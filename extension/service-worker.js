@@ -1561,6 +1561,73 @@ function normalizeBrainChunk(input) {
   return n;
 }
 
+function toBrainRecord(value) {
+  return value && typeof value === "object" ? value : {};
+}
+
+function normalizeBrainTabIds(input) {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const raw of input) {
+    const id = Number(raw);
+    if (!Number.isInteger(id)) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+function buildBrainSharedTabsContextMessage(sharedTabs) {
+  if (!Array.isArray(sharedTabs) || sharedTabs.length === 0) return "";
+  const lines = [];
+  for (let i = 0; i < sharedTabs.length; i += 1) {
+    const item = sharedTabs[i] || {};
+    const title = String(item.title || "").trim() || "(untitled)";
+    const url = String(item.url || "").trim() || "";
+    const id = Number(item.id);
+    const tabIdPart = Number.isInteger(id) ? ` [id=${id}]` : "";
+    lines.push(`${i + 1}. ${title}${tabIdPart}${url ? `\n   URL: ${url}` : ""}`);
+  }
+  return [
+    "Shared tabs context (user-selected):",
+    ...lines,
+    "Use this context directly before deciding whether to call list_tabs/open_tab."
+  ].join("\n");
+}
+
+function readBrainForkedFrom(meta) {
+  const metadata = toBrainRecord(meta?.header?.metadata);
+  const raw = toBrainRecord(metadata.forkedFrom);
+  const sessionId = String(raw.sessionId || "").trim();
+  const leafId = String(raw.leafId || "").trim();
+  const sourceEntryId = String(raw.sourceEntryId || "").trim();
+  const reason = String(raw.reason || "").trim();
+  if (!sessionId && !leafId && !sourceEntryId && !reason) return null;
+  return {
+    sessionId,
+    leafId,
+    sourceEntryId,
+    reason
+  };
+}
+
+function findPreviousUserEntryByChain(byId, startEntry) {
+  let cursor = startEntry || null;
+  let guard = byId.size + 2;
+  while (cursor && guard > 0) {
+    guard -= 1;
+    const isUserMessage = cursor.type === "message" && String(cursor.role || "") === "user";
+    if (isUserMessage && String(cursor.id || "").trim()) {
+      return cursor;
+    }
+    const parentId = String(cursor.parentId || "").trim();
+    cursor = parentId ? byId.get(parentId) || null : null;
+  }
+  return null;
+}
+
 function defaultBrainRunState(sessionId) {
   return {
     sessionId,
@@ -1964,6 +2031,16 @@ function parseLlmMessageFromBody(rawBody, contentType) {
 
 function buildLlmPayloadFromSessionView(view, model, tools = []) {
   const messages = [];
+  const sharedTabs = Array.isArray(view?.meta?.header?.metadata?.sharedTabs)
+    ? view.meta.header.metadata.sharedTabs
+    : [];
+  const sharedTabsContext = buildBrainSharedTabsContextMessage(sharedTabs);
+  if (sharedTabsContext) {
+    messages.push({
+      role: "system",
+      content: sharedTabsContext
+    });
+  }
   for (const item of view?.conversationView?.messages || []) {
     const rawRole = String(item?.role || "assistant").toLowerCase();
     let role = rawRole;
@@ -2933,10 +3010,17 @@ function findLatestBrainCompaction(entries) {
   return null;
 }
 
-async function buildBrainSessionView(sessionId, leafId = undefined) {
+async function getBrainBranchEntries(sessionId, leafId = undefined) {
   const id = normalizeBrainSessionId(sessionId);
   const meta = await ensureBrainSession(id);
   const all = await readAllBrainEntries(id);
+  if (all.length === 0) {
+    return {
+      meta,
+      all,
+      branch: []
+    };
+  }
 
   const byId = new Map(all.map((entry) => [entry.id, entry]));
   const targetLeafId = leafId === undefined ? meta.leafId : leafId;
@@ -2955,6 +3039,19 @@ async function buildBrainSessionView(sessionId, leafId = undefined) {
       branch = chain.reverse();
     }
   }
+
+  return {
+    meta,
+    all,
+    branch
+  };
+}
+
+async function buildBrainSessionView(sessionId, leafId = undefined) {
+  const id = normalizeBrainSessionId(sessionId);
+  const { meta, all, branch } = await getBrainBranchEntries(id, leafId);
+  const parentSessionId = String(meta?.header?.parentSessionId || "");
+  const forkedFrom = readBrainForkedFrom(meta);
 
   const compact = findLatestBrainCompaction(branch);
   const previousSummary = String(compact?.summary || "");
@@ -2992,6 +3089,8 @@ async function buildBrainSessionView(sessionId, leafId = undefined) {
       sessionId: id,
       messageCount: messages.length,
       messages,
+      parentSessionId,
+      forkedFrom,
       lastStatus: getBrainRunState(id),
       updatedAt: nowIso()
     }
@@ -3194,6 +3293,41 @@ async function handleBrainRunMessage(msg) {
     await ensureBrainSession(sessionId, msg.sessionOptions || {});
     const runState = ensureBrainRunState(sessionId);
 
+    if (Array.isArray(msg.tabIds)) {
+      const tabIds = normalizeBrainTabIds(msg.tabIds);
+      const allTabs = await queryAllTabsForBrain();
+      const tabById = new Map(allTabs.map((tab) => [Number(tab.id), tab]));
+      const sharedTabs = tabIds
+        .map((id) => tabById.get(id))
+        .filter(Boolean)
+        .map((tab) => ({
+          id: Number(tab.id),
+          title: String(tab.title || ""),
+          url: String(tab.url || "")
+        }));
+      const meta = await readBrainSessionMeta(sessionId);
+      if (meta) {
+        const header = toBrainRecord(meta.header);
+        const metadata = toBrainRecord(header.metadata);
+        if (sharedTabs.length > 0) {
+          metadata.sharedTabs = sharedTabs;
+        } else {
+          delete metadata.sharedTabs;
+        }
+        await writeBrainSessionMeta(sessionId, {
+          ...meta,
+          header: {
+            ...header,
+            metadata
+          }
+        });
+      }
+      await appendBrainTraceEvent(sessionId, "input.shared_tabs", {
+        providedTabIds: tabIds,
+        resolvedCount: sharedTabs.length
+      });
+    }
+
     const prompt = String(msg.prompt || "").trim();
     if (prompt) {
       const meta = await readBrainSessionMeta(sessionId);
@@ -3247,6 +3381,96 @@ async function handleBrainRunMessage(msg) {
     };
   }
 
+  if (msg.type === "brain.run.regenerate") {
+    const sessionId = normalizeBrainSessionId(msg.sessionId);
+    const sourceEntryId = String(msg.sourceEntryId || "").trim();
+    if (!sourceEntryId) {
+      return { ok: false, error: "brain.run.regenerate 需要 sourceEntryId" };
+    }
+
+    const meta = await readBrainSessionMeta(sessionId);
+    if (!meta) {
+      return { ok: false, error: `session 不存在: ${sessionId}` };
+    }
+
+    const entries = await readAllBrainEntries(sessionId);
+    const byId = new Map(entries.map((entry) => [entry.id, entry]));
+    const source = byId.get(sourceEntryId);
+    if (!source) {
+      return { ok: false, error: `regenerate sourceEntry 不存在: ${sourceEntryId}` };
+    }
+    if (source.type !== "message" || source.role !== "assistant") {
+      return { ok: false, error: "regenerate sourceEntry 必须是 assistant 消息" };
+    }
+
+    const requireSourceIsLeaf = msg.requireSourceIsLeaf === true;
+    const rebaseLeafToPreviousUser = msg.rebaseLeafToPreviousUser === true;
+    const currentLeafId = String(meta?.leafId || "");
+    if (requireSourceIsLeaf && currentLeafId !== sourceEntryId) {
+      return { ok: false, error: "仅最后一条 assistant 支持当前会话重试" };
+    }
+
+    const previousSeed = String(source.parentId || "").trim();
+    const previousEntry = previousSeed ? byId.get(previousSeed) : null;
+    const previousUser = findPreviousUserEntryByChain(byId, previousEntry);
+    if (!previousUser) {
+      return { ok: false, error: "未找到前序 user 消息，无法重试" };
+    }
+
+    const prompt = String(previousUser.text || "").trim();
+    if (!prompt) {
+      return { ok: false, error: "前序 user 消息为空，无法重试" };
+    }
+
+    if (rebaseLeafToPreviousUser && currentLeafId !== previousUser.id) {
+      await writeBrainSessionMeta(sessionId, {
+        ...meta,
+        leafId: previousUser.id
+      });
+    }
+
+    const runState = ensureBrainRunState(sessionId);
+    await appendBrainTraceEvent(sessionId, "input.regenerate", {
+      sourceEntryId,
+      previousUserEntryId: previousUser.id,
+      text: clipBrainText(prompt, 3000)
+    });
+
+    if (runState.stopped) {
+      runState.stopped = false;
+      runState.paused = false;
+      await appendBrainTraceEvent(sessionId, "loop_restart", {
+        reason: "restart_after_regenerate"
+      });
+    }
+
+    if (!runState.running) {
+      runState.running = true;
+      void runBrainAgentLoop(sessionId, prompt)
+        .catch(async (err) => {
+          await appendBrainTraceEvent(sessionId, "loop_internal_error", {
+            error: err instanceof Error ? err.message : String(err)
+          });
+        })
+        .finally(() => {
+          const latest = ensureBrainRunState(sessionId);
+          latest.running = false;
+        });
+    } else {
+      await appendBrainTraceEvent(sessionId, "loop_enqueue_skipped", {
+        reason: "already_running"
+      });
+    }
+
+    return {
+      ok: true,
+      data: {
+        sessionId,
+        runtime: getBrainRunState(sessionId)
+      }
+    };
+  }
+
   const sessionId = normalizeBrainSessionId(msg.sessionId);
   const state = ensureBrainRunState(sessionId);
 
@@ -3269,9 +3493,25 @@ async function handleBrainRunMessage(msg) {
 
 async function handleBrainSessionMessage(msg) {
   if (msg.type === "brain.session.list") {
+    const index = await readBrainSessionIndex();
+    const sessions = await Promise.all(
+      index.sessions.map(async (entry) => {
+        const meta = await readBrainSessionMeta(entry.id);
+        return {
+          ...entry,
+          title: normalizeBrainSessionTitle(entry.title, normalizeBrainSessionTitle(meta?.header?.title, "")),
+          parentSessionId: String(meta?.header?.parentSessionId || ""),
+          forkedFrom: readBrainForkedFrom(meta)
+        };
+      })
+    );
+
     return {
       ok: true,
-      data: await readBrainSessionIndex()
+      data: {
+        ...index,
+        sessions
+      }
     };
   }
 
@@ -3294,6 +3534,82 @@ async function handleBrainSessionMessage(msg) {
       ok: true,
       data: {
         conversationView: view.conversationView
+      }
+    };
+  }
+
+  if (msg.type === "brain.session.fork") {
+    const sessionId = normalizeBrainSessionId(msg.sessionId);
+    const leafId = String(msg.leafId || "").trim();
+    if (!leafId) {
+      return { ok: false, error: "brain.session.fork 需要 leafId" };
+    }
+
+    const sourceMeta = await readBrainSessionMeta(sessionId);
+    if (!sourceMeta) {
+      return { ok: false, error: `session 不存在: ${sessionId}` };
+    }
+
+    const sourceEntries = await readAllBrainEntries(sessionId);
+    const byId = new Map(sourceEntries.map((entry) => [entry.id, entry]));
+    if (!byId.has(leafId)) {
+      return { ok: false, error: `fork leaf 不存在: ${leafId}` };
+    }
+
+    const sourceTitle = String(sourceMeta?.header?.title || "").trim();
+    const forkTitle = String(msg.title || "").trim() || (sourceTitle ? `${sourceTitle} · 重答分支` : "重答分支");
+    const sourceMetadata = toBrainRecord(sourceMeta?.header?.metadata);
+    const forkReason = String(msg.reason || "manual");
+    const sourceEntryId = String(msg.sourceEntryId || "");
+    const targetSessionId = String(msg.targetSessionId || "").trim() || randomId("session");
+
+    if (String(msg.targetSessionId || "").trim()) {
+      const existing = await readBrainSessionMeta(targetSessionId);
+      if (existing) {
+        return { ok: false, error: `targetSessionId 已存在: ${targetSessionId}` };
+      }
+    }
+
+    await ensureBrainSession(targetSessionId, {
+      parentSessionId: sessionId,
+      title: forkTitle,
+      model: sourceMeta?.header?.model || "",
+      metadata: {
+        ...sourceMetadata,
+        forkedFrom: {
+          sessionId,
+          leafId,
+          sourceEntryId,
+          reason: forkReason
+        }
+      }
+    });
+
+    const { branch } = await getBrainBranchEntries(sessionId, leafId);
+    const oldToNew = new Map();
+    for (const sourceEntry of branch) {
+      const cloned = {
+        ...sourceEntry,
+        id: randomId("entry"),
+        parentId: sourceEntry.parentId ? oldToNew.get(sourceEntry.parentId) || null : null,
+        timestamp: nowIso()
+      };
+      if (cloned.type === "compaction") {
+        const oldFirstKept = String(cloned.firstKeptEntryId || "").trim();
+        cloned.firstKeptEntryId = oldFirstKept ? oldToNew.get(oldFirstKept) || null : null;
+      }
+      await appendBrainEntry(targetSessionId, cloned);
+      oldToNew.set(sourceEntry.id, cloned.id);
+    }
+
+    return {
+      ok: true,
+      data: {
+        sessionId: targetSessionId,
+        sourceSessionId: sessionId,
+        sourceLeafId: leafId,
+        leafId: oldToNew.get(leafId) || null,
+        copiedEntryCount: branch.length
       }
     };
   }

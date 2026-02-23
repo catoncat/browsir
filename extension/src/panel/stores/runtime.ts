@@ -13,11 +13,20 @@ interface ConversationMessage {
   entryId: string;
 }
 
+interface SessionForkSource {
+  sessionId: string;
+  leafId: string;
+  sourceEntryId: string;
+  reason: string;
+}
+
 interface SessionIndexEntry {
   id: string;
   title?: string;
   createdAt: string;
   updatedAt: string;
+  parentSessionId?: string;
+  forkedFrom?: SessionForkSource | null;
 }
 
 interface RuntimeStateView {
@@ -159,37 +168,132 @@ export const useRuntimeStore = defineStore("runtime", () => {
     await loadConversation(result.sessionId, { setActive: true });
   }
 
-  async function sendPrompt(prompt: string, options: { newSession?: boolean } = {}) {
+  async function sendPrompt(prompt: string, options: { newSession?: boolean; tabIds?: number[] } = {}) {
     const text = prompt.trim();
     if (!text) return;
     const useCurrentSession = !options.newSession && !!activeSessionId.value;
+    const tabIds = Array.isArray(options.tabIds)
+      ? options.tabIds.filter((id) => Number.isInteger(id)).map((id) => Number(id))
+      : [];
     const result = await sendMessage<{ sessionId: string; runtime: RuntimeStateView }>("brain.run.start", {
       sessionId: useCurrentSession ? activeSessionId.value : undefined,
-      prompt: text
+      prompt: text,
+      tabIds
     });
     runtime.value = result.runtime;
     await refreshSessions();
     await loadConversation(result.sessionId, { setActive: true });
   }
 
-  async function regenerateFromAssistantEntry(entryId: string) {
+  function findAssistantMessageIndex(entryId: string) {
+    return messages.value.findIndex((msg) => msg.entryId === entryId && msg.role === "assistant");
+  }
+
+  function findLatestAssistantEntryId() {
+    for (let i = messages.value.length - 1; i >= 0; i -= 1) {
+      const candidate = messages.value[i];
+      if (candidate?.role !== "assistant") continue;
+      const entryId = String(candidate.entryId || "").trim();
+      const content = String(candidate.content || "").trim();
+      if (entryId && content) return entryId;
+    }
+    return "";
+  }
+
+  function findPreviousUserEntryId(targetIndex: number) {
+    for (let i = targetIndex - 1; i >= 0; i -= 1) {
+      const candidate = messages.value[i];
+      if (candidate?.role !== "user") continue;
+      if (!String(candidate.content || "").trim()) continue;
+      if (!String(candidate.entryId || "").trim()) continue;
+      return String(candidate.entryId);
+    }
+    return "";
+  }
+
+  async function forkFromAssistantEntry(entryId: string, options: { autoRun?: boolean } = {}) {
     if (!activeSessionId.value) {
-      throw new Error("无活跃会话，无法重答");
+      throw new Error("无活跃会话，无法分叉");
     }
-
-    const targetIndex = messages.value.findIndex((msg) => msg.entryId === entryId && msg.role === "assistant");
+    const currentSessionId = activeSessionId.value;
+    const targetIndex = findAssistantMessageIndex(entryId);
     if (targetIndex < 0) {
-      throw new Error("未找到可重答的 assistant 消息");
+      throw new Error("未找到可分叉的 assistant 消息");
+    }
+    const previousUserEntryId = findPreviousUserEntryId(targetIndex);
+    if (!previousUserEntryId) {
+      throw new Error("未找到前序 user 消息，无法分叉");
+    }
+    const forked = await sendMessage<{ sessionId: string }>("brain.session.fork", {
+      sessionId: currentSessionId,
+      leafId: previousUserEntryId,
+      sourceEntryId: entryId,
+      reason: "branch_from_assistant"
+    });
+    const forkedSessionId = String(forked.sessionId || "").trim();
+    if (!forkedSessionId) {
+      throw new Error("创建分叉会话失败");
     }
 
-    // Trigger a run without a prompt to regenerate from the existing context
-    const result = await sendMessage<{ sessionId: string; runtime: RuntimeStateView }>("brain.run.start", {
-      sessionId: activeSessionId.value
+    if (options.autoRun === true) {
+      const result = await sendMessage<{ sessionId: string; runtime: RuntimeStateView }>("brain.run.regenerate", {
+        sessionId: forkedSessionId,
+        sourceEntryId: entryId
+      });
+      runtime.value = result.runtime;
+    }
+
+    await refreshSessions();
+    await loadConversation(forkedSessionId, { setActive: true });
+    return {
+      sessionId: forkedSessionId
+    };
+  }
+
+  async function retryLastAssistantEntry(entryId: string) {
+    if (!activeSessionId.value) {
+      throw new Error("无活跃会话，无法重试");
+    }
+    const targetIndex = findAssistantMessageIndex(entryId);
+    if (targetIndex < 0) {
+      throw new Error("未找到可重试的 assistant 消息");
+    }
+    const previousUserEntryId = findPreviousUserEntryId(targetIndex);
+    if (!previousUserEntryId) {
+      throw new Error("未找到前序 user 消息，无法重试");
+    }
+    const latestAssistantEntryId = findLatestAssistantEntryId();
+    if (!latestAssistantEntryId || latestAssistantEntryId !== entryId) {
+      throw new Error("仅最后一条 assistant 支持重新回答；历史消息请使用分叉");
+    }
+
+    const currentSessionId = activeSessionId.value;
+    const result = await sendMessage<{ sessionId: string; runtime: RuntimeStateView }>("brain.run.regenerate", {
+      sessionId: currentSessionId,
+      sourceEntryId: entryId,
+      requireSourceIsLeaf: true,
+      rebaseLeafToPreviousUser: true
     });
-    
     runtime.value = result.runtime;
     await refreshSessions();
-    await loadConversation(activeSessionId.value, { setActive: false });
+    await loadConversation(currentSessionId, { setActive: false });
+    return {
+      sessionId: currentSessionId
+    };
+  }
+
+  async function regenerateFromAssistantEntry(entryId: string, options: { mode?: "fork" | "retry" } = {}) {
+    if (options.mode === "fork") {
+      return forkFromAssistantEntry(entryId, { autoRun: false });
+    }
+    if (options.mode === "retry") {
+      return retryLastAssistantEntry(entryId);
+    }
+    const latestAssistantEntryId = findLatestAssistantEntryId();
+    if (latestAssistantEntryId && latestAssistantEntryId === entryId) {
+      return retryLastAssistantEntry(entryId);
+    }
+    return forkFromAssistantEntry(entryId, { autoRun: false });
   }
 
   async function runAction(type: "brain.run.pause" | "brain.run.resume" | "brain.run.stop") {
@@ -281,6 +385,8 @@ export const useRuntimeStore = defineStore("runtime", () => {
     loadConversation,
     createSession,
     sendPrompt,
+    forkFromAssistantEntry,
+    retryLastAssistantEntry,
     regenerateFromAssistantEntry,
     runAction,
     refreshSessionTitle,

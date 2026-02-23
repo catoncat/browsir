@@ -23,19 +23,31 @@ const showDebug = ref(false);
 
 const isRunning = computed(() => Boolean(runtime.value?.running && !runtime.value?.stopped));
 const hasBridge = computed(() => Boolean(health.value.bridgeUrl));
+const activeSession = computed(() => sessions.value.find((item) => item.id === activeSessionId.value) || null);
 
 const activeSessionTitle = computed(() => {
-  const session = sessions.value.find((item) => item.id === activeSessionId.value);
+  const session = activeSession.value;
   return session?.title || "新对话";
+});
+
+const activeForkSourceText = computed(() => {
+  const sourceId = String(activeSession.value?.forkedFrom?.sessionId || "").trim();
+  if (!sourceId) return "";
+  const tail = sourceId.length > 8 ? sourceId.slice(-8) : sourceId;
+  return `分叉自 ${tail}`;
 });
 
 const {
   copiedEntryId,
+  retryingEntryId,
+  forkingEntryId,
   actionNotice,
   canCopyMessage,
-  canRegenerateMessage,
+  canRetryMessage,
+  canForkMessage,
   handleCopyMessage,
-  handleRegenerateMessage,
+  handleRetryMessage,
+  handleForkMessage,
   cleanupMessageActions
 } = useMessageActions({
   messages,
@@ -130,7 +142,10 @@ async function handleSend(payload: { text: string; tabIds: number[] }) {
   const isNew = !activeSessionId.value;
 
   try {
-    await store.sendPrompt(text, { newSession: isNew });
+    await store.sendPrompt(text, {
+      newSession: isNew,
+      tabIds: Array.isArray(payload.tabIds) ? payload.tabIds : []
+    });
     prompt.value = "";
   } catch (err) {
     setErrorMessage(err, "发送失败");
@@ -178,6 +193,9 @@ onUnmounted(() => {
           <h1 class="text-[15px] font-bold text-ui-text truncate tracking-tight">
             {{ activeSessionTitle }}
           </h1>
+          <span v-if="activeForkSourceText" class="text-[10px] font-semibold text-ui-text-muted uppercase tracking-wide">
+            {{ activeForkSourceText }}
+          </span>
           <div v-if="hasBridge" class="w-2 h-2 bg-green-500 rounded-full shrink-0 shadow-[0_0_8px_rgba(34,197,94,0.4)]" title="Connected"></div>
         </div>
 
@@ -239,12 +257,17 @@ onUnmounted(() => {
               :content="msg.content"
               :entry-id="msg.entryId"
               :copied="copiedEntryId === msg.entryId"
+              :retrying="retryingEntryId === msg.entryId"
+              :forking="forkingEntryId === msg.entryId"
               :copy-disabled="loading || !canCopyMessage(msg)"
-              :regenerate-disabled="loading || isRunning || !canRegenerateMessage(msg, index)"
+              :retry-disabled="loading || isRunning || !canRetryMessage(msg, index)"
+              :fork-disabled="loading || isRunning || !canForkMessage(msg, index)"
               :show-copy-action="canCopyMessage(msg)"
-              :show-regenerate-action="canRegenerateMessage(msg, index)"
+              :show-retry-action="canRetryMessage(msg, index)"
+              :show-fork-action="canForkMessage(msg, index)"
               @copy="handleCopyMessage"
-              @regenerate="handleRegenerateMessage"
+              @retry="handleRetryMessage"
+              @fork="handleForkMessage"
             />
           </div>
 

@@ -1,0 +1,44 @@
+{
+  "id": "BHV-CHAT-SHARED-TABS-CONTEXT",
+  "intent": "用户分享的 tabs（title/url）必须进入 AI 上下文，并在回复中可观测",
+  "context": {
+    "surface": "sidepanel.chat",
+    "entry": "brain.run.start.tabIds",
+    "bridge": "connected"
+  },
+  "steps": [
+    "user_selects_tabs_and_sends_prompt",
+    "runtime_forwards_tab_ids_to_run_start",
+    "service_worker_resolves_tab_metadata_and_overwrites_shared_tabs",
+    "llm_payload_injects_shared_tabs_context_before_loop",
+    "assistant_response_reflects_shared_tabs_context"
+  ],
+  "observables": [
+    "brain_debug_dump_meta_contains_shared_tabs_title_url_when_tab_ids_present",
+    "assistant_response_contains_shared_tabs_context_marker",
+    "empty_tab_ids_do_not_inject_shared_tabs_context",
+    "same_session_next_send_overwrites_previous_shared_tabs"
+  ],
+  "risk": "medium",
+  "allowed_side_effects": [
+    "chrome.tabs.query",
+    "session_meta_update",
+    "llm_message_context_injection"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "browser-cdp", "e2e"],
+    "min_layers": 3
+  },
+  "degrade_policy": {
+    "max_consecutive_failures": 2,
+    "on_trigger": [
+      "skip_shared_tabs_injection_when_tab_ids_empty",
+      "keep_chat_flow_available_without_shared_tabs"
+    ]
+  },
+  "rollback_or_compensation": [
+    "shared_tabs_metadata_overwrite_per_send",
+    "do_not_persist_stale_shared_tabs_on_empty_tab_ids"
+  ],
+  "version": "1.0.0"
+}

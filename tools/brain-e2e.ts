@@ -39,6 +39,7 @@ interface MockLlmRequest {
   userText: string;
   messageCount: number;
   hasToolResult: boolean;
+  hasSharedTabsContext: boolean;
   toolMessages: string[];
 }
 
@@ -274,11 +275,17 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
         .filter((item) => item?.role === "tool")
         .map((item) => String(item?.content || ""));
       const hasToolResult = messages.some((item) => item?.role === "tool");
+      const hasSharedTabsContext = messages.some((item) => {
+        if (String(item?.role || "") !== "system") return false;
+        const content = String(item?.content || "");
+        return content.includes("Shared tabs context (user-selected):");
+      });
       requests.push({
         ts: new Date().toISOString(),
         userText,
         messageCount: messages.length,
         hasToolResult,
+        hasSharedTabsContext,
         toolMessages: toolMessages.map((item) => item.slice(0, 4_000))
       });
       if (requests.length > 180) {
@@ -419,6 +426,21 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
               {
                 delta: {
                   content: "LLM_MULTI_TURN_OK"
+                }
+              }
+            ]
+          },
+          "[DONE]"
+        ]);
+      }
+
+      if (userText.includes("#LLM_SHARED_TABS_CHECK")) {
+        return buildSseResponse([
+          {
+            choices: [
+              {
+                delta: {
+                  content: hasSharedTabsContext ? "SHARED_TABS_CONTEXT_PRESENT" : "SHARED_TABS_CONTEXT_MISSING"
                 }
               }
             ]
@@ -868,6 +890,45 @@ async function main() {
           throw err;
         }
         return null;
+      }
+    });
+
+    await runCase("panel.vnext", "dist sidepanel 路径可直接加载", async () => {
+      const distTarget = await createTarget(chromePort, `chrome-extension://${extId}/dist/sidepanel.html`);
+      assert(!!distTarget.webSocketDebuggerUrl, "dist sidepanel 缺少 webSocketDebuggerUrl");
+
+      const distClient = new CdpClient("sidepanel-dist", distTarget.webSocketDebuggerUrl!);
+      try {
+        await distClient.connect();
+        await distClient.send("Runtime.enable");
+
+        await waitFor(
+          "dist sidepanel ready",
+          async () => {
+            try {
+              const ready = await distClient.evaluate(`(() => {
+                const hasAppRoot = !!document.querySelector("#app");
+                const bootFailed = document.body.classList.contains("no-dist");
+                return { hasAppRoot, bootFailed };
+              })()`);
+              if (ready?.bootFailed) {
+                throw new Error("dist sidepanel boot failed");
+              }
+              return ready?.hasAppRoot ? true : null;
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              if (message.includes("boot failed")) {
+                throw err;
+              }
+              return null;
+            }
+          },
+          20_000,
+          250
+        );
+      } finally {
+        await distClient.close().catch(() => {});
+        await closeTarget(chromePort, distTarget.id).catch(() => {});
       }
     });
 
@@ -1429,6 +1490,141 @@ async function main() {
       );
     });
 
+    await runCase("brain.runtime", "brain.run.start 注入 shared tabs 上下文并每次覆盖", async () => {
+      mockLlm?.clearRequests();
+      const saveConfig = await sendBgMessage(sidepanelClient!, {
+        type: "config.save",
+        payload: {
+          bridgeUrl: `ws://${BRIDGE_HOST}:${bridgePort}/ws`,
+          bridgeToken,
+          llmApiBase: mockLlm!.baseUrl,
+          llmApiKey: "mock-key",
+          llmModel: "gpt-5.3-codex"
+        }
+      });
+      assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
+
+      const tabsForShare = await sidepanelClient!.evaluate(`(async () => {
+        const tabs = await chrome.tabs.query({});
+        return tabs
+          .filter((tab) => Number.isInteger(tab?.id) && String(tab?.url || tab?.pendingUrl || "").trim())
+          .slice(0, 3)
+          .map((tab) => ({ id: Number(tab.id), title: String(tab.title || ""), url: String(tab.url || tab.pendingUrl || "") }));
+      })()`);
+      assert(Array.isArray(tabsForShare), "tabsForShare 应为数组");
+      assert(tabsForShare.length >= 2, `可分享 tab 不足，实际=${tabsForShare.length}`);
+
+      const firstIds = [Number(tabsForShare[0].id), Number(tabsForShare[1].id)];
+      const started = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        prompt: "检查共享 tabs 注入 #LLM_SHARED_TABS_CHECK turn=1",
+        tabIds: firstIds
+      });
+      assert(started.ok === true, `brain.run.start(turn1) 失败: ${started.error || "unknown"}`);
+      const sessionId = String(started.data?.sessionId || "");
+      assert(sessionId.length > 0, "turn1 sessionId 为空");
+
+      const firstDump = await waitFor(
+        "shared tabs turn1 done",
+        async () => {
+          const dump = await sendBgMessage(sidepanelClient!, {
+            type: "brain.debug.dump",
+            sessionId
+          });
+          if (!dump.ok) return null;
+          const stream = Array.isArray(dump.data?.stepStream) ? dump.data.stepStream : [];
+          const hasDone = stream.some((item: any) => item?.type === "loop_done");
+          if (!hasDone) return null;
+          return dump.data;
+        },
+        35_000,
+        250
+      );
+
+      const firstSharedTabs = Array.isArray(firstDump?.meta?.header?.metadata?.sharedTabs)
+        ? firstDump.meta.header.metadata.sharedTabs
+        : [];
+      assert(firstSharedTabs.length === firstIds.length, `turn1 sharedTabs 数量不符，期望=${firstIds.length} 实际=${firstSharedTabs.length}`);
+      assert(
+        firstIds.every((id) => firstSharedTabs.some((item: any) => Number(item?.id) === id && String(item?.title || "").trim() && String(item?.url || "").trim())),
+        "turn1 sharedTabs 应包含每个 tab 的 id/title/url"
+      );
+      const firstMessages = Array.isArray(firstDump?.conversationView?.messages) ? firstDump.conversationView.messages : [];
+      assert(
+        firstMessages.some((item: any) => String(item?.content || "").includes("SHARED_TABS_CONTEXT_PRESENT")),
+        "turn1 assistant 回复应包含 SHARED_TABS_CONTEXT_PRESENT"
+      );
+
+      const secondIds = [Number(tabsForShare[1].id)];
+      const secondTurn = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        sessionId,
+        prompt: "检查共享 tabs 覆盖 #LLM_SHARED_TABS_CHECK turn=2",
+        tabIds: secondIds
+      });
+      assert(secondTurn.ok === true, `brain.run.start(turn2) 失败: ${secondTurn.error || "unknown"}`);
+
+      const secondDump = await waitFor(
+        "shared tabs turn2 done",
+        async () => {
+          const dump = await sendBgMessage(sidepanelClient!, {
+            type: "brain.debug.dump",
+            sessionId
+          });
+          if (!dump.ok) return null;
+          const stream = Array.isArray(dump.data?.stepStream) ? dump.data.stepStream : [];
+          const loopDoneCount = stream.filter((item: any) => item?.type === "loop_done").length;
+          if (loopDoneCount < 2) return null;
+          return dump.data;
+        },
+        35_000,
+        250
+      );
+      const secondSharedTabs = Array.isArray(secondDump?.meta?.header?.metadata?.sharedTabs)
+        ? secondDump.meta.header.metadata.sharedTabs
+        : [];
+      assert(secondSharedTabs.length === secondIds.length, `turn2 sharedTabs 应按新集合覆盖，期望=${secondIds.length} 实际=${secondSharedTabs.length}`);
+      assert(
+        secondSharedTabs.every((item: any) => Number(item?.id) === secondIds[0]),
+        "turn2 sharedTabs 应只保留最新 tab 集合"
+      );
+
+      const thirdTurn = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        sessionId,
+        prompt: "检查空共享不污染 #LLM_SHARED_TABS_CHECK turn=3",
+        tabIds: []
+      });
+      assert(thirdTurn.ok === true, `brain.run.start(turn3) 失败: ${thirdTurn.error || "unknown"}`);
+
+      const thirdDump = await waitFor(
+        "shared tabs turn3 done",
+        async () => {
+          const dump = await sendBgMessage(sidepanelClient!, {
+            type: "brain.debug.dump",
+            sessionId
+          });
+          if (!dump.ok) return null;
+          const stream = Array.isArray(dump.data?.stepStream) ? dump.data.stepStream : [];
+          const loopDoneCount = stream.filter((item: any) => item?.type === "loop_done").length;
+          if (loopDoneCount < 3) return null;
+          return dump.data;
+        },
+        35_000,
+        250
+      );
+      const thirdMetadata = thirdDump?.meta?.header?.metadata || {};
+      const thirdSharedTabs = Array.isArray(thirdMetadata?.sharedTabs) ? thirdMetadata.sharedTabs : [];
+      assert(thirdSharedTabs.length === 0, "turn3 空 tabIds 不应污染 sharedTabs");
+
+      const requests = mockLlm!.getRequests();
+      const sharedRequests = requests.filter((req) => req.userText.includes("#LLM_SHARED_TABS_CHECK"));
+      assert(sharedRequests.length >= 3, `shared tabs 请求次数不足，期望>=3 实际=${sharedRequests.length}`);
+      assert(sharedRequests[0]?.hasSharedTabsContext === true, "turn1 请求应带 shared tabs context");
+      assert(sharedRequests[1]?.hasSharedTabsContext === true, "turn2 请求应带 shared tabs context");
+      assert(sharedRequests[2]?.hasSharedTabsContext === false, "turn3 请求不应带 shared tabs context");
+    });
+
     await runCase("brain.runtime", "brain.debug.dump 可观测 llm 原始调用与工具步骤", async () => {
       mockLlm?.clearRequests();
       const saveConfig = await sendBgMessage(sidepanelClient!, {
@@ -1546,57 +1742,85 @@ async function main() {
       );
     });
 
-    await runCase("panel.vnext", "sidepanel 渲染并支持消息复制/重答", async () => {
+    await runCase("panel.vnext", "sidepanel 渲染并支持复制/历史分叉/最后一条重试", async () => {
       const marker = `panel-actions-${Date.now()}`;
 
-      const base = await sidepanelClient!.evaluate(`(() => {
-        return {
-          hasComposer: !!document.querySelector("textarea")
-        };
-      })()`);
+      const base = await sidepanelClient!.evaluate(`(() => ({
+        hasComposer: !!document.querySelector("textarea")
+      }))()`);
       assert(base.hasComposer === true, "缺少输入框");
 
-      const listed = await sendBgMessage(sidepanelClient!, { type: "brain.session.list" });
-      assert(listed.ok === true, `brain.session.list 失败: ${listed.error || "unknown"}`);
-      const sessionId = String(listed.data?.sessions?.[0]?.id || "");
-      assert(sessionId.length > 0, "未获取到可用 sessionId");
+      const sendPromptByUi = async (text: string) => {
+        const out = await sidepanelClient!.evaluate(`(() => {
+          const textarea = document.querySelector("textarea");
+          if (!textarea) return { ok: false, error: "textarea missing" };
+          textarea.focus();
+          textarea.value = ${JSON.stringify(text)};
+          textarea.dispatchEvent(new Event("input", { bubbles: true }));
+          textarea.dispatchEvent(
+            new KeyboardEvent("keydown", {
+              key: "Enter",
+              code: "Enter",
+              keyCode: 13,
+              which: 13,
+              bubbles: true,
+              cancelable: true
+            })
+          );
+          return { ok: true };
+        })()`);
+        assert(out?.ok === true, `UI 发送 prompt 失败: ${out?.error || "unknown"}`);
+      };
 
-      const started = await sendBgMessage(sidepanelClient!, {
-        type: "brain.run.start",
-        sessionId,
-        prompt: `请回复默认结果 ${marker}`
-      });
-      assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
+      await sendPromptByUi(`请回复第一条结果 ${marker}-1`);
 
-      const actionReady = await waitFor(
-        "panel assistant action icons ready",
+      await waitFor(
+        "panel first assistant action ready",
         async () => {
           const out = await sidepanelClient!.evaluate(`(() => {
             const copyBtns = Array.from(document.querySelectorAll('button[aria-label="复制内容"], button[aria-label="已复制"]'));
-            const regenBtns = Array.from(document.querySelectorAll('button[aria-label="重新回答"]'));
-            const allActionBtns = Array.from(document.querySelectorAll('button')).filter((btn) => {
-              const t = String(btn.textContent || "");
-              return t.includes("复制") || t.includes("重试") || t.includes("重新回答");
-            });
-            const lastRegen = regenBtns[regenBtns.length - 1];
+            const retryBtns = Array.from(document.querySelectorAll('button[aria-label="重新回答"]'));
+            const forkBtns = Array.from(document.querySelectorAll('button[aria-label="在新对话中分叉"]'));
             return {
               copyCount: copyBtns.length,
-              regenCount: regenBtns.length,
-              regenDisabled: !!lastRegen && !!lastRegen.disabled,
-              actionTextCount: allActionBtns.length,
-              bodyHead: String(document.body?.innerText || "").slice(0, 200)
+              retryCount: retryBtns.length,
+              forkCount: forkBtns.length
             };
           })()`);
           if ((out?.copyCount || 0) < 1) return null;
-          if ((out?.regenCount || 0) < 1) return null;
-          if (out?.regenDisabled) return null;
+          if ((out?.retryCount || 0) < 1) return null;
+          if ((out?.forkCount || 0) < 1) return null;
+          return out;
+        },
+        45_000,
+        250
+      );
+
+      await sendPromptByUi(`请回复第二条结果 ${marker}-2`);
+
+      const multiAssistantReady = await waitFor(
+        "panel two assistant actions ready",
+        async () => {
+          const out = await sidepanelClient!.evaluate(`(() => {
+            const retryBtns = Array.from(document.querySelectorAll('button[aria-label="重新回答"]'));
+            const forkBtns = Array.from(document.querySelectorAll('button[aria-label="在新对话中分叉"]'));
+            const copyBtns = Array.from(document.querySelectorAll('button[aria-label="复制内容"], button[aria-label="已复制"]'));
+            return {
+              retryCount: retryBtns.length,
+              forkCount: forkBtns.length,
+              copyCount: copyBtns.length
+            };
+          })()`);
+          if ((out?.retryCount || 0) < 1) return null;
+          if ((out?.forkCount || 0) < 2) return null;
+          if ((out?.copyCount || 0) < 2) return null;
           return out;
         },
         35_000,
         250
       );
-      assert((actionReady?.copyCount || 0) >= 1, `缺少 copy icon, textFallback=${actionReady?.actionTextCount || 0}`);
-      assert((actionReady?.regenCount || 0) >= 1, `缺少 regenerate icon, body=${actionReady?.bodyHead || ""}`);
+      assert((multiAssistantReady?.retryCount || 0) === 1, "仅最后一条 assistant 应显示重新回答按钮");
+      assert((multiAssistantReady?.forkCount || 0) >= 2, "历史 assistant 未显示分叉按钮");
 
       await sidepanelClient!.evaluate(`(() => {
         globalThis.__BRAIN_E2E_CLIPBOARD_WRITE = async () => true;
@@ -1622,30 +1846,130 @@ async function main() {
         200
       );
 
-      const assistantCountBefore = await sidepanelClient!.evaluate(`(() => {
-        return document.querySelectorAll('button[aria-label="复制内容"], button[aria-label="已复制"]').length;
-      })()`);
+      const sessionCountBeforeFork = Number((await sendBgMessage(sidepanelClient!, { type: "brain.session.list" })).data?.sessions?.length || 0);
 
-      const regenClicked = await sidepanelClient!.evaluate(`(() => {
-        const regenBtns = Array.from(document.querySelectorAll('button[aria-label="重新回答"]'));
-        const last = regenBtns[regenBtns.length - 1];
-        if (!last) return { ok: false, error: "regenerate button missing" };
-        if (last.disabled) return { ok: false, error: "regenerate button disabled" };
+      const forkClicked = await sidepanelClient!.evaluate(`(() => {
+        const forkBtns = Array.from(document.querySelectorAll('button[aria-label="在新对话中分叉"]'));
+        if (forkBtns.length < 2) return { ok: false, error: "fork buttons less than 2" };
+        const first = forkBtns[0];
+        const last = forkBtns[forkBtns.length - 1];
+        if (!first) return { ok: false, error: "history fork button missing" };
+        if (first.disabled) return { ok: false, error: "history fork button disabled" };
+        first.click();
+        return {
+          ok: true,
+          clickedHistorical: first !== last
+        };
+      })()`);
+      assert(forkClicked?.ok === true, `点击历史分叉失败: ${forkClicked?.error || "unknown"}`);
+      assert(forkClicked?.clickedHistorical === true, "未点击到历史 assistant 的分叉按钮");
+
+      await waitFor(
+        "panel fork notice",
+        async () => {
+          const text = await sidepanelClient!.evaluate(`(() => document.body?.innerText || "")()`);
+          return String(text).includes("已分叉到新对话") ? true : null;
+        },
+        10_000,
+        200
+      );
+
+      const listedAfterFork = await waitFor(
+        "panel fork creates one new session",
+        async () => {
+          const listedNow = await sendBgMessage(sidepanelClient!, { type: "brain.session.list" });
+          if (!listedNow.ok) return null;
+          const sessionsNow = Array.isArray(listedNow.data?.sessions) ? listedNow.data.sessions : [];
+          const currentCount = Number(sessionsNow.length || 0);
+          if (currentCount !== sessionCountBeforeFork + 1) return null;
+          return sessionsNow;
+        },
+        20_000,
+        250
+      );
+      assert(Array.isArray(listedAfterFork), "分叉后 session.list 返回异常");
+      const newestFork = listedAfterFork[0] || {};
+      assert(String(newestFork?.title || "").includes("重答分支"), "分叉会话标题应包含“重答分支”");
+      assert(String(newestFork?.forkedFrom?.sessionId || "").length > 0, "分叉会话应包含 fork 来源 sessionId");
+
+      await waitFor(
+        "panel header shows fork source",
+        async () => {
+          const text = await sidepanelClient!.evaluate(`(() => document.body?.innerText || "")()`);
+          return String(text).includes("分叉自") ? true : null;
+        },
+        10_000,
+        200
+      );
+
+      await sendPromptByUi(`请在分叉会话继续回答 ${marker}-3`);
+
+      await waitFor(
+        "panel fork session has assistant for latest retry",
+        async () => {
+          const out = await sidepanelClient!.evaluate(`(() => {
+            const copyCount = document.querySelectorAll('button[aria-label="复制内容"], button[aria-label="已复制"]').length;
+            const retryCount = document.querySelectorAll('button[aria-label="重新回答"]').length;
+            return { copyCount, retryCount };
+          })()`);
+          if (Number(out?.copyCount || 0) < 1) return null;
+          if (Number(out?.retryCount || 0) < 1) return null;
+          return out;
+        },
+        45_000,
+        250
+      );
+
+      const listedBeforeRetry = await sendBgMessage(sidepanelClient!, { type: "brain.session.list" });
+      assert(listedBeforeRetry.ok === true, "重试前读取会话列表失败");
+      const sessionsBeforeRetry = Array.isArray(listedBeforeRetry.data?.sessions) ? listedBeforeRetry.data.sessions : [];
+      const sessionCountBeforeRetry = Number(sessionsBeforeRetry.length || 0);
+      const retrySessionId = String(sessionsBeforeRetry[0]?.id || "");
+      assert(retrySessionId.length > 0, "重试前无法定位当前会话");
+
+      const retryClicked = await sidepanelClient!.evaluate(`(() => {
+        const retryBtns = Array.from(document.querySelectorAll('button[aria-label="重新回答"]'));
+        if (retryBtns.length < 1) return { ok: false, error: "retry button missing" };
+        const last = retryBtns[retryBtns.length - 1];
+        if (!last) return { ok: false, error: "retry button empty" };
+        if (last.disabled) return { ok: false, error: "retry button disabled" };
         last.click();
         return { ok: true };
       })()`);
-      assert(regenClicked?.ok === true, `点击重答失败: ${regenClicked?.error || "unknown"}`);
+      assert(retryClicked?.ok === true, `点击最后一条重试失败: ${retryClicked?.error || "unknown"}`);
 
       await waitFor(
-        "panel regenerate adds assistant reply",
+        "panel retry notice",
         async () => {
-          const count = await sidepanelClient!.evaluate(`(() => {
-            return document.querySelectorAll('button[aria-label="复制内容"], button[aria-label="已复制"]').length;
-          })()`);
-          return Number(count) > Number(assistantCountBefore) ? count : null;
+          const text = await sidepanelClient!.evaluate(`(() => document.body?.innerText || "")()`);
+          return String(text).includes("已发起重新回答") ? true : null;
+        },
+        10_000,
+        200
+      );
+
+      await waitFor(
+        "panel latest retry trace visible",
+        async () => {
+          const dump = await sendBgMessage(sidepanelClient!, {
+            type: "brain.debug.dump",
+            sessionId: retrySessionId
+          });
+          if (!dump.ok) return null;
+          const stream = Array.isArray(dump.data?.stepStream) ? dump.data.stepStream : [];
+          const hasRegenerateInput = stream.some((item: any) => item?.type === "input.regenerate");
+          const hasLoopDone = stream.some((item: any) => item?.type === "loop_done");
+          if (!hasRegenerateInput || !hasLoopDone) return null;
+          return true;
         },
         35_000,
         250
+      );
+
+      const sessionCountAfterRetry = Number((await sendBgMessage(sidepanelClient!, { type: "brain.session.list" })).data?.sessions?.length || 0);
+      assert(
+        sessionCountAfterRetry === sessionCountBeforeRetry,
+        `最后一条重试不应新建会话，期望 ${sessionCountBeforeRetry}，实际 ${sessionCountAfterRetry}`
       );
 
       await sidepanelClient!.evaluate(`(() => {
@@ -1672,7 +1996,7 @@ async function main() {
             return {
               hasErrorNotice: text.includes("复制失败，请检查剪贴板权限"),
               hasComposer: !!document.querySelector("textarea"),
-              hasApp: !!document.querySelector('#app')
+              hasApp: !!document.querySelector("#app")
             };
           })()`);
           if (!out?.hasErrorNotice) return null;

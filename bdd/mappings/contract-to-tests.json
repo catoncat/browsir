@@ -236,11 +236,32 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/panel/components/ChatMessage.vue::message action emits + extension/src/panel/stores/runtime.ts::regenerateFromAssistantEntry"
+          "target": "extension/src/panel/utils/message-actions.ts::canForkMessage+canRetryMessage + extension/src/panel/stores/runtime.ts::forkFromAssistantEntry+retryLastAssistantEntry + extension/service-worker.js::handleBrainSessionMessage(brain.session.fork)+handleBrainRunMessage(brain.run.regenerate)"
         },
         {
           "layer": "browser-cdp",
           "target": "bdd/features/chat/message-actions-retry-copy.feature"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/chat/regenerate-answer.feature"
+        },
+        {
+          "layer": "e2e",
+          "target": "bdd/evidence/brain-e2e.latest.json"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-CHAT-SHARED-TABS-CONTEXT",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/panel/stores/runtime.ts::sendPrompt + extension/service-worker.js::handleBrainRunMessage + buildLlmPayloadFromSessionView"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/chat/shared-tabs-context.feature"
         },
         {
           "layer": "e2e",
