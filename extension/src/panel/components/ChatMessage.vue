@@ -4,12 +4,9 @@ import {
   Sparkles,
   ChevronDown,
   ChevronUp,
-  ThumbsUp,
-  ThumbsDown,
   RotateCcw,
   Copy,
-  Check,
-  MoreVertical
+  Check
 } from "lucide-vue-next";
 import { renderMarkdown } from "../utils/markdown";
 
@@ -35,16 +32,15 @@ const isTool = computed(() => props.role === "tool");
 
 const showThinking = ref(false);
 
-const htmlContent = computed(() => {
-  if (isTool.value) {
-    try {
-      const data = JSON.parse(props.content);
-      return `<pre class="text-[12px] bg-gemini-surface p-3 rounded-xl border border-gemini-border overflow-x-auto my-2"><code>${JSON.stringify(data, null, 2)}</code></pre>`;
-    } catch {
-      return `<code class="text-[12px] font-mono opacity-60">${props.content}</code>`;
-    }
+const htmlContent = computed(() => renderMarkdown(props.content));
+const toolTextContent = computed(() => {
+  if (!isTool.value) return "";
+  try {
+    const data = JSON.parse(props.content);
+    return JSON.stringify(data, null, 2);
+  } catch {
+    return props.content;
   }
-  return renderMarkdown(props.content);
 });
 
 function toggleThinking() {
@@ -61,71 +57,70 @@ function handleRegenerate() {
 </script>
 
 <template>
-  <div class="flex flex-col mb-8 animate-in fade-in duration-500">
-    <div v-if="isUser" class="flex justify-end pl-12">
+  <div class="flex flex-col mb-6 animate-in fade-in duration-300 group">
+    <!-- User Message: Rounded Bubble -->
+    <div v-if="isUser" class="flex justify-end pl-10">
       <div
-        class="bg-gemini-user-bubble text-gemini-text px-5 py-3 rounded-[24px] text-[15px] leading-relaxed shadow-sm border border-black/[0.02]"
+        class="bg-ui-surface text-ui-text px-4 py-2.5 rounded-[20px] text-[14px] leading-relaxed border border-ui-border/50"
         v-html="htmlContent"
       ></div>
     </div>
 
-    <div v-else-if="isAssistant" class="flex flex-col gap-4 pr-4">
+    <!-- Assistant Message: Pure Layout -->
+    <div v-else-if="isAssistant" class="flex flex-col gap-3 pr-2 group">
+      <!-- AI Content -->
       <div
-        class="prose max-w-none text-[15px] text-gemini-text"
+        class="prose max-w-none text-[14px] text-ui-text font-normal"
         v-html="htmlContent"
       ></div>
 
-      <div class="flex items-center gap-1.5 opacity-60 hover:opacity-100 transition-opacity">
-        <button type="button" class="p-2 hover:bg-gemini-surface rounded-full transition-colors" aria-label="赞" title="赞">
-          <ThumbsUp :size="16" />
-        </button>
-        <button type="button" class="p-2 hover:bg-gemini-surface rounded-full transition-colors" aria-label="踩" title="踩">
-          <ThumbsDown :size="16" />
-        </button>
-
-        <button
-          v-if="props.showRegenerateAction"
-          type="button"
-          class="p-2 hover:bg-gemini-surface rounded-full transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-          aria-label="重新回答"
-          title="重新回答"
-          :disabled="props.regenerateDisabled"
-          @click="handleRegenerate"
-        >
-          <RotateCcw :size="16" />
-        </button>
-
+      <!-- Action Bar: ONLY Copy and Regenerate (Smaller 14px icons) -->
+      <div
+        v-if="props.showCopyAction || props.showRegenerateAction"
+        class="flex items-center gap-1 opacity-70 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
+      >
         <button
           v-if="props.showCopyAction"
           type="button"
-          class="p-2 hover:bg-gemini-surface rounded-full transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          class="p-1.5 hover:bg-ui-surface rounded-md text-ui-text-muted hover:text-ui-text transition-all disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
           :aria-label="props.copied ? '已复制' : '复制内容'"
           :title="props.copied ? '已复制' : '复制内容'"
           :disabled="props.copyDisabled"
           @click="handleCopy"
         >
-          <Check v-if="props.copied" :size="16" />
-          <Copy v-else :size="16" />
+          <Check v-if="props.copied" :size="14" class="text-green-600" />
+          <Copy v-else :size="14" />
         </button>
 
-        <button type="button" class="p-2 hover:bg-gemini-surface rounded-full transition-colors" aria-label="更多" title="更多">
-          <MoreVertical :size="16" />
+        <button
+          v-if="props.showRegenerateAction"
+          type="button"
+          class="p-1.5 hover:bg-ui-surface rounded-md text-ui-text-muted hover:text-ui-text transition-all disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+          aria-label="重新回答"
+          title="重新回答"
+          :disabled="props.regenerateDisabled"
+          @click="handleRegenerate"
+        >
+          <RotateCcw :size="14" />
         </button>
       </div>
     </div>
 
+    <!-- Tool/Thinking Message: Collapsible (No buttons) -->
     <div v-else-if="isTool" class="flex flex-col">
-      <div
-        class="flex items-center gap-2 py-2 text-[13px] font-medium text-blue-600 cursor-pointer select-none"
+      <button
+        type="button"
+        class="flex w-fit items-center gap-2 py-1.5 text-[12px] font-bold text-ui-accent cursor-pointer select-none hover:opacity-80 transition-opacity rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+        :aria-expanded="showThinking"
         @click="toggleThinking"
       >
-        <Sparkles :size="14" fill="currentColor" class="text-blue-500" />
-        <span>{{ showThinking ? "隐藏思维链" : "显示思维链" }}</span>
-        <ChevronUp v-if="showThinking" :size="14" />
-        <ChevronDown v-else :size="14" />
-      </div>
-      <div v-if="showThinking" class="animate-in slide-in-from-top-2 duration-300">
-        <div v-html="htmlContent"></div>
+        <Sparkles :size="12" fill="currentColor" />
+        <span class="uppercase tracking-wider">{{ showThinking ? "Hide thinking" : "Show thinking" }}</span>
+        <ChevronUp v-if="showThinking" :size="12" />
+        <ChevronDown v-else :size="12" />
+      </button>
+      <div v-if="showThinking" class="animate-in slide-in-from-top-1 duration-200">
+        <pre class="text-[11px] bg-ui-surface p-2.5 rounded-md border border-ui-border overflow-x-auto my-1.5 font-mono"><code>{{ toolTextContent }}</code></pre>
       </div>
     </div>
   </div>
@@ -135,5 +130,9 @@ function handleRegenerate() {
 :deep(pre) {
   max-width: 100%;
   overflow-x: auto;
+}
+/* Action bar appears on message hover */
+.group:hover .transition-opacity {
+  opacity: 1;
 }
 </style>

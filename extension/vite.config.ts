@@ -36,6 +36,7 @@ function emitManifest() {
 }
 
 export default defineConfig({
+  base: "./",
   plugins: [tailwindcss(), vue(), emitManifest()],
   build: {
     outDir: "dist",

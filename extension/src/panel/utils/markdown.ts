@@ -4,10 +4,10 @@ import hljs from "highlight.js";
 import "highlight.js/styles/github.css"; // We'll override with Claude style in CSS
 
 const md = new MarkdownIt({
-  html: true,
+  html: false,
   linkify: true,
   typographer: true,
-  highlight: (str, lang) => {
+  highlight: (str: string, lang: string): string => {
     if (lang && hljs.getLanguage(lang)) {
       try {
         return (
@@ -15,7 +15,9 @@ const md = new MarkdownIt({
           hljs.highlight(str, { language: lang, ignoreIllegals: true }).value +
           "</code></pre>"
         );
-      } catch (__) {}
+      } catch {
+        // Fall through to escaped plain-text rendering.
+      }
     }
 
     return '<pre class="hljs"><code>' + md.utils.escapeHtml(str) + "</code></pre>";

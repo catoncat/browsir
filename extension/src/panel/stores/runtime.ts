@@ -49,6 +49,10 @@ interface RuntimeHealth {
   hasLlmApiKey: boolean;
 }
 
+interface LoadConversationOptions {
+  setActive?: boolean;
+}
+
 async function sendMessage<T = any>(type: string, payload: Record<string, unknown> = {}): Promise<T> {
   const response = (await chrome.runtime.sendMessage({ type, ...payload })) as RuntimeResponse<T>;
   if (!response?.ok) {
@@ -86,6 +90,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
   const activeSessionId = ref("");
   const messages = ref<ConversationMessage[]>([]);
   const runtime = ref<RuntimeStateView | null>(null);
+  const conversationRequestSeq = ref(0);
   const health = ref<RuntimeHealth>(
     normalizeHealth({
       bridgeUrl: "ws://127.0.0.1:8787/ws",
@@ -110,25 +115,48 @@ export const useRuntimeStore = defineStore("runtime", () => {
     }
   }
 
-  async function loadConversation(sessionId: string) {
-    if (!sessionId) return;
-    activeSessionId.value = sessionId;
-    const view = await sendMessage<{ conversationView: { messages: ConversationMessage[]; lastStatus: RuntimeStateView } }>(
-      "brain.session.view",
-      { sessionId }
-    );
-    messages.value = view.conversationView?.messages ?? [];
-    runtime.value = view.conversationView?.lastStatus ?? null;
+  async function loadConversation(sessionId: string, options: LoadConversationOptions = {}) {
+    const normalizedSessionId = String(sessionId || "").trim();
+    if (!normalizedSessionId) return;
+
+    const shouldSetActive = options.setActive === true;
+    const previousActiveSessionId = activeSessionId.value;
+    if (shouldSetActive) {
+      activeSessionId.value = normalizedSessionId;
+    }
+
+    const requestSeq = ++conversationRequestSeq.value;
+
+    try {
+      const view = await sendMessage<{ conversationView: { messages: ConversationMessage[]; lastStatus: RuntimeStateView } }>(
+        "brain.session.view",
+        { sessionId: normalizedSessionId }
+      );
+
+      if (requestSeq !== conversationRequestSeq.value) {
+        return;
+      }
+      if (activeSessionId.value !== normalizedSessionId) {
+        return;
+      }
+
+      messages.value = view.conversationView?.messages ?? [];
+      runtime.value = view.conversationView?.lastStatus ?? null;
+    } catch (err) {
+      if (requestSeq === conversationRequestSeq.value && shouldSetActive) {
+        activeSessionId.value = previousActiveSessionId;
+      }
+      throw err;
+    }
   }
 
   async function createSession() {
     const result = await sendMessage<{ sessionId: string; runtime: RuntimeStateView }>("brain.run.start", {
       autoRun: false
     });
-    activeSessionId.value = result.sessionId;
     runtime.value = result.runtime;
     await refreshSessions();
-    await loadConversation(result.sessionId);
+    await loadConversation(result.sessionId, { setActive: true });
   }
 
   async function sendPrompt(prompt: string, options: { newSession?: boolean } = {}) {
@@ -139,31 +167,29 @@ export const useRuntimeStore = defineStore("runtime", () => {
       sessionId: useCurrentSession ? activeSessionId.value : undefined,
       prompt: text
     });
-    activeSessionId.value = result.sessionId;
     runtime.value = result.runtime;
     await refreshSessions();
-    await loadConversation(result.sessionId);
+    await loadConversation(result.sessionId, { setActive: true });
   }
 
   async function regenerateFromAssistantEntry(entryId: string) {
+    if (!activeSessionId.value) {
+      throw new Error("无活跃会话，无法重答");
+    }
+
     const targetIndex = messages.value.findIndex((msg) => msg.entryId === entryId && msg.role === "assistant");
     if (targetIndex < 0) {
       throw new Error("未找到可重答的 assistant 消息");
     }
 
-    for (let i = targetIndex - 1; i >= 0; i -= 1) {
-      const candidate = messages.value[i];
-      if (candidate?.role === "user") {
-        const userText = String(candidate.content || "").trim();
-        if (!userText) {
-          throw new Error("前序 user 消息为空，无法重答");
-        }
-        await sendPrompt(userText, { newSession: false });
-        return;
-      }
-    }
-
-    throw new Error("未找到前序 user 消息，无法重答");
+    // Trigger a run without a prompt to regenerate from the existing context
+    const result = await sendMessage<{ sessionId: string; runtime: RuntimeStateView }>("brain.run.start", {
+      sessionId: activeSessionId.value
+    });
+    
+    runtime.value = result.runtime;
+    await refreshSessions();
+    await loadConversation(activeSessionId.value, { setActive: false });
   }
 
   async function runAction(type: "brain.run.pause" | "brain.run.resume" | "brain.run.stop") {
@@ -176,7 +202,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
     await sendMessage("brain.session.title.refresh", { sessionId });
     await refreshSessions();
     if (activeSessionId.value === sessionId) {
-      await loadConversation(sessionId);
+      await loadConversation(sessionId, { setActive: false });
     }
   }
 
@@ -189,7 +215,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
       runtime.value = null;
       return;
     }
-    await loadConversation(activeSessionId.value);
+    await loadConversation(activeSessionId.value, { setActive: false });
   }
 
   async function bootstrap() {
@@ -200,7 +226,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
       config.value = normalizeConfig(cfg);
       await Promise.all([refreshHealth(), refreshSessions()]);
       if (activeSessionId.value) {
-        await loadConversation(activeSessionId.value);
+        await loadConversation(activeSessionId.value, { setActive: false });
       }
     } catch (err) {
       error.value = err instanceof Error ? err.message : String(err);
