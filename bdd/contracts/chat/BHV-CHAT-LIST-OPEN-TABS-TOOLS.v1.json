@@ -1,0 +1,43 @@
+{
+  "id": "BHV-CHAT-LIST-OPEN-TABS-TOOLS",
+  "intent": "聊天循环中的 list_tabs/open_tab 工具调用应稳定闭环，且 open_tab 结果可在浏览器中观察到",
+  "context": {
+    "surface": "sidepanel.chat",
+    "tools": ["list_tabs", "open_tab"],
+    "bridge": "connected"
+  },
+  "steps": [
+    "llm_emits_list_tabs_tool_call",
+    "sidepanel_executes_list_tabs_and_returns_tab_inventory",
+    "llm_emits_open_tab_tool_call",
+    "sidepanel_opens_tab_and_returns_opened_tab_metadata",
+    "llm_finishes_with_tool_aware_summary"
+  ],
+  "observables": [
+    "list_tabs_result_contains_count_and_tabs",
+    "open_tab_result_contains_opened_true_and_tab_info",
+    "opened_tab_exists_in_browser_after_loop"
+  ],
+  "risk": "medium",
+  "allowed_side_effects": [
+    "chrome.tabs.query",
+    "chrome.tabs.create",
+    "chat_memory_append_tool_results"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "browser-cdp", "e2e"],
+    "min_layers": 3
+  },
+  "degrade_policy": {
+    "max_consecutive_failures": 2,
+    "on_trigger": [
+      "surface_open_tab_error_to_user",
+      "fallback_to_manual_tab_selection_hint"
+    ]
+  },
+  "rollback_or_compensation": [
+    "return_structured_error_for_invalid_url",
+    "keep_previous_tab_selection_state"
+  ],
+  "version": "1.0.0"
+}

@@ -1,0 +1,128 @@
+:root {
+  --bg: #121411;
+  --panel: #1b201b;
+  --panel-soft: #202821;
+  --line: #39453a;
+  --ink: #d9e3d4;
+  --muted: #96a492;
+  --accent: #70c089;
+  font-family: "IBM Plex Sans", "Source Sans 3", "Noto Sans SC", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: radial-gradient(circle at 0 0, #30513b66, transparent 40%), var(--bg);
+  color: var(--ink);
+}
+
+.debug-shell {
+  min-height: 100vh;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.debug-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.debug-title {
+  margin: 0;
+  font-size: 18px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.controls {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 10px;
+}
+
+.controls label {
+  display: grid;
+  gap: 6px;
+}
+
+.controls span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.controls select {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: var(--panel-soft);
+  color: var(--ink);
+}
+
+.grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 10px;
+  min-width: 0;
+}
+
+.card h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.card pre {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0f110f;
+  color: #bfd0b8;
+  padding: 8px;
+  max-height: 300px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+}
+
+.btn {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--ink);
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.btn.ghost {
+  background: transparent;
+  color: var(--muted);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.error {
+  margin: 0;
+  color: #ff9c8d;
+}

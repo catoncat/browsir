@@ -1,0 +1,42 @@
+{
+  "id": "BHV-CHAT-HISTORY-INCLUDES-TOOL-RESULT",
+  "intent": "同一会话后续轮次构建 LLM 历史时必须包含已执行 tool result，避免丢失工具上下文",
+  "context": {
+    "surface": "sidepanel.chat",
+    "conversation_scope": "same_conversation",
+    "llm_messages": ["system", "user", "assistant", "tool"]
+  },
+  "steps": [
+    "first_turn_executes_tool_call",
+    "tool_result_persisted_for_conversation_history",
+    "follow_up_turn_builds_messages_from_history",
+    "llm_receives_tool_role_context"
+  ],
+  "observables": [
+    "follow_up_request_contains_role_tool_message",
+    "tool_message_content_is_structured_not_empty",
+    "follow_up_reply_can_use_previous_tool_context"
+  ],
+  "risk": "medium",
+  "allowed_side_effects": [
+    "conversation_history_read",
+    "llm_messages_append(tool_role)",
+    "trace_memory_compaction"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "browser-cdp", "e2e"],
+    "min_layers": 3
+  },
+  "degrade_policy": {
+    "max_consecutive_failures": 1,
+    "on_trigger": [
+      "fallback_to_current_turn_context_only",
+      "emit_history_missing_tool_warning"
+    ]
+  },
+  "rollback_or_compensation": [
+    "preserve_latest_user_goal_in_messages",
+    "keep_tool_result_in_trace_for_diagnostics"
+  ],
+  "version": "1.0.0"
+}

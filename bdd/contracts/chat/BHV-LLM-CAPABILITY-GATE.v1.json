@@ -1,0 +1,50 @@
+{
+  "id": "BHV-LLM-CAPABILITY-GATE",
+  "intent": "Loop 在 LLM 可用、不可用和异常场景下都应有可预测行为：可用时完成 tool_call 闭环，不可用时正确降级，无法降级时显式失败",
+  "context": {
+    "surface": "sidepanel.chat.loop",
+    "llm": {
+      "base": "https://ai.chen.rs/v1",
+      "streaming": true
+    },
+    "fallbackPlanner": "rule_planner"
+  },
+  "steps": [
+    "start_loop_with_llm_enabled",
+    "llm_emits_tool_call_and_receives_tool_result",
+    "llm_unavailable_and_rule_parsable_then_fallback_execute",
+    "llm_unavailable_and_rule_unparsable_then_failed_execute",
+    "llm_http_failure_then_fallback_execute"
+  ],
+  "observables": [
+    "llm_tool_call_roundtrip_completes_with_done",
+    "llm_missing_uses_rule_planner_when_goal_is_parsable",
+    "llm_missing_returns_failed_execute_when_goal_is_unparsable",
+    "llm_http_failure_does_not_block_rule_fallback"
+  ],
+  "risk": "high",
+  "allowed_side_effects": [
+    "network.llm.chat_completions",
+    "bridge.invoke(read|bash)",
+    "sidepanel.loop.status_transition(done|failed_execute)"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "browser-cdp", "e2e"],
+    "min_layers": 3
+  },
+  "degrade_policy": {
+    "on_llm_unavailable": [
+      "run_rule_planner_fallback",
+      "preserve_status_semantics"
+    ],
+    "on_llm_http_failure": [
+      "log_llm_error",
+      "fallback_to_rule_planner_when_parsable"
+    ]
+  },
+  "rollback_or_compensation": [
+    "mark_session_status_failed_execute_when_unrecoverable",
+    "avoid_false_done_without_executable_plan"
+  ],
+  "version": "1.0.0"
+}

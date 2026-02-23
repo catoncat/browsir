@@ -1,0 +1,45 @@
+{
+  "id": "BHV-CHAT-MESSAGE-ACTIONS-RETRY-COPY",
+  "intent": "assistant 消息必须提供复制与重新回答两个 icon 操作，且 clipboard 不可用时降级提示可见并不影响会话继续",
+  "context": {
+    "surface": "sidepanel.chat",
+    "messageRole": "assistant",
+    "actions": ["copy", "regenerate"],
+    "uiStyle": "icon-only-with-accessibility-label"
+  },
+  "steps": [
+    "render_assistant_message_with_action_icons",
+    "trigger_copy_action_with_clipboard_write",
+    "show_copy_success_or_failure_feedback",
+    "trigger_regenerate_action_from_assistant_entry"
+  ],
+  "observables": [
+    "assistant_message_shows_copy_and_regenerate_icons",
+    "copy_success_feedback_is_visible",
+    "regenerate_creates_new_assistant_reply",
+    "clipboard_failure_shows_degrade_hint_without_interrupting_session"
+  ],
+  "risk": "medium",
+  "allowed_side_effects": [
+    "clipboard_write",
+    "dom_update(chat_message_action_state)",
+    "runtime_session_continue"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "browser-cdp", "e2e"],
+    "min_layers": 3
+  },
+  "degrade_policy": {
+    "clipboard_unavailable": {
+      "on_trigger": [
+        "show_copy_failure_feedback",
+        "keep_chat_runtime_available"
+      ]
+    }
+  },
+  "rollback_or_compensation": [
+    "copy_failure_must_not_block_regenerate",
+    "runtime_flow_keeps_existing_session_context"
+  ],
+  "version": "1.0.0"
+}

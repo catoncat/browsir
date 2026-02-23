@@ -1,0 +1,252 @@
+{
+  "version": "1.0.0",
+  "mappings": [
+    {
+      "contractId": "BHV-CHAT-NO-TAB-START",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/service-worker.js::handleBrainRunMessage + runBrainAgentLoop + appendBrainEntry"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/chat/no-tab-start.feature"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-TAB-REF-DEFAULT",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/service-worker.js::queryAllTabsForBrain + getActiveTabIdForBrain + executeBrainToolCall(list_tabs/open_tab)"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/chat/tab-ref-default.feature"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-CHAT-HISTORY-INCLUDES-TOOL-RESULT",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/service-worker.js::buildLlmPayloadFromSessionView + runBrainAgentLoop + executeBrainToolCall"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/chat/history-includes-tool-result.feature"
+        },
+        {
+          "layer": "e2e",
+          "target": "bdd/evidence/brain-e2e.latest.json"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-CHAT-LIST-OPEN-TABS-TOOLS",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/service-worker.js::BRAIN_TOOL_DEFS + executeBrainToolCall + buildBrainToolMessageForLLM"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/chat/list-open-tabs-tools.feature"
+        },
+        {
+          "layer": "e2e",
+          "target": "bdd/evidence/brain-e2e.latest.json"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-CDP-ON-DEMAND",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/service-worker.js::executeBrainStep + executeBrainToolCall + runBrainAgentLoop"
+        },
+        {
+          "layer": "integration",
+          "target": "extension/service-worker.js::cdp.observe|snapshot|execute|verify|detach message handlers"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/cdp/on-demand.feature"
+        },
+        {
+          "layer": "e2e",
+          "target": "bdd/evidence/brain-e2e.latest.json"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-PANEL-ACTION-OPEN",
+      "proofs": [
+        {
+          "layer": "integration",
+          "target": "extension/service-worker.js::ensureSidePanelBehavior"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/panel/action-open.feature"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-CHAT-TOOL-RENDERER-REGISTRY",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/panel/stores/runtime.ts::loadConversation + extension/src/panel/App.vue::message bubble rendering"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/chat/tool-renderer-registry.feature"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-CHAT-STREAMING-MESSAGE-CONTAINER",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/service-worker.js::appendBrainTraceEvent + extension/src/debug/App.vue::Live Events + Step Stream rendering"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/chat/streaming-message-container.feature"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-LLM-CAPABILITY-GATE",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/service-worker.js::requestBrainLlmWithRetry + runBrainAgentLoop + executeBrainToolCall"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/chat/llm-capability-gate.feature"
+        },
+        {
+          "layer": "e2e",
+          "target": "bdd/evidence/brain-e2e.latest.json"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-LLM-LIVE-CAPABILITY",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/service-worker.js::requestBrainLlmWithRetry + runBrainAgentLoop + executeBrainToolCall"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/chat/llm-live-capability.feature"
+        },
+        {
+          "layer": "e2e",
+          "target": "bdd/evidence/brain-e2e-live.latest.json"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-SESSION-METADATA-SPLIT-STORAGE",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/session-store.browser.ts::appendEntryChunk + readEntryChunks + appendTraceChunk"
+        },
+        {
+          "layer": "integration",
+          "target": "extension/service-worker.js::appendBrainEntry + buildBrainSessionView + readBrainStepStream"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/storage/session-metadata-split-storage.feature"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-SESSION-COMPACTION-STATE-MACHINE",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/__tests__/orchestrator.browser.test.ts::handleAgentEnd retry/overflow branches + compaction events"
+        },
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/__tests__/compaction.browser.test.ts::shouldCompact + findCutPoint + prepareCompaction"
+        },
+        {
+          "layer": "integration",
+          "target": "extension/src/sw/kernel/orchestrator.browser.ts::preSendCompactionCheck + handleAgentEnd + runCompaction + persistEvent"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/session/compaction-state-machine.feature"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-SESSION-LIST-TITLE-DELETE",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/service-worker.js::deriveBrainSessionTitle + refreshBrainSessionTitle + deleteBrainSession"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/session/list-title-delete.feature"
+        },
+        {
+          "layer": "e2e",
+          "target": "bdd/evidence/brain-e2e.latest.json"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-SESSION-STORAGE-RESET-BOOTSTRAP",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/storage-reset.browser.ts::archiveLegacyState + resetSessionStore"
+        },
+        {
+          "layer": "integration",
+          "target": "extension/src/background/sw-main.ts::bootstrapSessionStore + legacy detection + brain.bootstrap broadcast"
+        },
+        {
+          "layer": "integration",
+          "target": "extension/src/sw/kernel/runtime-router.ts::handleStorage(brain.storage.archive|brain.storage.reset|brain.storage.init)"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/storage/session-reset-bootstrap.feature"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-CHAT-MESSAGE-ACTIONS-RETRY-COPY",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/panel/components/ChatMessage.vue::message action emits + extension/src/panel/stores/runtime.ts::regenerateFromAssistantEntry"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/chat/message-actions-retry-copy.feature"
+        },
+        {
+          "layer": "e2e",
+          "target": "bdd/evidence/brain-e2e.latest.json"
+        }
+      ]
+    }
+  ]
+}

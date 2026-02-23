@@ -1,0 +1,35 @@
+{
+  "id": "BHV-PANEL-ACTION-OPEN",
+  "intent": "点击插件 action 时应自动打开 side panel",
+  "context": {
+    "chromeVersion": ">=120",
+    "extensionPermissions": ["sidePanel"]
+  },
+  "steps": [
+    "initialize_side_panel_behavior",
+    "user_clicks_extension_action",
+    "verify_panel_opened"
+  ],
+  "observables": [
+    "openPanelOnActionClick=true",
+    "side_panel_visible_after_action_click"
+  ],
+  "risk": "low",
+  "allowed_side_effects": [
+    "chrome.sidePanel.setPanelBehavior"
+  ],
+  "proof_requirements": {
+    "required_layers": ["integration", "browser-cdp"],
+    "min_layers": 2
+  },
+  "degrade_policy": {
+    "max_consecutive_failures": 1,
+    "on_trigger": [
+      "reapply_side_panel_behavior_on_startup"
+    ]
+  },
+  "rollback_or_compensation": [
+    "retry setPanelBehavior onInstalled/onStartup"
+  ],
+  "version": "1.0.0"
+}

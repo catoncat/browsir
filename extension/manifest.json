@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Browser Brain Loop",
+  "version": "0.1.1",
+  "description": "Browser-side planner + loop engine + CDP gateway + local WS bridge.",
+  "permissions": [
+    "debugger",
+    "tabs",
+    "storage",
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Browser Brain Loop"
+  },
+  "minimum_chrome_version": "120"
+}

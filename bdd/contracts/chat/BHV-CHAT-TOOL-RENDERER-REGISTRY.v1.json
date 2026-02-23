@@ -1,0 +1,41 @@
+{
+  "id": "BHV-CHAT-TOOL-RENDERER-REGISTRY",
+  "intent": "工具调用结果在聊天面板中必须经过统一 renderer 注册表渲染，避免直接裸 JSON/字符串输出",
+  "context": {
+    "surface": "sidepanel.chat",
+    "toolOutputs": ["invoke", "snapshot", "cdp", "cdp_action"],
+    "renderMode": "registry-first"
+  },
+  "steps": [
+    "agent_emits_tool_call_result",
+    "resolve_renderer_by_tool_name_or_result_type",
+    "render_tool_card_with_status_and_payload",
+    "fallback_to_default_renderer_when_unregistered"
+  ],
+  "observables": [
+    "registered_renderer_is_used_when_available",
+    "unregistered_tool_uses_default_renderer",
+    "tool_output_is_not_raw_llm_dump"
+  ],
+  "risk": "medium",
+  "allowed_side_effects": [
+    "dom_update(chat_messages)",
+    "in_memory_renderer_registry_read"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "browser-cdp"],
+    "min_layers": 2
+  },
+  "degrade_policy": {
+    "max_consecutive_failures": 2,
+    "on_trigger": [
+      "fallback_to_default_renderer",
+      "emit_tool_render_error_hint"
+    ]
+  },
+  "rollback_or_compensation": [
+    "keep_raw_result_in_trace_for_debug",
+    "preserve_user_visible_summary"
+  ],
+  "version": "1.0.0"
+}

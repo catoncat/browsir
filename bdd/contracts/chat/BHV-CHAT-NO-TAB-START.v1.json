@@ -1,0 +1,40 @@
+{
+  "id": "BHV-CHAT-NO-TAB-START",
+  "intent": "用户在未引用任何 tab 时也能发起有效对话",
+  "context": {
+    "referencedTabIds": [],
+    "bridge": "connected"
+  },
+  "steps": [
+    "send_chat_message",
+    "planner_decides_action",
+    "execute_action",
+    "verify_observables"
+  ],
+  "observables": [
+    "assistant_message_exists",
+    "error_not_contains:没有可用 tab",
+    "status in [done,max_steps,failed_execute,failed_verify]"
+  ],
+  "risk": "medium",
+  "allowed_side_effects": [
+    "bridge.invoke(read|write|edit|bash)",
+    "cdp.execute(only_when_needed)"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "browser-cdp"],
+    "min_layers": 2
+  },
+  "degrade_policy": {
+    "max_consecutive_failures": 2,
+    "on_trigger": [
+      "restrict_to_invoke",
+      "replan_with_failure_summary"
+    ]
+  },
+  "rollback_or_compensation": [
+    "keep conversation persisted",
+    "emit structured failure summary"
+  ],
+  "version": "1.0.0"
+}

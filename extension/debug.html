@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Browser Brain Debug</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        background: #f2efe8;
+      }
+      #fallback {
+        display: none;
+        margin: 16px;
+        border: 1px solid #d7cdbd;
+        border-radius: 10px;
+        background: #fff9ed;
+        padding: 12px;
+        color: #423d34;
+      }
+      body.no-dist #fallback {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="fallback">
+      Debug 资源未构建，请执行：<code>bun run brain:ext:build</code>
+    </div>
+    <script type="module" src="./debug-loader.js"></script>
+  </body>
+</html>

@@ -1,0 +1,51 @@
+{
+  "id": "BHV-SESSION-STORAGE-RESET-BOOTSTRAP",
+  "intent": "Service Worker 启动时必须按 reset/bootstrap 序列处理存储：检测 legacy、可选归档、重置 session store，并保证索引可用",
+  "context": {
+    "surface": "service-worker.kernel.storage",
+    "legacyKey": "chatState.v2",
+    "bootstrapPath": "background.sw-main.bootstrapSessionStore",
+    "runtimeActions": ["brain.storage.archive", "brain.storage.reset", "brain.storage.init"]
+  },
+  "steps": [
+    "detect_legacy_chat_state_before_bootstrap",
+    "archive_legacy_payload_before_reset_when_legacy_exists",
+    "reset_session_store_keys_and_reinitialize_index",
+    "broadcast_brain_bootstrap_legacy_reset_result",
+    "bootstrap_without_legacy_runs_init_only",
+    "runtime_storage_reset_route_calls_reset_session_store"
+  ],
+  "observables": [
+    "legacy_payload_archived_under_archive_legacy_namespace",
+    "session_index_exists_after_reset_and_is_writable",
+    "bootstrap_emits_type_brain_bootstrap_mode_legacy_reset_when_legacy_exists",
+    "bootstrap_without_legacy_skips_reset_and_archive",
+    "brain_storage_reset_response_contains_removed_keys_and_index"
+  ],
+  "risk": "high",
+  "allowed_side_effects": [
+    "storage_read(local_all_keys|chatState.v2|session:index)",
+    "storage_write(archive:legacy:*|archive:legacy:index|session:index)",
+    "storage_remove(session:*|trace:*|legacy_matched_keys)",
+    "runtime_message(brain.bootstrap|brain.storage.reset|brain.storage.init)"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "integration", "browser-cdp"],
+    "min_layers": 3
+  },
+  "degrade_policy": {
+    "on_archive_failure": [
+      "abort_reset_and_return_error_to_caller",
+      "avoid_partial_delete_without_archive_confirmation"
+    ],
+    "on_bootstrap_without_legacy": [
+      "skip_reset_sequence",
+      "init_session_index_only"
+    ]
+  },
+  "rollback_or_compensation": [
+    "preserve_archive_records_when_preserveArchive_true",
+    "recreate_empty_session_index_after_reset"
+  ],
+  "version": "1.0.0"
+}

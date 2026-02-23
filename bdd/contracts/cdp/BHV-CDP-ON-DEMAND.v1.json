@@ -1,0 +1,48 @@
+{
+  "id": "BHV-CDP-ON-DEMAND",
+  "intent": "只有在 action 需要页面能力时才触发 CDP，并且需要有效 tabId；snapshot 与 action/verify 形成低噪闭环",
+  "context": {
+    "referencedTabIds": [],
+    "plannerAllowedActions": ["invoke", "cdp", "cdp_action", "snapshot", "browser_verify", "done"]
+  },
+  "steps": [
+    "planner_returns_non_cdp_action",
+    "execute_without_tab_dependency",
+    "planner_returns_cdp_action",
+    "resolve_or_validate_tab",
+    "execute_cdp_and_verify",
+    "snapshot_compact_with_token_budget",
+    "action_requires_verify_under_strict_policy"
+  ],
+  "observables": [
+    "invoke_action_does_not_require_tab",
+    "cdp_without_valid_tab_returns_explicit_error",
+    "cdp_with_valid_tab_is_executable",
+    "snapshot_returns_a11y_nodes_with_ref_role_backendNodeId",
+    "snapshot_supports_compact_and_truncated_flag",
+    "verify_supports_urlChanged_and_textIncludes"
+  ],
+  "risk": "high",
+  "allowed_side_effects": [
+    "bridge.invoke(read|write|edit|bash)",
+    "cdp.observe|snapshot|execute|verify",
+    "lease.acquire|heartbeat|release"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "integration", "browser-cdp", "e2e"],
+    "min_layers": 4
+  },
+  "degrade_policy": {
+    "max_consecutive_failures": 2,
+    "on_trigger": [
+      "disable_cdp_actions_temporarily",
+      "fallback_to_invoke_only",
+      "request_new_snapshot_before_retry"
+    ]
+  },
+  "rollback_or_compensation": [
+    "release_tab_lease_if_held",
+    "record_failure_type:cdf_tab_missing"
+  ],
+  "version": "1.1.0"
+}

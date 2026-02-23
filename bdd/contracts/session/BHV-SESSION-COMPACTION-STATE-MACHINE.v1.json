@@ -1,0 +1,51 @@
+{
+  "id": "BHV-SESSION-COMPACTION-STATE-MACHINE",
+  "intent": "Kernel 在 threshold/overflow/retry 分支下必须执行可预测的 compaction 状态机，并产出可追踪事件序列与决策结果",
+  "context": {
+    "surface": "service-worker.kernel.orchestrator",
+    "stateMachine": ["retry", "compaction", "done"],
+    "compactionReasons": ["threshold", "overflow"],
+    "events": ["auto_retry_start", "auto_retry_end", "auto_compaction_start", "session_compact", "auto_compaction_end"]
+  },
+  "steps": [
+    "create_session_and_append_messages",
+    "pre_send_threshold_check_triggers_compaction_when_tokens_reach_limit",
+    "handle_agent_end_prioritizes_retryable_error_when_not_overflow",
+    "handle_agent_end_overflow_enters_compaction_path_without_retry",
+    "emit_compaction_events_in_order_start_compact_end",
+    "append_compaction_entry_and_rebuild_context_with_previous_summary"
+  ],
+  "observables": [
+    "decision_retry_for_retryable_error_non_overflow",
+    "decision_continue_with_reason_compaction_threshold_or_compaction_overflow",
+    "event_stream_contains_auto_compaction_start_session_compact_auto_compaction_end",
+    "session_compact_payload_contains_entry_id_and_token_delta",
+    "context_messages_include_previous_summary_after_compaction"
+  ],
+  "risk": "high",
+  "allowed_side_effects": [
+    "session_store_append(compaction_entry)",
+    "trace_store_append(step_trace_record)",
+    "event_bus_emit(auto_retry_start|auto_retry_end|auto_compaction_start|session_compact|auto_compaction_end)",
+    "run_state_retry_counter_update"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "integration", "browser-cdp"],
+    "min_layers": 3
+  },
+  "degrade_policy": {
+    "on_compaction_failure": [
+      "emit_auto_compaction_end_success_false_with_error_message",
+      "propagate_error_to_runtime_caller_without_fake_continue"
+    ],
+    "on_retry_limit_reached": [
+      "emit_auto_retry_end_success_false",
+      "return_done_with_error_reason"
+    ]
+  },
+  "rollback_or_compensation": [
+    "preserve_previous_summary_and_first_kept_entry_id_for_context_rebuild",
+    "keep_retry_state_consistent_after_retry_end"
+  ],
+  "version": "1.0.0"
+}

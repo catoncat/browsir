@@ -1,0 +1,18 @@
+{
+  "name": "browser-brain-loop",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "brain:bridge": "cd bridge && bun run start",
+    "check:brain-bridge": "cd bridge && bun run typecheck && bun run test",
+    "brain:ext:watch": "bun tools/brain-ext-watch.ts",
+    "brain:ext:build": "cd extension && bun run build",
+    "brain:ext:test": "cd extension && bun run test",
+    "brain:dev": "./tools/brain-dev.sh",
+    "brain:e2e": "bun tools/brain-e2e.ts",
+    "brain:e2e:live": "BRAIN_E2E_ENABLE_LIVE_LLM=true BRAIN_E2E_EVIDENCE_PATH=bdd/evidence/brain-e2e-live.latest.json bun tools/brain-e2e.ts",
+    "bdd:validate": "bun tools/bdd-validate.ts",
+    "bdd:gate": "bun tools/bdd-gate.ts",
+    "bdd:gate:live": "BDD_GATE_PROFILE=live bun tools/bdd-gate.ts"
+  }
+}

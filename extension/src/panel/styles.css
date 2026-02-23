@@ -1,0 +1,62 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ui-bg: var(--bg);
+  --color-ui-text: var(--text);
+  --color-ui-text-muted: var(--text-muted);
+  --color-ui-border: var(--border);
+  --color-ui-surface: var(--surface);
+  --color-ui-accent: var(--accent);
+  
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --radius-ui: 8px;
+}
+
+:root {
+  /* 高保真 Light Mode：深色更深，边界更清 */
+  --bg: #ffffff;
+  --text: #1a1a1b; /* 极深碳黑 */
+  --text-muted: #4d5156; /* 强对比中灰 */
+  --border: #e0e0e2; /* 显性分割线 */
+  --surface: #f1f3f4; /* 明确的背景层 */
+  --accent: #1a73e8;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1e1f20;
+    --text: #ffffff;
+    --text-muted: #bdc1c6;
+    --border: #3c4043;
+    --surface: #2b2d2f;
+    --accent: #8ab4f8;
+    color-scheme: dark;
+  }
+}
+
+@layer base {
+  html, body, #app {
+    margin: 0 !important;
+    padding: 0 !important;
+    height: 100% !important;
+    width: 100% !important;
+    overflow: hidden;
+  }
+  
+  body {
+    @apply bg-ui-bg text-ui-text antialiased;
+    font-size: 14px; /* 提升至 14px */
+    line-height: 1.5;
+  }
+}
+
+@layer components {
+  .prose {
+    @apply leading-relaxed text-[14px] text-ui-text font-normal;
+  }
+  /* 确保 Markdown 中的粗体足够显眼 */
+  .prose strong {
+    @apply font-bold text-black dark:text-white;
+  }
+}

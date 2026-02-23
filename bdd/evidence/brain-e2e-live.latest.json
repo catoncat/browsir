@@ -1,0 +1,162 @@
+{
+  "version": "1.0.0",
+  "ts": "2026-02-20T13:44:18.530Z",
+  "passed": true,
+  "summary": {
+    "total": 21,
+    "passed": 21,
+    "failed": 0,
+    "durationMs": 50514
+  },
+  "env": {
+    "chromeBin": "/Users/envvar/Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    "headless": false,
+    "chromePort": 19333,
+    "bridgePort": 18787,
+    "mockLlmPort": 20201,
+    "useLiveLlmSuite": true,
+    "liveLlmBase": "https://ai.chen.rs/v1",
+    "liveLlmModel": "gpt-5.3-codex"
+  },
+  "tests": [
+    {
+      "group": "service-worker API",
+      "name": "snapshot interactive 返回 ref/node handles",
+      "status": "passed",
+      "durationMs": 11
+    },
+    {
+      "group": "service-worker API",
+      "name": "lease + cdp_action + verify 闭环",
+      "status": "passed",
+      "durationMs": 13
+    },
+    {
+      "group": "service-worker API",
+      "name": "ref 存在但句柄过期时可 fallback",
+      "status": "passed",
+      "durationMs": 11
+    },
+    {
+      "group": "service-worker API",
+      "name": "ref 不存在时按现状返回稳定错误",
+      "status": "passed",
+      "durationMs": 2
+    },
+    {
+      "group": "service-worker API",
+      "name": "ref 过期且 selector 无效时返回稳定错误契约",
+      "status": "passed",
+      "durationMs": 29
+    },
+    {
+      "group": "service-worker API",
+      "name": "lease 冲突 + release + 过期后可恢复",
+      "status": "passed",
+      "durationMs": 2410
+    },
+    {
+      "group": "service-worker API",
+      "name": "snapshot 支持 compact/maxTokens/a11y 字段",
+      "status": "passed",
+      "durationMs": 7
+    },
+    {
+      "group": "service-worker API",
+      "name": "cdp.verify 支持 urlChanged 断言",
+      "status": "passed",
+      "durationMs": 5
+    },
+    {
+      "group": "tab-ref-default",
+      "name": "新对话自动选中活跃 tab",
+      "status": "passed",
+      "durationMs": 2
+    },
+    {
+      "group": "tab-ref-default",
+      "name": "点击 chip dismiss 取消引用",
+      "status": "passed",
+      "durationMs": 3
+    },
+    {
+      "group": "tab-ref-default",
+      "name": "@ 输入触发 mention popup",
+      "status": "passed",
+      "durationMs": 603
+    },
+    {
+      "group": "tab-ref-default",
+      "name": "mention popup 多选 tab",
+      "status": "passed",
+      "durationMs": 9
+    },
+    {
+      "group": "tab-ref-default",
+      "name": "Escape 关闭 mention popup",
+      "status": "passed",
+      "durationMs": 1
+    },
+    {
+      "group": "sidepanel loop",
+      "name": "无 LLM 时 rule planner 正确执行命令",
+      "status": "passed",
+      "durationMs": 215
+    },
+    {
+      "group": "sidepanel loop",
+      "name": "rule planner 执行长命令正常返回",
+      "status": "passed",
+      "durationMs": 1014
+    },
+    {
+      "group": "sidepanel llm-capability",
+      "name": "LLM 可用时支持 tool_call 闭环",
+      "status": "passed",
+      "durationMs": 211
+    },
+    {
+      "group": "sidepanel llm-capability",
+      "name": "LLM 不可用但规则可解析时应降级成功",
+      "status": "passed",
+      "durationMs": 208
+    },
+    {
+      "group": "sidepanel llm-capability",
+      "name": "LLM 不可用且规则不可解析时应失败",
+      "status": "passed",
+      "durationMs": 211
+    },
+    {
+      "group": "sidepanel llm-capability",
+      "name": "LLM HTTP 失败时应回退到规则 planner",
+      "status": "passed",
+      "durationMs": 210
+    },
+    {
+      "group": "sidepanel llm-live",
+      "name": "真实 LLM 在浏览器目标上达到可验证成功率",
+      "status": "passed",
+      "durationMs": 42916
+    },
+    {
+      "group": "sidepanel loop",
+      "name": "stopped 状态文案优先于 memory 回填",
+      "status": "passed",
+      "durationMs": 1
+    }
+  ],
+  "fatalError": null,
+  "debug": {
+    "bridgeLogsTail": [
+      "$ bun src/index.ts",
+      "[bridge] ws://127.0.0.1:18787/ws  mode=god  maxConcurrency=6  bash.exec=enabled  audit=/Users/envvar/work/repos/browser-brain-loop/bridge/tmp/browser-bridge/audit-2026-02-20.jsonl",
+      "error: script \"start\" was terminated by signal SIGTERM (Polite quit request)"
+    ],
+    "chromeLogsTail": [
+      "DevTools listening on ws://127.0.0.1:19333/devtools/browser/85afbcad-ac53-4f5f-9b58-3b21e7850085",
+      "[24777:1823688:0220/214332.352736:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT",
+      "[24777:1823688:0220/214354.388498:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT"
+    ]
+  }
+}

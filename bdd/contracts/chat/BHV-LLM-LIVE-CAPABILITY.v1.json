@@ -1,0 +1,53 @@
+{
+  "id": "BHV-LLM-LIVE-CAPABILITY",
+  "intent": "在真实 LLM 接入下，浏览器任务应在可重复冒烟中达到可验证成功率，而非仅通过 mock 协议闭环",
+  "context": {
+    "surface": "sidepanel.chat.loop",
+    "gate_profile": "live",
+    "llm": {
+      "base": "https://ai.chen.rs/v1",
+      "model": "gpt-5.3-codex"
+    },
+    "evaluation": {
+      "metric": "task_success_rate",
+      "by": "cdp.verify",
+      "threshold": ">=67%"
+    }
+  },
+  "steps": [
+    "configure_real_llm_endpoint_and_key",
+    "run_browser_task_smoke_attempts",
+    "verify_each_attempt_with_cdp_verify",
+    "assert_success_rate_meets_threshold"
+  ],
+  "observables": [
+    "assistant_completes_browser_task_with_done_status",
+    "page_contains_expected_clicked_marker_after_actions",
+    "overall_success_rate_is_above_threshold"
+  ],
+  "risk": "high",
+  "allowed_side_effects": [
+    "network.llm.chat_completions.real_provider",
+    "cdp.snapshot|action|verify",
+    "bridge.invoke(read|write|edit|bash)"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "browser-cdp", "e2e"],
+    "min_layers": 3
+  },
+  "degrade_policy": {
+    "on_live_llm_unavailable": [
+      "fail_live_gate",
+      "retain_mock_gate_for_engineering_regression"
+    ],
+    "on_low_success_rate": [
+      "fail_live_gate",
+      "inspect_trace_and_tool_calls"
+    ]
+  },
+  "rollback_or_compensation": [
+    "mark_release_blocked_for_live_profile",
+    "preserve_evidence_for_regression_analysis"
+  ],
+  "version": "1.0.0"
+}

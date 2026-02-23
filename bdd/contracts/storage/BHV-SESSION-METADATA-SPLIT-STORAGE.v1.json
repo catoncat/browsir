@@ -1,0 +1,43 @@
+{
+  "id": "BHV-SESSION-METADATA-SPLIT-STORAGE",
+  "intent": "会话正文与会话元数据分离存储，并保证写入一致性与恢复一致性",
+  "context": {
+    "surface": "sidepanel.storage",
+    "sessionData": ["messages", "trace", "referencedTabIds"],
+    "sessionMetadata": ["title", "updatedAt", "status", "messageCount"]
+  },
+  "steps": [
+    "create_or_update_session",
+    "write_session_data_record",
+    "write_session_metadata_record",
+    "restore_session_and_metadata",
+    "validate_consistency_between_data_and_metadata"
+  ],
+  "observables": [
+    "session_list_reads_from_metadata_store",
+    "session_detail_reads_from_data_store",
+    "metadata_and_data_updated_atomically_or_with_compensation"
+  ],
+  "risk": "high",
+  "allowed_side_effects": [
+    "storage_write(session_data)",
+    "storage_write(session_metadata)",
+    "storage_read(session_data|session_metadata)"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "integration", "browser-cdp"],
+    "min_layers": 3
+  },
+  "degrade_policy": {
+    "max_consecutive_failures": 1,
+    "on_trigger": [
+      "fallback_to_legacy_single_blob_readonly",
+      "emit_recovery_task_for_metadata_rebuild"
+    ]
+  },
+  "rollback_or_compensation": [
+    "rebuild_metadata_from_session_data_when_missing",
+    "avoid_deleting_session_data_on_metadata_write_failure"
+  ],
+  "version": "1.0.0"
+}

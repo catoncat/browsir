@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Browser Brain vNext</title>
+    <link rel="stylesheet" href="dist/assets/sidepanel.css" />
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        background: #f4efe6;
+      }
+      #fallback {
+        display: none;
+        margin: 16px;
+        padding: 12px;
+        border: 1px solid #c9baa2;
+        border-radius: 10px;
+        background: #fff9ef;
+        color: #413b31;
+        line-height: 1.6;
+      }
+      body.no-dist #fallback {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="fallback">
+      <strong>vNext 面板资源未构建。</strong><br />
+      请先在仓库根目录执行：<code>bun run brain:ext:build</code>
+    </div>
+
+    <script type="module" src="./sidepanel-loader.js"></script>
+  </body>
+</html>

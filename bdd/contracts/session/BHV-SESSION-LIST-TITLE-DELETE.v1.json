@@ -1,0 +1,43 @@
+{
+  "id": "BHV-SESSION-LIST-TITLE-DELETE",
+  "intent": "会话列表应支持短标题展示、手动刷新标题和安全删除，且与会话存储保持一致",
+  "context": {
+    "surface": "sidepanel.chat",
+    "sessionList": ["title", "id", "updatedAt"],
+    "actions": ["select_session", "refresh_title", "delete_session"]
+  },
+  "steps": [
+    "first_round_finishes_and_generates_short_title",
+    "session_list_renders_title_field",
+    "user_triggers_refresh_title_and_title_updates",
+    "user_deletes_session_from_list",
+    "storage_and_session_index_remove_deleted_session"
+  ],
+  "observables": [
+    "session_list_title_changes_after_first_round",
+    "manual_refresh_title_returns_new_or_recomputed_title",
+    "deleted_session_not_present_in_session_list_or_session_view"
+  ],
+  "risk": "high",
+  "allowed_side_effects": [
+    "storage_write(session_meta|session_index|session_entries)",
+    "storage_remove(session_meta|session_entries|trace_chunks)",
+    "ui_event(click_refresh_title|click_delete_session)"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "browser-cdp", "e2e"],
+    "min_layers": 3
+  },
+  "degrade_policy": {
+    "max_consecutive_failures": 1,
+    "on_trigger": [
+      "fallback_to_session_id_display",
+      "block_delete_and_return_structured_error"
+    ]
+  },
+  "rollback_or_compensation": [
+    "keep_original_title_when_refresh_fails",
+    "remove_index_entry_even_if_partial_session_chunks_missing"
+  ],
+  "version": "1.0.0"
+}

@@ -1,0 +1,47 @@
+{
+  "id": "BHV-TAB-REF-DEFAULT",
+  "intent": "对话默认引用当前活跃 tab，支持取消引用和通过 @ mention 多选 tab",
+  "context": {
+    "referencedTabIds": ["auto:active"],
+    "bridge": "connected",
+    "tabs_available": true
+  },
+  "steps": [
+    "new_conversation_created",
+    "active_tab_auto_selected",
+    "user_can_dismiss_tab",
+    "user_types_at_mention",
+    "tab_picker_popup_shown",
+    "user_selects_multiple_tabs",
+    "selected_tabs_reflected_in_chips"
+  ],
+  "observables": [
+    "new_conversation_has_active_tab_selected",
+    "tab_chips_render_selected_tabs",
+    "at_mention_popup_lists_available_tabs",
+    "dismissed_tab_removed_from_selectedTabIds",
+    "multiple_tabs_can_be_referenced"
+  ],
+  "risk": "low",
+  "allowed_side_effects": [
+    "state.selectedTabIds updated",
+    "conversation.referencedTabIds updated",
+    "tab_chips UI re-rendered"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "browser-cdp"],
+    "min_layers": 2
+  },
+  "degrade_policy": {
+    "max_consecutive_failures": 1,
+    "on_trigger": [
+      "fallback_to_no_tab",
+      "allow_manual_tab_selection"
+    ]
+  },
+  "rollback_or_compensation": [
+    "revert to empty selectedTabIds",
+    "tab picker remains functional via settings panel"
+  ],
+  "version": "1.0.0"
+}

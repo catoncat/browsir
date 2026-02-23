@@ -1,0 +1,42 @@
+{
+  "id": "BHV-CHAT-STREAMING-MESSAGE-CONTAINER",
+  "intent": "流式回复期间使用独立容器增量更新，避免稳定消息区反复全量重绘",
+  "context": {
+    "surface": "sidepanel.chat",
+    "streaming": true,
+    "messageZones": ["stable_list", "streaming_container"]
+  },
+  "steps": [
+    "start_streaming_reply",
+    "append_delta_into_streaming_container",
+    "keep_stable_messages_unchanged_during_stream",
+    "flush_streaming_content_to_stable_list_on_complete"
+  ],
+  "observables": [
+    "streaming_content_visible_in_dedicated_container",
+    "stable_message_nodes_not_recreated_each_delta",
+    "container_cleared_after_stream_complete"
+  ],
+  "risk": "medium",
+  "allowed_side_effects": [
+    "dom_update(streaming_container)",
+    "requestAnimationFrame_batching",
+    "chat_scroll_position_update"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "browser-cdp"],
+    "min_layers": 2
+  },
+  "degrade_policy": {
+    "max_consecutive_failures": 2,
+    "on_trigger": [
+      "disable_batching_temporarily",
+      "fallback_to_single_message_render_path"
+    ]
+  },
+  "rollback_or_compensation": [
+    "preserve_partial_stream_text",
+    "mark_stream_as_interrupted"
+  ],
+  "version": "1.0.0"
+}
