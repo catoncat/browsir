@@ -59,11 +59,44 @@ function shortHost(url: string): string {
 
 function inferToolName(inputToolName: string, payload: JsonRecord): string {
   if (inputToolName) return inputToolName;
+  if (toText(payload.tool)) return toText(payload.tool).toLowerCase();
   if (Array.isArray(payload.tabs)) return "list_tabs";
   if (payload.opened === true || (payload.tab && typeof payload.tab === "object")) return "open_tab";
   if (Array.isArray(payload.nodes) || toText(payload.snapshotId) || toText(payload.compact)) return "snapshot";
   if (toText(payload.verifyReason) || typeof payload.verified === "boolean") return "browser_action";
   if (toText(payload.type) === "invoke" || (payload.response && typeof payload.response === "object")) return "invoke";
+  return "";
+}
+
+function renderToolTarget(toolName: string, payload: JsonRecord): string {
+  const fromPayload = toText(payload.target);
+  if (fromPayload) return fromPayload;
+  const args = asRecord(payload.args);
+  const normalized = String(toolName || "").trim().toLowerCase();
+
+  if (normalized === "bash") {
+    const command = toText(args.command) || toText(payload.rawArgs);
+    return command ? `命令：${command}` : "";
+  }
+  if (["read_file", "write_file", "edit_file"].includes(normalized)) {
+    const path = toText(args.path);
+    return path ? `路径：${path}` : "";
+  }
+  if (normalized === "open_tab") {
+    const url = toText(args.url);
+    return url ? `目标：${url}` : "";
+  }
+  if (normalized === "snapshot") {
+    const mode = toText(args.mode) || "interactive";
+    const selector = toText(args.selector);
+    return selector ? `模式：${mode} · 选择器：${selector}` : `模式：${mode}`;
+  }
+  if (normalized === "browser_action") {
+    const kind = toText(args.kind);
+    const target = toText(args.url) || toText(args.ref) || toText(args.selector);
+    if (kind && target) return `${kind} · ${target}`;
+    return kind ? `动作：${kind}` : "";
+  }
   return "";
 }
 
@@ -133,11 +166,12 @@ function renderOpenTab(payload: JsonRecord, detail: string): ToolRenderResult {
 function renderInvoke(toolName: string, callId: string, payload: JsonRecord, detail: string): ToolRenderResult {
   const error = toText(payload.error);
   if (error) {
+    const target = renderToolTarget(toolName, payload);
     return {
       kind: "invoke",
       tone: "error",
       title: `工具调用失败：${toolName || "invoke"}`,
-      subtitle: error,
+      subtitle: [target, error].filter(Boolean).join(" · "),
       detail
     };
   }
@@ -147,12 +181,13 @@ function renderInvoke(toolName: string, callId: string, payload: JsonRecord, det
   const bridgeTool = toText(asRecord(invokeResult.data).echoedTool);
   const toolLabel = toolName || bridgeTool || "invoke";
   const invokeId = toText(invokeResult.id) || callId;
+  const target = renderToolTarget(toolLabel, payload);
 
   return {
     kind: "invoke",
     tone: "success",
     title: `已执行工具：${toolLabel}`,
-    subtitle: invokeId ? `调用 ID: ${invokeId}` : "",
+    subtitle: [target, invokeId ? `调用 ID: ${invokeId}` : ""].filter(Boolean).join(" · "),
     detail
   };
 }
@@ -182,11 +217,12 @@ function renderBrowser(payload: JsonRecord, detail: string): ToolRenderResult {
 function renderDefault(toolName: string, callId: string, payload: JsonRecord, detail: string): ToolRenderResult {
   const error = toText(payload.error);
   if (error) {
+    const target = renderToolTarget(toolName, payload);
     return {
       kind: "default",
       tone: "error",
       title: `工具失败：${toolName || "unknown"}`,
-      subtitle: error,
+      subtitle: [target, error].filter(Boolean).join(" · "),
       detail
     };
   }
@@ -194,7 +230,7 @@ function renderDefault(toolName: string, callId: string, payload: JsonRecord, de
     kind: "default",
     tone: "neutral",
     title: toolName ? `已执行工具：${toolName}` : "已执行工具调用",
-    subtitle: callId ? `调用 ID: ${callId}` : "",
+    subtitle: [renderToolTarget(toolName, payload), callId ? `调用 ID: ${callId}` : ""].filter(Boolean).join(" · "),
     detail
   };
 }

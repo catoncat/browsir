@@ -114,6 +114,9 @@ const activeToolRun = ref<ToolRunSnapshot | null>(null);
 const activeRunHint = ref<RuntimeProgressHint | null>(null);
 const toolPendingLogs = ref<string[]>([]);
 const activeRunToken = ref(0);
+const llmStreamingText = ref("");
+const llmStreamingSessionId = ref("");
+const llmStreamingActive = ref(false);
 let forkSessionHighlightTimer: ReturnType<typeof setTimeout> | null = null;
 
 const USER_FORK_MIN_VISIBLE_MS = 620;
@@ -330,6 +333,12 @@ function clearToolPendingLogs() {
   toolPendingLogs.value = [];
 }
 
+function resetLlmStreamingState() {
+  llmStreamingText.value = "";
+  llmStreamingSessionId.value = "";
+  llmStreamingActive.value = false;
+}
+
 function appendToolPendingLogs(stream: "stdout" | "stderr", chunk: string) {
   const raw = String(chunk || "");
   if (!raw) return;
@@ -342,6 +351,16 @@ function appendToolPendingLogs(stream: "stdout" | "stderr", chunk: string) {
 
   const normalized = parts.map((line) => (stream === "stderr" ? `stderr | ${line}` : line));
   const merged = [...toolPendingLogs.value, ...normalized];
+  if (merged.length > TOOL_LOG_MAX_LINES) {
+    merged.splice(0, merged.length - TOOL_LOG_MAX_LINES);
+  }
+  toolPendingLogs.value = merged;
+}
+
+function appendToolTraceLog(text: string) {
+  const line = String(text || "").trim();
+  if (!line) return;
+  const merged = [...toolPendingLogs.value, line];
   if (merged.length > TOOL_LOG_MAX_LINES) {
     merged.splice(0, merged.length - TOOL_LOG_MAX_LINES);
   }
@@ -406,14 +425,40 @@ function applyRuntimeEventToolRun(event: unknown) {
   const payload = toRecord(envelope.payload);
   const mode = String(payload.mode || "");
   const ts = normalizeEventTs(envelope);
+  const eventSessionId = String(envelope.sessionId || "").trim();
   if (type === "loop_start") {
     activeToolRun.value = null;
+    resetLlmStreamingState();
     clearToolPendingLogs();
+    appendToolTraceLog("开始执行");
     setLlmRunHint("分析任务", "正在规划下一步动作");
     return;
   }
   if (type === "llm.request") {
+    appendToolTraceLog("调用模型：生成下一步计划");
     setLlmRunHint("调用模型", "正在生成下一步计划");
+    return;
+  }
+  if (type === "llm.stream.start") {
+    llmStreamingSessionId.value = eventSessionId || String(activeSessionId.value || "");
+    llmStreamingText.value = "";
+    llmStreamingActive.value = true;
+    setLlmRunHint("回答中", "正在生成回复");
+    return;
+  }
+  if (type === "llm.stream.delta") {
+    const chunk = String(payload.text || "");
+    if (!chunk) return;
+    const activeId = String(activeSessionId.value || "").trim();
+    const sourceId = llmStreamingSessionId.value || eventSessionId;
+    if (sourceId && activeId && sourceId !== activeId) return;
+    llmStreamingSessionId.value = sourceId || activeId;
+    llmStreamingText.value = `${llmStreamingText.value}${chunk}`;
+    llmStreamingActive.value = true;
+    return;
+  }
+  if (type === "llm.stream.end") {
+    llmStreamingActive.value = false;
     return;
   }
   if (type === "llm.response.parsed") {
@@ -426,29 +471,45 @@ function applyRuntimeEventToolRun(event: unknown) {
   if (type === "step_planned" && mode === "tool_call") {
     const step = normalizeStep(payload.step);
     if (!step) return;
-    clearToolPendingLogs();
+    resetLlmStreamingState();
+    const action = String(payload.action || "");
+    const detail = formatToolPendingDetail(action, String(payload.arguments || ""));
+    appendToolTraceLog(`计划：${prettyToolAction(action)}${detail ? ` · ${detail}` : ""}`);
     activeToolRun.value = {
       step,
-      action: String(payload.action || ""),
+      action,
       arguments: String(payload.arguments || ""),
       ts
     };
-    setToolRunHint(String(payload.action || ""), String(payload.arguments || ""), ts);
+    setToolRunHint(action, String(payload.arguments || ""), ts);
     return;
   }
   if (type === "step_finished" && mode === "tool_call") {
     const step = normalizeStep(payload.step);
     if (!step) return;
+    const action = String(payload.action || "");
+    const ok = payload.ok === true;
+    const errorText = String(payload.error || "").trim();
+    appendToolTraceLog(
+      ok
+        ? `完成：${prettyToolAction(action)}`
+        : `失败：${prettyToolAction(action)}${errorText ? ` · ${clipText(errorText, 160)}` : ""}`
+    );
     if (activeToolRun.value && activeToolRun.value.step === step) {
       activeToolRun.value = null;
     }
-    clearToolPendingLogs();
     setLlmRunHint("继续推理", "正在处理工具结果");
+    return;
+  }
+  if (type === "step_finished" && mode === "llm") {
+    llmStreamingActive.value = false;
     return;
   }
   if (["loop_done", "loop_error", "loop_skip_stopped", "loop_internal_error", "loop_start"].includes(type)) {
     activeToolRun.value = null;
+    resetLlmStreamingState();
     clearToolPendingLogs();
+    appendToolTraceLog("执行结束");
     activeRunHint.value = null;
   }
 }
@@ -462,7 +523,7 @@ function applyBridgeEventToolOutput(rawEvent: unknown) {
   const data = toRecord(envelope.data);
 
   if (eventName === "invoke.started") {
-    clearToolPendingLogs();
+    appendToolTraceLog("工具开始执行");
     return;
   }
   if (eventName === "invoke.stdout") {
@@ -471,6 +532,12 @@ function applyBridgeEventToolOutput(rawEvent: unknown) {
   }
   if (eventName === "invoke.stderr") {
     appendToolPendingLogs("stderr", String(data.chunk || ""));
+    return;
+  }
+  if (eventName === "invoke.finished") {
+    const ok = data.ok === true;
+    const durationMs = Number(data.durationMs || 0);
+    appendToolTraceLog(ok ? `工具完成${durationMs > 0 ? `（${durationMs}ms）` : ""}` : "工具失败");
   }
 }
 
@@ -506,6 +573,31 @@ const runningStatus = computed(() => {
     action: activeRunHint.value?.label || "思考中",
     detail: activeRunHint.value?.detail || "正在分析你的请求"
   };
+});
+
+const shouldShowStreamingAssistant = computed(() => {
+  if (!isRunning.value) return false;
+  const text = String(llmStreamingText.value || "");
+  const normalizedText = text.trim();
+  if (!llmStreamingActive.value && !normalizedText) return false;
+  if (!normalizedText) return false;
+
+  const sourceSessionId = String(llmStreamingSessionId.value || "").trim();
+  const currentSessionId = String(activeSessionId.value || "").trim();
+  if (sourceSessionId && currentSessionId && sourceSessionId !== currentSessionId) {
+    return false;
+  }
+
+  for (let i = messages.value.length - 1; i >= 0; i -= 1) {
+    const item = messages.value[i];
+    if (String(item?.role || "") !== "assistant") continue;
+    const content = String(item?.content || "").trim();
+    if (!content) continue;
+    if (content === normalizedText) return false;
+    break;
+  }
+
+  return true;
 });
 
 const displayMessages = computed<DisplayMessage[]>(() => {
@@ -547,6 +639,14 @@ const displayMessages = computed<DisplayMessage[]>(() => {
     }
   }
 
+  if (shouldShowStreamingAssistant.value) {
+    rendered.push({
+      role: "assistant_streaming",
+      content: llmStreamingText.value,
+      entryId: `__assistant_streaming__${String(activeSessionId.value || "__global__")}__${activeRunToken.value}`
+    });
+  }
+
   if (isRunning.value && runningStatus.value) {
     rendered.push({
       role: "tool_pending",
@@ -583,6 +683,7 @@ watch(isRunning, (running, wasRunning) => {
   userPendingRegenerate.value = null;
   clearActiveToolRun();
   clearToolPendingLogs();
+  resetLlmStreamingState();
   activeRunHint.value = null;
 });
 
@@ -598,6 +699,7 @@ watch(activeSessionId, () => {
   }
   clearActiveToolRun();
   clearToolPendingLogs();
+  resetLlmStreamingState();
   activeRunHint.value = null;
   if (!activeSession.value?.forkedFrom?.sessionId) {
     setForkSessionHighlight(false);
@@ -633,6 +735,15 @@ const displayMessageStructureKey = computed(() =>
 );
 
 watch(displayMessageStructureKey, async () => {
+  const shouldFollow = isMainScrollNearBottom();
+  await nextTick();
+  if (shouldFollow && scrollContainer.value) {
+    scrollContainer.value.scrollTop = scrollContainer.value.scrollHeight;
+  }
+});
+
+watch(llmStreamingText, async () => {
+  if (!isRunning.value) return;
   const shouldFollow = isMainScrollNearBottom();
   await nextTick();
   if (shouldFollow && scrollContainer.value) {

@@ -65,6 +65,64 @@ function findAssistantIndex(messages: PanelMessageLike[], entryId: string) {
   return messages.findIndex((item) => item?.role === "assistant" && String(item?.entryId || "").trim() === entryId);
 }
 
+function resolveAssistantIndex(messages: PanelMessageLike[], message: PanelMessageLike, indexHint: number) {
+  const entryId = String(message?.entryId || "").trim();
+  if (entryId) {
+    const matched = findAssistantIndex(messages, entryId);
+    if (matched >= 0) return matched;
+  }
+  if (Number.isInteger(indexHint) && indexHint >= 0 && indexHint < messages.length) {
+    return indexHint;
+  }
+  return -1;
+}
+
+function findAssistantTurnBounds(messages: PanelMessageLike[], assistantIndex: number) {
+  if (assistantIndex < 0 || assistantIndex >= messages.length) return null;
+  if (messages[assistantIndex]?.role !== "assistant") return null;
+
+  let start = assistantIndex - 1;
+  while (start >= 0 && messages[start]?.role !== "user") {
+    start -= 1;
+  }
+
+  let end = assistantIndex + 1;
+  while (end < messages.length && messages[end]?.role !== "user") {
+    end += 1;
+  }
+
+  return {
+    start: start + 1,
+    end: end - 1
+  };
+}
+
+function isAssistantTurnTail(messages: PanelMessageLike[], assistantIndex: number) {
+  const bounds = findAssistantTurnBounds(messages, assistantIndex);
+  if (!bounds) return false;
+  for (let i = bounds.end; i >= bounds.start; i -= 1) {
+    const candidate = messages[i];
+    if (candidate?.role !== "assistant") continue;
+    if (!String(candidate?.content || "").trim()) continue;
+    return i === assistantIndex;
+  }
+  return false;
+}
+
+function collectAssistantTurnContent(messages: PanelMessageLike[], assistantIndex: number): string {
+  const bounds = findAssistantTurnBounds(messages, assistantIndex);
+  if (!bounds) return "";
+  const parts: string[] = [];
+  for (let i = bounds.start; i <= bounds.end; i += 1) {
+    const candidate = messages[i];
+    if (candidate?.role !== "assistant") continue;
+    const text = String(candidate?.content || "").trim();
+    if (!text) continue;
+    parts.push(text);
+  }
+  return parts.join("\n\n").trim();
+}
+
 function findPreviousUserEntryId(messages: PanelMessageLike[], index: number) {
   for (let i = index - 1; i >= 0; i -= 1) {
     const candidate = messages[i];
@@ -133,25 +191,37 @@ export function useMessageActions(options: UseMessageActionsOptions) {
   }
 
   function canCopyMessage(message: PanelMessageLike) {
-    return isValidAssistantMessage(message);
+    if (!isValidAssistantMessage(message)) return false;
+    const index = resolveAssistantIndex(messages.value, message, -1);
+    if (index < 0) return false;
+    return isAssistantTurnTail(messages.value, index);
   }
 
   function canForkMessage(message: PanelMessageLike, index: number) {
     if (!isValidAssistantMessage(message)) return false;
     if (!message.entryId) return false;
-    return hasPreviousUserMessage(messages.value, index);
+    const resolvedIndex = resolveAssistantIndex(messages.value, message, index);
+    if (resolvedIndex < 0) return false;
+    if (!isAssistantTurnTail(messages.value, resolvedIndex)) return false;
+    return hasPreviousUserMessage(messages.value, resolvedIndex);
   }
 
   function canRetryMessage(message: PanelMessageLike, index: number) {
     if (!isValidAssistantMessage(message)) return false;
     if (!message.entryId) return false;
-    if (!hasPreviousUserMessage(messages.value, index)) return false;
-    return isLatestAssistantMessage(messages.value, index);
+    const resolvedIndex = resolveAssistantIndex(messages.value, message, index);
+    if (resolvedIndex < 0) return false;
+    if (!isAssistantTurnTail(messages.value, resolvedIndex)) return false;
+    if (!hasPreviousUserMessage(messages.value, resolvedIndex)) return false;
+    return isLatestAssistantMessage(messages.value, resolvedIndex);
   }
 
   async function handleCopyMessage(payload: CopyPayload) {
     if (payload.role !== "assistant") return;
-    const content = String(payload.content || "").trim();
+    const entryId = String(payload.entryId || "").trim();
+    const index = entryId ? findAssistantIndex(messages.value, entryId) : -1;
+    const merged = index >= 0 ? collectAssistantTurnContent(messages.value, index) : "";
+    const content = merged || String(payload.content || "").trim();
     if (!content) return;
 
     try {

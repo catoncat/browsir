@@ -28,6 +28,7 @@ const props = defineProps<{
   toolPending?: boolean;
   toolPendingAction?: string;
   toolPendingDetail?: string;
+  toolPendingLogs?: string[];
   busyPlaceholder?: boolean;
   busyMode?: "retry" | "fork";
   busySourceEntryId?: string;
@@ -59,12 +60,17 @@ const emit = defineEmits<{
 
 const isUser = computed(() => props.role === "user");
 const isAssistant = computed(() => props.role === "assistant");
+const isAssistantStreaming = computed(() => props.role === "assistant_streaming");
+const isAssistantLike = computed(() => isAssistant.value || isAssistantStreaming.value);
 const isAssistantPlaceholder = computed(() => props.role === "assistant_placeholder" || props.busyPlaceholder === true);
 const isTool = computed(() => props.role === "tool");
 const isToolPending = computed(() => props.role === "tool_pending" || props.toolPending === true);
 
 const showThinking = ref(false);
 const inlineTextarea = ref<HTMLTextAreaElement | null>(null);
+const pendingLogViewport = ref<HTMLElement | null>(null);
+const pendingLogExpanded = ref(false);
+const pendingLogStickToBottom = ref(true);
 
 const htmlContent = computed(() => renderMarkdown(props.content));
 const toolRender = computed(() =>
@@ -105,9 +111,17 @@ const toolIcon = computed(() => {
   if (toolRender.value.kind === "browser") return Activity;
   return Database;
 });
+const pendingLogs = computed(() =>
+  Array.isArray(props.toolPendingLogs) ? props.toolPendingLogs.filter((item) => String(item || "").trim().length > 0) : []
+);
+const pendingLogExpandable = computed(() => pendingLogs.value.length > 6);
 
 function toggleThinking() {
   showThinking.value = !showThinking.value;
+}
+
+function togglePendingLogExpand() {
+  pendingLogExpanded.value = !pendingLogExpanded.value;
 }
 
 function handleCopy() {
@@ -154,6 +168,20 @@ function handleFork() {
   emit("fork", { entryId: props.entryId });
 }
 
+function syncPendingLogScroll(forceBottom = false) {
+  const el = pendingLogViewport.value;
+  if (!el) return;
+  if (!forceBottom && !pendingLogStickToBottom.value) return;
+  el.scrollTop = el.scrollHeight;
+}
+
+function handlePendingLogScroll() {
+  const el = pendingLogViewport.value;
+  if (!el) return;
+  const remain = el.scrollHeight - el.scrollTop - el.clientHeight;
+  pendingLogStickToBottom.value = remain <= 14;
+}
+
 watch(
   () => props.editing,
   async (editing) => {
@@ -166,13 +194,37 @@ watch(
     target.setSelectionRange(end, end);
   }
 );
+
+watch(
+  () => props.entryId,
+  () => {
+    pendingLogExpanded.value = false;
+    pendingLogStickToBottom.value = true;
+  }
+);
+
+watch(
+  () => pendingLogs.value.length,
+  async () => {
+    await nextTick();
+    syncPendingLogScroll();
+  }
+);
+
+watch(
+  () => pendingLogExpanded.value,
+  async () => {
+    await nextTick();
+    syncPendingLogScroll(true);
+  }
+);
 </script>
 
 <template>
   <div 
     class="flex flex-col mb-6 animate-in fade-in duration-300 group"
     role="listitem"
-    :aria-label="`${isUser ? '用户' : (isAssistant || isAssistantPlaceholder) ? '助手' : '工具'}消息: ${messageAriaPreview}...`"
+    :aria-label="`${isUser ? '用户' : (isAssistantLike || isAssistantPlaceholder) ? '助手' : '工具'}消息: ${messageAriaPreview}...`"
   >
     <!-- User Message: Rounded Bubble -->
     <div
@@ -258,11 +310,11 @@ watch(
 
     <!-- Assistant Message: Pure Layout -->
     <div 
-      v-else-if="isAssistant" 
+      v-else-if="isAssistantLike" 
       class="flex flex-col gap-3 pr-2 group" 
       :class="(props.retrying || props.forking) ? 'opacity-40 select-none' : ''"
       role="group"
-      aria-label="助手回复的内容"
+      :aria-label="isAssistantStreaming ? '助手正在生成回复' : '助手回复的内容'"
     >
       <!-- AI Content -->
       <div
@@ -271,9 +323,18 @@ watch(
         tabindex="0"
       ></div>
 
+      <div
+        v-if="isAssistantStreaming"
+        class="inline-flex items-center gap-1.5 text-[11px] font-semibold text-ui-accent"
+        role="status"
+        aria-live="polite"
+      >
+        <Loader2 :size="12" class="animate-spin" aria-hidden="true" />
+      </div>
+
       <!-- Action Bar: Copy + Retry + Fork -->
       <div
-        v-if="props.showCopyAction || props.showRetryAction || props.showForkAction"
+        v-if="isAssistant && (props.showCopyAction || props.showRetryAction || props.showForkAction)"
         class="flex items-center gap-1 transition-opacity"
         :class="(props.retrying || props.forking) ? 'opacity-100' : 'opacity-70 sm:opacity-0 sm:group-hover:opacity-100'"
         role="toolbar"
@@ -344,7 +405,6 @@ watch(
       class="flex flex-col pr-2"
       role="status"
       aria-live="polite"
-      aria-busy="true"
       aria-label="工具执行中"
       data-testid="tool-running-placeholder"
       :data-tool-action="props.toolPendingAction || props.toolName || ''"
@@ -362,6 +422,36 @@ watch(
         >
           {{ props.toolPendingDetail }}
         </p>
+        <div v-if="pendingLogs.length" class="mt-2.5 rounded-md border border-ui-accent/20 bg-white/50">
+          <div
+            ref="pendingLogViewport"
+            class="tool-log-viewport overflow-y-auto px-2.5 py-2 font-mono text-[11px] leading-snug text-ui-text"
+            :class="pendingLogExpanded ? 'max-h-56' : 'max-h-24'"
+            @scroll="handlePendingLogScroll"
+          >
+            <div class="space-y-1">
+              <p
+                v-for="(line, idx) in pendingLogs"
+                :key="`${idx}-${line}`"
+                class="break-all whitespace-pre-wrap"
+              >
+                {{ line }}
+              </p>
+            </div>
+          </div>
+          <div class="flex items-center justify-between border-t border-ui-accent/15 px-2.5 py-1.5 text-[10px] text-ui-text-muted">
+            <span>实时输出 {{ pendingLogs.length }} 行</span>
+            <button
+              v-if="pendingLogExpandable"
+              type="button"
+              class="rounded px-1.5 py-0.5 font-semibold text-ui-accent hover:bg-ui-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+              :aria-label="pendingLogExpanded ? '收起输出区域' : '展开输出区域'"
+              @click="togglePendingLogExpand"
+            >
+              {{ pendingLogExpanded ? "收起" : "展开" }}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -415,9 +505,15 @@ watch(
 .tool-running-pill {
   position: relative;
   overflow: hidden;
-  background: linear-gradient(110deg, rgba(37, 99, 235, 0.10) 0%, rgba(37, 99, 235, 0.04) 35%, rgba(37, 99, 235, 0.16) 50%, rgba(37, 99, 235, 0.04) 65%, rgba(37, 99, 235, 0.10) 100%);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  background: linear-gradient(110deg, rgba(37, 99, 235, 0.12) 0%, rgba(37, 99, 235, 0.05) 35%, rgba(37, 99, 235, 0.18) 50%, rgba(37, 99, 235, 0.05) 65%, rgba(37, 99, 235, 0.12) 100%);
   background-size: 220% 100%;
   animation: tool-shimmer 1.45s linear infinite;
+}
+
+.tool-log-viewport {
+  scrollbar-gutter: stable both-edges;
 }
 
 @keyframes tool-shimmer {
@@ -432,6 +528,10 @@ watch(
 @media (prefers-reduced-motion: reduce) {
   .tool-running-pill {
     animation: none;
+  }
+
+  .animate-spin {
+    animation: none !important;
   }
 }
 </style>

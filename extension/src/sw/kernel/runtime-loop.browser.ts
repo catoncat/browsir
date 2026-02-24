@@ -372,6 +372,78 @@ function normalizeToolCalls(rawToolCalls: unknown): ToolCallItem[] {
     .filter((item): item is ToolCallItem => item !== null);
 }
 
+function parseToolCallArgs(raw: string): JsonRecord | null {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+  const parsed = safeJsonParse(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  return parsed as JsonRecord;
+}
+
+function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs: string): string {
+  const normalized = String(toolName || "").trim().toLowerCase();
+  const raw = String(rawArgs || "").trim();
+  const pick = (key: string) => String(args?.[key] || "").trim();
+
+  if (normalized === "bash") {
+    const command = pick("command") || raw;
+    return command ? `命令：${clipText(command, 220)}` : "";
+  }
+  if (normalized === "open_tab") {
+    const url = pick("url");
+    return url ? `目标：${clipText(url, 220)}` : "";
+  }
+  if (["read_file", "write_file", "edit_file"].includes(normalized)) {
+    const path = pick("path");
+    return path ? `路径：${clipText(path, 220)}` : "";
+  }
+  if (normalized === "snapshot") {
+    const mode = pick("mode") || "interactive";
+    const selector = pick("selector");
+    return selector ? `模式：${mode} · 选择器：${clipText(selector, 120)}` : `模式：${mode}`;
+  }
+  if (normalized === "browser_action") {
+    const kind = pick("kind");
+    const target = pick("url") || pick("ref") || pick("selector");
+    if (kind && target) return `${kind} · ${clipText(target, 180)}`;
+    if (kind) return `动作：${kind}`;
+  }
+  if (normalized === "browser_verify") return "页面验证";
+  if (normalized === "list_tabs") return "读取标签页列表";
+  if (raw) return `参数：${clipText(raw, 220)}`;
+  return "";
+}
+
+function buildToolFailurePayload(toolCall: ToolCallItem, result: JsonRecord): JsonRecord {
+  const toolName = String(toolCall.function.name || "").trim();
+  const rawArgs = String(toolCall.function.arguments || "").trim();
+  const args = parseToolCallArgs(rawArgs);
+  const target = summarizeToolTarget(toolName, args, rawArgs);
+  return {
+    error: String(result.error || "工具执行失败"),
+    errorReason: String(result.errorReason || "failed_execute"),
+    tool: toolName,
+    target,
+    args: args || null,
+    rawArgs: args ? undefined : clipText(rawArgs, 1200),
+    details: result.details || null
+  };
+}
+
+function buildToolSuccessPayload(toolCall: ToolCallItem, data: unknown): JsonRecord {
+  const toolName = String(toolCall.function.name || "").trim();
+  const rawArgs = String(toolCall.function.arguments || "").trim();
+  const args = parseToolCallArgs(rawArgs);
+  const target = summarizeToolTarget(toolName, args, rawArgs);
+  const base = data && typeof data === "object" && !Array.isArray(data) ? ({ ...(data as JsonRecord) } as JsonRecord) : { data };
+  return {
+    ...base,
+    tool: toolName,
+    target,
+    args: args || null
+  };
+}
+
 function parseLlmMessageFromSse(rawBody: string): JsonRecord {
   const lines = String(rawBody || "").split(/\r?\n/);
   const toolByIndex = new Map<number, ToolCallItem>();
@@ -419,6 +491,120 @@ function parseLlmMessageFromSse(rawBody: string): JsonRecord {
       .sort((a, b) => a - b)
       .map((idx) => toolByIndex.get(idx))
       .filter((item): item is ToolCallItem => Boolean(item))
+  };
+}
+
+interface LlmSseStreamResult {
+  message: JsonRecord;
+  rawBody: string;
+  packetCount: number;
+}
+
+function extractDeltaText(delta: JsonRecord): string {
+  const content = delta.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  let out = "";
+  for (const item of content) {
+    const row = toRecord(item);
+    const text = row.text;
+    if (typeof text === "string") {
+      out += text;
+      continue;
+    }
+    const nested = row.content;
+    if (typeof nested === "string") out += nested;
+  }
+  return out;
+}
+
+function appendDeltaToolCalls(toolByIndex: Map<number, ToolCallItem>, delta: JsonRecord): void {
+  const toolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
+  for (const rawCall of toolCalls) {
+    const call = toRecord(rawCall);
+    const idx = Number.isInteger(call.index) ? Number(call.index) : 0;
+    const prev = toolByIndex.get(idx) || {
+      id: "",
+      type: "function" as const,
+      function: { name: "", arguments: "" }
+    };
+    if (typeof call.id === "string" && call.id) prev.id = call.id;
+    const fn = toRecord(call.function);
+    if (typeof fn.name === "string" && fn.name) {
+      prev.function.name = prev.function.name ? `${prev.function.name}${fn.name}` : fn.name;
+    }
+    if (typeof fn.arguments === "string" && fn.arguments) {
+      prev.function.arguments = `${prev.function.arguments || ""}${fn.arguments}`;
+    }
+    toolByIndex.set(idx, prev);
+  }
+}
+
+async function readLlmMessageFromSseStream(
+  body: ReadableStream<Uint8Array>,
+  onDeltaText?: (chunk: string) => void
+): Promise<LlmSseStreamResult> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let text = "";
+  let packetCount = 0;
+  const rawPackets: string[] = [];
+  const toolByIndex = new Map<number, ToolCallItem>();
+
+  const processLine = (rawLine: string) => {
+    const line = String(rawLine || "").trim();
+    if (!line.startsWith("data:")) return;
+    const data = line.slice(5).trim();
+    if (!data) return;
+    rawPackets.push(`data: ${data}`);
+    if (data === "[DONE]") return;
+
+    const parsed = safeJsonParse(data);
+    const packet = toRecord(parsed);
+    packetCount += 1;
+    const choices = Array.isArray(packet.choices) ? packet.choices : [];
+    for (const choice of choices) {
+      const row = toRecord(choice);
+      const delta = toRecord(row.delta || row.message);
+      const textChunk = extractDeltaText(delta);
+      if (textChunk) {
+        text += textChunk;
+        if (onDeltaText) onDeltaText(textChunk);
+      }
+      appendDeltaToolCalls(toolByIndex, delta);
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let lineBreak = buffer.indexOf("\n");
+    while (lineBreak >= 0) {
+      const line = buffer.slice(0, lineBreak).replace(/\r$/, "");
+      buffer = buffer.slice(lineBreak + 1);
+      processLine(line);
+      lineBreak = buffer.indexOf("\n");
+    }
+  }
+
+  const tail = buffer + decoder.decode();
+  if (tail.trim()) processLine(tail.replace(/\r$/, ""));
+
+  const message: JsonRecord = {
+    content: text,
+    tool_calls: Array.from(toolByIndex.keys())
+      .sort((a, b) => a - b)
+      .map((idx) => toolByIndex.get(idx))
+      .filter((item): item is ToolCallItem => Boolean(item))
+  };
+
+  return {
+    message,
+    rawBody: rawPackets.join("\n"),
+    packetCount
   };
 }
 
@@ -1075,7 +1261,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           tools: BRAIN_TOOL_DEFS,
           tool_choice: "auto",
           temperature: 0.2,
-          stream: false
+          stream: true
         };
         const url = `${llmBase.replace(/\/$/, "")}/chat/completions`;
 
@@ -1099,7 +1285,49 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         status = resp.status;
         ok = resp.ok;
         contentType = String(resp.headers.get("content-type") || "");
-        rawBody = await resp.text();
+
+        if (!ok) {
+          rawBody = await resp.text();
+          orchestrator.events.emit("llm.response.raw", sessionId, {
+            step,
+            attempt,
+            status,
+            ok,
+            body: clipText(rawBody)
+          });
+          const err = new Error(`LLM HTTP ${status}`) as Error & { status?: number };
+          err.status = status;
+          throw err;
+        }
+
+        let message: JsonRecord;
+        const lowerType = contentType.toLowerCase();
+        if (resp.body && lowerType.includes("text/event-stream")) {
+          orchestrator.events.emit("llm.stream.start", sessionId, {
+            step,
+            attempt
+          });
+          const streamed = await readLlmMessageFromSseStream(resp.body, (chunk) => {
+            if (!chunk) return;
+            orchestrator.events.emit("llm.stream.delta", sessionId, {
+              step,
+              attempt,
+              text: chunk
+            });
+          });
+          rawBody = streamed.rawBody;
+          message = streamed.message;
+          orchestrator.events.emit("llm.stream.end", sessionId, {
+            step,
+            attempt,
+            packetCount: streamed.packetCount,
+            contentLength: parseLlmContent(message).length,
+            toolCalls: normalizeToolCalls(message.tool_calls).length
+          });
+        } else {
+          rawBody = await resp.text();
+          message = parseLlmMessageFromBody(rawBody, contentType);
+        }
 
         orchestrator.events.emit("llm.response.raw", sessionId, {
           step,
@@ -1109,13 +1337,6 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           body: clipText(rawBody)
         });
 
-        if (!ok) {
-          const err = new Error(`LLM HTTP ${status}`) as Error & { status?: number };
-          err.status = status;
-          throw err;
-        }
-
-        const message = parseLlmMessageFromBody(rawBody, contentType);
         const state = orchestrator.getRunState(sessionId);
         if (state.retry.active) {
           orchestrator.resetRetryState(sessionId);
@@ -1295,22 +1516,20 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
           const result = await executeToolCall(sessionId, tc);
           if (result.error) {
+            const failurePayload = buildToolFailurePayload(tc, result);
             const failureText = `工具 ${tc.function.name} 失败: ${String(result.error)}`;
             messages.push({
               role: "tool",
               tool_call_id: tc.id,
               content: safeStringify(
-                {
-                  error: result.error,
-                  details: result.details || null
-                },
+                failurePayload,
                 6000
               )
             });
             await orchestrator.sessions.appendMessage({
               sessionId,
               role: "tool",
-              text: safeStringify({ error: result.error }, 4000),
+              text: safeStringify(failurePayload, 10_000),
               toolName: tc.function.name,
               toolCallId: tc.id
             });
@@ -1331,16 +1550,18 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           }
 
           const responsePayload = toRecord(result.response);
-          const toolContent = safeStringify(responsePayload.data ?? result, 12_000);
+          const rawToolData = responsePayload.data ?? result;
+          const llmToolContent = safeStringify(rawToolData, 12_000);
+          const uiToolPayload = buildToolSuccessPayload(tc, rawToolData);
           messages.push({
             role: "tool",
             tool_call_id: tc.id,
-            content: toolContent
+            content: llmToolContent
           });
           await orchestrator.sessions.appendMessage({
             sessionId,
             role: "tool",
-            text: clipText(toolContent, 10_000),
+            text: clipText(safeStringify(uiToolPayload, 10_000), 10_000),
             toolName: tc.function.name,
             toolCallId: tc.id
           });
@@ -1349,7 +1570,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             ok: true,
             mode: "tool_call",
             action: tc.function.name,
-            preview: clipText(toolContent, 800)
+            preview: clipText(llmToolContent, 800)
           });
         }
       }
