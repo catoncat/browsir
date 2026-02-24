@@ -1439,7 +1439,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       };
     }
 
-    if (normalizedCapability && !normalizedMode) {
+    if (normalizedCapability) {
       const result: ExecuteStepResult = {
         ok: false,
         modeUsed: "bridge",
