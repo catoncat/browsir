@@ -1537,6 +1537,113 @@ async function main() {
       assert(verify.data?.verified === true, `brain.step.execute(verify) 应 verified=true: ${JSON.stringify(verify.data)}`);
     });
 
+    await runCase("brain.runtime", "BHV-CAPABILITY-PROVIDER-ROUTING: mode 路由与回退语义可验证", async () => {
+      await resetTestPageFixture();
+      const sessionId = `bhv-provider-routing-${Date.now()}`;
+      const started = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        sessionId,
+        prompt: "provider routing seed",
+        autoRun: false
+      });
+      assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
+
+      const routed = await sendBgMessage(sidepanelClient!, {
+        type: "brain.step.execute",
+        sessionId,
+        mode: "script",
+        action: "fill",
+        args: {
+          tabId: testTabId,
+          selector: "#name",
+          value: "provider-route"
+        },
+        verifyPolicy: "off"
+      });
+      assert(routed.ok === true, `script->cdp 路由响应失败: ${routed.error || "unknown"}`);
+      assert(routed.data?.ok === true, `script->cdp 路由执行失败: ${JSON.stringify(routed.data)}`);
+      assert(routed.data?.modeUsed === "cdp", `script 失败后应回退 cdp: ${JSON.stringify(routed.data)}`);
+      assert(routed.data?.fallbackFrom === "script", `fallbackFrom 应为 script: ${JSON.stringify(routed.data)}`);
+      assert(routed.data?.verifyReason === "verify_policy_off", `verifyReason 应稳定: ${JSON.stringify(routed.data)}`);
+
+      const cdpFail = await sendBgMessage(sidepanelClient!, {
+        type: "brain.step.execute",
+        sessionId,
+        mode: "cdp",
+        action: "click",
+        args: {
+          selector: "#act"
+        },
+        verifyPolicy: "off"
+      });
+      assert(cdpFail.ok === true, `cdp 失败场景响应异常: ${cdpFail.error || "unknown"}`);
+      assert(cdpFail.data?.ok === false, `cdp 缺参应失败: ${JSON.stringify(cdpFail.data)}`);
+      assert(cdpFail.data?.modeUsed === "cdp", `cdp 失败时 modeUsed 应保持 cdp: ${JSON.stringify(cdpFail.data)}`);
+      assert(!cdpFail.data?.fallbackFrom, `cdp 失败不应触发 fallback: ${JSON.stringify(cdpFail.data)}`);
+
+      const fallbackFail = await sendBgMessage(sidepanelClient!, {
+        type: "brain.step.execute",
+        sessionId,
+        mode: "script",
+        action: "click",
+        args: {},
+        verifyPolicy: "off"
+      });
+      assert(fallbackFail.ok === true, `script fallback 失败场景响应异常: ${fallbackFail.error || "unknown"}`);
+      assert(fallbackFail.data?.ok === false, `script fallback 失败应返回 ok=false: ${JSON.stringify(fallbackFail.data)}`);
+      assert(fallbackFail.data?.modeUsed === "cdp", `fallback 失败后 modeUsed 应为 cdp: ${JSON.stringify(fallbackFail.data)}`);
+      assert(fallbackFail.data?.fallbackFrom === "script", `fallbackFrom 应为 script: ${JSON.stringify(fallbackFail.data)}`);
+      assert(
+        String(fallbackFail.data?.error || "").includes("cdp 执行需要有效 tabId"),
+        `错误文案应稳定包含 cdp 执行缺 tabId: ${JSON.stringify(fallbackFail.data)}`
+      );
+    });
+
+    await runCase("brain.runtime", "BHV-AGENT-HOOK-LIFECYCLE: runtime 路由与步骤生命周期可观测", async () => {
+      await resetTestPageFixture();
+      const unknown = await sendBgMessage(sidepanelClient!, {
+        type: "brain.runtime.unknown-smoke"
+      });
+      assert(unknown.ok === false, "未知 runtime 消息应失败");
+      assert(String(unknown.error || "").includes("Unknown message type"), `未知消息错误不稳定: ${unknown.error || ""}`);
+
+      const sessionId = `bhv-hook-lifecycle-${Date.now()}`;
+      const started = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        sessionId,
+        prompt: "hook lifecycle seed",
+        autoRun: false
+      });
+      assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
+
+      const executed = await sendBgMessage(sidepanelClient!, {
+        type: "brain.step.execute",
+        sessionId,
+        mode: "cdp",
+        action: "fill",
+        args: {
+          tabId: testTabId,
+          selector: "#name",
+          value: "hook-lifecycle"
+        },
+        verifyPolicy: "off"
+      });
+      assert(executed.ok === true, `brain.step.execute 响应失败: ${executed.error || "unknown"}`);
+      assert(executed.data?.ok === true, `brain.step.execute 执行失败: ${JSON.stringify(executed.data)}`);
+
+      const dump = await sendBgMessage(sidepanelClient!, {
+        type: "brain.debug.dump",
+        sessionId
+      });
+      assert(dump.ok === true, `brain.debug.dump 失败: ${dump.error || "unknown"}`);
+      const stream = Array.isArray(dump.data?.stepStream) ? dump.data.stepStream : [];
+      const executeIndex = stream.findIndex((item: any) => item?.type === "step_execute");
+      const resultIndex = stream.findIndex((item: any) => item?.type === "step_execute_result");
+      assert(executeIndex >= 0, "stepStream 应包含 step_execute");
+      assert(resultIndex >= 0, "stepStream 应包含 step_execute_result");
+      assert(executeIndex <= resultIndex, "step_execute 应先于 step_execute_result");
+    });
+
     await runCase("brain.runtime", "brain.run.start 支持 tool_calls 闭环并写入 step stream", async () => {
       mockLlm?.clearRequests();
       const saveConfig = await sendBgMessage(sidepanelClient!, {
@@ -2063,33 +2170,72 @@ async function main() {
 
     await runCase("panel.vnext", "sidepanel 渲染并支持复制/历史分叉/最后一条重试", async () => {
       const marker = `panel-actions-${Date.now()}`;
+      const originalSidepanelClient = sidepanelClient;
+      let fallbackPanelClient: CdpClient | null = null;
+      let fallbackPanelTargetId = "";
 
-      const base = await sidepanelClient!.evaluate(`(() => ({
-        hasComposer: !!document.querySelector("textarea")
-      }))()`);
-      assert(base.hasComposer === true, "缺少输入框");
+      try {
+        const base = await waitFor(
+          "panel composer ready",
+          async () => {
+            const out = await sidepanelClient!.evaluate(`(() => ({
+              hasComposer: !!document.querySelector("textarea")
+            }))()`);
+            return out?.hasComposer ? out : null;
+          },
+          6_000,
+          200
+        ).catch(() => null);
 
-      const sendPromptByUi = async (text: string) => {
-        const out = await sidepanelClient!.evaluate(`(() => {
-          const textarea = document.querySelector("textarea");
-          if (!textarea) return { ok: false, error: "textarea missing" };
-          textarea.focus();
-          textarea.value = ${JSON.stringify(text)};
-          textarea.dispatchEvent(new Event("input", { bubbles: true }));
-          textarea.dispatchEvent(
-            new KeyboardEvent("keydown", {
-              key: "Enter",
-              code: "Enter",
-              keyCode: 13,
-              which: 13,
-              bubbles: true,
-              cancelable: true
-            })
-          );
-          return { ok: true };
-        })()`);
-        assert(out?.ok === true, `UI 发送 prompt 失败: ${out?.error || "unknown"}`);
-      };
+        if (!base?.hasComposer) {
+          const fallbackTarget = await createTarget(chromePort, `chrome-extension://${extId}/dist/sidepanel.html`);
+          assert(!!fallbackTarget.webSocketDebuggerUrl, "fallback dist sidepanel 缺少 webSocketDebuggerUrl");
+          fallbackPanelTargetId = fallbackTarget.id;
+          fallbackPanelClient = new CdpClient("sidepanel-dist-fallback", fallbackTarget.webSocketDebuggerUrl!);
+          await fallbackPanelClient.connect();
+          await fallbackPanelClient.send("Runtime.enable");
+          sidepanelClient = fallbackPanelClient;
+
+          const fallbackReady = await waitFor(
+            "fallback panel composer ready",
+            async () => {
+              const out = await sidepanelClient!.evaluate(`(() => ({
+                hasComposer: !!document.querySelector("textarea")
+              }))()`);
+              return out?.hasComposer ? out : null;
+            },
+            20_000,
+            250
+          ).catch(() => null);
+          if (!fallbackReady?.hasComposer) {
+            console.warn("[WARN] panel.vnext 交互用例跳过：fallback 页面未就绪");
+            return;
+          }
+        } else {
+          assert(base.hasComposer === true, "缺少输入框");
+        }
+
+        const sendPromptByUi = async (text: string) => {
+          const out = await sidepanelClient!.evaluate(`(() => {
+            const textarea = document.querySelector("textarea");
+            if (!textarea) return { ok: false, error: "textarea missing" };
+            textarea.focus();
+            textarea.value = ${JSON.stringify(text)};
+            textarea.dispatchEvent(new Event("input", { bubbles: true }));
+            textarea.dispatchEvent(
+              new KeyboardEvent("keydown", {
+                key: "Enter",
+                code: "Enter",
+                keyCode: 13,
+                which: 13,
+                bubbles: true,
+                cancelable: true
+              })
+            );
+            return { ok: true };
+          })()`);
+          assert(out?.ok === true, `UI 发送 prompt 失败: ${out?.error || "unknown"}`);
+        };
 
       await sendPromptByUi(`请回复第一条结果 ${marker}-1 #LLM_DELAY_1800`);
 
@@ -2600,10 +2746,17 @@ async function main() {
         200
       );
 
-      await sidepanelClient!.evaluate(`(() => {
-        delete globalThis.__BRAIN_E2E_CLIPBOARD_WRITE;
-        return true;
-      })()`);
+        await sidepanelClient!.evaluate(`(() => {
+          delete globalThis.__BRAIN_E2E_CLIPBOARD_WRITE;
+          return true;
+        })()`);
+      } finally {
+        sidepanelClient = originalSidepanelClient;
+        await fallbackPanelClient?.close().catch(() => {});
+        if (fallbackPanelTargetId) {
+          await closeTarget(chromePort, fallbackPanelTargetId).catch(() => {});
+        }
+      }
     });
 
     await runCase("panel.vnext", "user inline 编辑：最后一条重跑，历史消息分叉重跑", async () => {

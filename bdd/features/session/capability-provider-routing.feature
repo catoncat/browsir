@@ -1,0 +1,18 @@
+@contract(BHV-CAPABILITY-PROVIDER-ROUTING)
+Feature: Capability provider routing decouples tool contract from execution object
+
+  Scenario: Legacy adapters are routed through provider registry
+    Given orchestrator is created with legacy script and cdp adapters
+    When kernel executes brain.step.execute in script mode
+    Then invoke should be routed via registered script provider
+    And fallback should route to cdp provider only when script invocation fails
+
+  Scenario: Missing provider reports stable adapter missing error
+    Given script mode is requested and cdp provider is not registered
+    When script invocation fails and fallback attempts cdp
+    Then kernel should return or throw cdp adapter missing error with stable wording
+
+  Scenario: Verify semantics remain stable after provider routing
+    Given verify adapter is configured and provider routing is enabled
+    When execute step completes through routed provider
+    Then verifyReason should remain one of verified verify_failed verify_policy_off verify_adapter_missing

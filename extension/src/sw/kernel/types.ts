@@ -164,6 +164,26 @@ export interface StepTraceRecord {
   payload: Record<string, unknown>;
 }
 
+export type ExecuteMode = "script" | "cdp" | "bridge";
+
+export interface ExecuteStepInput {
+  sessionId: string;
+  mode: ExecuteMode;
+  action: string;
+  args?: Record<string, unknown>;
+  verifyPolicy?: "off" | "on_critical" | "always";
+}
+
+export interface ExecuteStepResult {
+  ok: boolean;
+  modeUsed: ExecuteMode;
+  fallbackFrom?: ExecuteMode;
+  verified: boolean;
+  verifyReason?: string;
+  data?: unknown;
+  error?: string;
+}
+
 export function randomId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
 }

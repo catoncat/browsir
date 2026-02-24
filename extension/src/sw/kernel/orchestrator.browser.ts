@@ -1,8 +1,21 @@
 import { compact, shouldCompact } from "./compaction.browser";
 import { BrainEventBus, type BrainEventEnvelope } from "./events";
+import { HookRunner, type HookHandler, type HookHandlerOptions } from "./hook-runner";
+import type { OrchestratorHookMap } from "./orchestrator-hooks";
 import { BrowserSessionManager } from "./session-manager.browser";
 import { appendTraceChunk, readTraceChunk } from "./session-store.browser";
-import { nowIso, randomId, type RunState, type StepTraceRecord } from "./types";
+import {
+  nowIso,
+  randomId,
+  type ExecuteMode,
+  type ExecuteStepInput,
+  type ExecuteStepResult,
+  type RunState,
+  type StepTraceRecord
+} from "./types";
+import { ToolProviderRegistry, type RegisterProviderOptions, type StepToolProvider } from "./tool-provider-registry";
+
+export type { ExecuteMode, ExecuteStepInput, ExecuteStepResult } from "./types";
 
 export interface OrchestratorOptions {
   retryMaxAttempts?: number;
@@ -34,30 +47,6 @@ export interface RuntimeView {
   stopped: boolean;
   retry: RunState["retry"];
 }
-
-export type ExecuteMode = "script" | "cdp" | "bridge";
-
-export interface ExecuteStepInput {
-  sessionId: string;
-  mode: ExecuteMode;
-  action: string;
-  args?: Record<string, unknown>;
-  verifyPolicy?: "off" | "on_critical" | "always";
-}
-
-export interface ExecuteStepResult {
-  ok: boolean;
-  modeUsed: ExecuteMode;
-  fallbackFrom?: ExecuteMode;
-  verified: boolean;
-  verifyReason?: string;
-  data?: unknown;
-  error?: string;
-  errorCode?: string;
-  errorDetails?: unknown;
-  retryable?: boolean;
-}
-
 export interface ExecutionAdapters {
   script?: (input: ExecuteStepInput) => Promise<unknown>;
   cdp?: (input: ExecuteStepInput) => Promise<unknown>;
@@ -79,12 +68,21 @@ function backoffDelay(attempt: number, base: number, cap: number): number {
   return Math.min(cap, base * 2 ** Math.max(0, attempt - 1));
 }
 
+class HookBlockError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HookBlockError";
+  }
+}
+
 // 对照点：pi-mono/packages/coding-agent/src/core/agent-session.ts:1565 _checkCompaction
 export class BrainOrchestrator {
   readonly sessions = new BrowserSessionManager();
   readonly events = new BrainEventBus();
   private readonly options: Required<OrchestratorOptions>;
-  private readonly adapters: ExecutionAdapters;
+  private readonly verifyAdapter?: ExecutionAdapters["verify"];
+  private readonly hooks = new HookRunner<OrchestratorHookMap>();
+  private readonly toolProviders = new ToolProviderRegistry();
   private readonly runStateBySession = new Map<string, RunState>();
   private readonly streamBySession = new Map<string, StepTraceRecord[]>();
 
@@ -98,11 +96,69 @@ export class BrainOrchestrator {
       splitTurn: options.splitTurn ?? true,
       traceChunkSize: options.traceChunkSize ?? 80
     };
-    this.adapters = adapters;
+    this.verifyAdapter = adapters.verify;
+    this.wireLegacyAdapters(adapters);
 
     this.events.subscribe((event) => {
       void this.persistEvent(event);
     });
+  }
+
+  registerToolProvider(mode: ExecuteMode, provider: StepToolProvider, options: RegisterProviderOptions = {}): void {
+    this.toolProviders.register(mode, provider, options);
+  }
+
+  unregisterToolProvider(mode: ExecuteMode): boolean {
+    return this.toolProviders.unregister(mode);
+  }
+
+  listToolProviders(): Array<{ mode: ExecuteMode; id: string }> {
+    return this.toolProviders.list();
+  }
+
+  onHook<K extends keyof OrchestratorHookMap & string>(
+    hook: K,
+    handler: HookHandler<OrchestratorHookMap[K]>,
+    options: HookHandlerOptions = {}
+  ): () => void {
+    return this.hooks.on(hook, handler, options);
+  }
+
+  runHook<K extends keyof OrchestratorHookMap & string>(hook: K, payload: OrchestratorHookMap[K]) {
+    return this.hooks.run(hook, payload);
+  }
+
+  private wireLegacyAdapters(adapters: ExecutionAdapters): void {
+    if (adapters.script) {
+      this.registerToolProvider(
+        "script",
+        {
+          id: "legacy:script-adapter",
+          invoke: adapters.script
+        },
+        { replace: true }
+      );
+    }
+    if (adapters.cdp) {
+      this.registerToolProvider(
+        "cdp",
+        {
+          id: "legacy:cdp-adapter",
+          invoke: adapters.cdp
+        },
+        { replace: true }
+      );
+    }
+    if (adapters.bridge) {
+      this.registerToolProvider(
+        "bridge",
+        {
+          id: "legacy:bridge-adapter",
+          invoke: adapters.bridge
+        },
+        { replace: true }
+      );
+    }
   }
 
   private async persistEvent(event: BrainEventEnvelope): Promise<void> {
@@ -266,60 +322,127 @@ export class BrainOrchestrator {
     return this.isCriticalAction(input.action);
   }
 
+  private async invokeProviderWithHooks(
+    mode: ExecuteMode,
+    input: ExecuteStepInput
+  ): Promise<{ modeUsed: ExecuteMode; inputUsed: ExecuteStepInput; data: unknown }> {
+    const beforeTool = await this.hooks.run("tool.before_call", { mode, input });
+    if (beforeTool.blocked) {
+      throw new HookBlockError(`tool.before_call blocked: ${beforeTool.reason || "blocked"}`);
+    }
+
+    const invokeMode = beforeTool.value.mode;
+    const invokeInput = beforeTool.value.input;
+    const rawResult = await this.toolProviders.invoke(invokeMode, invokeInput);
+
+    const afterTool = await this.hooks.run("tool.after_result", {
+      mode: invokeMode,
+      input: invokeInput,
+      result: rawResult
+    });
+    if (afterTool.blocked) {
+      throw new HookBlockError(`tool.after_result blocked: ${afterTool.reason || "blocked"}`);
+    }
+
+    return {
+      modeUsed: afterTool.value.mode,
+      inputUsed: afterTool.value.input,
+      data: afterTool.value.result
+    };
+  }
+
+  private async applyAfterExecuteHook(input: ExecuteStepInput, result: ExecuteStepResult): Promise<ExecuteStepResult> {
+    const afterStep = await this.hooks.run("step.after_execute", { input, result });
+    if (afterStep.blocked) {
+      return {
+        ...result,
+        ok: false,
+        error: `step.after_execute blocked: ${afterStep.reason || "blocked"}`
+      };
+    }
+    return afterStep.value.result;
+  }
+
   // 对照点：执行策略 PR-6 script 优先，失败降级 cdp
   async executeStep(input: ExecuteStepInput): Promise<ExecuteStepResult> {
-    const tryInvoke = async (mode: ExecuteMode, payload: ExecuteStepInput) => {
-      if (mode === "script" && this.adapters.script) return this.adapters.script(payload);
-      if (mode === "cdp" && this.adapters.cdp) return this.adapters.cdp(payload);
-      if (mode === "bridge" && this.adapters.bridge) return this.adapters.bridge(payload);
-      throw new Error(`${mode} adapter 未配置`);
-    };
+    const beforeStep = await this.hooks.run("step.before_execute", { input });
+    if (beforeStep.blocked) {
+      return {
+        ok: false,
+        modeUsed: input.mode,
+        verified: false,
+        error: `step.before_execute blocked: ${beforeStep.reason || "blocked"}`
+      };
+    }
 
-    let modeUsed: ExecuteMode = input.mode;
+    const nextInput = beforeStep.value.input;
+    let modeUsed: ExecuteMode = nextInput.mode;
+    let verifyInput: ExecuteStepInput = nextInput;
     let fallbackFrom: ExecuteMode | undefined;
     let data: unknown;
 
     try {
-      data = await tryInvoke(input.mode, input);
+      const invoked = await this.invokeProviderWithHooks(nextInput.mode, nextInput);
+      modeUsed = invoked.modeUsed;
+      verifyInput = invoked.inputUsed;
+      data = invoked.data;
     } catch (error) {
-      if (input.mode !== "script") {
-        return {
+      if (error instanceof HookBlockError) {
+        return this.applyAfterExecuteHook(nextInput, {
+          ok: false,
+          modeUsed,
+          error: error.message,
+          verified: false
+        });
+      }
+
+      if (nextInput.mode !== "script") {
+        return this.applyAfterExecuteHook(nextInput, {
           ok: false,
           modeUsed,
           error: error instanceof Error ? error.message : String(error),
           verified: false
-        };
+        });
       }
 
       fallbackFrom = "script";
       modeUsed = "cdp";
-      data = await tryInvoke("cdp", { ...input, mode: "cdp" });
+      const invoked = await this.invokeProviderWithHooks("cdp", { ...nextInput, mode: "cdp" });
+      modeUsed = invoked.modeUsed;
+      verifyInput = invoked.inputUsed;
+      data = invoked.data;
     }
 
     let verified = false;
     let verifyReason = "verify_skipped";
-    if (this.shouldVerify(input) && this.adapters.verify) {
-      const verifyResult = await this.adapters.verify({ ...input, mode: modeUsed }, data);
+    if (this.shouldVerify(verifyInput) && this.verifyAdapter) {
+      const verifyResult = await this.verifyAdapter({ ...verifyInput, mode: modeUsed }, data);
       verified = verifyResult.verified;
       verifyReason = verifyResult.reason || (verified ? "verified" : "verify_failed");
-    } else if (!this.shouldVerify(input)) {
+    } else if (!this.shouldVerify(verifyInput)) {
       verifyReason = "verify_policy_off";
     } else {
       verifyReason = "verify_adapter_missing";
     }
 
-    return {
+    return this.applyAfterExecuteHook(nextInput, {
       ok: true,
       modeUsed,
       fallbackFrom,
       verified,
       verifyReason,
       data
-    };
+    });
   }
 
   // 对照点：pi-mono/packages/coding-agent/src/core/agent-session.ts:1591 overflow/threshold 分支
   async preSendCompactionCheck(sessionId: string): Promise<boolean> {
+    const beforeCheck = await this.hooks.run("compaction.check.before", {
+      sessionId,
+      source: "pre_send"
+    });
+    if (beforeCheck.blocked) return false;
+
     const context = await this.sessions.buildSessionContext(sessionId);
     const decision = shouldCompact({
       overflow: false,
@@ -328,21 +451,45 @@ export class BrainOrchestrator {
       thresholdTokens: this.options.thresholdTokens
     });
 
-    if (!decision.shouldCompact || decision.reason !== "threshold") return false;
+    const afterCheck = await this.hooks.run("compaction.check.after", {
+      sessionId,
+      source: "pre_send",
+      shouldCompact: decision.shouldCompact,
+      reason: decision.reason ?? undefined
+    });
+    if (afterCheck.blocked) return false;
+    const finalCheck = afterCheck.value;
+
+    if (!finalCheck.shouldCompact || finalCheck.reason !== "threshold") return false;
     await this.runCompaction(sessionId, "threshold", false);
     return true;
   }
 
   // 对照点：pi-mono/packages/coding-agent/src/core/agent-session.ts:2083 retry 判定优先于 compaction
   async handleAgentEnd(input: AgentEndInput): Promise<AgentEndDecision> {
-    const sessionId = input.sessionId;
+    const beforeHook = await this.hooks.run("agent_end.before", {
+      input,
+      state: this.getRunState(input.sessionId)
+    });
+    if (beforeHook.blocked) {
+      return {
+        action: "done",
+        reason: `agent_end_blocked:${beforeHook.reason || "blocked"}`,
+        sessionId: input.sessionId
+      };
+    }
+
+    const nextInput = beforeHook.value.input;
+    const sessionId = nextInput.sessionId;
     const state = this.ensureRunState(sessionId);
 
     if (state.stopped) {
-      return { action: "done", reason: "stopped", sessionId };
+      const decision: AgentEndDecision = { action: "done", reason: "stopped", sessionId };
+      const afterHook = await this.hooks.run("agent_end.after", { input: nextInput, decision });
+      return afterHook.blocked ? decision : afterHook.value.decision;
     }
 
-    const retryable = isRetryableError(input.error) && !input.overflow;
+    const retryable = isRetryableError(nextInput.error) && !nextInput.overflow;
     if (retryable) {
       if (state.retry.attempt < state.retry.maxAttempts) {
         state.retry.attempt += 1;
@@ -352,21 +499,23 @@ export class BrainOrchestrator {
           attempt: state.retry.attempt,
           maxAttempts: state.retry.maxAttempts,
           delayMs: state.retry.delayMs,
-          reason: input.error?.message || "retryable-error"
+          reason: nextInput.error?.message || "retryable-error"
         });
-        return {
+        const decision: AgentEndDecision = {
           action: "retry",
           reason: "retryable_error",
           delayMs: state.retry.delayMs,
           sessionId
         };
+        const afterHook = await this.hooks.run("agent_end.after", { input: nextInput, decision });
+        return afterHook.blocked ? decision : afterHook.value.decision;
       }
 
       this.events.emit("auto_retry_end", sessionId, {
         success: false,
         attempt: state.retry.attempt,
         maxAttempts: state.retry.maxAttempts,
-        finalError: input.error?.message || "retry-limit"
+        finalError: nextInput.error?.message || "retry-limit"
       });
       state.retry.active = false;
       state.retry.delayMs = 0;
@@ -381,29 +530,64 @@ export class BrainOrchestrator {
       state.retry.attempt = 0;
     }
 
+    const beforeCheck = await this.hooks.run("compaction.check.before", {
+      sessionId,
+      source: "agent_end"
+    });
+    if (beforeCheck.blocked) {
+      const decision: AgentEndDecision = {
+        action: "done",
+        reason: "compaction_check_blocked",
+        sessionId
+      };
+      const afterHook = await this.hooks.run("agent_end.after", { input: nextInput, decision });
+      return afterHook.blocked ? decision : afterHook.value.decision;
+    }
+
     const context = await this.sessions.buildSessionContext(sessionId);
     const compactDecision = shouldCompact({
-      overflow: Boolean(input.overflow),
+      overflow: Boolean(nextInput.overflow),
       entries: context.entries,
       previousSummary: context.previousSummary,
       thresholdTokens: this.options.thresholdTokens
     });
 
-    if (compactDecision.shouldCompact && compactDecision.reason) {
-      const willRetry = compactDecision.reason === "overflow";
-      await this.runCompaction(sessionId, compactDecision.reason, willRetry);
-      return {
-        action: "continue",
-        reason: `compaction_${compactDecision.reason}`,
+    const afterCheck = await this.hooks.run("compaction.check.after", {
+      sessionId,
+      source: "agent_end",
+      shouldCompact: compactDecision.shouldCompact,
+      reason: compactDecision.reason ?? undefined
+    });
+    if (afterCheck.blocked) {
+      const decision: AgentEndDecision = {
+        action: "done",
+        reason: "compaction_check_blocked",
         sessionId
       };
+      const afterHook = await this.hooks.run("agent_end.after", { input: nextInput, decision });
+      return afterHook.blocked ? decision : afterHook.value.decision;
+    }
+    const finalCompact = afterCheck.value;
+
+    if (finalCompact.shouldCompact && finalCompact.reason) {
+      const willRetry = finalCompact.reason === "overflow";
+      await this.runCompaction(sessionId, finalCompact.reason, willRetry);
+      const decision: AgentEndDecision = {
+        action: "continue",
+        reason: `compaction_${finalCompact.reason}`,
+        sessionId
+      };
+      const afterHook = await this.hooks.run("agent_end.after", { input: nextInput, decision });
+      return afterHook.blocked ? decision : afterHook.value.decision;
     }
 
-    return {
+    const decision: AgentEndDecision = {
       action: "done",
-      reason: input.error ? "error" : "completed",
+      reason: nextInput.error ? "error" : "completed",
       sessionId
     };
+    const afterHook = await this.hooks.run("agent_end.after", { input: nextInput, decision });
+    return afterHook.blocked ? decision : afterHook.value.decision;
   }
 
   async getStepStream(sessionId: string): Promise<StepTraceRecord[]> {
@@ -423,28 +607,37 @@ export class BrainOrchestrator {
   }
 
   private async runCompaction(sessionId: string, reason: "overflow" | "threshold", willRetry: boolean): Promise<void> {
-    this.events.emit("auto_compaction_start", sessionId, {
+    const beforeHook = await this.hooks.run("compaction.before", {
+      sessionId,
       reason,
       willRetry
+    });
+    if (beforeHook.blocked) return;
+    const nextReason = beforeHook.value.reason;
+    const nextWillRetry = beforeHook.value.willRetry;
+
+    this.events.emit("auto_compaction_start", sessionId, {
+      reason: nextReason,
+      willRetry: nextWillRetry
     });
 
     try {
       const context = await this.sessions.buildSessionContext(sessionId);
       const draft = compact({
-        reason,
+        reason: nextReason,
         entries: context.entries,
         previousSummary: context.previousSummary,
         keepTail: this.options.keepTail,
         splitTurn: this.options.splitTurn
       });
-      const compactionEntry = await this.sessions.appendCompaction(sessionId, reason, draft, {
+      const compactionEntry = await this.sessions.appendCompaction(sessionId, nextReason, draft, {
         source: "browser-orchestrator",
         generatedAt: nowIso()
       });
 
       this.events.emit("session_compact", sessionId, {
-        reason,
-        willRetry,
+        reason: nextReason,
+        willRetry: nextWillRetry,
         entryId: compactionEntry.id,
         firstKeptEntryId: draft.firstKeptEntryId,
         tokensBefore: draft.tokensBefore,
@@ -452,19 +645,31 @@ export class BrainOrchestrator {
       });
 
       this.events.emit("auto_compaction_end", sessionId, {
-        reason,
+        reason: nextReason,
         success: true,
-        willRetry,
+        willRetry: nextWillRetry,
         firstKeptEntryId: draft.firstKeptEntryId,
         tokensBefore: draft.tokensBefore,
         tokensAfter: draft.tokensAfter
       });
+      await this.hooks.run("compaction.after", {
+        sessionId,
+        reason: nextReason,
+        willRetry: nextWillRetry
+      });
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       this.events.emit("auto_compaction_end", sessionId, {
-        reason,
+        reason: nextReason,
         success: false,
-        willRetry,
-        errorMessage: error instanceof Error ? error.message : String(error)
+        willRetry: nextWillRetry,
+        errorMessage
+      });
+      await this.hooks.run("compaction.error", {
+        sessionId,
+        reason: nextReason,
+        willRetry: nextWillRetry,
+        errorMessage
       });
       throw error;
     }
