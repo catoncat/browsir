@@ -898,6 +898,23 @@ describe("runtime-router.browser", () => {
     expect(result.errorCode).toBe("E_RUNTIME_NOT_READY");
     expect(String(result.error || "")).toContain("capability provider 未就绪");
     expect(result.capabilityUsed).toBe("fs.virtual.read");
+
+    const executedWithMode = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      mode: "bridge",
+      capability: "fs.virtual.read",
+      action: "read_file",
+      args: {
+        path: "mem://missing.txt"
+      },
+      verifyPolicy: "off"
+    });
+    expect(executedWithMode.ok).toBe(true);
+    const withModeResult = (executedWithMode.data || {}) as Record<string, unknown>;
+    expect(withModeResult.ok).toBe(false);
+    expect(withModeResult.errorCode).toBe("E_RUNTIME_NOT_READY");
+    expect(String(withModeResult.error || "")).toContain("capability provider 未就绪");
   });
 
   it("brain.step.execute 事件顺序严格为 step_execute -> step_execute_result（单次）", async () => {
