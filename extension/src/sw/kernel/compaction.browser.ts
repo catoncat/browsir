@@ -1,6 +1,6 @@
 import { approxTokenCount, type CompactionDraft, type SessionEntry } from "./types";
 
-const DEFAULT_KEEP_TAIL = 14;
+const DEFAULT_KEEP_TAIL = 30;
 const DEFAULT_SUMMARY_MAX_CHARS = 1800;
 
 export interface ShouldCompactInput {

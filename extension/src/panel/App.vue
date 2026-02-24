@@ -4,6 +4,7 @@ import { storeToRefs } from "pinia";
 import { computed, onMounted, onUnmounted, ref, nextTick, watch } from "vue";
 import { useRuntimeStore } from "./stores/runtime";
 import { useMessageActions, type PanelMessageLike, type PendingRegenerateState } from "./utils/message-actions";
+import { collectDiagnostics } from "./utils/diagnostics";
 
 import SessionList from "./components/SessionList.vue";
 import ChatMessage from "./components/ChatMessage.vue";
@@ -52,6 +53,7 @@ interface DisplayMessage extends PanelMessageLike {
   toolName?: string;
   toolCallId?: string;
   toolPending?: boolean;
+  toolPendingLeaving?: boolean;
   toolPendingStatus?: "running" | "done" | "failed";
   toolPendingHeadline?: string;
   toolPendingAction?: string;
@@ -96,6 +98,14 @@ interface ToolPendingStepState {
   status: "running" | "done" | "failed";
   error?: string;
   logs: string[];
+}
+
+interface RuntimeEventDigest {
+  source: "brain" | "bridge";
+  ts: string;
+  type: string;
+  preview: string;
+  sessionId: string;
 }
 
 async function regenerateFromAssistantWithScene(
@@ -150,7 +160,15 @@ const llmStreamingText = ref("");
 const llmStreamingSessionId = ref("");
 const llmStreamingActive = ref(false);
 const llmStreamingReplaceOnNextDelta = ref(false);
+const finalAssistantStreamingPhase = ref(false);
+const toolPendingCardLeaving = ref(false);
+const toolPendingCardDismissed = ref(false);
+const recentRuntimeEvents = ref<RuntimeEventDigest[]>([]);
 let forkSessionHighlightTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingStepLogFlushTimer: ReturnType<typeof setTimeout> | null = null;
+let toolPendingCardLeaveTimer: ReturnType<typeof setTimeout> | null = null;
+let initialToolSyncTimer: ReturnType<typeof setTimeout> | null = null;
+const pendingStepLogBuffer = new Map<number, string[]>();
 
 const USER_FORK_MIN_VISIBLE_MS = 620;
 const USER_FORK_SCENE_PREPARE_MS = 140;
@@ -160,7 +178,18 @@ const FORK_SWITCH_HIGHLIGHT_MS = 1800;
 const TOOL_STREAM_SYNC_INTERVAL_MS = 3200;
 const TOOL_STEP_MAX_LINES = 24;
 const TOOL_STEP_LOG_MAX_LINES = 24;
+const TOOL_STEP_LOG_FLUSH_MS = 72;
+const TOOL_CARD_HANDOFF_MS = 180;
+const TOOL_INITIAL_SYNC_INTERVAL_MS = 180;
+const TOOL_INITIAL_SYNC_MAX_ATTEMPTS = 18;
 const MAIN_SCROLL_BOTTOM_THRESHOLD_PX = 120;
+const RUNTIME_EVENT_MAX = 220;
+const LOOP_TERMINAL_TYPES = new Set([
+  "loop_done",
+  "loop_error",
+  "loop_skip_stopped",
+  "loop_internal_error"
+]);
 
 const isForkSceneActive = computed(() => forkScenePhase.value !== "idle");
 
@@ -319,6 +348,26 @@ function clipText(text: string, max = 96): string {
   return value.length > max ? `${value.slice(0, max)}…` : value;
 }
 
+function pushRecentRuntimeEvent(source: "brain" | "bridge", event: unknown) {
+  const row = toRecord(event);
+  const payload = toRecord(row.payload || row.data);
+  const type = String(row.type || row.event || "").trim() || "unknown";
+  const ts = String(row.ts || row.timestamp || new Date().toISOString());
+  const sessionId = String(row.sessionId || "").trim();
+  const preview = clipText(
+    String(payload.error || payload.message || payload.action || payload.arguments || payload.reason || payload.chunk || ""),
+    180
+  );
+  const merged = [
+    ...recentRuntimeEvents.value,
+    { source, ts, type, preview, sessionId }
+  ];
+  if (merged.length > RUNTIME_EVENT_MAX) {
+    merged.splice(0, merged.length - RUNTIME_EVENT_MAX);
+  }
+  recentRuntimeEvents.value = merged;
+}
+
 function toScalarText(value: unknown): string {
   if (typeof value === "string") return value.trim();
   if (typeof value === "number" || typeof value === "boolean") return String(value);
@@ -448,6 +497,62 @@ function clearActiveToolRun() {
 
 function clearToolPendingSteps() {
   toolPendingStepStates.value = [];
+  pendingStepLogBuffer.clear();
+  if (pendingStepLogFlushTimer) {
+    clearTimeout(pendingStepLogFlushTimer);
+    pendingStepLogFlushTimer = null;
+  }
+}
+
+function clearToolPendingCardLeaveTimer() {
+  if (toolPendingCardLeaveTimer) {
+    clearTimeout(toolPendingCardLeaveTimer);
+    toolPendingCardLeaveTimer = null;
+  }
+}
+
+function resetToolPendingCardHandoff() {
+  clearToolPendingCardLeaveTimer();
+  toolPendingCardLeaving.value = false;
+  toolPendingCardDismissed.value = false;
+}
+
+function dismissToolPendingCardWithHandoff() {
+  if (toolPendingCardDismissed.value || toolPendingCardLeaving.value) return;
+  toolPendingCardLeaving.value = true;
+  clearToolPendingCardLeaveTimer();
+  toolPendingCardLeaveTimer = setTimeout(() => {
+    toolPendingCardLeaveTimer = null;
+    toolPendingCardLeaving.value = false;
+    toolPendingCardDismissed.value = true;
+  }, TOOL_CARD_HANDOFF_MS);
+}
+
+function stopInitialToolSync() {
+  if (initialToolSyncTimer) {
+    clearTimeout(initialToolSyncTimer);
+    initialToolSyncTimer = null;
+  }
+}
+
+function startInitialToolSync() {
+  stopInitialToolSync();
+  let attempts = 0;
+  const tick = () => {
+    if (!isRunning.value) return;
+    const sessionId = String(activeSessionId.value || "").trim();
+    if (!sessionId) return;
+    const hasStableActivity =
+      Boolean(activeToolRun.value) ||
+      toolPendingStepStates.value.length > 0 ||
+      toolPendingCardDismissed.value;
+    if (hasStableActivity) return;
+    attempts += 1;
+    void runSafely(() => syncActiveToolRun(sessionId), "同步工具运行状态失败");
+    if (attempts >= TOOL_INITIAL_SYNC_MAX_ATTEMPTS) return;
+    initialToolSyncTimer = setTimeout(tick, TOOL_INITIAL_SYNC_INTERVAL_MS);
+  };
+  initialToolSyncTimer = setTimeout(tick, TOOL_INITIAL_SYNC_INTERVAL_MS);
 }
 
 function resetLlmStreamingState() {
@@ -455,10 +560,54 @@ function resetLlmStreamingState() {
   llmStreamingSessionId.value = "";
   llmStreamingActive.value = false;
   llmStreamingReplaceOnNextDelta.value = false;
+  finalAssistantStreamingPhase.value = false;
 }
 
 function pauseLlmStreamingState() {
   llmStreamingActive.value = false;
+}
+
+function resolveToolPendingLogStep(list: ToolPendingStepState[]): number {
+  if (!list.length) return 0;
+  const activeStep = Number(activeToolRun.value?.step || 0);
+  if (activeStep > 0 && list.some((item) => item.step === activeStep)) return activeStep;
+  const running = list.findLast((item) => item.status === "running");
+  if (running) return running.step;
+  return Number(list[list.length - 1]?.step || 0);
+}
+
+function flushBufferedToolPendingLogs() {
+  if (pendingStepLogBuffer.size === 0) return;
+  const list = [...toolPendingStepStates.value];
+  let changed = false;
+
+  for (const [step, buffered] of pendingStepLogBuffer.entries()) {
+    if (!Array.isArray(buffered) || buffered.length === 0) continue;
+    const idx = list.findIndex((item) => item.step === step);
+    if (idx < 0 || !list[idx]) continue;
+    const merged = [...(Array.isArray(list[idx].logs) ? list[idx].logs : []), ...buffered];
+    if (merged.length > TOOL_STEP_LOG_MAX_LINES) {
+      merged.splice(0, merged.length - TOOL_STEP_LOG_MAX_LINES);
+    }
+    list[idx] = {
+      ...list[idx],
+      logs: merged
+    };
+    changed = true;
+  }
+
+  pendingStepLogBuffer.clear();
+  if (changed) {
+    toolPendingStepStates.value = list;
+  }
+}
+
+function scheduleFlushBufferedToolPendingLogs() {
+  if (pendingStepLogFlushTimer) return;
+  pendingStepLogFlushTimer = setTimeout(() => {
+    pendingStepLogFlushTimer = null;
+    flushBufferedToolPendingLogs();
+  }, TOOL_STEP_LOG_FLUSH_MS);
 }
 
 function appendToolPendingLogs(stream: "stdout" | "stderr", chunk: string) {
@@ -475,28 +624,12 @@ function appendToolPendingLogs(stream: "stdout" | "stderr", chunk: string) {
   const list = [...toolPendingStepStates.value];
   if (!list.length) return;
 
-  let index = -1;
-  const activeStep = Number(activeToolRun.value?.step || 0);
-  if (activeStep > 0) {
-    index = list.findIndex((item) => item.step === activeStep);
-  }
-  if (index < 0) {
-    index = list.findLastIndex((item) => item.status === "running");
-  }
-  if (index < 0) {
-    index = list.length - 1;
-  }
-  if (index < 0 || !list[index]) return;
-
-  const merged = [...(Array.isArray(list[index].logs) ? list[index].logs : []), ...normalized];
-  if (merged.length > TOOL_STEP_LOG_MAX_LINES) {
-    merged.splice(0, merged.length - TOOL_STEP_LOG_MAX_LINES);
-  }
-  list[index] = {
-    ...list[index],
-    logs: merged
-  };
-  toolPendingStepStates.value = list;
+  const step = resolveToolPendingLogStep(list);
+  if (!step) return;
+  const buffered = pendingStepLogBuffer.get(step) || [];
+  buffered.push(...normalized);
+  pendingStepLogBuffer.set(step, buffered);
+  scheduleFlushBufferedToolPendingLogs();
 }
 
 function upsertToolPendingStepState(input: ToolPendingStepState) {
@@ -598,6 +731,83 @@ function deriveActiveToolRunFromStream(stream: StepTraceRecord[]): ToolRunSnapsh
   return latest;
 }
 
+function deriveCurrentLoopWindow(stream: StepTraceRecord[]) {
+  const list = Array.isArray(stream) ? stream : [];
+  let lastLoopStartIndex = -1;
+  let lastLoopTerminalIndex = -1;
+
+  for (let i = 0; i < list.length; i += 1) {
+    const type = String(list[i]?.type || "");
+    if (type === "loop_start") {
+      lastLoopStartIndex = i;
+      continue;
+    }
+    if (LOOP_TERMINAL_TYPES.has(type)) {
+      lastLoopTerminalIndex = i;
+    }
+  }
+
+  const inProgress = lastLoopStartIndex >= 0 && lastLoopStartIndex > lastLoopTerminalIndex;
+  if (lastLoopStartIndex >= 0) {
+    return {
+      inProgress,
+      stream: list.slice(lastLoopStartIndex)
+    };
+  }
+  if (lastLoopTerminalIndex >= 0) {
+    return {
+      inProgress: false,
+      stream: list.slice(lastLoopTerminalIndex + 1)
+    };
+  }
+  return {
+    inProgress: false,
+    stream: list
+  };
+}
+
+function deriveToolPendingStepStatesFromStream(stream: StepTraceRecord[]): ToolPendingStepState[] {
+  const byStep = new Map<number, ToolPendingStepState>();
+  for (const row of stream || []) {
+    const type = String(row?.type || "");
+    const payload = toRecord(row?.payload);
+    const mode = String(payload.mode || "");
+    if (mode !== "tool_call") continue;
+    const step = normalizeStep(payload.step);
+    if (!step) continue;
+
+    const previous = byStep.get(step) || null;
+    const action = String(payload.action || previous?.action || "");
+    const detail =
+      String(previous?.detail || "").trim() || formatToolPendingDetail(action, String(payload.arguments || ""));
+
+    if (type === "step_planned") {
+      byStep.set(step, {
+        step,
+        action,
+        detail,
+        status: "running",
+        error: "",
+        logs: previous?.logs || []
+      });
+      continue;
+    }
+
+    if (type === "step_finished") {
+      byStep.set(step, {
+        step,
+        action,
+        detail,
+        status: payload.ok === true ? "done" : "failed",
+        error: String(payload.error || "").trim(),
+        logs: previous?.logs || []
+      });
+    }
+  }
+
+  return Array.from(byStep.values()).sort((a, b) => a.step - b.step);
+}
+
 function applyRuntimeEventToolRun(event: unknown) {
   const envelope = toRecord(event);
   const type = String(envelope.type || "");
@@ -608,6 +818,7 @@ function applyRuntimeEventToolRun(event: unknown) {
   if (type === "loop_start") {
     activeToolRun.value = null;
     resetLlmStreamingState();
+    resetToolPendingCardHandoff();
     clearToolPendingSteps();
     setLlmRunHint("分析任务", "正在规划下一步动作");
     return;
@@ -649,7 +860,10 @@ function applyRuntimeEventToolRun(event: unknown) {
   }
   if (type === "llm.response.parsed") {
     const toolCalls = Number(payload.toolCalls || 0);
-    if (!(Number.isFinite(toolCalls) && toolCalls > 0)) {
+    if (Number.isFinite(toolCalls) && toolCalls > 0) {
+      finalAssistantStreamingPhase.value = false;
+    } else {
+      finalAssistantStreamingPhase.value = true;
       setLlmRunHint("整理回复", "正在生成最终回答");
     }
     return;
@@ -657,6 +871,8 @@ function applyRuntimeEventToolRun(event: unknown) {
   if (type === "step_planned" && mode === "tool_call") {
     const step = normalizeStep(payload.step);
     if (!step) return;
+    finalAssistantStreamingPhase.value = false;
+    resetToolPendingCardHandoff();
     pauseLlmStreamingState();
     const action = String(payload.action || "");
     const detail = formatToolPendingDetail(action, String(payload.arguments || ""));
@@ -676,6 +892,7 @@ function applyRuntimeEventToolRun(event: unknown) {
     return;
   }
   if (type === "step_finished" && mode === "tool_call") {
+    flushBufferedToolPendingLogs();
     const step = normalizeStep(payload.step);
     if (!step) return;
     const existing = toolPendingStepStates.value.find((item) => item.step === step) || null;
@@ -703,6 +920,7 @@ function applyRuntimeEventToolRun(event: unknown) {
   if (["loop_done", "loop_error", "loop_skip_stopped", "loop_internal_error", "loop_start"].includes(type)) {
     activeToolRun.value = null;
     resetLlmStreamingState();
+    resetToolPendingCardHandoff();
     clearToolPendingSteps();
     activeRunHint.value = null;
   }
@@ -738,7 +956,14 @@ async function syncActiveToolRun(sessionId: string) {
     throw new Error(String(response?.error || "读取 step stream 失败"));
   }
   const stream = Array.isArray(response?.data?.stream) ? response.data?.stream || [] : [];
-  const latest = deriveActiveToolRunFromStream(stream);
+  const currentLoop = deriveCurrentLoopWindow(stream);
+  if (toolPendingStepStates.value.length === 0 && currentLoop.inProgress) {
+    const recovered = deriveToolPendingStepStatesFromStream(currentLoop.stream);
+    if (recovered.length > 0) {
+      toolPendingStepStates.value = recovered;
+    }
+  }
+  const latest = deriveActiveToolRunFromStream(currentLoop.stream);
   activeToolRun.value = latest;
   if (latest) {
     setToolRunHint(latest.action, latest.arguments, latest.ts);
@@ -767,15 +992,33 @@ const latestToolPendingStepState = computed(() => {
   return list.length > 0 ? list[list.length - 1] : null;
 });
 
+const runningToolPendingStepState = computed(() => {
+  const list = toolPendingStepStates.value;
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    if (list[i]?.status === "running") return list[i];
+  }
+  return null;
+});
+
+const primaryToolPendingStepState = computed(() =>
+  runningToolPendingStepState.value || latestToolPendingStepState.value
+);
+
+const hasRunningToolPendingActivity = computed(() =>
+  Boolean(activeToolRun.value) || toolPendingStepStates.value.some((item) => item.status === "running")
+);
+
 const toolPendingCardStatus = computed<"running" | "done" | "failed">(() => {
-  if (latestToolPendingStepState.value) return latestToolPendingStepState.value.status;
-  if (activeToolRun.value) return "running";
-  return "running";
+  if (hasRunningToolPendingActivity.value) return "running";
+  if (isRunning.value && hasToolPendingActivity.value) return "running";
+  if (latestToolPendingStepState.value?.status === "failed") return "failed";
+  if (latestToolPendingStepState.value?.status === "done") return "done";
+  return activeToolRun.value ? "running" : "done";
 });
 
 const toolPendingCardHeadline = computed(() => {
-  if (latestToolPendingStepState.value) {
-    return formatToolPendingHeadline(latestToolPendingStepState.value);
+  if (runningToolPendingStepState.value) {
+    return formatToolPendingHeadline(runningToolPendingStepState.value);
   }
   if (activeToolRun.value) {
     const pending = {
@@ -787,6 +1030,12 @@ const toolPendingCardHeadline = computed(() => {
       logs: []
     };
     return formatToolPendingHeadline(pending);
+  }
+  if (isRunning.value && hasToolPendingActivity.value) {
+    return "进行中 · 正在处理步骤结果";
+  }
+  if (latestToolPendingStepState.value) {
+    return formatToolPendingHeadline(latestToolPendingStepState.value);
   }
   return "等待工具步骤";
 });
@@ -827,15 +1076,26 @@ const shouldShowStreamingAssistant = computed(() => {
   return true;
 });
 
-const shouldShowToolPendingCard = computed(() => isRunning.value && hasToolPendingActivity.value);
+const shouldShowToolPendingCard = computed(() => {
+  if (!isRunning.value) return false;
+  if (toolPendingCardDismissed.value) return false;
+  return hasToolPendingActivity.value || toolPendingCardLeaving.value;
+});
 
-const toolPendingCardAction = computed(() =>
-  activeToolRun.value ? prettyToolAction(activeToolRun.value.action) : "工具调用步骤"
-);
+const toolPendingCardAction = computed(() => {
+  if (activeToolRun.value) return prettyToolAction(activeToolRun.value.action);
+  if (primaryToolPendingStepState.value?.action) {
+    return prettyToolAction(primaryToolPendingStepState.value.action);
+  }
+  return "工具调用步骤";
+});
 
-const toolPendingCardDetail = computed(() =>
-  activeToolRun.value ? formatToolPendingDetail(activeToolRun.value.action, activeToolRun.value.arguments) : ""
-);
+const toolPendingCardDetail = computed(() => {
+  if (activeToolRun.value) {
+    return formatToolPendingDetail(activeToolRun.value.action, activeToolRun.value.arguments);
+  }
+  return String(primaryToolPendingStepState.value?.detail || "").trim();
+});
 
 const displayMessages = computed<DisplayMessage[]>(() => {
   const rendered = (messages.value || [])
@@ -893,6 +1153,7 @@ const displayMessages = computed<DisplayMessage[]>(() => {
       entryId: `__tool_pending__${String(activeSessionId.value || "__global__")}__${activeRunToken.value}`,
       toolName: activeToolRun.value?.action || "llm",
       toolPending: true,
+      toolPendingLeaving: toolPendingCardLeaving.value,
       toolPendingStatus: toolPendingCardStatus.value,
       toolPendingHeadline: toolPendingCardHeadline.value,
       toolPendingAction: toolPendingCardAction.value,
@@ -912,6 +1173,7 @@ const displayMessages = computed<DisplayMessage[]>(() => {
 
 watch(isRunning, (running, wasRunning) => {
   if (running) {
+    resetToolPendingCardHandoff();
     if (!wasRunning) {
       activeRunToken.value += 1;
       clearToolPendingSteps();
@@ -925,8 +1187,11 @@ watch(isRunning, (running, wasRunning) => {
         "同步工具运行状态失败"
       );
     }
+    startInitialToolSync();
     return;
   }
+  stopInitialToolSync();
+  resetToolPendingCardHandoff();
   userPendingRegenerate.value = null;
   clearActiveToolRun();
   clearToolPendingSteps();
@@ -935,6 +1200,8 @@ watch(isRunning, (running, wasRunning) => {
 });
 
 watch(activeSessionId, () => {
+  stopInitialToolSync();
+  resetToolPendingCardHandoff();
   const currentSessionId = String(activeSessionId.value || "").trim();
   const isExpectedForkSwitch =
     forkSceneSwitching.value &&
@@ -957,8 +1224,47 @@ watch(activeSessionId, () => {
       () => syncActiveToolRun(activeSessionId.value),
       "同步工具运行状态失败"
     );
+    startInitialToolSync();
   }
 });
+
+watch(
+  [
+    isRunning,
+    hasToolPendingActivity,
+    hasRunningToolPendingActivity,
+    llmStreamingActive,
+    llmStreamingText,
+    finalAssistantStreamingPhase
+  ],
+  ([running, hasActivity, hasRunningTool, streamingActive, streamingText, finalPhase]) => {
+    if (!running || !hasActivity) return;
+    if (hasRunningTool) {
+      resetToolPendingCardHandoff();
+      stopInitialToolSync();
+      return;
+    }
+    if (!finalPhase) return;
+    const hasStreaming = streamingActive || Boolean(String(streamingText || "").trim());
+    if (hasStreaming) {
+      dismissToolPendingCardWithHandoff();
+    }
+  }
+);
+
+watch(
+  [() => pendingRegenerate.value, () => userPendingRegenerate.value],
+  ([assistantPending, userPending]) => {
+    if (!assistantPending && !userPending) return;
+    resetToolPendingCardHandoff();
+    clearActiveToolRun();
+    clearToolPendingSteps();
+    finalAssistantStreamingPhase.value = false;
+    if (isRunning.value) {
+      startInitialToolSync();
+    }
+  }
+);
 
 watch(
   messages,
@@ -1102,11 +1408,17 @@ const onRuntimeMessage = (message: unknown) => {
   };
 
   if (payload?.type === "bridge.event") {
+    if (payload.payload) {
+      pushRecentRuntimeEvent("bridge", payload.payload);
+    }
     applyBridgeEventToolOutput(payload.payload);
     return;
   }
 
   if (payload?.type !== "brain.event") return;
+  if (payload.event) {
+    pushRecentRuntimeEvent("brain", payload.event);
+  }
   const eventSessionId = String(payload?.event?.sessionId || "").trim();
   if (!eventSessionId) return;
 
@@ -1174,7 +1486,7 @@ async function handleStopRun() {
 async function handleSend(payload: { text: string; tabIds: number[] }) {
   const text = String(payload.text || "");
   if (!text.trim()) return;
-  const isNew = !activeSessionId.value;
+  const isNew = !activeSessionId.value && sessions.value.length === 0;
 
   try {
     await store.sendPrompt(text, {
@@ -1218,6 +1530,30 @@ async function handleCopyMarkdown() {
   showExportMenu.value = false;
 }
 
+async function handleCopyDiagnostics() {
+  try {
+    const sessionId = String(activeSessionId.value || "").trim();
+    const { text } = await collectDiagnostics({
+      sessionId: sessionId || undefined,
+      recentEvents: recentRuntimeEvents.value.map((item) => ({
+        source: item.source,
+        ts: item.ts,
+        type: item.type,
+        preview: item.preview,
+        sessionId: item.sessionId
+      })),
+      timelineLimit: 28
+    });
+    await navigator.clipboard.writeText(text);
+    actionNotice.value = { type: "success", message: "诊断信息已复制" };
+    setTimeout(() => {
+      actionNotice.value = null;
+    }, 2200);
+  } catch (err) {
+    setErrorMessage(err, "复制诊断信息失败");
+  }
+}
+
 function handleExport(mode: 'download' | 'open') {
   const md = generateMarkdown();
   const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
@@ -1243,6 +1579,8 @@ function handleExport(mode: 'download' | 'open') {
 }
 
 onUnmounted(() => {
+  stopInitialToolSync();
+  clearToolPendingCardLeaveTimer();
   if (forkSessionHighlightTimer) {
     clearTimeout(forkSessionHighlightTimer);
     forkSessionHighlightTimer = null;
@@ -1251,6 +1589,7 @@ onUnmounted(() => {
   resetForkSceneState();
   clearActiveToolRun();
   clearToolPendingSteps();
+  recentRuntimeEvents.value = [];
   chrome.runtime.onMessage.removeListener(onRuntimeMessage);
   cleanupMessageActions();
 });
@@ -1324,6 +1663,15 @@ onUnmounted(() => {
             @click="handleCreateSession"
           >
             <Plus :size="20" aria-hidden="true" />
+          </button>
+
+          <button
+            class="p-2 hover:bg-ui-surface rounded-full text-ui-text transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+            title="复制诊断信息"
+            aria-label="复制诊断信息"
+            @click="handleCopyDiagnostics"
+          >
+            <Copy :size="18" aria-hidden="true" />
           </button>
 
           <!-- Export Menu -->
@@ -1421,6 +1769,7 @@ onUnmounted(() => {
               :tool-name="msg.toolName"
               :tool-call-id="msg.toolCallId"
               :tool-pending="msg.toolPending"
+              :tool-pending-leaving="msg.toolPendingLeaving"
               :tool-pending-status="msg.toolPendingStatus"
               :tool-pending-headline="msg.toolPendingHeadline"
               :tool-pending-action="msg.toolPendingAction"

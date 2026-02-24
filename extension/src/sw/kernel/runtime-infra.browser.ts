@@ -2,6 +2,12 @@ const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:8787/ws";
 const DEFAULT_BRIDGE_TOKEN = "dev-token-change-me";
 const DEFAULT_LEASE_TTL_MS = 30_000;
 const MAX_LEASE_TTL_MS = 5 * 60_000;
+const DEFAULT_BRIDGE_INVOKE_TIMEOUT_MS = 120_000;
+const MAX_BRIDGE_INVOKE_TIMEOUT_MS = 300_000;
+const DEFAULT_LLM_TIMEOUT_MS = 120_000;
+const MAX_LLM_TIMEOUT_MS = 300_000;
+const DEFAULT_LLM_RETRY_MAX_ATTEMPTS = 2;
+const MAX_LLM_RETRY_MAX_ATTEMPTS = 6;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -11,6 +17,10 @@ export interface BridgeConfig {
   llmApiBase: string;
   llmApiKey: string;
   llmModel: string;
+  maxSteps: number;
+  bridgeInvokeTimeoutMs: number;
+  llmTimeoutMs: number;
+  llmRetryMaxAttempts: number;
   devAutoReload: boolean;
   devReloadIntervalMs: number;
 }
@@ -23,6 +33,10 @@ export interface RuntimeOk<T = unknown> {
 export interface RuntimeErr {
   ok: false;
   error: string;
+  code?: string;
+  details?: unknown;
+  retryable?: boolean;
+  status?: number;
 }
 
 export type RuntimeInfraResult<T = unknown> = RuntimeOk<T> | RuntimeErr;
@@ -88,6 +102,21 @@ function toPositiveInt(raw: unknown, fallback: number): number {
   return Math.floor(n);
 }
 
+function toIntInRange(raw: unknown, fallback: number, min: number, max: number): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  const floored = Math.floor(n);
+  if (floored < min) return min;
+  if (floored > max) return max;
+  return floored;
+}
+
+function toOptionalFiniteNumber(raw: unknown): number | null {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  return n;
+}
+
 function normalizeOwner(raw: unknown): string {
   const owner = typeof raw === "string" ? raw.trim() : "";
   if (!owner) {
@@ -115,8 +144,57 @@ function ok<T>(data?: T): RuntimeInfraResult<T> {
 }
 
 function fail(error: unknown): RuntimeInfraResult {
-  if (error instanceof Error) return { ok: false, error: error.message };
+  if (error instanceof Error) {
+    const enriched = error as Error & {
+      code?: unknown;
+      details?: unknown;
+      retryable?: unknown;
+      status?: unknown;
+    };
+    const out: RuntimeErr = {
+      ok: false,
+      error: error.message
+    };
+    if (typeof enriched.code === "string" && enriched.code.trim()) out.code = enriched.code.trim();
+    if (enriched.details !== undefined) out.details = enriched.details;
+    if (typeof enriched.retryable === "boolean") out.retryable = enriched.retryable;
+    if (Number.isFinite(Number(enriched.status))) out.status = Number(enriched.status);
+    return out;
+  }
   return { ok: false, error: String(error) };
+}
+
+function isRetryableBridgeCode(code: string): boolean {
+  return ["E_BUSY", "E_TIMEOUT", "E_CLIENT_TIMEOUT", "E_BRIDGE_DISCONNECTED"].includes(String(code || "").toUpperCase());
+}
+
+function asBridgeInvokeError(
+  message: string,
+  meta: {
+    code?: string;
+    details?: unknown;
+    retryable?: boolean;
+    status?: number;
+  } = {}
+): Error & { code?: string; details?: unknown; retryable?: boolean; status?: number } {
+  const error = new Error(message) as Error & {
+    code?: string;
+    details?: unknown;
+    retryable?: boolean;
+    status?: number;
+  };
+  if (meta.code) error.code = meta.code;
+  if (meta.details !== undefined) error.details = meta.details;
+  if (typeof meta.retryable === "boolean") error.retryable = meta.retryable;
+  if (typeof meta.status === "number") error.status = meta.status;
+  return error;
+}
+
+function readInvokeTimeoutHint(frame: JsonRecord): number | null {
+  const direct = toOptionalFiniteNumber(frame.timeoutMs);
+  if (direct !== null) return direct;
+  const nested = toOptionalFiniteNumber(asRecord(frame.args).timeoutMs);
+  return nested;
 }
 
 function snapshotKey(options: JsonRecord): string {
@@ -229,7 +307,12 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     bridgeSocket = null;
 
     for (const pending of pendingInvokes.values()) {
-      pending.reject(new Error("Bridge disconnected"));
+      pending.reject(
+        asBridgeInvokeError("Bridge disconnected", {
+          code: "E_BRIDGE_DISCONNECTED",
+          retryable: true
+        })
+      );
     }
     pendingInvokes.clear();
   }
@@ -259,7 +342,13 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       pending.resolve(message);
       return;
     }
-    const err = new Error(String(asRecord(message.error).message || "Bridge invoke failed"));
+    const errorPayload = asRecord(message.error);
+    const code = typeof errorPayload.code === "string" ? errorPayload.code.trim().toUpperCase() : "";
+    const err = asBridgeInvokeError(String(errorPayload.message || "Bridge invoke failed"), {
+      code: code || undefined,
+      details: errorPayload.details,
+      retryable: code ? isRetryableBridgeCode(code) : undefined
+    });
     pending.reject(err);
   }
 
@@ -271,6 +360,10 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       "llmApiBase",
       "llmApiKey",
       "llmModel",
+      "maxSteps",
+      "bridgeInvokeTimeoutMs",
+      "llmTimeoutMs",
+      "llmRetryMaxAttempts",
       "devAutoReload",
       "devReloadIntervalMs"
     ]);
@@ -280,6 +373,20 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       llmApiBase: String(data.llmApiBase || "https://ai.chen.rs/v1"),
       llmApiKey: String(data.llmApiKey || ""),
       llmModel: String(data.llmModel || "gpt-5.3-codex"),
+      maxSteps: toIntInRange(data.maxSteps, 100, 1, 500),
+      bridgeInvokeTimeoutMs: toIntInRange(
+        data.bridgeInvokeTimeoutMs,
+        DEFAULT_BRIDGE_INVOKE_TIMEOUT_MS,
+        1_000,
+        MAX_BRIDGE_INVOKE_TIMEOUT_MS
+      ),
+      llmTimeoutMs: toIntInRange(data.llmTimeoutMs, DEFAULT_LLM_TIMEOUT_MS, 1_000, MAX_LLM_TIMEOUT_MS),
+      llmRetryMaxAttempts: toIntInRange(
+        data.llmRetryMaxAttempts,
+        DEFAULT_LLM_RETRY_MAX_ATTEMPTS,
+        0,
+        MAX_LLM_RETRY_MAX_ATTEMPTS
+      ),
       devAutoReload: data.devAutoReload !== false,
       devReloadIntervalMs: Number.isFinite(Number(data.devReloadIntervalMs)) ? Number(data.devReloadIntervalMs) : 1500
     };
@@ -295,6 +402,20 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       llmApiBase: String(source.llmApiBase || current.llmApiBase || "https://ai.chen.rs/v1").trim(),
       llmApiKey: String(source.llmApiKey ?? current.llmApiKey ?? ""),
       llmModel: String(source.llmModel || current.llmModel || "gpt-5.3-codex").trim(),
+      maxSteps: toIntInRange(source.maxSteps, current.maxSteps || 100, 1, 500),
+      bridgeInvokeTimeoutMs: toIntInRange(
+        source.bridgeInvokeTimeoutMs,
+        current.bridgeInvokeTimeoutMs || DEFAULT_BRIDGE_INVOKE_TIMEOUT_MS,
+        1_000,
+        MAX_BRIDGE_INVOKE_TIMEOUT_MS
+      ),
+      llmTimeoutMs: toIntInRange(source.llmTimeoutMs, current.llmTimeoutMs || DEFAULT_LLM_TIMEOUT_MS, 1_000, MAX_LLM_TIMEOUT_MS),
+      llmRetryMaxAttempts: toIntInRange(
+        source.llmRetryMaxAttempts,
+        current.llmRetryMaxAttempts || DEFAULT_LLM_RETRY_MAX_ATTEMPTS,
+        0,
+        MAX_LLM_RETRY_MAX_ATTEMPTS
+      ),
       devAutoReload: source.devAutoReload === undefined ? current.devAutoReload : source.devAutoReload !== false,
       devReloadIntervalMs: Math.max(500, Number(source.devReloadIntervalMs || current.devReloadIntervalMs || 1500))
     };
@@ -357,8 +478,18 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
 
   async function invokeBridge(frame: unknown): Promise<unknown> {
     const ws = await connectBridge();
+    const config = await getBridgeConfig();
     const payloadFrame = asRecord(frame);
     const id = String(payloadFrame.id || randomId("invoke"));
+    const hintTimeout = readInvokeTimeoutHint(payloadFrame);
+    const timeoutMs = toIntInRange(
+      hintTimeout == null
+        ? config.bridgeInvokeTimeoutMs
+        : Math.max(config.bridgeInvokeTimeoutMs, Math.floor(hintTimeout) + 2_000),
+      config.bridgeInvokeTimeoutMs,
+      1_000,
+      MAX_BRIDGE_INVOKE_TIMEOUT_MS
+    );
     const payload = {
       id,
       type: "invoke",
@@ -371,8 +502,18 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     return await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         pendingInvokes.delete(id);
-        reject(new Error("Bridge invoke timeout"));
-      }, 60_000);
+        reject(
+          asBridgeInvokeError(`Bridge invoke timeout after ${timeoutMs}ms`, {
+            code: "E_CLIENT_TIMEOUT",
+            details: {
+              timeoutMs,
+              requestedTimeoutMs: hintTimeout,
+              tool: String(payload.tool || "")
+            },
+            retryable: true
+          })
+        );
+      }, timeoutMs);
       pendingInvokes.set(id, { resolve, reject, timeout });
       ws.send(JSON.stringify(payload));
     });

@@ -5,11 +5,19 @@ import { nowIso, type SessionEntry, type SessionMeta } from "./types";
 
 type JsonRecord = Record<string, unknown>;
 
-const MAX_LOOP_STEPS = 14;
 const MAX_LLM_RETRIES = 2;
 const MAX_DEBUG_CHARS = 24_000;
 const SESSION_TITLE_MAX = 28;
 const SESSION_TITLE_MIN = 2;
+const DEFAULT_LLM_TIMEOUT_MS = 120_000;
+const MIN_LLM_TIMEOUT_MS = 1_000;
+const MAX_LLM_TIMEOUT_MS = 300_000;
+const DEFAULT_BASH_TIMEOUT_MS = 120_000;
+const MIN_BASH_TIMEOUT_MS = 200;
+const MAX_BASH_TIMEOUT_MS = 300_000;
+const TOOL_AUTO_RETRY_MAX = 2;
+const TOOL_AUTO_RETRY_BASE_DELAY_MS = 300;
+const TOOL_AUTO_RETRY_CAP_DELAY_MS = 2_000;
 
 interface ToolCallItem {
   id: string;
@@ -39,9 +47,17 @@ interface LlmRequestInput {
   llmBase: string;
   llmKey: string;
   llmModel: string;
+  llmTimeoutMs: number;
   step: number;
   messages: JsonRecord[];
 }
+
+type RuntimeErrorWithMeta = Error & {
+  code?: string;
+  details?: unknown;
+  retryable?: boolean;
+  status?: number;
+};
 
 interface RuntimeLoopController {
   startFromPrompt(input: RunStartInput): Promise<{ sessionId: string; runtime: RuntimeView }>;
@@ -64,7 +80,11 @@ const BRAIN_TOOL_DEFS: JsonRecord[] = [
       parameters: {
         type: "object",
         properties: {
-          command: { type: "string" }
+          command: { type: "string" },
+          timeoutMs: {
+            type: "number",
+            description: "Optional command timeout in milliseconds. For long tasks, increase this value."
+          }
         },
         required: ["command"]
       }
@@ -244,6 +264,53 @@ function parsePositiveInt(raw: unknown): number | null {
   return n;
 }
 
+function normalizeIntInRange(raw: unknown, fallback: number, min: number, max: number): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  const floored = Math.floor(n);
+  if (floored < min) return min;
+  if (floored > max) return max;
+  return floored;
+}
+
+function asRuntimeErrorWithMeta(error: unknown): RuntimeErrorWithMeta {
+  if (error instanceof Error) return error as RuntimeErrorWithMeta;
+  return new Error(String(error)) as RuntimeErrorWithMeta;
+}
+
+function normalizeErrorCode(code: unknown): string {
+  return String(code || "")
+    .trim()
+    .toUpperCase();
+}
+
+function isRetryableToolErrorCode(code: string): boolean {
+  return ["E_BUSY", "E_TIMEOUT", "E_CLIENT_TIMEOUT", "E_BRIDGE_DISCONNECTED"].includes(normalizeErrorCode(code));
+}
+
+function shouldAutoRetryToolErrorCode(code: string): boolean {
+  return ["E_BUSY", "E_CLIENT_TIMEOUT", "E_BRIDGE_DISCONNECTED"].includes(normalizeErrorCode(code));
+}
+
+function computeToolRetryDelayMs(attempt: number): number {
+  const next = TOOL_AUTO_RETRY_BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1);
+  return Math.min(TOOL_AUTO_RETRY_CAP_DELAY_MS, next);
+}
+
+function buildToolRetryHint(toolName: string, errorCode: string): string {
+  const normalized = normalizeErrorCode(errorCode);
+  if (toolName === "bash" && normalized === "E_TIMEOUT") {
+    return "Increase bash.timeoutMs and retry the same command.";
+  }
+  if (normalized === "E_BUSY") {
+    return "Bridge is busy, retry after a short delay.";
+  }
+  if (normalized === "E_CLIENT_TIMEOUT" || normalized === "E_BRIDGE_DISCONNECTED") {
+    return "Bridge connection was unstable; retry this tool call.";
+  }
+  return "Retry only when the failure is transient.";
+}
+
 function normalizeTabIds(input: unknown[]): number[] {
   const seen = new Set<number>();
   const out: number[] = [];
@@ -419,9 +486,14 @@ function buildToolFailurePayload(toolCall: ToolCallItem, result: JsonRecord): Js
   const rawArgs = String(toolCall.function.arguments || "").trim();
   const args = parseToolCallArgs(rawArgs);
   const target = summarizeToolTarget(toolName, args, rawArgs);
+  const errorCode = normalizeErrorCode(result.errorCode);
+  const retryable = result.retryable === true || isRetryableToolErrorCode(errorCode);
   return {
     error: String(result.error || "工具执行失败"),
     errorReason: String(result.errorReason || "failed_execute"),
+    errorCode: errorCode || undefined,
+    retryable,
+    retryHint: String(result.retryHint || buildToolRetryHint(toolName, errorCode)),
     tool: toolName,
     target,
     args: args || null,
@@ -636,6 +708,15 @@ function buildSharedTabsContextMessage(sharedTabs: unknown): string {
 
 function buildLlmMessagesFromContext(meta: SessionMeta | null, contextMessages: Array<{ role: string; content: string }>): JsonRecord[] {
   const out: JsonRecord[] = [];
+  out.push({
+    role: "system",
+    content: [
+      "Tool retry policy:",
+      "1) For transient tool errors (retryable=true), retry the same goal with adjusted parameters.",
+      "2) bash supports optional timeoutMs (milliseconds). Increase timeoutMs when timeout-related failures happen.",
+      "3) For non-retryable errors, stop retrying and explain the blocker clearly."
+    ].join("\n")
+  });
   const metadata = toRecord(meta?.header?.metadata);
   const sharedTabsContext = buildSharedTabsContextMessage(metadata.sharedTabs);
   if (sharedTabsContext) {
@@ -701,6 +782,28 @@ function buildToolResponseEnvelope(type: string, data: unknown, extra: JsonRecor
   };
 }
 
+function buildStepFailureEnvelope(
+  toolName: string,
+  out: ExecuteStepResult,
+  fallbackError: string,
+  retryHint: string,
+  options: {
+    defaultRetryable?: boolean;
+    errorReason?: "failed_execute" | "failed_verify";
+  } = {}
+): JsonRecord {
+  const errorCode = normalizeErrorCode(out.errorCode);
+  const defaultRetryable = options.defaultRetryable === true;
+  return {
+    error: out.error || fallbackError,
+    errorCode: errorCode || undefined,
+    errorReason: options.errorReason || "failed_execute",
+    retryable: out.retryable === true || defaultRetryable || isRetryableToolErrorCode(errorCode),
+    retryHint,
+    details: out.errorDetails || null
+  };
+}
+
 async function queryAllTabsForRuntime(): Promise<Array<{ id: number; windowId: number; index: number; active: boolean; pinned: boolean; title: string; url: string }>> {
   const tabs = await chrome.tabs.query({});
   return (tabs || [])
@@ -728,10 +831,31 @@ async function getActiveTabIdForRuntime(): Promise<number | null> {
 async function callInfra(infra: RuntimeInfraHandler, message: JsonRecord): Promise<JsonRecord> {
   const result = await infra.handleMessage(message);
   if (!result) {
-    throw new Error(`unsupported infra message: ${String(message.type || "")}`);
+    const error = new Error(`unsupported infra message: ${String(message.type || "")}`) as RuntimeErrorWithMeta;
+    error.code = "E_INFRA_UNSUPPORTED";
+    throw error;
   }
   if (!result.ok) {
-    throw new Error(String(result.error || "infra call failed"));
+    const error = new Error(String(result.error || "infra call failed")) as RuntimeErrorWithMeta;
+    const resultWithMeta = result as {
+      code?: unknown;
+      details?: unknown;
+      retryable?: unknown;
+      status?: unknown;
+    };
+    if (typeof resultWithMeta.code === "string" && resultWithMeta.code.trim()) {
+      error.code = resultWithMeta.code.trim();
+    }
+    if (resultWithMeta.details !== undefined) {
+      error.details = resultWithMeta.details;
+    }
+    if (typeof resultWithMeta.retryable === "boolean") {
+      error.retryable = resultWithMeta.retryable;
+    }
+    if (Number.isFinite(Number(resultWithMeta.status))) {
+      error.status = Number(resultWithMeta.status);
+    }
+    throw error;
   }
   return toRecord(result.data);
 }
@@ -743,6 +867,10 @@ function extractLlmConfig(raw: JsonRecord): BridgeConfig {
     llmApiBase: String(raw.llmApiBase || ""),
     llmApiKey: String(raw.llmApiKey || ""),
     llmModel: String(raw.llmModel || "gpt-5.3-codex"),
+    maxSteps: normalizeIntInRange(raw.maxSteps, 100, 1, 500),
+    bridgeInvokeTimeoutMs: normalizeIntInRange(raw.bridgeInvokeTimeoutMs, DEFAULT_BASH_TIMEOUT_MS, 1_000, MAX_BASH_TIMEOUT_MS),
+    llmTimeoutMs: normalizeIntInRange(raw.llmTimeoutMs, DEFAULT_LLM_TIMEOUT_MS, MIN_LLM_TIMEOUT_MS, MAX_LLM_TIMEOUT_MS),
+    llmRetryMaxAttempts: normalizeIntInRange(raw.llmRetryMaxAttempts, MAX_LLM_RETRIES, 0, 6),
     devAutoReload: raw.devAutoReload !== false,
     devReloadIntervalMs: Number(raw.devReloadIntervalMs || 1500)
   };
@@ -928,19 +1056,25 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     try {
       data = await runMode(normalizedMode);
     } catch (error) {
+      const runtimeError = asRuntimeErrorWithMeta(error);
       if (normalizedMode !== "script") {
         const result: ExecuteStepResult = {
           ok: false,
           modeUsed,
           verified: false,
-          error: error instanceof Error ? error.message : String(error)
+          error: runtimeError.message,
+          errorCode: normalizeErrorCode(runtimeError.code),
+          errorDetails: runtimeError.details,
+          retryable: runtimeError.retryable
         };
         orchestrator.events.emit("step_execute_result", sessionId, {
           ok: result.ok,
           modeUsed: result.modeUsed,
           verifyReason: result.verifyReason || "",
           verified: result.verified,
-          error: result.error || ""
+          error: result.error || "",
+          errorCode: result.errorCode || "",
+          retryable: result.retryable === true
         });
         return result;
       }
@@ -950,12 +1084,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       try {
         data = await runMode("cdp");
       } catch (fallbackError) {
+        const runtimeFallbackError = asRuntimeErrorWithMeta(fallbackError);
         const result: ExecuteStepResult = {
           ok: false,
           modeUsed,
           fallbackFrom,
           verified: false,
-          error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+          error: runtimeFallbackError.message,
+          errorCode: normalizeErrorCode(runtimeFallbackError.code),
+          errorDetails: runtimeFallbackError.details,
+          retryable: runtimeFallbackError.retryable
         };
         orchestrator.events.emit("step_execute_result", sessionId, {
           ok: result.ok,
@@ -963,7 +1101,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           fallbackFrom: result.fallbackFrom || "",
           verifyReason: result.verifyReason || "",
           verified: result.verified,
-          error: result.error || ""
+          error: result.error || "",
+          errorCode: result.errorCode || "",
+          retryable: result.retryable === true
         });
         return result;
       }
@@ -971,44 +1111,69 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
     let verified = false;
     let verifyReason = "verify_policy_off";
-    if (verifyEnabled) {
-      if (modeUsed === "bridge") {
-        verifyReason = "verify_not_supported_for_bridge";
-      } else if (!tabId) {
-        verifyReason = "verify_missing_tab_id";
-      } else if (normalizedAction === "verify" || normalizedAction === "cdp.verify") {
-        verified = toRecord(data).ok === true;
-        verifyReason = verified ? "verified" : "verify_failed";
-      } else {
-        const explicitExpect = normalizeVerifyExpect(payload.expect || actionPayload.expect || null);
-        let verifyData: unknown = null;
-        if (explicitExpect) {
-          if (explicitExpect.urlChanged === true && toRecord(toRecord(preObserve).page).url) {
-            explicitExpect.previousUrl = String(toRecord(toRecord(preObserve).page).url || "");
+    try {
+      if (verifyEnabled) {
+        if (modeUsed === "bridge") {
+          verifyReason = "verify_not_supported_for_bridge";
+        } else if (!tabId) {
+          verifyReason = "verify_missing_tab_id";
+        } else if (normalizedAction === "verify" || normalizedAction === "cdp.verify") {
+          verified = toRecord(data).ok === true;
+          verifyReason = verified ? "verified" : "verify_failed";
+        } else {
+          const explicitExpect = normalizeVerifyExpect(payload.expect || actionPayload.expect || null);
+          let verifyData: unknown = null;
+          if (explicitExpect) {
+            if (explicitExpect.urlChanged === true && toRecord(toRecord(preObserve).page).url) {
+              explicitExpect.previousUrl = String(toRecord(toRecord(preObserve).page).url || "");
+            }
+            verifyData = await callInfra(infra, {
+              type: "cdp.verify",
+              tabId,
+              action: { expect: explicitExpect },
+              result: toRecord(data).result || data
+            });
+          } else if (preObserve) {
+            const afterObserve = await callInfra(infra, {
+              type: "cdp.observe",
+              tabId
+            });
+            verifyData = buildObserveProgressVerify(preObserve, afterObserve);
           }
-          verifyData = await callInfra(infra, {
-            type: "cdp.verify",
-            tabId,
-            action: { expect: explicitExpect },
-            result: toRecord(data).result || data
-          });
-        } else if (preObserve) {
-          const afterObserve = await callInfra(infra, {
-            type: "cdp.observe",
-            tabId
-          });
-          verifyData = buildObserveProgressVerify(preObserve, afterObserve);
-        }
 
-        verified = toRecord(verifyData).ok === true;
-        verifyReason = verifyData ? (verified ? "verified" : "verify_failed") : "verify_skipped";
-        if (verifyData && data && typeof data === "object" && !Array.isArray(data)) {
-          data = {
-            ...(data as JsonRecord),
-            verify: verifyData
-          };
+          verified = toRecord(verifyData).ok === true;
+          verifyReason = verifyData ? (verified ? "verified" : "verify_failed") : "verify_skipped";
+          if (verifyData && data && typeof data === "object" && !Array.isArray(data)) {
+            data = {
+              ...(data as JsonRecord),
+              verify: verifyData
+            };
+          }
         }
       }
+    } catch (verifyError) {
+      const runtimeVerifyError = asRuntimeErrorWithMeta(verifyError);
+      const result: ExecuteStepResult = {
+        ok: false,
+        modeUsed,
+        fallbackFrom,
+        verified: false,
+        error: runtimeVerifyError.message,
+        errorCode: normalizeErrorCode(runtimeVerifyError.code) || "E_VERIFY_EXECUTE",
+        errorDetails: runtimeVerifyError.details,
+        retryable: true
+      };
+      orchestrator.events.emit("step_execute_result", sessionId, {
+        ok: result.ok,
+        modeUsed: result.modeUsed,
+        fallbackFrom: result.fallbackFrom || "",
+        verifyReason: result.verifyReason || "",
+        verified: result.verified,
+        error: result.error || "",
+        errorCode: result.errorCode || "",
+        retryable: result.retryable === true
+      });
+      return result;
     }
 
     const result: ExecuteStepResult = {
@@ -1029,6 +1194,55 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     return result;
   }
 
+  async function invokeBridgeFrameWithRetry(
+    sessionId: string,
+    toolName: string,
+    frame: JsonRecord,
+    autoRetryMax = TOOL_AUTO_RETRY_MAX
+  ): Promise<JsonRecord> {
+    const totalAttempts = Math.max(1, autoRetryMax + 1);
+    let lastFailure: ExecuteStepResult | null = null;
+
+    for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
+      const invoke = await executeStep({
+        sessionId,
+        mode: "bridge",
+        action: "invoke",
+        args: {
+          frame
+        }
+      });
+      if (invoke.ok) {
+        return buildToolResponseEnvelope("invoke", invoke.data, {
+          attempt,
+          autoRetried: attempt > 1
+        });
+      }
+
+      lastFailure = invoke;
+      const code = normalizeErrorCode(invoke.errorCode);
+      const canAutoRetry = attempt < totalAttempts && shouldAutoRetryToolErrorCode(code);
+      if (!canAutoRetry) break;
+      await delay(computeToolRetryDelayMs(attempt));
+    }
+
+    const failure = lastFailure || {
+      ok: false,
+      modeUsed: "bridge" as ExecuteMode,
+      verified: false,
+      error: `${toolName} 执行失败`
+    };
+    const errorCode = normalizeErrorCode(failure.errorCode);
+    return {
+      error: failure.error || `${toolName} 执行失败`,
+      errorCode: errorCode || undefined,
+      errorReason: "failed_execute",
+      retryable: failure.retryable === true || isRetryableToolErrorCode(errorCode),
+      retryHint: buildToolRetryHint(toolName, errorCode),
+      details: failure.errorDetails || null
+    };
+  }
+
   async function executeToolCall(sessionId: string, toolCall: ToolCallItem): Promise<JsonRecord> {
     const name = String(toolCall.function.name || "").trim();
     const argsRaw = String(toolCall.function.arguments || "").trim();
@@ -1045,19 +1259,18 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       case "bash": {
         const command = String(args.command || "").trim();
         if (!command) return { error: "bash 需要 command" };
-        const invoke = await executeStep({
-          sessionId,
-          mode: "bridge",
-          action: "invoke",
+        const timeoutMs =
+          args.timeoutMs == null
+            ? undefined
+            : normalizeIntInRange(args.timeoutMs, DEFAULT_BASH_TIMEOUT_MS, MIN_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS);
+        return await invokeBridgeFrameWithRetry(sessionId, "bash", {
+          tool: "bash",
           args: {
-            frame: {
-              tool: "bash",
-              args: { cmdId: "bash.exec", args: [command] }
-            }
+            cmdId: "bash.exec",
+            args: [command],
+            ...(timeoutMs == null ? {} : { timeoutMs })
           }
         });
-        if (!invoke.ok) return { error: invoke.error || "bash 执行失败" };
-        return buildToolResponseEnvelope("invoke", invoke.data);
       }
       case "read_file": {
         const path = String(args.path || "").trim();
@@ -1065,60 +1278,33 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const invokeArgs: JsonRecord = { path };
         if (args.offset != null) invokeArgs.offset = args.offset;
         if (args.limit != null) invokeArgs.limit = args.limit;
-        const invoke = await executeStep({
-          sessionId,
-          mode: "bridge",
-          action: "invoke",
-          args: {
-            frame: {
-              tool: "read",
-              args: invokeArgs
-            }
-          }
+        return await invokeBridgeFrameWithRetry(sessionId, "read_file", {
+          tool: "read",
+          args: invokeArgs
         });
-        if (!invoke.ok) return { error: invoke.error || "read_file 执行失败" };
-        return buildToolResponseEnvelope("invoke", invoke.data);
       }
       case "write_file": {
         const path = String(args.path || "").trim();
         if (!path) return { error: "write_file 需要 path" };
-        const invoke = await executeStep({
-          sessionId,
-          mode: "bridge",
-          action: "invoke",
+        return await invokeBridgeFrameWithRetry(sessionId, "write_file", {
+          tool: "write",
           args: {
-            frame: {
-              tool: "write",
-              args: {
-                path,
-                content: String(args.content || ""),
-                mode: String(args.mode || "overwrite")
-              }
-            }
+            path,
+            content: String(args.content || ""),
+            mode: String(args.mode || "overwrite")
           }
         });
-        if (!invoke.ok) return { error: invoke.error || "write_file 执行失败" };
-        return buildToolResponseEnvelope("invoke", invoke.data);
       }
       case "edit_file": {
         const path = String(args.path || "").trim();
         if (!path) return { error: "edit_file 需要 path" };
-        const invoke = await executeStep({
-          sessionId,
-          mode: "bridge",
-          action: "invoke",
+        return await invokeBridgeFrameWithRetry(sessionId, "edit_file", {
+          tool: "edit",
           args: {
-            frame: {
-              tool: "edit",
-              args: {
-                path,
-                edits: Array.isArray(args.edits) ? args.edits : []
-              }
-            }
+            path,
+            edits: Array.isArray(args.edits) ? args.edits : []
           }
         });
-        if (!invoke.ok) return { error: invoke.error || "edit_file 执行失败" };
-        return buildToolResponseEnvelope("invoke", invoke.data);
       }
       case "list_tabs": {
         const tabs = await queryAllTabsForRuntime();
@@ -1149,7 +1335,15 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       }
       case "snapshot": {
         const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
-        if (!tabId) return { error: "snapshot 需要 tabId，当前无可用 tab" };
+        if (!tabId) {
+          return {
+            error: "snapshot 需要 tabId，当前无可用 tab",
+            errorCode: "E_NO_TAB",
+            errorReason: "failed_execute",
+            retryable: true,
+            retryHint: "Call list_tabs and then retry snapshot with a valid tabId."
+          };
+        }
         const out = await executeStep({
           sessionId,
           mode: "cdp",
@@ -1168,12 +1362,28 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             }
           }
         });
-        if (!out.ok) return { error: out.error || "snapshot 执行失败" };
+        if (!out.ok) {
+          return buildStepFailureEnvelope(
+            "snapshot",
+            out,
+            "snapshot 执行失败",
+            "Take another snapshot (or list_tabs first) and retry with a valid tab/selector.",
+            { defaultRetryable: true }
+          );
+        }
         return buildToolResponseEnvelope("snapshot", out.data);
       }
       case "browser_action": {
         const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
-        if (!tabId) return { error: "browser_action 需要 tabId，当前无可用 tab" };
+        if (!tabId) {
+          return {
+            error: "browser_action 需要 tabId，当前无可用 tab",
+            errorCode: "E_NO_TAB",
+            errorReason: "failed_execute",
+            retryable: true,
+            retryHint: "Call list_tabs and retry browser_action with a valid tabId."
+          };
+        }
         const kind = String(args.kind || "");
         const out = await executeStep({
           sessionId,
@@ -1193,13 +1403,24 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             expect: args.expect
           }
         });
-        if (!out.ok) return { error: out.error || "browser_action 执行失败" };
+        if (!out.ok) {
+          return buildStepFailureEnvelope(
+            "browser_action",
+            out,
+            "browser_action 执行失败",
+            "Take a fresh snapshot and retry with updated ref/selector.",
+            { defaultRetryable: true }
+          );
+        }
         const explicitExpect = normalizeVerifyExpect(args.expect || null);
         const hardFail = !!explicitExpect || kind === "navigate";
         if (!out.verified && hardFail) {
           return {
             error: "browser_action 执行成功但未通过验证",
+            errorCode: "E_VERIFY_FAILED",
             errorReason: "failed_verify",
+            retryable: true,
+            retryHint: "Adjust action args/expect and retry the browser action.",
             details: {
               verifyReason: out.verifyReason,
               data: out.data
@@ -1213,7 +1434,15 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       }
       case "browser_verify": {
         const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
-        if (!tabId) return { error: "browser_verify 需要 tabId，当前无可用 tab" };
+        if (!tabId) {
+          return {
+            error: "browser_verify 需要 tabId，当前无可用 tab",
+            errorCode: "E_NO_TAB",
+            errorReason: "failed_execute",
+            retryable: true,
+            retryHint: "Call list_tabs and retry browser_verify with a valid tabId."
+          };
+        }
         const out = await executeStep({
           sessionId,
           mode: "cdp",
@@ -1226,11 +1455,22 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           },
           verifyPolicy: "always"
         });
-        if (!out.ok) return { error: out.error || "browser_verify 执行失败" };
+        if (!out.ok) {
+          return buildStepFailureEnvelope(
+            "browser_verify",
+            out,
+            "browser_verify 执行失败",
+            "Update verify expectation and run browser_verify again.",
+            { defaultRetryable: true }
+          );
+        }
         if (!out.verified) {
           return {
             error: "browser_verify 未通过",
+            errorCode: "E_VERIFY_FAILED",
             errorReason: "failed_verify",
+            retryable: true,
+            retryHint: "Refine expect conditions and re-run browser_verify.",
             details: out.data
           };
         }
@@ -1242,14 +1482,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
   }
 
   async function requestLlmWithRetry(input: LlmRequestInput): Promise<JsonRecord> {
-    const { sessionId, llmBase, llmKey, llmModel, step, messages } = input;
+    const { sessionId, llmBase, llmKey, llmModel, llmTimeoutMs, step, messages } = input;
     let lastError: unknown = null;
     const maxAttempts = Math.max(0, Number(orchestrator.getRunState(sessionId).retry.maxAttempts || MAX_LLM_RETRIES));
     const totalAttempts = maxAttempts + 1;
 
     for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort("llm-timeout"), 60_000);
+      const timer = setTimeout(() => ctrl.abort("llm-timeout"), llmTimeoutMs);
       let status = 0;
       let ok = false;
       let rawBody = "";
@@ -1404,6 +1644,12 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const llmBase = String(config.llmApiBase || "").trim();
     const llmKey = String(config.llmApiKey || "").trim();
     const llmModel = String(config.llmModel || "gpt-5.3-codex").trim();
+    const maxLoopSteps = normalizeIntInRange(config.maxSteps, 100, 1, 500);
+    const llmTimeoutMs = normalizeIntInRange(config.llmTimeoutMs, DEFAULT_LLM_TIMEOUT_MS, MIN_LLM_TIMEOUT_MS, MAX_LLM_TIMEOUT_MS);
+    const llmRetryMaxAttempts = normalizeIntInRange(config.llmRetryMaxAttempts, MAX_LLM_RETRIES, 0, 6);
+    orchestrator.updateRetryState(sessionId, {
+      maxAttempts: llmRetryMaxAttempts
+    });
 
     orchestrator.events.emit("loop_start", sessionId, {
       prompt: clipText(prompt, 3000)
@@ -1442,7 +1688,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     let finalStatus = "done";
 
     try {
-      while (llmStep < MAX_LOOP_STEPS) {
+      while (llmStep < maxLoopSteps) {
         let state = orchestrator.getRunState(sessionId);
         if (state.stopped) {
           finalStatus = "stopped";
@@ -1463,6 +1709,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           llmBase,
           llmKey,
           llmModel,
+          llmTimeoutMs,
           step: llmStep,
           messages
         });
@@ -1501,6 +1748,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           break;
         }
 
+        let shouldContinueAfterToolFailure = false;
         for (const tc of toolCalls) {
           toolStep += 1;
           orchestrator.events.emit("step_planned", sessionId, {
@@ -1536,6 +1784,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               action: tc.function.name,
               error: String(result.error)
             });
+            if (result.retryable === true) {
+              shouldContinueAfterToolFailure = true;
+              break;
+            }
+
             await orchestrator.sessions.appendMessage({
               sessionId,
               role: "assistant",
@@ -1569,14 +1822,18 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             preview: clipText(llmToolContent, 800)
           });
         }
+
+        if (shouldContinueAfterToolFailure) {
+          continue;
+        }
       }
 
-      if (llmStep >= MAX_LOOP_STEPS) {
+      if (llmStep >= maxLoopSteps) {
         finalStatus = "max_steps";
         await orchestrator.sessions.appendMessage({
           sessionId,
           role: "assistant",
-          text: `已达到最大步数 ${MAX_LOOP_STEPS}，结束本轮执行。`
+          text: `已达到最大步数 ${maxLoopSteps}，结束本轮执行。`
         });
       }
     } catch (error) {

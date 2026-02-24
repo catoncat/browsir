@@ -12,6 +12,7 @@ const dialogRef = ref<HTMLElement | null>(null);
 const apiBaseId = "settings-api-base";
 const apiKeyId = "settings-api-key";
 const modelNameId = "settings-model-name";
+const maxStepsId = "settings-max-steps";
 const bridgeUrlId = "settings-bridge-url";
 
 async function handleSave() {
@@ -80,6 +81,17 @@ onMounted(() => {
               :id="modelNameId"
               v-model="config.llmModel"
               type="text"
+              class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+            />
+          </div>
+          <div class="space-y-1.5">
+            <label :for="maxStepsId" class="block text-[11px] font-bold text-ui-text-muted/80 ml-0.5 uppercase tracking-tighter">Max Steps</label>
+            <input
+              :id="maxStepsId"
+              v-model.number="config.maxSteps"
+              type="number"
+              min="1"
+              max="500"
               class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
             />
           </div>

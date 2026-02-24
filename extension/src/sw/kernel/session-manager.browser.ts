@@ -51,6 +51,30 @@ export interface AppendCustomInput {
 
 // 对照点：pi-mono/packages/coding-agent/src/core/session-manager.ts:307 buildSessionContext
 export class BrowserSessionManager {
+  private readonly writeTailBySession = new Map<string, Promise<void>>();
+
+  private async withSessionWriteLock<T>(sessionId: string, task: () => Promise<T>): Promise<T> {
+    const key = String(sessionId || "").trim();
+    const previous = this.writeTailBySession.get(key) ?? Promise.resolve();
+    const run = previous.catch(() => undefined).then(task);
+    const nextTail = run.then(
+      () => undefined,
+      () => undefined
+    );
+    this.writeTailBySession.set(key, nextTail);
+    try {
+      return await run;
+    } finally {
+      if (this.writeTailBySession.get(key) === nextTail) {
+        this.writeTailBySession.delete(key);
+      }
+    }
+  }
+
+  private async appendEntryUnlocked(sessionId: string, entry: SessionEntry): Promise<SessionMeta> {
+    return appendSessionEntry(sessionId, entry);
+  }
+
   async createSession(input: CreateSessionInput = {}): Promise<SessionMeta> {
     const header: SessionHeader = {
       type: "session",
@@ -88,51 +112,57 @@ export class BrowserSessionManager {
   }
 
   async setLeaf(sessionId: string, leafId: string | null): Promise<SessionMeta> {
-    const meta = await this.ensureSession(sessionId);
-    const next: SessionMeta = {
-      ...meta,
-      leafId,
-      updatedAt: nowIso()
-    };
-    await writeSessionMeta(sessionId, next);
-    return next;
+    return this.withSessionWriteLock(sessionId, async () => {
+      const meta = await this.ensureSession(sessionId);
+      const next: SessionMeta = {
+        ...meta,
+        leafId,
+        updatedAt: nowIso()
+      };
+      await writeSessionMeta(sessionId, next);
+      return next;
+    });
   }
 
   async appendEntry(sessionId: string, entry: SessionEntry): Promise<SessionMeta> {
-    return appendSessionEntry(sessionId, entry);
+    return this.withSessionWriteLock(sessionId, () => this.appendEntryUnlocked(sessionId, entry));
   }
 
   async appendMessage(input: AppendMessageInput): Promise<MessageEntry> {
-    const parentId = input.parentId === undefined ? await this.getLeaf(input.sessionId) : input.parentId;
-    const entry: MessageEntry = {
-      id: randomId("entry"),
-      type: "message",
-      parentId,
-      timestamp: nowIso(),
-      role: input.role,
-      text: input.text,
-      toolName: input.toolName,
-      toolCallId: input.toolCallId,
-      metadata: input.metadata,
-      custom: input.custom
-    };
-    await this.appendEntry(input.sessionId, entry);
-    return entry;
+    return this.withSessionWriteLock(input.sessionId, async () => {
+      const parentId = input.parentId === undefined ? await this.getLeaf(input.sessionId) : input.parentId;
+      const entry: MessageEntry = {
+        id: randomId("entry"),
+        type: "message",
+        parentId,
+        timestamp: nowIso(),
+        role: input.role,
+        text: input.text,
+        toolName: input.toolName,
+        toolCallId: input.toolCallId,
+        metadata: input.metadata,
+        custom: input.custom
+      };
+      await this.appendEntryUnlocked(input.sessionId, entry);
+      return entry;
+    });
   }
 
   async appendCustom(input: AppendCustomInput): Promise<SessionEntry> {
-    const parentId = input.parentId === undefined ? await this.getLeaf(input.sessionId) : input.parentId;
-    const entry: SessionEntry = {
-      id: randomId("entry"),
-      type: "custom",
-      parentId,
-      timestamp: nowIso(),
-      key: input.key,
-      value: input.value,
-      custom: input.custom
-    };
-    await this.appendEntry(input.sessionId, entry);
-    return entry;
+    return this.withSessionWriteLock(input.sessionId, async () => {
+      const parentId = input.parentId === undefined ? await this.getLeaf(input.sessionId) : input.parentId;
+      const entry: SessionEntry = {
+        id: randomId("entry"),
+        type: "custom",
+        parentId,
+        timestamp: nowIso(),
+        key: input.key,
+        value: input.value,
+        custom: input.custom
+      };
+      await this.appendEntryUnlocked(input.sessionId, entry);
+      return entry;
+    });
   }
 
   async appendCompaction(
@@ -141,22 +171,24 @@ export class BrowserSessionManager {
     draft: CompactionDraft,
     details?: Record<string, unknown>
   ): Promise<CompactionEntry> {
-    const parentId = await this.getLeaf(sessionId);
-    const entry: CompactionEntry = {
-      id: randomId("entry"),
-      type: "compaction",
-      parentId,
-      timestamp: nowIso(),
-      reason,
-      summary: draft.summary,
-      previousSummary: draft.previousSummary,
-      firstKeptEntryId: draft.firstKeptEntryId,
-      tokensBefore: draft.tokensBefore,
-      tokensAfter: draft.tokensAfter,
-      details
-    };
-    await this.appendEntry(sessionId, entry);
-    return entry;
+    return this.withSessionWriteLock(sessionId, async () => {
+      const parentId = await this.getLeaf(sessionId);
+      const entry: CompactionEntry = {
+        id: randomId("entry"),
+        type: "compaction",
+        parentId,
+        timestamp: nowIso(),
+        reason,
+        summary: draft.summary,
+        previousSummary: draft.previousSummary,
+        firstKeptEntryId: draft.firstKeptEntryId,
+        tokensBefore: draft.tokensBefore,
+        tokensAfter: draft.tokensAfter,
+        details
+      };
+      await this.appendEntryUnlocked(sessionId, entry);
+      return entry;
+    });
   }
 
   async getEntries(sessionId: string): Promise<SessionEntry[]> {

@@ -12,12 +12,16 @@
   "steps": [
     "start_loop_with_llm_enabled",
     "llm_emits_tool_call_and_receives_tool_result",
+    "llm_receives_retryable_tool_failure_and_retries_with_adjusted_args",
+    "cdp_tool_failure_is_reported_and_loop_continues",
     "llm_unavailable_and_rule_parsable_then_fallback_execute",
     "llm_unavailable_and_rule_unparsable_then_failed_execute",
     "llm_http_failure_then_fallback_execute"
   ],
   "observables": [
     "llm_tool_call_roundtrip_completes_with_done",
+    "retryable_tool_failure_contains_retry_signal_and_eventual_success",
+    "cdp_failure_does_not_abort_loop_immediately",
     "llm_missing_uses_rule_planner_when_goal_is_parsable",
     "llm_missing_returns_failed_execute_when_goal_is_unparsable",
     "llm_http_failure_does_not_block_rule_fallback"
@@ -40,11 +44,15 @@
     "on_llm_http_failure": [
       "log_llm_error",
       "fallback_to_rule_planner_when_parsable"
+    ],
+    "on_retryable_tool_failure": [
+      "emit_retry_signal_to_llm",
+      "allow_followup_tool_retry_before_final_failure"
     ]
   },
   "rollback_or_compensation": [
     "mark_session_status_failed_execute_when_unrecoverable",
     "avoid_false_done_without_executable_plan"
   ],
-  "version": "1.0.0"
+  "version": "1.1.0"
 }

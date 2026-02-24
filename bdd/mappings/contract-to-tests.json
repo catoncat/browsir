@@ -2,6 +2,19 @@
   "version": "1.0.0",
   "mappings": [
     {
+      "contractId": "BHV-CHAT-MAX-STEPS-CONFIG",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::runAgentLoop + extension/src/panel/stores/runtime.ts::saveConfig"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/chat/max-steps-config.feature"
+        }
+      ]
+    },
+    {
       "contractId": "BHV-CHAT-NO-TAB-START",
       "proofs": [
         {
@@ -78,7 +91,7 @@
         },
         {
           "layer": "e2e",
-          "target": "bdd/evidence/brain-e2e.latest.json"
+          "target": "bdd/evidence/brain-e2e.latest.json::brain.run.start 支持 tool_calls 闭环并写入 step stream||LLM 工具超时后可按失败信号调整 timeout 重试成功||CDP 失败后不中断，LLM 可继续推进并完成||LLM HTTP 失败时应产生 auto_retry 事件并失败收口"
         }
       ]
     },

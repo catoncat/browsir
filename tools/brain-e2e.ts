@@ -424,6 +424,128 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
         ]);
       }
 
+      if (userText.includes("#LLM_BASH_TIMEOUT_RECOVER")) {
+        const sawRecoveredOutput = toolMessages.some((content) => content.includes("RECOVERED"));
+        const sawRetryableSignal = toolMessages.some(
+          (content) => content.includes('"retryable":true') || content.includes('"errorCode":"E_TIMEOUT"')
+        );
+
+        if (!hasToolResult) {
+          return buildSseResponse([
+            {
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: "call_bash_timeout_1",
+                        type: "function",
+                        function: {
+                          name: "bash",
+                          arguments: JSON.stringify({
+                            command: "sleep 1; echo FIRST_ATTEMPT",
+                            timeoutMs: 250
+                          })
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            "[DONE]"
+          ]);
+        }
+
+        if (!sawRecoveredOutput && sawRetryableSignal) {
+          return buildSseResponse([
+            {
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: "call_bash_timeout_2",
+                        type: "function",
+                        function: {
+                          name: "bash",
+                          arguments: JSON.stringify({
+                            command: "sleep 1; echo RECOVERED",
+                            timeoutMs: 2600
+                          })
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            "[DONE]"
+          ]);
+        }
+
+        return buildSseResponse([
+          {
+            choices: [
+              {
+                delta: {
+                  content: sawRecoveredOutput ? "LLM_BASH_TIMEOUT_RECOVER_SUCCESS" : "LLM_BASH_TIMEOUT_RECOVER_INCOMPLETE"
+                }
+              }
+            ]
+          },
+          "[DONE]"
+        ]);
+      }
+
+      if (userText.includes("#LLM_CDP_VERIFY_FAIL_CONTINUE")) {
+        if (!hasToolResult) {
+          return buildSseResponse([
+            {
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: "call_cdp_verify_fail_1",
+                        type: "function",
+                        function: {
+                          name: "browser_action",
+                          arguments: JSON.stringify({
+                            kind: "navigate",
+                            url: "about:blank#cdp-verify-fail-continue",
+                            expect: {
+                              textIncludes: "__EXPECT_TEXT_THAT_WILL_NOT_EXIST__"
+                            }
+                          })
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            "[DONE]"
+          ]);
+        }
+
+        return buildSseResponse([
+          {
+            choices: [
+              {
+                delta: {
+                  content: "LLM_CDP_VERIFY_RECOVERED"
+                }
+              }
+            ]
+          },
+          "[DONE]"
+        ]);
+      }
+
       if (userText.includes("#LLM_MULTI_TURN")) {
         return buildSseResponse([
           {
@@ -1747,6 +1869,132 @@ async function main() {
       );
     });
 
+    await runCase("brain.runtime", "LLM 工具超时后可按失败信号调整 timeout 重试成功", async () => {
+      mockLlm?.clearRequests();
+      const saveConfig = await sendBgMessage(sidepanelClient!, {
+        type: "config.save",
+        payload: {
+          bridgeUrl: `ws://${BRIDGE_HOST}:${bridgePort}/ws`,
+          bridgeToken,
+          llmApiBase: mockLlm!.baseUrl,
+          llmApiKey: "mock-key",
+          llmModel: "gpt-5.3-codex",
+          llmTimeoutMs: 10_000,
+          llmRetryMaxAttempts: 2
+        }
+      });
+      assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
+
+      const started = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        prompt: "触发工具超时后重试 #LLM_BASH_TIMEOUT_RECOVER"
+      });
+      assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
+      const sessionId = String(started.data?.sessionId || "");
+      assert(sessionId.length > 0, "sessionId 为空");
+
+      const dump = await waitFor(
+        "brain.debug.dump tool-timeout-retry trace",
+        async () => {
+          const out = await sendBgMessage(sidepanelClient!, {
+            type: "brain.debug.dump",
+            sessionId
+          });
+          if (!out.ok) return null;
+          const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
+          if (!stream.some((item: any) => item?.type === "loop_done")) return null;
+          return out.data;
+        },
+        40_000,
+        250
+      );
+
+      const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
+      assert(
+        stream.some((item: any) => item?.type === "step_finished" && item?.payload?.mode === "tool_call" && item?.payload?.ok === false),
+        "应先出现一次失败的 tool_call"
+      );
+      assert(
+        stream.some((item: any) => item?.type === "step_finished" && item?.payload?.mode === "tool_call" && item?.payload?.ok === true),
+        "应出现后续成功的 tool_call"
+      );
+      assert(
+        stream.some((item: any) => item?.type === "loop_done" && item?.payload?.status === "done"),
+        "工具超时重试场景应最终 done"
+      );
+
+      const requests = mockLlm!.getRequests();
+      assert(requests.length >= 3, `预期 >=3 次 LLM 请求，实际=${requests.length}`);
+      const toolMessagesJoined = requests.flatMap((req) => req.toolMessages).join("\n");
+      assert(toolMessagesJoined.includes('"retryable":true'), "失败 tool payload 应包含 retryable=true 提示");
+      assert(toolMessagesJoined.includes("RECOVERED"), "后续 tool 结果应包含 RECOVERED");
+    });
+
+    await runCase("brain.runtime", "CDP 失败后不中断，LLM 可继续推进并完成", async () => {
+      mockLlm?.clearRequests();
+      const saveConfig = await sendBgMessage(sidepanelClient!, {
+        type: "config.save",
+        payload: {
+          bridgeUrl: `ws://${BRIDGE_HOST}:${bridgePort}/ws`,
+          bridgeToken,
+          llmApiBase: mockLlm!.baseUrl,
+          llmApiKey: "mock-key",
+          llmModel: "gpt-5.3-codex",
+          llmTimeoutMs: 10_000,
+          llmRetryMaxAttempts: 2
+        }
+      });
+      assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
+
+      const started = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        prompt: "触发 cdp verify 失败但应继续 #LLM_CDP_VERIFY_FAIL_CONTINUE"
+      });
+      assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
+      const sessionId = String(started.data?.sessionId || "");
+      assert(sessionId.length > 0, "sessionId 为空");
+
+      const dump = await waitFor(
+        "brain.debug.dump cdp-failure-continue trace",
+        async () => {
+          const out = await sendBgMessage(sidepanelClient!, {
+            type: "brain.debug.dump",
+            sessionId
+          });
+          if (!out.ok) return null;
+          const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
+          if (!stream.some((item: any) => item?.type === "loop_done")) return null;
+          return out.data;
+        },
+        40_000,
+        250
+      );
+
+      const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
+      const loopDoneEvent = stream.find((item: any) => item?.type === "loop_done");
+      const loopStatus = String(loopDoneEvent?.payload?.status || "");
+      const failedToolStep = stream.find(
+        (item: any) => item?.type === "step_finished" && item?.payload?.mode === "tool_call" && item?.payload?.ok === false
+      );
+      const loopErrorEvent = stream.find((item: any) => item?.type === "loop_error");
+      const requests = mockLlm!.getRequests();
+      const toolMessagesJoined = requests.flatMap((req) => req.toolMessages).join("\n");
+      assert(
+        loopStatus === "done",
+        `CDP 失败后应允许继续并最终 done，当前=${loopStatus || "unknown"}; failedStep=${JSON.stringify(
+          failedToolStep?.payload || {}
+        )}; loopError=${JSON.stringify(loopErrorEvent?.payload || {})}; payload=${toolMessagesJoined.slice(0, 500)}`
+      );
+
+      assert(requests.length >= 2, `预期 >=2 次 LLM 请求，实际=${requests.length}`);
+      assert(requests.some((req) => req.hasToolResult), "后续 LLM 请求应收到 tool failure payload");
+      assert(
+        toolMessagesJoined.includes('"errorReason":"failed_verify"') || toolMessagesJoined.includes('"errorReason":"failed_execute"'),
+        "tool failure payload 应包含失败原因"
+      );
+      assert(toolMessagesJoined.includes('"tool":"browser_action"'), "tool failure payload 应标识 browser_action");
+    });
+
     await runCase("panel.vnext", "sidepanel 渲染并支持复制/历史分叉/最后一条重试", async () => {
       const marker = `panel-actions-${Date.now()}`;
 
@@ -1909,6 +2157,8 @@ async function main() {
             }
             const tool = document.querySelector('[data-testid="tool-running-placeholder"]');
             if (tool) return { mode: "retry", source: "tool_pending" };
+            const streaming = document.querySelector('[data-testid="assistant-streaming-message"]');
+            if (streaming) return { mode: "retry", source: "assistant_streaming" };
             return null;
           })()`);
           if (!out) return null;
@@ -2068,6 +2318,11 @@ async function main() {
             }
             const tool = document.querySelector('[data-testid="tool-running-placeholder"]');
             if (tool) return { mode: "fork", sourceEntryId: "", source: "tool_pending" };
+            const streaming = document.querySelector('[data-testid="assistant-streaming-message"]');
+            if (streaming) return { mode: "fork", sourceEntryId: "", source: "assistant_streaming" };
+            const hasRetry = document.querySelectorAll('button[aria-label="重新回答"]').length > 0;
+            const hasCopy = document.querySelectorAll('button[aria-label="复制内容"], button[aria-label="已复制"]').length > 0;
+            if (hasRetry && hasCopy) return { mode: "fork", sourceEntryId: "", source: "already_done" };
             return null;
           })()`);
           if (!out) return null;
@@ -2179,6 +2434,8 @@ async function main() {
             }
             const tool = document.querySelector('[data-testid="tool-running-placeholder"]');
             if (tool) return { mode: "retry", sourceEntryId: "", source: "tool_pending" };
+            const streaming = document.querySelector('[data-testid="assistant-streaming-message"]');
+            if (streaming) return { mode: "retry", sourceEntryId: "", source: "assistant_streaming" };
             return null;
           })()`);
           if (!out) return null;

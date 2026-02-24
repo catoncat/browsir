@@ -53,6 +53,9 @@ export interface ExecuteStepResult {
   verifyReason?: string;
   data?: unknown;
   error?: string;
+  errorCode?: string;
+  errorDetails?: unknown;
+  retryable?: boolean;
 }
 
 export interface ExecutionAdapters {
@@ -91,7 +94,7 @@ export class BrainOrchestrator {
       retryBaseDelayMs: options.retryBaseDelayMs ?? 500,
       retryCapDelayMs: options.retryCapDelayMs ?? 5000,
       thresholdTokens: options.thresholdTokens ?? 1800,
-      keepTail: options.keepTail ?? 14,
+      keepTail: options.keepTail ?? 30,
       splitTurn: options.splitTurn ?? true,
       traceChunkSize: options.traceChunkSize ?? 80
     };

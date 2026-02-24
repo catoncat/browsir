@@ -7,6 +7,18 @@ Feature: Loop LLM capability gate
     Then 会话状态应为 done
     And 回复应包含 tool_call 完成结果
 
+  Scenario: LLM 遇到可重试工具失败时继续重试并成功
+    Given sidepanel 配置可用的 LLM API 且工具首次返回可重试失败
+    When 用户发送触发 bash tool_call 的目标
+    Then 会话状态应为 done
+    And step stream 应包含失败后再次成功的 tool_call
+
+  Scenario: CDP 操作失败后不中断并继续推进
+    Given sidepanel 配置可用的 LLM API 且 browser_action 首次验证失败
+    When 用户发送触发 browser_action 的目标
+    Then 会话状态应为 done
+    And 失败的 browser_action 应作为 tool 消息反馈给 LLM
+
   Scenario: LLM 不可用但规则可解析时降级成功
     Given sidepanel 未配置 LLM API
     When 用户发送可被规则 planner 解析的目标

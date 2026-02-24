@@ -1,0 +1,31 @@
+{
+  "id": "BHV-CHAT-MAX-STEPS-CONFIG",
+  "description": "Ensure max_steps is configurable and enforced by the runtime loop",
+  "category": "chat",
+  "priority": "medium",
+  "pre_conditions": [
+    "system_idle",
+    "settings_accessible"
+  ],
+  "steps": [
+    "configure_max_steps_in_ui",
+    "save_and_reload_config",
+    "trigger_multi_step_loop",
+    "observe_loop_termination_on_max_steps"
+  ],
+  "observables": [
+    "config_persisted_in_storage",
+    "runtime_loop_reads_dynamic_limit",
+    "final_status_is_max_steps_when_limit_reached"
+  ],
+  "triggers": {
+    "on_limit_reached": [
+      "append_max_steps_reached_message",
+      "set_final_status_to_max_steps"
+    ]
+  },
+  "rollback_or_compensation": [
+    "fallback_to_default_100_if_config_invalid"
+  ],
+  "version": "1.0.0"
+}

@@ -51,8 +51,8 @@ export function loadConfig(): BridgeConfig {
     maxOutputBytes: parseIntEnv("BRIDGE_MAX_OUTPUT_BYTES", 256 * 1024),
     maxReadBytes: parseIntEnv("BRIDGE_MAX_READ_BYTES", 1024 * 1024),
     maxConcurrency: parseIntEnv("BRIDGE_MAX_CONCURRENCY", 6),
-    defaultTimeoutMs: parseIntEnv("BRIDGE_DEFAULT_TIMEOUT_MS", 30_000),
-    maxTimeoutMs: parseIntEnv("BRIDGE_MAX_TIMEOUT_MS", 120_000),
+    defaultTimeoutMs: parseIntEnv("BRIDGE_DEFAULT_TIMEOUT_MS", 120_000),
+    maxTimeoutMs: parseIntEnv("BRIDGE_MAX_TIMEOUT_MS", 300_000),
     auditPath:
       process.env.BRIDGE_AUDIT_PATH ?? path.resolve(process.cwd(), `tmp/browser-bridge/audit-${now}.jsonl`),
   };

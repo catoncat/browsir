@@ -49,6 +49,7 @@ interface PanelConfig {
   llmApiBase: string;
   llmApiKey: string;
   llmModel: string;
+  maxSteps: number;
   devAutoReload: boolean;
   devReloadIntervalMs: number;
 }
@@ -103,6 +104,7 @@ function normalizeConfig(raw: Record<string, unknown> | null | undefined): Panel
     llmApiBase: String(raw?.llmApiBase || "https://ai.chen.rs/v1"),
     llmApiKey: String(raw?.llmApiKey || ""),
     llmModel: String(raw?.llmModel || "gpt-5.3-codex"),
+    maxSteps: Number.isFinite(Number(raw?.maxSteps)) ? Number(raw?.maxSteps) : 100,
     devAutoReload: raw?.devAutoReload !== false,
     devReloadIntervalMs: Number.isFinite(Number(raw?.devReloadIntervalMs)) ? Number(raw?.devReloadIntervalMs) : 1500
   };
@@ -190,6 +192,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
       autoRun: false
     });
     runtime.value = result.runtime;
+    activeSessionId.value = result.sessionId;
     await refreshSessions();
     await loadConversation(result.sessionId, { setActive: true });
   }
@@ -197,16 +200,18 @@ export const useRuntimeStore = defineStore("runtime", () => {
   async function sendPrompt(prompt: string, options: { newSession?: boolean; tabIds?: number[] } = {}) {
     const text = prompt.trim();
     if (!text) return;
-    const useCurrentSession = !options.newSession && !!activeSessionId.value;
+    const preferredSessionId = String(activeSessionId.value || sessions.value[0]?.id || "").trim();
+    const useCurrentSession = !options.newSession && !!preferredSessionId;
     const tabIds = Array.isArray(options.tabIds)
       ? options.tabIds.filter((id) => Number.isInteger(id)).map((id) => Number(id))
       : [];
     const result = await sendMessage<{ sessionId: string; runtime: RuntimeStateView }>("brain.run.start", {
-      sessionId: useCurrentSession ? activeSessionId.value : undefined,
+      sessionId: useCurrentSession ? preferredSessionId : undefined,
       prompt: text,
       tabIds
     });
     runtime.value = result.runtime;
+    activeSessionId.value = result.sessionId;
     await refreshSessions();
     await loadConversation(result.sessionId, { setActive: true });
   }
@@ -435,6 +440,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
           llmApiBase: config.value.llmApiBase.trim(),
           llmApiKey: config.value.llmApiKey,
           llmModel: config.value.llmModel.trim(),
+          maxSteps: Math.max(1, Number(config.value.maxSteps || 100)),
           devAutoReload: config.value.devAutoReload,
           devReloadIntervalMs: Math.max(500, Number(config.value.devReloadIntervalMs || 1500))
         }

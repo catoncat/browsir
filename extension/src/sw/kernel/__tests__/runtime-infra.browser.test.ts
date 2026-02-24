@@ -9,6 +9,7 @@ class FakeWebSocket {
   static readonly CLOSING = 2;
   static readonly CLOSED = 3;
   static instances: FakeWebSocket[] = [];
+  static nextError: Record<string, unknown> | null = null;
 
   readonly url: string;
   readyState = FakeWebSocket.CONNECTING;
@@ -28,7 +29,19 @@ class FakeWebSocket {
 
   send(data: string): void {
     const payload = JSON.parse(data) as { id: string; tool?: string };
+    const pendingError = FakeWebSocket.nextError;
+    FakeWebSocket.nextError = null;
     queueMicrotask(() => {
+      if (pendingError) {
+        this.onmessage?.({
+          data: JSON.stringify({
+            id: payload.id,
+            ok: false,
+            error: pendingError
+          })
+        } as MessageEvent<string>);
+        return;
+      }
       this.onmessage?.({
         data: JSON.stringify({
           id: payload.id,
@@ -54,6 +67,7 @@ describe("runtime infra handler", () => {
 
   beforeEach(() => {
     FakeWebSocket.instances = [];
+    FakeWebSocket.nextError = null;
     // vitest 环境下 bridge 不需要真实网络。
     (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = FakeWebSocket as unknown as typeof WebSocket;
     (chrome as unknown as { debugger: any }).debugger = {
@@ -158,7 +172,10 @@ describe("runtime infra handler", () => {
         bridgeToken: "token-x",
         llmApiBase: "https://example.com/v1",
         llmApiKey: "k1",
-        llmModel: "gpt-test"
+        llmModel: "gpt-test",
+        bridgeInvokeTimeoutMs: 180000,
+        llmTimeoutMs: 175000,
+        llmRetryMaxAttempts: 4
       }
     });
     expect(saved?.ok).toBe(true);
@@ -170,6 +187,9 @@ describe("runtime infra handler", () => {
     expect(updated.bridgeUrl).toBe("ws://127.0.0.1:18787/ws");
     expect(updated.bridgeToken).toBe("token-x");
     expect(updated.llmModel).toBe("gpt-test");
+    expect(updated.bridgeInvokeTimeoutMs).toBe(180000);
+    expect(updated.llmTimeoutMs).toBe(175000);
+    expect(updated.llmRetryMaxAttempts).toBe(4);
   });
 
   it("supports lease acquire/heartbeat/release contract", async () => {
@@ -241,6 +261,34 @@ describe("runtime infra handler", () => {
     expect(invokeData.ok).toBe(true);
     expect(innerData.echoedTool).toBe("read");
     expect(FakeWebSocket.instances.length).toBeGreaterThan(0);
+  });
+
+  it("propagates bridge invoke error code/details", async () => {
+    const infra = createRuntimeInfraHandler();
+    const connect = await infra.handleMessage({ type: "bridge.connect" });
+    expect(connect?.ok).toBe(true);
+
+    FakeWebSocket.nextError = {
+      code: "E_BUSY",
+      message: "Bridge concurrency limit reached",
+      details: {
+        maxConcurrency: 1
+      }
+    };
+
+    await expect(
+      infra.handleMessage({
+        type: "bridge.invoke",
+        payload: {
+          tool: "read",
+          args: { path: "/tmp/demo.txt" }
+        }
+      })
+    ).rejects.toMatchObject({
+      message: "Bridge concurrency limit reached",
+      code: "E_BUSY",
+      retryable: true
+    });
   });
 
   it("supports cdp.observe/snapshot/action/verify with lease guard", async () => {

@@ -316,7 +316,10 @@ describe("runtime-router.browser", () => {
         bridgeToken: "token-demo",
         llmApiBase: "https://example.ai/v1",
         llmApiKey: "sk-demo",
-        llmModel: "gpt-test"
+        llmModel: "gpt-test",
+        bridgeInvokeTimeoutMs: 180000,
+        llmTimeoutMs: 160000,
+        llmRetryMaxAttempts: 3
       }
     });
     expect(saved.ok).toBe(true);
@@ -351,6 +354,9 @@ describe("runtime-router.browser", () => {
     const debugCfgData = (debugCfg.data || {}) as Record<string, unknown>;
     expect(debugCfgData.bridgeUrl).toBe("ws://127.0.0.1:17777/ws");
     expect(debugCfgData.hasLlmApiKey).toBe(true);
+    expect(debugCfgData.bridgeInvokeTimeoutMs).toBe(180000);
+    expect(debugCfgData.llmTimeoutMs).toBe(160000);
+    expect(debugCfgData.llmRetryMaxAttempts).toBe(3);
 
     const dumped = await invokeRuntime({
       type: "brain.debug.dump",

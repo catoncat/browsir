@@ -621,6 +621,9 @@ async function handleBrainDebug(orchestrator: BrainOrchestrator, infra: RuntimeI
       bridgeUrl: String(cfg.bridgeUrl || ""),
       llmApiBase: String(cfg.llmApiBase || ""),
       llmModel: String(cfg.llmModel || "gpt-5.3-codex"),
+      bridgeInvokeTimeoutMs: Number(cfg.bridgeInvokeTimeoutMs || 0),
+      llmTimeoutMs: Number(cfg.llmTimeoutMs || 0),
+      llmRetryMaxAttempts: Number(cfg.llmRetryMaxAttempts || 0),
       hasLlmApiKey: !!String(cfg.llmApiKey || "").trim()
     });
   }

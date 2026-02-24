@@ -33,6 +33,7 @@ const props = defineProps<{
   toolName?: string;
   toolCallId?: string;
   toolPending?: boolean;
+  toolPendingLeaving?: boolean;
   toolPendingStatus?: "running" | "done" | "failed";
   toolPendingHeadline?: string;
   toolPendingAction?: string;
@@ -150,9 +151,6 @@ const pendingLineCount = computed(() =>
   pendingStepItems.value.reduce((total, item) => total + 1 + item.logs.length, 0)
 );
 const pendingCardExpandable = computed(() => pendingLineCount.value > 10);
-const streamingIndicatorText = computed(() =>
-  String(props.content || "").trim() ? "输出中" : "思考中"
-);
 
 function visibleLogsForStep(logs: string[]) {
   if (pendingCardExpanded.value) return logs;
@@ -376,15 +374,12 @@ watch(
 
       <div
         v-if="isAssistantStreaming"
-        class="inline-flex items-center gap-1.5 text-[11px] font-medium text-ui-text-muted"
+        class="inline-flex items-center text-[12px] font-mono text-ui-text-muted"
         role="status"
         aria-live="polite"
         data-testid="assistant-streaming-spinner"
       >
-        <span>{{ streamingIndicatorText }}</span>
-        <span class="thinking-dots" aria-hidden="true">
-          <span></span><span></span><span></span>
-        </span>
+        <span class="streaming-ellipsis" aria-label="正在思考">...</span>
       </div>
 
       <!-- Action Bar: Copy + Retry + Fork -->
@@ -457,7 +452,8 @@ watch(
     <!-- Tool Pending Placeholder -->
     <div
       v-else-if="isToolPending"
-      class="flex flex-col pr-2"
+      class="flex flex-col pr-2 transition-all duration-200 ease-out"
+      :class="props.toolPendingLeaving ? 'opacity-0 -translate-y-1 pointer-events-none' : 'opacity-100 translate-y-0'"
       role="status"
       aria-live="polite"
       aria-label="工具执行中"
@@ -597,37 +593,35 @@ watch(
   scrollbar-gutter: stable both-edges;
 }
 
-.thinking-dots {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
+.streaming-ellipsis {
+  display: inline-block;
+  width: 3ch;
+  overflow: hidden;
+  white-space: nowrap;
+  letter-spacing: 0.04em;
+  animation: streaming-ellipsis 1s steps(4, end) infinite;
 }
 
-.thinking-dots > span {
-  width: 4px;
-  height: 4px;
-  border-radius: 999px;
-  background: currentColor;
-  opacity: 0.3;
-  animation: thinking-dot 1.2s ease-in-out infinite;
-}
-
-.thinking-dots > span:nth-child(2) {
-  animation-delay: 0.15s;
-}
-
-.thinking-dots > span:nth-child(3) {
-  animation-delay: 0.3s;
-}
-
-@keyframes thinking-dot {
-  0%, 80%, 100% {
-    opacity: 0.3;
-    transform: translateY(0);
+@keyframes streaming-ellipsis {
+  0% {
+    width: 0ch;
+    opacity: 0.35;
   }
-  40% {
+  35% {
+    width: 1ch;
+    opacity: 0.62;
+  }
+  65% {
+    width: 2ch;
+    opacity: 0.82;
+  }
+  85% {
+    width: 3ch;
     opacity: 1;
-    transform: translateY(-1px);
+  }
+  100% {
+    width: 3ch;
+    opacity: 0.45;
   }
 }
 
@@ -636,8 +630,9 @@ watch(
     animation: none !important;
   }
 
-  .thinking-dots > span {
+  .streaming-ellipsis {
     animation: none;
+    width: 3ch;
     opacity: 0.8;
   }
 }
