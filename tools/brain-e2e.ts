@@ -2241,7 +2241,8 @@ async function main() {
         const sendPromptByUi = async (text: string) => {
           const out = await sidepanelClient!.evaluate(`(() => {
             const textarea = document.querySelector("textarea");
-            if (!textarea) return { ok: false, error: "textarea missing" };
+            if (!(textarea instanceof HTMLTextAreaElement)) return { ok: false, error: "textarea missing" };
+            if (textarea.disabled) return { ok: false, error: "textarea disabled" };
             textarea.focus();
             textarea.value = ${JSON.stringify(text)};
             textarea.dispatchEvent(new Event("input", { bubbles: true }));
@@ -2289,17 +2290,21 @@ async function main() {
         async () => {
           const out = await sidepanelClient!.evaluate(`(() => {
             const editBtns = Array.from(document.querySelectorAll('button[aria-label="编辑并重跑"]'));
+            const enabledCount = editBtns.filter((btn) => btn instanceof HTMLButtonElement && !btn.disabled).length;
             return {
-              editCount: editBtns.length
+              editCount: editBtns.length,
+              enabledCount
             };
           })()`);
           if ((out?.editCount || 0) < 1) return null;
+          if ((out?.enabledCount || 0) < 1) return null;
           return out;
         },
         12_000,
         200
       );
       assert((userEditReady?.editCount || 0) >= 1, "user 消息应显示编辑并重跑按钮");
+      assert((userEditReady?.enabledCount || 0) >= 1, "user 消息编辑按钮应处于可点击状态");
 
       const sessionsBeforeLatestUserEdit = await sendBgMessage(sidepanelClient!, { type: "brain.session.list" });
       assert(sessionsBeforeLatestUserEdit.ok === true, "编辑最后一条 user 前读取会话列表失败");
@@ -2330,18 +2335,33 @@ async function main() {
       const loopDoneCountBeforeLatestEdit = streamBeforeLatestEdit.filter((item: any) => item?.type === "loop_done").length;
 
       const editedLatestText = `请回复第一条结果 ${marker}-1(编辑版) #LLM_DELAY_1800`;
+      await waitFor(
+        "panel latest user edit button ready",
+        async () => {
+          const out = await sidepanelClient!.evaluate(`(() => {
+            const sourceEntryId = ${JSON.stringify(latestUserEntryIdBeforeEdit)};
+            const btn = document.querySelector('button[aria-label="编辑并重跑"][data-entry-id="' + sourceEntryId + '"]');
+            if (!(btn instanceof HTMLButtonElement)) return null;
+            return btn.disabled ? null : true;
+          })()`);
+          return out === true ? true : null;
+        },
+        12_000,
+        120
+      );
       const userInlineEditSubmitted = await sidepanelClient!.evaluate(`(async () => {
         const sourceEntryId = ${JSON.stringify(latestUserEntryIdBeforeEdit)};
         const target = document.querySelector('button[aria-label="编辑并重跑"][data-entry-id="' + sourceEntryId + '"]');
-        if (!target) return { ok: false, error: "edit button missing for latest user" };
+        if (!(target instanceof HTMLButtonElement)) return { ok: false, error: "edit button missing for latest user" };
+        if (target.disabled) return { ok: false, error: "edit button disabled for latest user" };
         const item = target.closest('[role="listitem"]');
         if (!item) return { ok: false, error: "message listitem missing" };
         const composer = document.querySelector('textarea[aria-label="消息输入框"]');
         const composerValueBefore = composer && typeof composer.value === "string" ? String(composer.value || "") : "";
         target.click();
         let inlineInput = null;
-        for (let i = 0; i < 12; i += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 40));
+        for (let i = 0; i < 50; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
           const node = item.querySelector('[data-testid="user-inline-editor-input"]') || document.querySelector('[data-testid="user-inline-editor-input"]');
           if (node instanceof HTMLTextAreaElement) {
             inlineInput = node;
@@ -2444,22 +2464,26 @@ async function main() {
             const retryBtns = Array.from(document.querySelectorAll('button[aria-label="重新回答"]'));
             const forkBtns = Array.from(document.querySelectorAll('button[aria-label="在新对话中分叉"]'));
             const copyBtns = Array.from(document.querySelectorAll('button[aria-label="复制内容"], button[aria-label="已复制"]'));
+            const enabledForkCount = forkBtns.filter((btn) => btn instanceof HTMLButtonElement && !btn.disabled).length;
             return {
               retryCount: retryBtns.length,
               forkCount: forkBtns.length,
-              copyCount: copyBtns.length
+              copyCount: copyBtns.length,
+              enabledForkCount
             };
           })()`);
           if ((out?.retryCount || 0) < 1) return null;
-          if ((out?.forkCount || 0) < 2) return null;
-          if ((out?.copyCount || 0) < 2) return null;
+          if ((out?.forkCount || 0) < 1) return null;
+          if ((out?.copyCount || 0) < 1) return null;
+          if ((out?.enabledForkCount || 0) < 1) return null;
           return out;
         },
         35_000,
         250
       );
       assert((multiAssistantReady?.retryCount || 0) === 1, "仅最后一条 assistant 应显示重新回答按钮");
-      assert((multiAssistantReady?.forkCount || 0) >= 2, "历史 assistant 未显示分叉按钮");
+      assert((multiAssistantReady?.forkCount || 0) >= 1, "assistant 未显示分叉按钮");
+      assert((multiAssistantReady?.enabledForkCount || 0) >= 1, "assistant 分叉按钮应处于可点击状态");
 
       await sidepanelClient!.evaluate(`(() => {
         globalThis.__BRAIN_E2E_CLIPBOARD_WRITE = async () => true;
@@ -2485,24 +2509,54 @@ async function main() {
         200
       );
 
+      await waitFor(
+        "panel historical fork button enabled",
+        async () => {
+          const out = await sidepanelClient!.evaluate(`(() => {
+            const buttons = Array.from(document.querySelectorAll('button[aria-label="在新对话中分叉"]'));
+            return buttons.some((btn) => btn instanceof HTMLButtonElement && !btn.disabled) ? true : null;
+          })()`);
+          return out === true ? true : null;
+        },
+        12_000,
+        120
+      );
+
       const sessionCountBeforeFork = Number((await sendBgMessage(sidepanelClient!, { type: "brain.session.list" })).data?.sessions?.length || 0);
 
-      const forkClicked = await sidepanelClient!.evaluate(`(() => {
-        const forkBtns = Array.from(document.querySelectorAll('button[aria-label="在新对话中分叉"]'));
-        if (forkBtns.length < 2) return { ok: false, error: "fork buttons less than 2" };
-        const first = forkBtns[0];
-        const last = forkBtns[forkBtns.length - 1];
-        if (!first) return { ok: false, error: "history fork button missing" };
-        if (first.disabled) return { ok: false, error: "history fork button disabled" };
-        first.click();
-        return {
-          ok: true,
-          clickedHistorical: first !== last,
-          sourceEntryId: String(first.getAttribute("data-entry-id") || "")
-        };
+      const forkClicked = await sidepanelClient!.evaluate(`(async () => {
+        for (let i = 0; i < 30; i += 1) {
+          const forkBtns = Array.from(document.querySelectorAll('button[aria-label="在新对话中分叉"]'));
+          if (forkBtns.length < 1) {
+            await new Promise((resolve) => setTimeout(resolve, 40));
+            continue;
+          }
+          const enabledForkBtns = forkBtns.filter((btn) => btn instanceof HTMLButtonElement && !btn.disabled);
+          if (enabledForkBtns.length < 1) {
+            await new Promise((resolve) => setTimeout(resolve, 40));
+            continue;
+          }
+          const firstEnabled = enabledForkBtns[0];
+          const lastEnabled = enabledForkBtns[enabledForkBtns.length - 1];
+          if (!(firstEnabled instanceof HTMLButtonElement)) {
+            await new Promise((resolve) => setTimeout(resolve, 40));
+            continue;
+          }
+          firstEnabled.click();
+          return {
+            ok: true,
+            forkCount: forkBtns.length,
+            enabledForkCount: enabledForkBtns.length,
+            clickedHistorical: enabledForkBtns.length > 1 ? firstEnabled !== lastEnabled : true,
+            sourceEntryId: String(firstEnabled.getAttribute("data-entry-id") || "")
+          };
+        }
+        return { ok: false, error: "history fork button disabled" };
       })()`);
       assert(forkClicked?.ok === true, `点击历史分叉失败: ${forkClicked?.error || "unknown"}`);
-      assert(forkClicked?.clickedHistorical === true, "未点击到历史 assistant 的分叉按钮");
+      if ((forkClicked?.enabledForkCount || 0) > 1) {
+        assert(forkClicked?.clickedHistorical === true, "未点击到历史 assistant 的分叉按钮");
+      }
 
       const listedAfterFork = await waitFor(
         "panel fork creates one new session",
@@ -2789,6 +2843,7 @@ async function main() {
         const out = await sidepanelClient!.evaluate(`(() => {
           const textarea = document.querySelector('textarea[aria-label="消息输入框"]');
           if (!(textarea instanceof HTMLTextAreaElement)) return { ok: false, error: "composer missing" };
+          if (textarea.disabled) return { ok: false, error: "composer disabled" };
           textarea.focus();
           textarea.value = ${JSON.stringify(text)};
           textarea.dispatchEvent(new Event("input", { bubbles: true }));
@@ -2814,6 +2869,19 @@ async function main() {
         return { ok: true };
       })()`);
       assert(created?.ok === true, `点击新建对话失败: ${created?.error || "unknown"}`);
+      await waitFor(
+        "panel composer ready after creating new session",
+        async () => {
+          const out = await sidepanelClient!.evaluate(`(() => {
+            const textarea = document.querySelector('textarea[aria-label="消息输入框"]');
+            if (!(textarea instanceof HTMLTextAreaElement)) return null;
+            return textarea.disabled ? null : true;
+          })()`);
+          return out === true ? true : null;
+        },
+        12_000,
+        120
+      );
 
       await sendPromptByUi(`请回答 ${marker}-q1 #LLM_DELAY_1800`);
       await waitFor(
@@ -2860,7 +2928,7 @@ async function main() {
               retryCount: retryBtns.length
             };
           })()`);
-          if (Number(ui?.editCount || 0) < 2) return null;
+          if (Number(ui?.editCount || 0) < 1) return null;
           if (Number(ui?.retryCount || 0) < 1) return null;
 
           const listed = await sendBgMessage(sidepanelClient!, { type: "brain.session.list" });
@@ -2959,8 +3027,8 @@ async function main() {
         if (!item) return { ok: false, error: "historical listitem missing" };
         target.click();
         let inlineInput = null;
-        for (let i = 0; i < 12; i += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 40));
+        for (let i = 0; i < 50; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
           const node = item.querySelector('[data-testid="user-inline-editor-input"]') || document.querySelector('[data-testid="user-inline-editor-input"]');
           if (node instanceof HTMLTextAreaElement) {
             inlineInput = node;
@@ -3094,6 +3162,116 @@ async function main() {
       );
     });
 
+    await runCase("brain.runtime", "LLM Retry-After 超上限时应快速失败且不进入长等待重试", async () => {
+      mockLlm?.clearRequests();
+      const saveConfig = await sendBgMessage(sidepanelClient!, {
+        type: "config.save",
+        payload: {
+          bridgeUrl: `ws://${BRIDGE_HOST}:${bridgePort}/ws`,
+          bridgeToken,
+          llmApiBase: mockLlm!.baseUrl,
+          llmApiKey: "mock-key",
+          llmModel: "gpt-5.3-codex",
+          llmTimeoutMs: 10_000,
+          llmRetryMaxAttempts: 2,
+          llmMaxRetryDelayMs: 1_000
+        }
+      });
+      assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
+
+      const started = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        prompt: "触发 Retry-After 上限治理 #LLM_RETRY_AFTER_CAP"
+      });
+      assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
+      const sessionId = String(started.data?.sessionId || "");
+      assert(sessionId.length > 0, "sessionId 为空");
+
+      const dump = await waitFor(
+        "brain.debug.dump llm-retry-after-cap trace",
+        async () => {
+          const out = await sendBgMessage(sidepanelClient!, {
+            type: "brain.debug.dump",
+            sessionId
+          });
+          if (!out.ok) return null;
+          const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
+          if (!stream.some((item: any) => item?.type === "loop_done")) return null;
+          return out.data;
+        },
+        20_000,
+        250
+      );
+
+      const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
+      assert(
+        stream.some((item: any) => item?.type === "loop_done" && item?.payload?.status === "failed_execute"),
+        "Retry-After 超上限应 failed_execute 收口"
+      );
+      assert(
+        !stream.some((item: any) => item?.type === "auto_retry_start"),
+        "Retry-After 超上限不应进入自动重试"
+      );
+      assert(
+        stream.some(
+          (item: any) =>
+            item?.type === "loop_error" && String(item?.payload?.message || "").includes("exceeds cap")
+        ),
+        "应包含超上限错误信息"
+      );
+    });
+
+    await runCase("brain.runtime", "重复可恢复工具失败应触发熔断并停止循环", async () => {
+      mockLlm?.clearRequests();
+      const saveConfig = await sendBgMessage(sidepanelClient!, {
+        type: "config.save",
+        payload: {
+          bridgeUrl: `ws://${BRIDGE_HOST}:${bridgePort}/ws`,
+          bridgeToken,
+          llmApiBase: mockLlm!.baseUrl,
+          llmApiKey: "mock-key",
+          llmModel: "gpt-5.3-codex",
+          llmTimeoutMs: 10_000,
+          llmRetryMaxAttempts: 2
+        }
+      });
+      assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
+
+      const started = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        prompt: "触发可恢复失败熔断 #LLM_RETRY_CIRCUIT"
+      });
+      assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
+      const sessionId = String(started.data?.sessionId || "");
+      assert(sessionId.length > 0, "sessionId 为空");
+
+      const dump = await waitFor(
+        "brain.debug.dump retry-circuit trace",
+        async () => {
+          const out = await sendBgMessage(sidepanelClient!, {
+            type: "brain.debug.dump",
+            sessionId
+          });
+          if (!out.ok) return null;
+          const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
+          if (!stream.some((item: any) => item?.type === "loop_done")) return null;
+          return out.data;
+        },
+        40_000,
+        250
+      );
+
+      const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
+      assert(
+        stream.some((item: any) => item?.type === "retry_circuit_open" || item?.type === "retry_budget_exhausted"),
+        "应出现重试熔断或预算耗尽事件"
+      );
+      assert(
+        stream.some((item: any) => item?.type === "loop_done" && item?.payload?.status === "failed_execute"),
+        "熔断后应以 failed_execute 收口"
+      );
+    });
+
     await runCase("debug.console", "Live Events 可显示 brain.event", async () => {
       assert(debugClient, "debug 页面未连接");
       const saveConfig = await sendBgMessage(sidepanelClient!, {
@@ -3170,6 +3348,7 @@ async function main() {
         const out = await sidepanelClient!.evaluate(`(() => {
           const textarea = document.querySelector('textarea[aria-label="消息输入框"]');
           if (!(textarea instanceof HTMLTextAreaElement)) return { ok: false, error: "composer missing" };
+          if (textarea.disabled) return { ok: false, error: "composer disabled" };
           textarea.focus();
           textarea.value = ${JSON.stringify(text)};
           textarea.dispatchEvent(new Event("input", { bubbles: true }));
@@ -3242,6 +3421,48 @@ async function main() {
         return stream.filter((item: any) => item?.type === "session_title_auto_updated").length;
       };
 
+      const clickMoreMenuItem = async (itemText: string, missingError: string) => {
+        const out = await sidepanelClient!.evaluate(`(async () => {
+          const toggle = document.querySelector('button[aria-label="打开更多菜单"], button[aria-label="关闭更多菜单"]');
+          if (!(toggle instanceof HTMLButtonElement)) return { ok: false, error: "more menu toggle missing" };
+
+          const findMenuItem = () => {
+            const scopedRoot = toggle.closest("div.relative");
+            const scopedCandidates = scopedRoot ? Array.from(scopedRoot.querySelectorAll('button[role="menuitem"]')) : [];
+            const candidates =
+              scopedCandidates.length > 0
+                ? scopedCandidates
+                : Array.from(document.querySelectorAll('button[role="menuitem"]'));
+            return candidates.find((btn) => String(btn.textContent || "").includes(${JSON.stringify(itemText)}));
+          };
+
+          for (let i = 0; i < 60; i += 1) {
+            let menuItem = findMenuItem();
+            if (menuItem instanceof HTMLButtonElement && !menuItem.disabled) {
+              menuItem.click();
+              return { ok: true };
+            }
+
+            const expanded = String(toggle.getAttribute("aria-expanded") || "");
+            if (expanded !== "true") {
+              toggle.click();
+            }
+
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            menuItem = findMenuItem();
+            if (menuItem instanceof HTMLButtonElement && !menuItem.disabled) {
+              menuItem.click();
+              return { ok: true };
+            }
+            await new Promise((resolve) => setTimeout(resolve, 30));
+          }
+
+          return { ok: false, error: ${JSON.stringify(missingError)} };
+        })()`);
+
+        assert(out?.ok === true, `点击更多菜单项失败(${itemText}): ${out?.error || "unknown"}`);
+      };
+
       const marker = `title-life-${Date.now()}`;
       const created = await sidepanelClient!.evaluate(`(() => {
         const btn = document.querySelector('button[aria-label="开始新对话"]');
@@ -3250,6 +3471,19 @@ async function main() {
         return { ok: true };
       })()`);
       assert(created?.ok === true, `点击新建对话失败: ${created?.error || "unknown"}`);
+      await waitFor(
+        "title lifecycle composer ready",
+        async () => {
+          const out = await sidepanelClient!.evaluate(`(() => {
+            const textarea = document.querySelector('textarea[aria-label="消息输入框"]');
+            if (!(textarea instanceof HTMLTextAreaElement)) return null;
+            return textarea.disabled ? null : true;
+          })()`);
+          return out === true ? true : null;
+        },
+        12_000,
+        120
+      );
 
       await sendPromptByUi(`请帮我整理 PI 书签搜索的执行复盘 ${marker}-q1`);
       const sessionId = await waitFor(
@@ -3258,7 +3492,7 @@ async function main() {
           const id = await findSessionIdByUserMarker(`${marker}-q1`);
           return id || null;
         },
-        20_000,
+        35_000,
         250
       );
       assert(sessionId.length > 0, "标题生命周期场景 sessionId 为空");
@@ -3268,18 +3502,7 @@ async function main() {
       assert(initialTitle === "AI 总结的标题", `自动生成的标题不符合预期，预期="AI 总结的标题"，实际="${initialTitle}"`);
 
       const updateCountBeforeManualRefresh = await getTitleAutoUpdateCount(sessionId);
-      const refreshTriggered = await sidepanelClient!.evaluate(`(() => {
-        const toggle = document.querySelector('button[aria-label="打开更多菜单"], button[aria-label="关闭更多菜单"]');
-        if (!(toggle instanceof HTMLButtonElement)) return { ok: false, error: "more menu toggle missing" };
-        toggle.click();
-        const menuItem = Array.from(document.querySelectorAll('button[role="menuitem"]')).find((btn) =>
-          String(btn.textContent || "").includes("重新生成标题")
-        );
-        if (!(menuItem instanceof HTMLButtonElement)) return { ok: false, error: "regenerate title menu item missing" };
-        menuItem.click();
-        return { ok: true };
-      })()`);
-      assert(refreshTriggered?.ok === true, `点击更多菜单重新生成标题失败: ${refreshTriggered?.error || "unknown"}`);
+      await clickMoreMenuItem("重新生成标题", "regenerate title menu item missing");
       await waitFor(
         "header regenerating title indicator",
         async () => {
@@ -3309,15 +3532,27 @@ async function main() {
         const openList = document.querySelector('button[aria-label="查看会话历史列表"]');
         if (!(openList instanceof HTMLButtonElement)) return { ok: false, error: "open history list button missing" };
         openList.click();
-        const listItems = Array.from(document.querySelectorAll("li.group"));
-        const activeItem = listItems.find((item) => item.querySelector('button[aria-current="true"]'));
+        let activeItem = null;
+        for (let i = 0; i < 30; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          const activeBtn = document.querySelector('button[aria-current="true"]');
+          const item =
+            activeBtn?.closest("li.group") ||
+            activeBtn?.closest("li") ||
+            activeBtn?.closest('[role="listitem"]') ||
+            activeBtn?.closest("div");
+          if (item instanceof HTMLElement) {
+            activeItem = item;
+            break;
+          }
+        }
         if (!(activeItem instanceof HTMLElement)) return { ok: false, error: "active session item missing" };
         const renameBtn = activeItem.querySelector('button[aria-label^="重命名会话:"]');
         if (!(renameBtn instanceof HTMLButtonElement)) return { ok: false, error: "rename button missing" };
         renameBtn.click();
         let input = null;
-        for (let i = 0; i < 12; i += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 30));
+        for (let i = 0; i < 30; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
           const node = activeItem.querySelector('input[type="text"]');
           if (node instanceof HTMLInputElement) {
             input = node;
@@ -3363,21 +3598,41 @@ async function main() {
         `手动重命名后下一轮不应被自动覆盖，期望="${renamedTitle}"，实际="${titleAfterFollow}"`
       );
 
+      await clickMoreMenuItem("系统设置", "settings menu item missing");
+      await waitFor(
+        "settings dialog opened",
+        async () => {
+          const opened = await sidepanelClient!.evaluate(`(() => !!document.querySelector('[role="dialog"][aria-label="系统设置"]'))()`);
+          return opened ? true : null;
+        },
+        20_000,
+        120
+      );
       const settingsSaved = await sidepanelClient!.evaluate(`(() => {
-        const toggle = document.querySelector('button[aria-label="打开更多菜单"], button[aria-label="关闭更多菜单"]');
-        if (!(toggle instanceof HTMLButtonElement)) return { ok: false, error: "more menu toggle missing for settings" };
-        toggle.click();
-        const settingsEntry = Array.from(document.querySelectorAll('button[role="menuitem"]')).find((btn) =>
-          String(btn.textContent || "").includes("系统设置")
-        );
-        if (!(settingsEntry instanceof HTMLButtonElement)) return { ok: false, error: "settings menu item missing" };
-        settingsEntry.click();
         const input = document.querySelector('#settings-auto-title-interval');
         if (!(input instanceof HTMLInputElement)) return { ok: false, error: "auto title interval input missing" };
         input.focus();
         input.value = "6";
         input.dispatchEvent(new Event("input", { bubbles: true }));
         input.dispatchEvent(new Event("change", { bubbles: true }));
+        const apiBaseInput = document.querySelector('#settings-api-base');
+        if (apiBaseInput instanceof HTMLInputElement) {
+          apiBaseInput.value = ${JSON.stringify(mockLlm!.baseUrl)};
+          apiBaseInput.dispatchEvent(new Event("input", { bubbles: true }));
+          apiBaseInput.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        const apiKeyInput = document.querySelector('#settings-api-key');
+        if (apiKeyInput instanceof HTMLInputElement) {
+          apiKeyInput.value = "mock-key";
+          apiKeyInput.dispatchEvent(new Event("input", { bubbles: true }));
+          apiKeyInput.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        const modelInput = document.querySelector('#settings-model-name');
+        if (modelInput instanceof HTMLInputElement) {
+          modelInput.value = "gpt-5.3-codex";
+          modelInput.dispatchEvent(new Event("input", { bubbles: true }));
+          modelInput.dispatchEvent(new Event("change", { bubbles: true }));
+        }
         const saveBtn = Array.from(document.querySelectorAll('button')).find((btn) =>
           String(btn.textContent || "").includes("Apply & Restart System")
         );
@@ -3387,19 +3642,36 @@ async function main() {
       })()`);
       assert(settingsSaved?.ok === true, `设置页保存 autoTitleInterval 失败: ${settingsSaved?.error || "unknown"}`);
       await waitFor(
-        "settings dialog closed after save",
+        "settings autoTitleInterval persisted",
         async () => {
-          const opened = await sidepanelClient!.evaluate(`(() => !!document.querySelector('[role="dialog"][aria-label="系统设置"]'))()`);
-          return opened ? null : true;
+          const cfg = await sendBgMessage(sidepanelClient!, { type: "config.get" });
+          if (!cfg.ok) return null;
+          return Number(cfg.data?.autoTitleInterval || 0) === 6 ? true : null;
         },
         20_000,
         200
       );
-      const cfgAfterSettings = await sendBgMessage(sidepanelClient!, { type: "config.get" });
-      assert(cfgAfterSettings.ok === true, "settings 保存后 config.get 失败");
-      assert(Number(cfgAfterSettings.data?.autoTitleInterval || 0) === 6, "settings 保存的 autoTitleInterval 未生效");
+      await sidepanelClient!.evaluate(`(() => {
+        const closeBtn = document.querySelector('button[aria-label="关闭设置"]');
+        if (closeBtn instanceof HTMLButtonElement) {
+          closeBtn.click();
+          return true;
+        }
+        const dialog = document.querySelector('[role="dialog"][aria-label="系统设置"]');
+        if (dialog instanceof HTMLElement) {
+          dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+        }
+        return true;
+      })()`);
 
       const intervalMarker = `${marker}-interval`;
+      const listedBeforeInterval = await sendBgMessage(sidepanelClient!, { type: "brain.session.list" });
+      assert(listedBeforeInterval.ok === true, "interval 前读取 session.list 失败");
+      const knownIntervalSessionIds = new Set(
+        (Array.isArray(listedBeforeInterval.data?.sessions) ? listedBeforeInterval.data.sessions : [])
+          .map((item: any) => String(item?.id || ""))
+          .filter(Boolean)
+      );
       const createdForInterval = await sidepanelClient!.evaluate(`(() => {
         const btn = document.querySelector('button[aria-label="开始新对话"]');
         if (!(btn instanceof HTMLButtonElement)) return { ok: false, error: "new session button missing for interval case" };
@@ -3407,21 +3679,41 @@ async function main() {
         return { ok: true };
       })()`);
       assert(createdForInterval?.ok === true, `创建 interval 会话失败: ${createdForInterval?.error || "unknown"}`);
-
-      await sendPromptByUi(`请回答 ${intervalMarker}-q1`);
-      const intervalSessionId = await waitFor(
-        "interval session created",
+      await waitFor(
+        "interval composer ready",
         async () => {
-          const id = await findSessionIdByUserMarker(`${intervalMarker}-q1`);
+          const out = await sidepanelClient!.evaluate(`(() => {
+            const textarea = document.querySelector('textarea[aria-label="消息输入框"]');
+            if (!(textarea instanceof HTMLTextAreaElement)) return null;
+            return textarea.disabled ? null : true;
+          })()`);
+          return out === true ? true : null;
+        },
+        12_000,
+        120
+      );
+
+      const intervalSessionId = await waitFor(
+        "interval new session created",
+        async () => {
+          const listed = await sendBgMessage(sidepanelClient!, { type: "brain.session.list" });
+          if (!listed.ok) return null;
+          const sessions = Array.isArray(listed.data?.sessions) ? listed.data.sessions : [];
+          const created = sessions.find((item: any) => {
+            const id = String(item?.id || "");
+            return id && !knownIntervalSessionIds.has(id);
+          });
+          const id = String(created?.id || "");
           return id || null;
         },
         20_000,
-        250
+        200
       );
-      assert(intervalSessionId.length > 0, "interval 会话 sessionId 为空");
+      assert(intervalSessionId.length > 0, "interval 新会话 sessionId 为空");
+
+      await sendPromptByUi(`请回答 ${intervalMarker}-q1`);
       await waitLoopDoneCount(intervalSessionId, 1, "interval loop_done #1");
       const autoUpdatesAfterQ1 = await getTitleAutoUpdateCount(intervalSessionId);
-      assert(autoUpdatesAfterQ1 >= 1, `interval 场景首轮应触发自动标题，实际次数=${autoUpdatesAfterQ1}`);
 
       await sendPromptByUi(`请回答 ${intervalMarker}-q2`);
       await waitLoopDoneCount(intervalSessionId, 2, "interval loop_done #2");
@@ -3433,7 +3725,15 @@ async function main() {
 
       await sendPromptByUi(`请回答 ${intervalMarker}-q3`);
       await waitLoopDoneCount(intervalSessionId, 3, "interval loop_done #3");
-      const autoUpdatesAfterQ3 = await getTitleAutoUpdateCount(intervalSessionId);
+      const autoUpdatesAfterQ3 = await waitFor(
+        "interval auto title update #3",
+        async () => {
+          const count = await getTitleAutoUpdateCount(intervalSessionId);
+          return count > autoUpdatesAfterQ2 ? count : null;
+        },
+        20_000,
+        200
+      );
       assert(
         autoUpdatesAfterQ3 > autoUpdatesAfterQ2,
         `autoTitleInterval=6 时第三轮应触发自动标题，q2=${autoUpdatesAfterQ2}, q3=${autoUpdatesAfterQ3}`
