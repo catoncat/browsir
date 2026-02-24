@@ -113,7 +113,7 @@ describe("orchestrator.browser", () => {
     expect(result.data).toEqual({ ok: true, source: "script" });
   });
 
-  it("script 失败后降级到 cdp", async () => {
+  it("script 失败时直接返回失败（不做 cdp fallback）", async () => {
     const orchestrator = new BrainOrchestrator();
     orchestrator.registerToolProvider(
       "script",
@@ -122,14 +122,6 @@ describe("orchestrator.browser", () => {
         invoke: async () => {
           throw new Error("script-failed");
         }
-      },
-      { replace: true }
-    );
-    orchestrator.registerToolProvider(
-      "cdp",
-      {
-        id: "test.cdp.fallback",
-        invoke: async () => ({ ok: true, source: "cdp" })
       },
       { replace: true }
     );
@@ -142,10 +134,10 @@ describe("orchestrator.browser", () => {
       args: { ref: "a1" }
     });
 
-    expect(result.ok).toBe(true);
-    expect(result.modeUsed).toBe("cdp");
-    expect(result.fallbackFrom).toBe("script");
-    expect(result.data).toEqual({ ok: true, source: "cdp" });
+    expect(result.ok).toBe(false);
+    expect(result.modeUsed).toBe("script");
+    expect(result.fallbackFrom).toBeUndefined();
+    expect(String(result.error || "")).toContain("script-failed");
   });
 
   it("cdp 失败时直接返回失败", async () => {
@@ -175,7 +167,7 @@ describe("orchestrator.browser", () => {
     expect(result.error).toContain("cdp-failed");
   });
 
-  it("script 失败且无 cdp provider 时保持抛错语义", async () => {
+  it("script 失败且无 cdp provider 时保持失败结果语义", async () => {
     const orchestrator = new BrainOrchestrator();
     orchestrator.registerToolProvider(
       "script",
@@ -189,14 +181,17 @@ describe("orchestrator.browser", () => {
     );
     const created = await orchestrator.createSession({ title: "missing-cdp-provider" });
 
-    await expect(
-      orchestrator.executeStep({
-        sessionId: created.sessionId,
-        mode: "script",
-        action: "click",
-        args: { ref: "a1" }
-      })
-    ).rejects.toThrow("cdp adapter 未配置");
+    const result = await orchestrator.executeStep({
+      sessionId: created.sessionId,
+      mode: "script",
+      action: "click",
+      args: { ref: "a1" }
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.modeUsed).toBe("script");
+    expect(result.fallbackFrom).toBeUndefined();
+    expect(String(result.error || "")).toContain("script-failed");
   });
 
   it("tool.before_call hook 可阻断执行", async () => {

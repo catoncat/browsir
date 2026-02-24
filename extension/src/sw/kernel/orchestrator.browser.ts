@@ -523,9 +523,7 @@ export class BrainOrchestrator {
     let modeUsed: ExecuteMode = initialMode;
     let verifyInput: ExecuteStepInput = nextInput;
     let capabilityUsed: ExecuteCapability | undefined;
-    let fallbackFrom: ExecuteMode | undefined;
     let data: unknown;
-    const capabilityBound = Boolean(nextInput.capability && this.toolProviders.hasCapability(nextInput.capability));
 
     try {
       const invoked = await this.invokeProviderWithHooks(initialMode, nextInput);
@@ -543,22 +541,12 @@ export class BrainOrchestrator {
         });
       }
 
-      if (initialMode !== "script" || capabilityBound) {
-        return this.applyAfterExecuteHook(nextInput, {
-          ok: false,
-          modeUsed,
-          error: error instanceof Error ? error.message : String(error),
-          verified: false
-        });
-      }
-
-      fallbackFrom = "script";
-      modeUsed = "cdp";
-      const invoked = await this.invokeProviderWithHooks("cdp", { ...nextInput, mode: "cdp", capability: undefined });
-      modeUsed = invoked.modeUsed;
-      verifyInput = invoked.inputUsed;
-      capabilityUsed = invoked.capabilityUsed;
-      data = invoked.data;
+      return this.applyAfterExecuteHook(nextInput, {
+        ok: false,
+        modeUsed,
+        error: error instanceof Error ? error.message : String(error),
+        verified: false
+      });
     }
 
     let verified = false;
@@ -577,7 +565,6 @@ export class BrainOrchestrator {
       ok: true,
       modeUsed,
       capabilityUsed,
-      fallbackFrom,
       verified,
       verifyReason,
       data
