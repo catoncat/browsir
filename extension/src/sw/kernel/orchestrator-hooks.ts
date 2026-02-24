@@ -1,4 +1,4 @@
-import type { ExecuteMode, ExecuteStepInput, ExecuteStepResult } from "./types";
+import type { ExecuteCapability, ExecuteMode, ExecuteStepInput, ExecuteStepResult } from "./types";
 import type { AgentEndDecision, AgentEndInput, RuntimeView } from "./orchestrator.browser";
 
 export interface OrchestratorHookMap {
@@ -25,10 +25,12 @@ export interface OrchestratorHookMap {
   };
   "tool.before_call": {
     mode: ExecuteMode;
+    capability?: ExecuteCapability;
     input: ExecuteStepInput;
   };
   "tool.after_result": {
     mode: ExecuteMode;
+    capability?: ExecuteCapability;
     input: ExecuteStepInput;
     result: unknown;
   };

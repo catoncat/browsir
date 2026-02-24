@@ -5,6 +5,7 @@ import type { OrchestratorHookMap } from "./orchestrator-hooks";
 import { BrowserSessionManager } from "./session-manager.browser";
 import { appendTraceChunk, readTraceChunk } from "./session-store.browser";
 import {
+  type ExecuteCapability,
   nowIso,
   randomId,
   type ExecuteMode,
@@ -14,8 +15,9 @@ import {
   type StepTraceRecord
 } from "./types";
 import { ToolProviderRegistry, type RegisterProviderOptions, type StepToolProvider } from "./tool-provider-registry";
+import { PluginRuntime, type AgentPluginDefinition, type PluginRuntimeView } from "./plugin-runtime";
 
-export type { ExecuteMode, ExecuteStepInput, ExecuteStepResult } from "./types";
+export type { ExecuteCapability, ExecuteMode, ExecuteStepInput, ExecuteStepResult } from "./types";
 
 export interface OrchestratorOptions {
   retryMaxAttempts?: number;
@@ -83,6 +85,15 @@ export class BrainOrchestrator {
   private readonly verifyAdapter?: ExecutionAdapters["verify"];
   private readonly hooks = new HookRunner<OrchestratorHookMap>();
   private readonly toolProviders = new ToolProviderRegistry();
+  private readonly plugins = new PluginRuntime({
+    onHook: (hook, handler, options) => this.onHook(hook, handler, options),
+    registerToolProvider: (mode, provider, options) => this.registerToolProvider(mode, provider, options),
+    unregisterToolProvider: (mode, expectedProviderId) => this.unregisterToolProvider(mode, expectedProviderId),
+    registerCapabilityProvider: (capability, provider, options) =>
+      this.registerCapabilityProvider(capability, provider, options),
+    unregisterCapabilityProvider: (capability, expectedProviderId) =>
+      this.unregisterCapabilityProvider(capability, expectedProviderId)
+  });
   private readonly runStateBySession = new Map<string, RunState>();
   private readonly streamBySession = new Map<string, StepTraceRecord[]>();
 
@@ -108,12 +119,57 @@ export class BrainOrchestrator {
     this.toolProviders.register(mode, provider, options);
   }
 
-  unregisterToolProvider(mode: ExecuteMode): boolean {
-    return this.toolProviders.unregister(mode);
+  unregisterToolProvider(mode: ExecuteMode, expectedProviderId?: string): boolean {
+    return this.toolProviders.unregister(mode, expectedProviderId);
   }
 
   listToolProviders(): Array<{ mode: ExecuteMode; id: string }> {
     return this.toolProviders.list();
+  }
+
+  registerCapabilityProvider(
+    capability: ExecuteCapability,
+    provider: StepToolProvider,
+    options: RegisterProviderOptions = {}
+  ): void {
+    this.toolProviders.registerCapability(capability, provider, options);
+  }
+
+  unregisterCapabilityProvider(capability: ExecuteCapability, expectedProviderId?: string): boolean {
+    return this.toolProviders.unregisterCapability(capability, expectedProviderId);
+  }
+
+  listCapabilityProviders(): Array<{ capability: ExecuteCapability; id: string; mode?: ExecuteMode }> {
+    return this.toolProviders.listCapabilities();
+  }
+
+  hasCapabilityProvider(capability: ExecuteCapability): boolean {
+    return this.toolProviders.hasCapability(capability);
+  }
+
+  resolveModeForCapability(capability: ExecuteCapability): ExecuteMode | null {
+    const provider = this.toolProviders.getCapability(capability);
+    return provider?.mode || null;
+  }
+
+  registerPlugin(definition: AgentPluginDefinition, options: { enable?: boolean; replace?: boolean } = {}): void {
+    this.plugins.register(definition, options);
+  }
+
+  unregisterPlugin(pluginId: string): boolean {
+    return this.plugins.unregister(pluginId);
+  }
+
+  enablePlugin(pluginId: string): void {
+    this.plugins.enable(pluginId);
+  }
+
+  disablePlugin(pluginId: string): void {
+    this.plugins.disable(pluginId);
+  }
+
+  listPlugins(): PluginRuntimeView[] {
+    return this.plugins.list();
   }
 
   onHook<K extends keyof OrchestratorHookMap & string>(
@@ -325,20 +381,21 @@ export class BrainOrchestrator {
   private async invokeProviderWithHooks(
     mode: ExecuteMode,
     input: ExecuteStepInput
-  ): Promise<{ modeUsed: ExecuteMode; inputUsed: ExecuteStepInput; data: unknown }> {
-    const beforeTool = await this.hooks.run("tool.before_call", { mode, input });
+  ): Promise<{ modeUsed: ExecuteMode; inputUsed: ExecuteStepInput; data: unknown; capabilityUsed?: ExecuteCapability }> {
+    const beforeTool = await this.hooks.run("tool.before_call", { mode, capability: input.capability, input });
     if (beforeTool.blocked) {
       throw new HookBlockError(`tool.before_call blocked: ${beforeTool.reason || "blocked"}`);
     }
 
     const invokeMode = beforeTool.value.mode;
     const invokeInput = beforeTool.value.input;
-    const rawResult = await this.toolProviders.invoke(invokeMode, invokeInput);
+    const rawInvoke = await this.toolProviders.invoke(invokeMode, invokeInput);
 
     const afterTool = await this.hooks.run("tool.after_result", {
-      mode: invokeMode,
+      mode: rawInvoke.modeUsed,
+      capability: rawInvoke.capabilityUsed,
       input: invokeInput,
-      result: rawResult
+      result: rawInvoke.data
     });
     if (afterTool.blocked) {
       throw new HookBlockError(`tool.after_result blocked: ${afterTool.reason || "blocked"}`);
@@ -346,6 +403,7 @@ export class BrainOrchestrator {
 
     return {
       modeUsed: afterTool.value.mode,
+      capabilityUsed: afterTool.value.capability,
       inputUsed: afterTool.value.input,
       data: afterTool.value.result
     };
@@ -369,22 +427,37 @@ export class BrainOrchestrator {
     if (beforeStep.blocked) {
       return {
         ok: false,
-        modeUsed: input.mode,
+        modeUsed: input.mode || "bridge",
         verified: false,
         error: `step.before_execute blocked: ${beforeStep.reason || "blocked"}`
       };
     }
 
     const nextInput = beforeStep.value.input;
-    let modeUsed: ExecuteMode = nextInput.mode;
+    const initialMode = this.toolProviders.resolveMode(nextInput);
+    if (!initialMode) {
+      return this.applyAfterExecuteHook(nextInput, {
+        ok: false,
+        modeUsed: nextInput.mode || "bridge",
+        verified: false,
+        error: nextInput.capability
+          ? `未找到 capability provider: ${nextInput.capability}`
+          : "mode 必须是 script/cdp/bridge"
+      });
+    }
+
+    let modeUsed: ExecuteMode = initialMode;
     let verifyInput: ExecuteStepInput = nextInput;
+    let capabilityUsed: ExecuteCapability | undefined;
     let fallbackFrom: ExecuteMode | undefined;
     let data: unknown;
+    const capabilityBound = Boolean(nextInput.capability && this.toolProviders.hasCapability(nextInput.capability));
 
     try {
-      const invoked = await this.invokeProviderWithHooks(nextInput.mode, nextInput);
+      const invoked = await this.invokeProviderWithHooks(initialMode, nextInput);
       modeUsed = invoked.modeUsed;
       verifyInput = invoked.inputUsed;
+      capabilityUsed = invoked.capabilityUsed;
       data = invoked.data;
     } catch (error) {
       if (error instanceof HookBlockError) {
@@ -396,7 +469,7 @@ export class BrainOrchestrator {
         });
       }
 
-      if (nextInput.mode !== "script") {
+      if (initialMode !== "script" || capabilityBound) {
         return this.applyAfterExecuteHook(nextInput, {
           ok: false,
           modeUsed,
@@ -407,9 +480,10 @@ export class BrainOrchestrator {
 
       fallbackFrom = "script";
       modeUsed = "cdp";
-      const invoked = await this.invokeProviderWithHooks("cdp", { ...nextInput, mode: "cdp" });
+      const invoked = await this.invokeProviderWithHooks("cdp", { ...nextInput, mode: "cdp", capability: undefined });
       modeUsed = invoked.modeUsed;
       verifyInput = invoked.inputUsed;
+      capabilityUsed = invoked.capabilityUsed;
       data = invoked.data;
     }
 
@@ -428,6 +502,7 @@ export class BrainOrchestrator {
     return this.applyAfterExecuteHook(nextInput, {
       ok: true,
       modeUsed,
+      capabilityUsed,
       fallbackFrom,
       verified,
       verifyReason,

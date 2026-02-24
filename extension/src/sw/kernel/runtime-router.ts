@@ -570,14 +570,18 @@ async function handleStep(
 
   if (type === "brain.step.execute") {
     const sessionId = requireSessionId(payload);
-    const mode = String(payload.mode || "").trim() as "script" | "cdp" | "bridge";
+    const modeRaw = String(payload.mode || "").trim();
+    const mode = ["script", "cdp", "bridge"].includes(modeRaw) ? (modeRaw as "script" | "cdp" | "bridge") : undefined;
+    const capability = String(payload.capability || "").trim() || undefined;
     const action = String(payload.action || "").trim();
-    if (!mode || !["script", "cdp", "bridge"].includes(mode)) return fail("mode 必须是 script/cdp/bridge");
+    if (modeRaw && !mode) return fail("mode 必须是 script/cdp/bridge");
+    if (!mode && !capability) return fail("mode 或 capability 至少需要一个");
     if (!action) return fail("action 不能为空");
     return ok(
       await runtimeLoop.executeStep({
         sessionId,
         mode,
+        capability,
         action,
         args: toRecord(payload.args),
         verifyPolicy: payload.verifyPolicy as "off" | "on_critical" | "always" | undefined
@@ -651,6 +655,14 @@ async function handleBrainDebug(orchestrator: BrainOrchestrator, infra: RuntimeI
       llmRetryMaxAttempts: Number(cfg.llmRetryMaxAttempts || 0),
       llmMaxRetryDelayMs: Number(cfg.llmMaxRetryDelayMs || 0),
       hasLlmApiKey: !!String(cfg.llmApiKey || "").trim()
+    });
+  }
+
+  if (action === "brain.debug.plugins") {
+    return ok({
+      plugins: orchestrator.listPlugins(),
+      modeProviders: orchestrator.listToolProviders(),
+      capabilityProviders: orchestrator.listCapabilityProviders()
     });
   }
 

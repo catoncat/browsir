@@ -1,4 +1,10 @@
-import { BrainOrchestrator, type ExecuteMode, type ExecuteStepResult, type RuntimeView } from "./orchestrator.browser";
+import {
+  BrainOrchestrator,
+  type ExecuteCapability,
+  type ExecuteMode,
+  type ExecuteStepResult,
+  type RuntimeView
+} from "./orchestrator.browser";
 import { writeSessionMeta } from "./session-store.browser";
 import { type BridgeConfig, type RuntimeInfraHandler } from "./runtime-infra.browser";
 import { nowIso, type SessionEntry, type SessionMeta } from "./types";
@@ -74,7 +80,8 @@ export interface RuntimeLoopController {
   startFromRegenerate(input: RegenerateRunInput): Promise<{ sessionId: string; runtime: RuntimeView }>;
   executeStep(input: {
     sessionId: string;
-    mode: ExecuteMode;
+    mode?: ExecuteMode;
+    capability?: ExecuteCapability;
     action: string;
     args?: JsonRecord;
     verifyPolicy?: "off" | "on_critical" | "always";
@@ -1162,7 +1169,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
   async function executeStep(input: {
     sessionId: string;
-    mode: ExecuteMode;
+    mode?: ExecuteMode;
+    capability?: ExecuteCapability;
     action: string;
     args?: JsonRecord;
     verifyPolicy?: "off" | "on_critical" | "always";
@@ -1170,21 +1178,61 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const sessionId = String(input.sessionId || "").trim();
     const normalizedMode = ["script", "cdp", "bridge"].includes(String(input.mode || "").trim())
       ? (String(input.mode || "").trim() as ExecuteMode)
-      : ("" as ExecuteMode);
+      : undefined;
+    const normalizedCapability = String(input.capability || "").trim() || undefined;
     const normalizedAction = String(input.action || "").trim();
     const payload = toRecord(input.args);
     const actionPayload = toRecord(payload.action) && Object.keys(toRecord(payload.action)).length > 0 ? toRecord(payload.action) : payload;
     const tabId = parsePositiveInt(payload.tabId || actionPayload.tabId);
 
-    if (!normalizedMode) {
-      return { ok: false, modeUsed: "cdp", verified: false, error: "mode 必须是 script/cdp/bridge" };
+    if (!normalizedMode && !normalizedCapability) {
+      return { ok: false, modeUsed: "bridge", verified: false, error: "mode 或 capability 至少需要一个" };
     }
     if (!normalizedAction) {
-      return { ok: false, modeUsed: normalizedMode, verified: false, error: "action 不能为空" };
+      return { ok: false, modeUsed: normalizedMode || "bridge", verified: false, error: "action 不能为空" };
+    }
+
+    if (normalizedCapability && orchestrator.hasCapabilityProvider(normalizedCapability)) {
+      const capabilityMode = normalizedMode || orchestrator.resolveModeForCapability(normalizedCapability) || "bridge";
+      orchestrator.events.emit("step_execute", sessionId, {
+        mode: capabilityMode,
+        capability: normalizedCapability,
+        action: normalizedAction
+      });
+      const result = await orchestrator.executeStep({
+        sessionId,
+        mode: capabilityMode,
+        capability: normalizedCapability,
+        action: normalizedAction,
+        args: payload,
+        verifyPolicy: input.verifyPolicy
+      });
+      orchestrator.events.emit("step_execute_result", sessionId, {
+        ok: result.ok,
+        modeUsed: result.modeUsed,
+        capabilityUsed: result.capabilityUsed || normalizedCapability,
+        fallbackFrom: result.fallbackFrom,
+        verified: result.verified,
+        verifyReason: result.verifyReason,
+        error: result.error
+      });
+      return result;
+    }
+
+    if (!normalizedMode) {
+      return {
+        ok: false,
+        modeUsed: "bridge",
+        verified: false,
+        error: normalizedCapability
+          ? `capability provider 未注册: ${normalizedCapability}`
+          : "mode 必须是 script/cdp/bridge"
+      };
     }
 
     orchestrator.events.emit("step_execute", sessionId, {
       mode: normalizedMode,
+      capability: normalizedCapability,
       action: normalizedAction
     });
 

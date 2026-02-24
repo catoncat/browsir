@@ -165,10 +165,12 @@ export interface StepTraceRecord {
 }
 
 export type ExecuteMode = "script" | "cdp" | "bridge";
+export type ExecuteCapability = string;
 
 export interface ExecuteStepInput {
   sessionId: string;
-  mode: ExecuteMode;
+  mode?: ExecuteMode;
+  capability?: ExecuteCapability;
   action: string;
   args?: Record<string, unknown>;
   verifyPolicy?: "off" | "on_critical" | "always";
@@ -177,6 +179,7 @@ export interface ExecuteStepInput {
 export interface ExecuteStepResult {
   ok: boolean;
   modeUsed: ExecuteMode;
+  capabilityUsed?: ExecuteCapability;
   fallbackFrom?: ExecuteMode;
   verified: boolean;
   verifyReason?: string;

@@ -305,6 +305,63 @@ describe("runtime-router.browser", () => {
     expect(String(firstUserSource?.content || "")).toBe("问题一");
   });
 
+  it("supports capability provider in brain.step.execute", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.virtual-fs.router",
+        name: "virtual-fs-router",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["fs.virtual.read"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "fs.virtual.read": {
+            id: "plugin.virtual-fs.router.read",
+            mode: "bridge",
+            invoke: async (input) => ({
+              provider: "virtual-fs-router",
+              path: String(input.args?.path || "")
+            })
+          }
+        }
+      }
+    });
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "capability provider test",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const executed = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.virtual.read",
+      action: "read_file",
+      args: {
+        path: "mem://docs.txt"
+      },
+      verifyPolicy: "off"
+    });
+    expect(executed.ok).toBe(true);
+    const result = (executed.data || {}) as Record<string, unknown>;
+    expect(result.ok).toBe(true);
+    expect(result.modeUsed).toBe("bridge");
+    expect(result.capabilityUsed).toBe("fs.virtual.read");
+    expect(result.data).toEqual({
+      provider: "virtual-fs-router",
+      path: "mem://docs.txt"
+    });
+  });
+
   it("supports title refresh + delete + debug config/dump", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
