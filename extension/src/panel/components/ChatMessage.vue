@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronUp,
   RotateCcw,
+  GitBranch,
   Copy,
   Check
 } from "lucide-vue-next";
@@ -15,15 +16,20 @@ const props = defineProps<{
   content: string;
   entryId: string;
   copied?: boolean;
+  retrying?: boolean;
+  forking?: boolean;
   copyDisabled?: boolean;
-  regenerateDisabled?: boolean;
+  retryDisabled?: boolean;
+  forkDisabled?: boolean;
   showCopyAction?: boolean;
-  showRegenerateAction?: boolean;
+  showRetryAction?: boolean;
+  showForkAction?: boolean;
 }>();
 
 const emit = defineEmits<{
   (e: "copy", payload: { entryId: string; content: string; role: string }): void;
-  (e: "regenerate", payload: { entryId: string }): void;
+  (e: "retry", payload: { entryId: string }): void;
+  (e: "fork", payload: { entryId: string }): void;
 }>();
 
 const isUser = computed(() => props.role === "user");
@@ -52,7 +58,11 @@ function handleCopy() {
 }
 
 function handleRegenerate() {
-  emit("regenerate", { entryId: props.entryId });
+  emit("retry", { entryId: props.entryId });
+}
+
+function handleFork() {
+  emit("fork", { entryId: props.entryId });
 }
 </script>
 
@@ -67,17 +77,18 @@ function handleRegenerate() {
     </div>
 
     <!-- Assistant Message: Pure Layout -->
-    <div v-else-if="isAssistant" class="flex flex-col gap-3 pr-2 group">
+    <div v-else-if="isAssistant" class="flex flex-col gap-3 pr-2 group" :class="(props.retrying || props.forking) ? 'opacity-40 select-none' : ''">
       <!-- AI Content -->
       <div
         class="prose max-w-none text-[14px] text-ui-text font-normal"
         v-html="htmlContent"
       ></div>
 
-      <!-- Action Bar: ONLY Copy and Regenerate (Smaller 14px icons) -->
+      <!-- Action Bar: Copy + Retry + Fork -->
       <div
-        v-if="props.showCopyAction || props.showRegenerateAction"
-        class="flex items-center gap-1 opacity-70 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
+        v-if="props.showCopyAction || props.showRetryAction || props.showForkAction"
+        class="flex items-center gap-1 transition-opacity"
+        :class="(props.retrying || props.forking) ? 'opacity-100' : 'opacity-70 sm:opacity-0 sm:group-hover:opacity-100'"
       >
         <button
           v-if="props.showCopyAction"
@@ -85,7 +96,7 @@ function handleRegenerate() {
           class="p-1.5 hover:bg-ui-surface rounded-md text-ui-text-muted hover:text-ui-text transition-all disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
           :aria-label="props.copied ? '已复制' : '复制内容'"
           :title="props.copied ? '已复制' : '复制内容'"
-          :disabled="props.copyDisabled"
+          :disabled="props.copyDisabled || props.retrying || props.forking"
           @click="handleCopy"
         >
           <Check v-if="props.copied" :size="14" class="text-green-600" />
@@ -93,15 +104,27 @@ function handleRegenerate() {
         </button>
 
         <button
-          v-if="props.showRegenerateAction"
+          v-if="props.showRetryAction"
           type="button"
           class="p-1.5 hover:bg-ui-surface rounded-md text-ui-text-muted hover:text-ui-text transition-all disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
           aria-label="重新回答"
           title="重新回答"
-          :disabled="props.regenerateDisabled"
+          :disabled="props.retryDisabled || props.retrying || props.forking"
           @click="handleRegenerate"
         >
-          <RotateCcw :size="14" />
+          <RotateCcw :size="14" :class="props.retrying ? 'animate-spin text-ui-accent' : ''" />
+        </button>
+
+        <button
+          v-if="props.showForkAction"
+          type="button"
+          class="p-1.5 hover:bg-ui-surface rounded-md text-ui-text-muted hover:text-ui-text transition-all disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+          aria-label="在新对话中分叉"
+          title="在新对话中分叉"
+          :disabled="props.forkDisabled || props.retrying || props.forking"
+          @click="handleFork"
+        >
+          <GitBranch :size="14" :class="props.forking ? 'animate-pulse text-ui-accent' : ''" />
         </button>
       </div>
     </div>

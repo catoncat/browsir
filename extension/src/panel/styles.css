@@ -41,9 +41,16 @@
     padding: 0 !important;
     height: 100% !important;
     width: 100% !important;
+  }
+
+  html, body {
+    overflow: auto;
+  }
+
+  #app {
     overflow: hidden;
   }
-  
+
   body {
     @apply bg-ui-bg text-ui-text antialiased;
     font-size: 14px; /* 提升至 14px */
