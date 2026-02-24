@@ -54,6 +54,7 @@ interface DisplayMessage extends PanelMessageLike {
   toolPending?: boolean;
   toolPendingAction?: string;
   toolPendingDetail?: string;
+  toolPendingLogs?: string[];
   busyPlaceholder?: boolean;
   busyMode?: "retry" | "fork";
   busySourceEntryId?: string;
@@ -111,6 +112,8 @@ const forkSceneTargetSessionId = ref("");
 const forkSessionHighlight = ref(false);
 const activeToolRun = ref<ToolRunSnapshot | null>(null);
 const activeRunHint = ref<RuntimeProgressHint | null>(null);
+const toolPendingLogs = ref<string[]>([]);
+const activeRunToken = ref(0);
 let forkSessionHighlightTimer: ReturnType<typeof setTimeout> | null = null;
 
 const USER_FORK_MIN_VISIBLE_MS = 620;
@@ -119,6 +122,8 @@ const USER_FORK_SCENE_LEAVE_MS = 170;
 const USER_FORK_SCENE_ENTER_MS = 240;
 const FORK_SWITCH_HIGHLIGHT_MS = 1800;
 const TOOL_STREAM_SYNC_INTERVAL_MS = 3200;
+const TOOL_LOG_MAX_LINES = 120;
+const MAIN_SCROLL_BOTTOM_THRESHOLD_PX = 120;
 
 const isForkSceneActive = computed(() => forkScenePhase.value !== "idle");
 
@@ -321,6 +326,28 @@ function clearActiveToolRun() {
   activeToolRun.value = null;
 }
 
+function clearToolPendingLogs() {
+  toolPendingLogs.value = [];
+}
+
+function appendToolPendingLogs(stream: "stdout" | "stderr", chunk: string) {
+  const raw = String(chunk || "");
+  if (!raw) return;
+  const parts = raw
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0);
+  if (!parts.length) return;
+
+  const normalized = parts.map((line) => (stream === "stderr" ? `stderr | ${line}` : line));
+  const merged = [...toolPendingLogs.value, ...normalized];
+  if (merged.length > TOOL_LOG_MAX_LINES) {
+    merged.splice(0, merged.length - TOOL_LOG_MAX_LINES);
+  }
+  toolPendingLogs.value = merged;
+}
+
 function setLlmRunHint(label: string, detail = "") {
   activeRunHint.value = {
     phase: "llm",
@@ -381,6 +408,7 @@ function applyRuntimeEventToolRun(event: unknown) {
   const ts = normalizeEventTs(envelope);
   if (type === "loop_start") {
     activeToolRun.value = null;
+    clearToolPendingLogs();
     setLlmRunHint("分析任务", "正在规划下一步动作");
     return;
   }
@@ -398,6 +426,7 @@ function applyRuntimeEventToolRun(event: unknown) {
   if (type === "step_planned" && mode === "tool_call") {
     const step = normalizeStep(payload.step);
     if (!step) return;
+    clearToolPendingLogs();
     activeToolRun.value = {
       step,
       action: String(payload.action || ""),
@@ -413,12 +442,35 @@ function applyRuntimeEventToolRun(event: unknown) {
     if (activeToolRun.value && activeToolRun.value.step === step) {
       activeToolRun.value = null;
     }
+    clearToolPendingLogs();
     setLlmRunHint("继续推理", "正在处理工具结果");
     return;
   }
   if (["loop_done", "loop_error", "loop_skip_stopped", "loop_internal_error", "loop_start"].includes(type)) {
     activeToolRun.value = null;
+    clearToolPendingLogs();
     activeRunHint.value = null;
+  }
+}
+
+function applyBridgeEventToolOutput(rawEvent: unknown) {
+  const envelope = toRecord(rawEvent);
+  const eventSessionId = String(envelope.sessionId || "").trim();
+  if (!eventSessionId || eventSessionId !== String(activeSessionId.value || "").trim()) return;
+  if (!isRunning.value) return;
+  const eventName = String(envelope.event || "").trim();
+  const data = toRecord(envelope.data);
+
+  if (eventName === "invoke.started") {
+    clearToolPendingLogs();
+    return;
+  }
+  if (eventName === "invoke.stdout") {
+    appendToolPendingLogs("stdout", String(data.chunk || ""));
+    return;
+  }
+  if (eventName === "invoke.stderr") {
+    appendToolPendingLogs("stderr", String(data.chunk || ""));
   }
 }
 
@@ -499,21 +551,24 @@ const displayMessages = computed<DisplayMessage[]>(() => {
     rendered.push({
       role: "tool_pending",
       content: "",
-      entryId: activeToolRun.value
-        ? `__tool_pending__tool__${activeToolRun.value.step}`
-        : `__tool_pending__llm__${String(activeRunHint.value?.ts || "0")}`,
+      entryId: `__tool_pending__${String(activeSessionId.value || "__global__")}__${activeRunToken.value}`,
       toolName: activeToolRun.value?.action || "llm",
       toolPending: true,
       toolPendingAction: runningStatus.value.action,
-      toolPendingDetail: runningStatus.value.detail
+      toolPendingDetail: runningStatus.value.detail,
+      toolPendingLogs: toolPendingLogs.value
     });
   }
 
   return rendered;
 });
 
-watch(isRunning, (running) => {
+watch(isRunning, (running, wasRunning) => {
   if (running) {
+    if (!wasRunning) {
+      activeRunToken.value += 1;
+      clearToolPendingLogs();
+    }
     if (!activeRunHint.value) {
       setLlmRunHint("思考中", "正在分析你的请求");
     }
@@ -527,6 +582,7 @@ watch(isRunning, (running) => {
   }
   userPendingRegenerate.value = null;
   clearActiveToolRun();
+  clearToolPendingLogs();
   activeRunHint.value = null;
 });
 
@@ -541,6 +597,7 @@ watch(activeSessionId, () => {
     resetForkSceneState();
   }
   clearActiveToolRun();
+  clearToolPendingLogs();
   activeRunHint.value = null;
   if (!activeSession.value?.forkedFrom?.sessionId) {
     setForkSessionHighlight(false);
@@ -564,16 +621,24 @@ watch(
   { deep: true }
 );
 
-watch(
-  displayMessages,
-  async () => {
-    await nextTick();
-    if (scrollContainer.value) {
-      scrollContainer.value.scrollTop = scrollContainer.value.scrollHeight;
-    }
-  },
-  { deep: true }
+function isMainScrollNearBottom() {
+  const el = scrollContainer.value;
+  if (!el) return true;
+  const remain = el.scrollHeight - el.scrollTop - el.clientHeight;
+  return remain <= MAIN_SCROLL_BOTTOM_THRESHOLD_PX;
+}
+
+const displayMessageStructureKey = computed(() =>
+  displayMessages.value.map((item) => `${item.role}:${item.entryId}`).join("|")
 );
+
+watch(displayMessageStructureKey, async () => {
+  const shouldFollow = isMainScrollNearBottom();
+  await nextTick();
+  if (shouldFollow && scrollContainer.value) {
+    scrollContainer.value.scrollTop = scrollContainer.value.scrollHeight;
+  }
+});
 
 function setErrorMessage(err: unknown, fallback: string) {
   const message = err instanceof Error ? err.message : String(err || "");
@@ -676,7 +741,17 @@ async function runSafely(task: () => Promise<void>, fallback: string) {
 }
 
 const onRuntimeMessage = (message: unknown) => {
-  const payload = message as { type?: string; event?: { sessionId?: string } };
+  const payload = message as {
+    type?: string;
+    event?: { sessionId?: string };
+    payload?: { sessionId?: string; event?: string; data?: Record<string, unknown> };
+  };
+
+  if (payload?.type === "bridge.event") {
+    applyBridgeEventToolOutput(payload.payload);
+    return;
+  }
+
   if (payload?.type !== "brain.event") return;
   const eventSessionId = String(payload?.event?.sessionId || "").trim();
   if (!eventSessionId) return;
@@ -821,6 +896,7 @@ onUnmounted(() => {
   bumpForkSceneToken();
   resetForkSceneState();
   clearActiveToolRun();
+  clearToolPendingLogs();
   chrome.runtime.onMessage.removeListener(onRuntimeMessage);
   cleanupMessageActions();
 });
@@ -874,19 +950,6 @@ onUnmounted(() => {
             <GitBranch :size="10" :class="forkSessionHighlight ? 'animate-pulse' : ''" aria-hidden="true" />
             <span>{{ activeForkSourceText }}</span>
           </span>
-          <div
-            v-if="isRunning && runningStatus"
-            class="max-w-[60%] inline-flex items-center gap-1.5 rounded-full border border-ui-accent/30 bg-ui-accent/8 px-2.5 py-0.5 text-[10px] font-semibold text-ui-accent"
-            role="status"
-            aria-live="polite"
-            aria-label="当前执行状态"
-            data-testid="header-running-status"
-          >
-            <Loader2 :size="10" class="animate-spin shrink-0" aria-hidden="true" />
-            <span class="truncate">
-              {{ runningStatus.action }}<template v-if="runningStatus.detail"> · {{ runningStatus.detail }}</template>
-            </span>
-          </div>
           <div v-if="hasBridge" class="w-2 h-2 bg-green-500 rounded-full shrink-0 shadow-[0_0_8px_rgba(34,197,94,0.4)]" :title="'Bridge Connected'" role="status" aria-label="Bridge Connected"></div>
         </div>
 
@@ -988,7 +1051,7 @@ onUnmounted(() => {
 
       <div
         ref="scrollContainer"
-        class="flex-1 overflow-y-auto scroll-smooth w-full min-h-0"
+        class="flex-1 overflow-y-auto w-full min-h-0"
         role="log"
         aria-live="polite"
         aria-label="对话历史记录"
@@ -1006,6 +1069,7 @@ onUnmounted(() => {
               :tool-pending="msg.toolPending"
               :tool-pending-action="msg.toolPendingAction"
               :tool-pending-detail="msg.toolPendingDetail"
+              :tool-pending-logs="msg.toolPendingLogs"
               :busy-placeholder="msg.busyPlaceholder"
                 :busy-mode="msg.busyMode"
                 :busy-source-entry-id="msg.busySourceEntryId"
