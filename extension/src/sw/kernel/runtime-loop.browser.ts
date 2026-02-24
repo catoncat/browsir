@@ -1448,7 +1448,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
   }
 
   async function executeToolCall(sessionId: string, toolCall: ToolCallItem): Promise<JsonRecord> {
-    const name = String(toolCall.function.name || "").trim();
+    const requestedTool = String(toolCall.function.name || "").trim();
     const argsRaw = String(toolCall.function.arguments || "").trim();
     let args: JsonRecord = {};
     if (argsRaw) {
@@ -1458,9 +1458,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         return { error: `参数解析失败: ${error instanceof Error ? error.message : String(error)}` };
       }
     }
+    const contract = orchestrator.resolveToolContract(requestedTool);
+    const resolvedTool = String(contract?.name || requestedTool).trim();
 
-    switch (name) {
-      case "bash": {
+    const handlers: Record<string, () => Promise<JsonRecord>> = {
+      bash: async () => {
         const command = String(args.command || "").trim();
         if (!command) return { error: "bash 需要 command" };
         const capability = TOOL_CAPABILITIES.bash;
@@ -1476,8 +1478,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             ...(timeoutMs == null ? {} : { timeoutMs })
           }
         }, capability);
-      }
-      case "read_file": {
+      },
+      read_file: async () => {
         const path = String(args.path || "").trim();
         if (!path) return { error: "read_file 需要 path" };
         const capability = TOOL_CAPABILITIES.read_file;
@@ -1488,8 +1490,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           tool: "read",
           args: invokeArgs
         }, capability);
-      }
-      case "write_file": {
+      },
+      write_file: async () => {
         const path = String(args.path || "").trim();
         if (!path) return { error: "write_file 需要 path" };
         const capability = TOOL_CAPABILITIES.write_file;
@@ -1501,8 +1503,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             mode: String(args.mode || "overwrite")
           }
         }, capability);
-      }
-      case "edit_file": {
+      },
+      edit_file: async () => {
         const path = String(args.path || "").trim();
         if (!path) return { error: "edit_file 需要 path" };
         const capability = TOOL_CAPABILITIES.edit_file;
@@ -1513,8 +1515,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             edits: Array.isArray(args.edits) ? args.edits : []
           }
         }, capability);
-      }
-      case "list_tabs": {
+      },
+      list_tabs: async () => {
         const tabs = await queryAllTabsForRuntime();
         const activeTabId = await getActiveTabIdForRuntime();
         return buildToolResponseEnvelope("tabs", {
@@ -1522,8 +1524,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           activeTabId,
           tabs
         });
-      }
-      case "open_tab": {
+      },
+      open_tab: async () => {
         const rawUrl = String(args.url || "").trim();
         if (!rawUrl) return { error: "open_tab 需要 url" };
         const created = await chrome.tabs.create({
@@ -1540,8 +1542,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             url: created?.url || created?.pendingUrl || ""
           }
         });
-      }
-      case "snapshot": {
+      },
+      snapshot: async () => {
         const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
         if (!tabId) {
           return {
@@ -1585,8 +1587,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           capabilityUsed: out.capabilityUsed || capability,
           modeUsed: out.modeUsed
         });
-      }
-      case "browser_action": {
+      },
+      browser_action: async () => {
         const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
         if (!tabId) {
           return {
@@ -1650,8 +1652,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           verifyReason: out.verifyReason,
           verified: out.verified
         });
-      }
-      case "browser_verify": {
+      },
+      browser_verify: async () => {
         const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
         if (!tabId) {
           return {
@@ -1699,10 +1701,26 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           capabilityUsed: out.capabilityUsed || capability,
           modeUsed: out.modeUsed
         });
-      }
-      default:
-        return { error: `未知工具: ${name}` };
+      },
+    };
+
+    const resolvedHandler = handlers[resolvedTool];
+    if (resolvedHandler) {
+      return await resolvedHandler();
     }
+    const requestedHandler = handlers[requestedTool];
+    if (requestedHandler) {
+      return await requestedHandler();
+    }
+
+    return {
+      error: `未知工具: ${requestedTool}`,
+      errorCode: "E_TOOL",
+      details: {
+        requestedTool,
+        resolvedTool
+      }
+    };
   }
 
   async function requestLlmWithRetry(input: LlmRequestInput): Promise<JsonRecord> {
