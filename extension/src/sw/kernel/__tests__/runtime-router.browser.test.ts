@@ -737,6 +737,138 @@ describe("runtime-router.browser", () => {
     expect(((payload.receivedFrame || {}) as Record<string, unknown>).tool).toBe("read");
   });
 
+  it("tool_call 的 browser_action 优先走 capability provider 并保留 verify 语义", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    let providerInvoked = 0;
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.browser.action.script-mode",
+        name: "browser-action-script-mode",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["browser.action"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "browser.action": {
+            id: "plugin.browser.action.script-mode.provider",
+            mode: "script",
+            priority: 50,
+            invoke: async (input) => {
+              providerInvoked += 1;
+              return {
+                data: {
+                  provider: "plugin-script-browser-action",
+                  action: input.args?.action || null
+                },
+                verified: true,
+                verifyReason: "verified"
+              };
+            }
+          }
+        }
+      }
+    });
+
+    let llmCall = 0;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
+      if (llmCall === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_action_1",
+                      type: "function",
+                      function: {
+                        name: "browser_action",
+                        arguments: JSON.stringify({
+                          tabId: 1,
+                          kind: "click",
+                          selector: "#submit",
+                          expect: {
+                            selectorExists: "#done"
+                          }
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "done"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test",
+        autoTitleInterval: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "点击提交按钮"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    expect(fetchSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(providerInvoked).toBe(1);
+
+    const viewed = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(viewed.ok).toBe(true);
+    const messages = readConversationMessages(viewed);
+    const toolPayloads = messages
+      .filter((entry) => String(entry.role || "") === "tool")
+      .map((entry) => JSON.parse(String(entry.content || "{}")) as Record<string, unknown>);
+    const actionPayload = toolPayloads.find((entry) => String(entry.tool || "") === "browser_action");
+    expect(actionPayload).toBeDefined();
+    expect(String(actionPayload?.errorCode || "")).not.toBe("E_VERIFY_FAILED");
+  });
+
   it("returns runtime-not-ready when capability provider is missing", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
