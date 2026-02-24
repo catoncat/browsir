@@ -73,6 +73,13 @@ interface ToolRunSnapshot {
   ts: string;
 }
 
+interface RuntimeProgressHint {
+  phase: "llm" | "tool";
+  label: string;
+  detail: string;
+  ts: string;
+}
+
 const {
   copiedEntryId,
   retryingEntryId,
@@ -97,15 +104,39 @@ const editingUserDraft = ref("");
 const editingUserSubmitting = ref(false);
 const userPendingRegenerate = ref<PendingRegenerateState | null>(null);
 const userForkingEntryId = ref("");
-const branchSwitching = ref(false);
+const forkScenePhase = ref<"idle" | "prepare" | "leave" | "swap" | "enter">("idle");
+const forkSceneToken = ref(0);
+const forkSceneSwitching = ref(false);
+const forkSceneTargetSessionId = ref("");
 const forkSessionHighlight = ref(false);
 const activeToolRun = ref<ToolRunSnapshot | null>(null);
+const activeRunHint = ref<RuntimeProgressHint | null>(null);
 let forkSessionHighlightTimer: ReturnType<typeof setTimeout> | null = null;
 
 const USER_FORK_MIN_VISIBLE_MS = 620;
-const USER_FORK_SWITCH_TRANSITION_MS = 160;
+const USER_FORK_SCENE_PREPARE_MS = 140;
+const USER_FORK_SCENE_LEAVE_MS = 170;
+const USER_FORK_SCENE_ENTER_MS = 240;
 const FORK_SWITCH_HIGHLIGHT_MS = 1800;
 const TOOL_STREAM_SYNC_INTERVAL_MS = 3200;
+
+const isForkSceneActive = computed(() => forkScenePhase.value !== "idle");
+
+const chatSceneClass = computed(() => ({
+  "chat-scene--prepare": forkScenePhase.value === "prepare",
+  "chat-scene--leave": forkScenePhase.value === "leave" || forkScenePhase.value === "swap",
+  "chat-scene--enter": forkScenePhase.value === "enter"
+}));
+
+const forkSceneProgressClass = computed(() => {
+  if (forkScenePhase.value === "prepare") return "w-[30%]";
+  if (forkScenePhase.value === "enter") return "w-full";
+  return "w-[74%]";
+});
+
+const forkSceneIconClass = computed(() => (
+  forkScenePhase.value === "enter" ? "animate-pulse" : "animate-spin"
+));
 
 function sleep(ms: number) {
   return new Promise((resolve) => {
@@ -127,6 +158,54 @@ function triggerForkSessionHighlight() {
     setForkSessionHighlight(false);
     forkSessionHighlightTimer = null;
   }, FORK_SWITCH_HIGHLIGHT_MS);
+}
+
+function bumpForkSceneToken() {
+  forkSceneToken.value += 1;
+  return forkSceneToken.value;
+}
+
+function isForkSceneStale(token: number) {
+  return token !== forkSceneToken.value;
+}
+
+function resetForkSceneState() {
+  forkScenePhase.value = "idle";
+  forkSceneSwitching.value = false;
+  forkSceneTargetSessionId.value = "";
+}
+
+async function playForkSceneSwitch(targetSessionId: string) {
+  const normalizedTargetSessionId = String(targetSessionId || "").trim();
+  if (!normalizedTargetSessionId) return;
+
+  const token = bumpForkSceneToken();
+  forkSceneSwitching.value = true;
+  forkSceneTargetSessionId.value = normalizedTargetSessionId;
+
+  try {
+    forkScenePhase.value = "prepare";
+    await sleep(USER_FORK_SCENE_PREPARE_MS);
+    if (isForkSceneStale(token)) return;
+
+    forkScenePhase.value = "leave";
+    await sleep(USER_FORK_SCENE_LEAVE_MS);
+    if (isForkSceneStale(token)) return;
+
+    forkScenePhase.value = "swap";
+    await store.loadConversation(normalizedTargetSessionId, { setActive: true });
+    if (isForkSceneStale(token)) return;
+
+    triggerForkSessionHighlight();
+    await nextTick();
+
+    forkScenePhase.value = "enter";
+    await sleep(USER_FORK_SCENE_ENTER_MS);
+  } finally {
+    if (!isForkSceneStale(token)) {
+      resetForkSceneState();
+    }
+  }
 }
 
 function resetEditingState() {
@@ -242,6 +321,24 @@ function clearActiveToolRun() {
   activeToolRun.value = null;
 }
 
+function setLlmRunHint(label: string, detail = "") {
+  activeRunHint.value = {
+    phase: "llm",
+    label: String(label || "").trim() || "思考中",
+    detail: String(detail || "").trim(),
+    ts: new Date().toISOString()
+  };
+}
+
+function setToolRunHint(action: string, argsRaw: string, ts: string) {
+  activeRunHint.value = {
+    phase: "tool",
+    label: prettyToolAction(action),
+    detail: formatToolPendingDetail(action, argsRaw),
+    ts: String(ts || new Date().toISOString())
+  };
+}
+
 function deriveActiveToolRunFromStream(stream: StepTraceRecord[]): ToolRunSnapshot | null {
   const pendingByStep = new Map<number, ToolRunSnapshot>();
   for (const row of stream || []) {
@@ -281,6 +378,23 @@ function applyRuntimeEventToolRun(event: unknown) {
   const type = String(envelope.type || "");
   const payload = toRecord(envelope.payload);
   const mode = String(payload.mode || "");
+  const ts = normalizeEventTs(envelope);
+  if (type === "loop_start") {
+    activeToolRun.value = null;
+    setLlmRunHint("分析任务", "正在规划下一步动作");
+    return;
+  }
+  if (type === "llm.request") {
+    setLlmRunHint("调用模型", "正在生成下一步计划");
+    return;
+  }
+  if (type === "llm.response.parsed") {
+    const toolCalls = Number(payload.toolCalls || 0);
+    if (!(Number.isFinite(toolCalls) && toolCalls > 0)) {
+      setLlmRunHint("整理回复", "正在生成最终回答");
+    }
+    return;
+  }
   if (type === "step_planned" && mode === "tool_call") {
     const step = normalizeStep(payload.step);
     if (!step) return;
@@ -288,8 +402,9 @@ function applyRuntimeEventToolRun(event: unknown) {
       step,
       action: String(payload.action || ""),
       arguments: String(payload.arguments || ""),
-      ts: normalizeEventTs(envelope)
+      ts
     };
+    setToolRunHint(String(payload.action || ""), String(payload.arguments || ""), ts);
     return;
   }
   if (type === "step_finished" && mode === "tool_call") {
@@ -298,10 +413,12 @@ function applyRuntimeEventToolRun(event: unknown) {
     if (activeToolRun.value && activeToolRun.value.step === step) {
       activeToolRun.value = null;
     }
+    setLlmRunHint("继续推理", "正在处理工具结果");
     return;
   }
   if (["loop_done", "loop_error", "loop_skip_stopped", "loop_internal_error", "loop_start"].includes(type)) {
     activeToolRun.value = null;
+    activeRunHint.value = null;
   }
 }
 
@@ -316,8 +433,28 @@ async function syncActiveToolRun(sessionId: string) {
     throw new Error(String(response?.error || "读取 step stream 失败"));
   }
   const stream = Array.isArray(response?.data?.stream) ? response.data?.stream || [] : [];
-  activeToolRun.value = deriveActiveToolRunFromStream(stream);
+  const latest = deriveActiveToolRunFromStream(stream);
+  activeToolRun.value = latest;
+  if (latest) {
+    setToolRunHint(latest.action, latest.arguments, latest.ts);
+  } else if (isRunning.value && !activeRunHint.value) {
+    setLlmRunHint("思考中", "正在分析你的请求");
+  }
 }
+
+const runningStatus = computed(() => {
+  if (!isRunning.value) return null;
+  if (activeToolRun.value) {
+    return {
+      action: prettyToolAction(activeToolRun.value.action),
+      detail: formatToolPendingDetail(activeToolRun.value.action, activeToolRun.value.arguments)
+    };
+  }
+  return {
+    action: activeRunHint.value?.label || "思考中",
+    detail: activeRunHint.value?.detail || "正在分析你的请求"
+  };
+});
 
 const displayMessages = computed<DisplayMessage[]>(() => {
   const rendered = (messages.value || []).map((item) => ({
@@ -358,15 +495,17 @@ const displayMessages = computed<DisplayMessage[]>(() => {
     }
   }
 
-  if (isRunning.value && activeToolRun.value) {
+  if (isRunning.value && runningStatus.value) {
     rendered.push({
       role: "tool_pending",
       content: "",
-      entryId: `__tool_pending__${activeToolRun.value.step}`,
-      toolName: activeToolRun.value.action,
+      entryId: activeToolRun.value
+        ? `__tool_pending__tool__${activeToolRun.value.step}`
+        : `__tool_pending__llm__${String(activeRunHint.value?.ts || "0")}`,
+      toolName: activeToolRun.value?.action || "llm",
       toolPending: true,
-      toolPendingAction: prettyToolAction(activeToolRun.value.action),
-      toolPendingDetail: formatToolPendingDetail(activeToolRun.value.action, activeToolRun.value.arguments)
+      toolPendingAction: runningStatus.value.action,
+      toolPendingDetail: runningStatus.value.detail
     });
   }
 
@@ -375,6 +514,9 @@ const displayMessages = computed<DisplayMessage[]>(() => {
 
 watch(isRunning, (running) => {
   if (running) {
+    if (!activeRunHint.value) {
+      setLlmRunHint("思考中", "正在分析你的请求");
+    }
     if (activeSessionId.value) {
       void runSafely(
         () => syncActiveToolRun(activeSessionId.value),
@@ -385,11 +527,21 @@ watch(isRunning, (running) => {
   }
   userPendingRegenerate.value = null;
   clearActiveToolRun();
+  activeRunHint.value = null;
 });
 
 watch(activeSessionId, () => {
-  branchSwitching.value = false;
+  const currentSessionId = String(activeSessionId.value || "").trim();
+  const isExpectedForkSwitch =
+    forkSceneSwitching.value &&
+    currentSessionId.length > 0 &&
+    currentSessionId === forkSceneTargetSessionId.value;
+  if (!isExpectedForkSwitch) {
+    bumpForkSceneToken();
+    resetForkSceneState();
+  }
   clearActiveToolRun();
+  activeRunHint.value = null;
   if (!activeSession.value?.forkedFrom?.sessionId) {
     setForkSessionHighlight(false);
   }
@@ -413,7 +565,7 @@ watch(
 );
 
 watch(
-  () => displayMessages.value.length,
+  displayMessages,
   async () => {
     await nextTick();
     if (scrollContainer.value) {
@@ -496,18 +648,14 @@ async function handleEditSubmit(payload: { entryId: string; content: string; rol
       if (elapsed < USER_FORK_MIN_VISIBLE_MS) {
         await sleep(USER_FORK_MIN_VISIBLE_MS - elapsed);
       }
-      branchSwitching.value = true;
-      await store.loadConversation(result.sessionId, { setActive: true });
-      triggerForkSessionHighlight();
-      await nextTick();
-      await sleep(USER_FORK_SWITCH_TRANSITION_MS);
-      branchSwitching.value = false;
+      await playForkSceneSwitch(result.sessionId);
     }
 
     resetEditingState();
   } catch (err) {
     userPendingRegenerate.value = null;
-    branchSwitching.value = false;
+    bumpForkSceneToken();
+    resetForkSceneState();
     setErrorMessage(err, "编辑并重跑失败");
     console.error(err);
   } finally {
@@ -670,6 +818,8 @@ onUnmounted(() => {
     clearTimeout(forkSessionHighlightTimer);
     forkSessionHighlightTimer = null;
   }
+  bumpForkSceneToken();
+  resetForkSceneState();
   clearActiveToolRun();
   chrome.runtime.onMessage.removeListener(onRuntimeMessage);
   cleanupMessageActions();
@@ -694,10 +844,19 @@ onUnmounted(() => {
     <SettingsView v-if="showSettings" @close="showSettings = false" />
     <DebugView v-if="showDebug" @close="showDebug = false" />
 
-    <main class="relative flex-1 flex flex-col min-w-0 min-h-0 bg-ui-bg">
+    <main
+      class="relative flex-1 flex flex-col min-w-0 min-h-0 bg-ui-bg"
+      :aria-busy="isForkSceneActive ? 'true' : undefined"
+    >
       <div v-if="loading && !displayMessages.length" class="absolute inset-0 z-40 flex items-center justify-center bg-white/80">
         <Loader2 class="animate-spin text-ui-accent" :size="24" />
       </div>
+
+      <div
+        class="relative flex h-full min-h-0 flex-col chat-scene"
+        :class="chatSceneClass"
+        :data-chat-scene-phase="forkScenePhase"
+      >
 
       <header class="h-12 flex items-center px-3 shrink-0 border-b border-ui-border bg-ui-bg z-30" role="banner">
         <div class="flex-1 overflow-hidden flex items-center gap-2">
@@ -715,6 +874,19 @@ onUnmounted(() => {
             <GitBranch :size="10" :class="forkSessionHighlight ? 'animate-pulse' : ''" aria-hidden="true" />
             <span>{{ activeForkSourceText }}</span>
           </span>
+          <div
+            v-if="isRunning && runningStatus"
+            class="max-w-[60%] inline-flex items-center gap-1.5 rounded-full border border-ui-accent/30 bg-ui-accent/8 px-2.5 py-0.5 text-[10px] font-semibold text-ui-accent"
+            role="status"
+            aria-live="polite"
+            aria-label="当前执行状态"
+            data-testid="header-running-status"
+          >
+            <Loader2 :size="10" class="animate-spin shrink-0" aria-hidden="true" />
+            <span class="truncate">
+              {{ runningStatus.action }}<template v-if="runningStatus.detail"> · {{ runningStatus.detail }}</template>
+            </span>
+          </div>
           <div v-if="hasBridge" class="w-2 h-2 bg-green-500 rounded-full shrink-0 shadow-[0_0_8px_rgba(34,197,94,0.4)]" :title="'Bridge Connected'" role="status" aria-label="Bridge Connected"></div>
         </div>
 
@@ -816,8 +988,7 @@ onUnmounted(() => {
 
       <div
         ref="scrollContainer"
-        class="flex-1 overflow-y-auto scroll-smooth w-full min-h-0 transition-opacity duration-150"
-        :class="branchSwitching ? 'opacity-75' : 'opacity-100'"
+        class="flex-1 overflow-y-auto scroll-smooth w-full min-h-0"
         role="log"
         aria-live="polite"
         aria-label="对话历史记录"
@@ -885,6 +1056,79 @@ onUnmounted(() => {
           @stop="handleStopRun"
         />
       </div>
+
+      </div>
+
+      <div
+        v-if="isForkSceneActive"
+        class="pointer-events-none absolute inset-0 z-30 flex items-center justify-center"
+        data-testid="chat-fork-switch-overlay"
+        :data-phase="forkScenePhase"
+        aria-hidden="true"
+      >
+        <div class="absolute inset-0 bg-ui-bg/60 backdrop-blur-[2px]" />
+        <div class="relative inline-flex items-center gap-3 rounded-full border border-ui-accent/20 bg-ui-bg/85 px-3 py-2 shadow-[0_12px_30px_rgba(15,23,42,0.18)]">
+          <span class="inline-flex h-7 w-7 items-center justify-center rounded-full border border-ui-accent/30 bg-ui-accent/10 text-ui-accent">
+            <GitBranch :size="13" :class="forkSceneIconClass" aria-hidden="true" />
+          </span>
+          <span class="h-1.5 w-[74px] overflow-hidden rounded-full bg-ui-accent/20">
+            <span
+              class="block h-full rounded-full bg-ui-accent transition-[width] duration-180 ease-out"
+              :class="forkSceneProgressClass"
+            />
+          </span>
+        </div>
+      </div>
     </main>
   </div>
 </template>
+
+<style scoped>
+.chat-scene {
+  will-change: transform, opacity, filter;
+  transform-origin: center;
+  transition:
+    transform 170ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 170ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 170ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.chat-scene--prepare {
+  transform: scale(0.994) translateY(1px);
+}
+
+.chat-scene--leave {
+  transform: translateX(-18px) scale(0.986);
+  opacity: 0;
+  filter: blur(1.2px);
+}
+
+.chat-scene--enter {
+  animation: chat-scene-enter 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes chat-scene-enter {
+  from {
+    transform: translateX(20px) scale(0.986);
+    opacity: 0;
+    filter: blur(1.2px);
+  }
+
+  to {
+    transform: translateX(0) scale(1);
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-scene,
+  .chat-scene--enter {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
+    opacity: 1 !important;
+    filter: none !important;
+  }
+}
+</style>

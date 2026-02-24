@@ -2467,6 +2467,21 @@ async function main() {
       assert(historicalEditSubmitted?.ok === true, `提交历史 user inline 编辑失败: ${historicalEditSubmitted?.error || "unknown"}`);
       assert(historicalEditSubmitted?.focused === true, "历史 user inline editor 打开后应自动聚焦");
 
+      await waitFor(
+        "panel historical user edit fork scene overlay visible",
+        async () => {
+          const out = await sidepanelClient!.evaluate(`(() => {
+            const node = document.querySelector('[data-testid="chat-fork-switch-overlay"]');
+            if (!(node instanceof HTMLElement)) return null;
+            const phase = String(node.getAttribute("data-phase") || "");
+            return phase ? { phase } : null;
+          })()`);
+          return out;
+        },
+        12_000,
+        80
+      );
+
       const sessionsAfterHistoricalEdit = await waitFor(
         "panel historical user edit creates fork session",
         async () => {
@@ -2490,6 +2505,24 @@ async function main() {
       assert(forkSessionId !== sourceSessionId, "历史 user 编辑后应切到分叉会话");
       assert(String(forkSession?.forkedFrom?.sessionId || "") === sourceSessionId, "分叉来源 sessionId 不正确");
       assert(String(forkSession?.forkedFrom?.leafId || "").length > 0, "分叉来源 leafId 为空");
+
+      await waitFor(
+        "panel historical user edit shows fork source indicator",
+        async () => {
+          const out = await sidepanelClient!.evaluate(`(() => {
+            const node = document.querySelector('[data-testid="fork-session-indicator"]');
+            if (!(node instanceof HTMLElement)) return null;
+            const text = (node.textContent || "").replace(/\\s+/g, " ").trim();
+            return text ? { text } : null;
+          })()`);
+          if (!out) return null;
+          const expectedTail = String(sourceSessionId || "").slice(-8);
+          if (!expectedTail) return null;
+          return String(out.text || "").endsWith(expectedTail) ? out : null;
+        },
+        12_000,
+        200
+      );
 
       await waitFor(
         "panel historical user edit trace visible",
