@@ -1,0 +1,29 @@
+{
+  "id": "BHV-CHAT-MARKDOWN-LINKS",
+  "intent": "确保消息中的 Markdown 链接被正确解析并支持在外部打开",
+  "context": {
+    "role": "assistant/user",
+    "format": "markdown"
+  },
+  "steps": [
+    "解析包含 [text](url) 的字符串",
+    "生成带有 target='_blank' 的 HTML 链接标签"
+  ],
+  "observables": [
+    "页面渲染出 a 标签",
+    "a 标签包含 rel='noopener noreferrer'",
+    "点击链接会在新标签页打开"
+  ],
+  "risk": "low",
+  "allowed_side_effects": [
+    "打开新的浏览器标签页"
+  ],
+  "proof_requirements": {
+    "required_layers": ["browser-cdp"],
+    "min_layers": 1
+  },
+  "degrade_policy": {
+    "policy": "显示原始 URL 文本"
+  },
+  "version": "1.0.0"
+}

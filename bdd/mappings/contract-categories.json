@@ -62,6 +62,10 @@
       "category": "storage"
     },
     {
+      "contractId": "BHV-SESSION-INTERRUPTION-RECOVERY",
+      "category": "storage"
+    },
+    {
       "contractId": "BHV-SESSION-LIST-TITLE-DELETE",
       "category": "ux"
     },
@@ -79,6 +83,10 @@
     },
     {
       "contractId": "BHV-TAB-REF-DEFAULT",
+      "category": "ux"
+    },
+    {
+      "contractId": "BHV-CHAT-MARKDOWN-LINKS",
       "category": "ux"
     }
   ]

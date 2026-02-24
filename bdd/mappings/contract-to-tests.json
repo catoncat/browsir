@@ -349,6 +349,19 @@
           "target": "bdd/evidence/brain-e2e.latest.json::brain.run.start 注入 shared tabs 上下文并每次覆盖"
         }
       ]
+    },
+    {
+      "contractId": "BHV-CHAT-MARKDOWN-LINKS",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/panel/components/ChatMessage.vue::IncremarkContent + IncremarkLink"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/business/chat/markdown-links.feature"
+        }
+      ]
     }
   ]
 }
