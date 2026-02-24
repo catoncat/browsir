@@ -172,20 +172,19 @@ function handleSend() {
 </script>
 
 <template>
-  <div class="w-full bg-ui-bg relative flex flex-col border-t border-ui-border">
-    <!-- Mention Dropdown (RE-DESIGNED: COMPACT) -->
+  <div class="w-full bg-ui-bg relative px-3 pb-4 pt-2">
+    <!-- Mention Dropdown -->
     <div 
       v-if="showMentionList" 
       ref="mentionContainer"
-      class="absolute bottom-full left-0 right-0 z-50 bg-ui-bg border-t border-ui-border shadow-2xl overflow-hidden animate-in slide-in-from-bottom-2 duration-200"
+      class="absolute bottom-[calc(100%-8px)] left-4 right-4 z-50 bg-ui-bg border border-ui-border rounded-xl shadow-2xl overflow-hidden animate-in slide-in-from-bottom-2 duration-200"
+      role="listbox"
+      aria-label="选择标签页进行引用"
     >
       <div class="px-3 py-1.5 bg-ui-surface border-b border-ui-border flex items-center justify-between">
         <div class="flex items-center gap-2 text-[10px] font-bold text-ui-text-muted uppercase tracking-widest">
-          <Search :size="10" />
+          <Search :size="10" aria-hidden="true" />
           Recent Tabs
-        </div>
-        <div class="text-[9px] text-ui-text-muted opacity-60 font-bold uppercase">
-          Space: Toggle • Enter: OK
         </div>
       </div>
       
@@ -194,135 +193,143 @@ function handleSend() {
           v-for="(tab, index) in filteredTabs" 
           :id="`tab-item-${index}`"
           :key="tab.id"
-          class="w-full flex items-center gap-2.5 px-3 py-2 transition-colors text-left border-b border-ui-border/30 last:border-0"
-          :class="[focusedIndex === index ? 'bg-ui-surface' : '']"
+          role="option"
+          :aria-selected="focusedIndex === index"
+          class="w-full flex items-center gap-2.5 px-3 py-2 transition-colors text-left border-b border-ui-border/30 last:border-0 outline-none"
+          :class="[
+            focusedIndex === index ? 'bg-ui-surface' : '',
+            isTabSelected(tab.id) ? 'bg-ui-accent/5' : ''
+          ]"
           @mouseenter="focusedIndex = index"
           @click="toggleTabSelection(tab)"
         >
-          <div class="relative shrink-0">
-            <img v-if="tab.favIconUrl" :src="tab.favIconUrl" class="w-3.5 h-3.5 rounded-sm" />
-            <Globe v-else :size="14" class="text-ui-text-muted" />
-            <div v-if="isTabSelected(tab.id)" class="absolute -top-1 -right-1 bg-ui-accent text-white rounded-full p-0.5 shadow-sm">
-              <Check :size="6" stroke-width="5" />
-            </div>
+          <div class="shrink-0">
+            <img v-if="tab.favIconUrl" :src="tab.favIconUrl" class="w-4 h-4 rounded-sm" aria-hidden="true" />
+            <Globe v-else :size="16" class="text-ui-text-muted" aria-hidden="true" />
           </div>
           
           <div class="flex-1 min-w-0">
             <div class="text-[12px] font-medium text-ui-text truncate">{{ tab.title }}</div>
             <div class="text-[9px] text-ui-text-muted truncate opacity-60 font-mono tracking-tight">{{ tab.url }}</div>
           </div>
+
+          <div v-if="isTabSelected(tab.id)" class="shrink-0 text-ui-accent">
+            <Check :size="14" stroke-width="3" aria-label="已选择" />
+          </div>
         </button>
       </div>
     </div>
 
-    <!-- DOCKED FULL-WIDTH INPUT AREA -->
-    <div class="flex flex-col bg-ui-bg w-full">
-      <!-- REPLICATED ICON STACKING: Integrated Context Header -->
+    <!-- GEMINI STYLE CONTAINER -->
+    <div class="flex flex-col bg-ui-surface border border-ui-border rounded-2xl shadow-sm overflow-hidden transition-all focus-within:ring-1 focus-within:ring-ui-accent/20 focus-within:border-ui-accent/40">
+      
+      <!-- Integrated Sharing Header (Top of Card) -->
       <div 
         v-if="selectedTabs.length > 0"
-        class="flex flex-col bg-ui-surface border-b border-ui-border transition-colors animate-in fade-in slide-in-from-top-1 duration-200"
+        class="flex flex-col bg-ui-surface/60 border-b border-ui-border/30"
       >
         <div class="flex items-center justify-between px-4 py-2.5">
           <div class="flex items-center gap-2 overflow-hidden">
-            <!-- Icon Stack Logic -->
-            <div v-if="selectedTabs.length > 0" class="flex items-center gap-2">
-              <div class="flex -space-x-1.5 mr-1">
-                <div 
-                  v-for="(tab, i) in selectedTabs.slice(0, 3)" 
-                  :key="tab.id" 
-                  class="w-5 h-5 rounded-md border border-ui-border bg-white flex items-center justify-center overflow-hidden shrink-0 shadow-sm"
-                  :style="{ zIndex: 10 - i }"
-                >
-                  <img v-if="tab.favIconUrl" :src="tab.favIconUrl" class="w-full h-full object-contain" />
-                  <Globe v-else :size="10" />
-                </div>
+            <div class="flex -space-x-1 mr-1">
+              <div 
+                v-for="(tab, i) in selectedTabs.slice(0, 3)" 
+                :key="tab.id" 
+                class="w-5 h-5 rounded border border-ui-border bg-white flex items-center justify-center overflow-hidden shrink-0 shadow-sm"
+                :style="{ zIndex: 10 - i }"
+              >
+                <img v-if="tab.favIconUrl" :src="tab.favIconUrl" class="w-full h-full object-contain" aria-hidden="true" />
+                <Globe v-else :size="10" aria-hidden="true" />
               </div>
-              <span class="text-[12px] font-bold text-ui-text truncate">
-                {{ selectedTabs.length === 1 ? selectedTabs[0].title : `Sharing ${selectedTabs.length} tabs` }}
-              </span>
             </div>
+            <span class="text-[13px] font-medium text-ui-text truncate">
+              {{ selectedTabs.length === 1 ? selectedTabs[0].title : `正在共享 ${selectedTabs.length} 个标签页` }}
+            </span>
           </div>
           
-          <div class="flex items-center gap-1 shrink-0">
+          <div class="flex items-center gap-0.5 shrink-0">
             <button 
               v-if="selectedTabs.length > 1"
               @click="isContextExpanded = !isContextExpanded"
-              class="p-1.5 hover:bg-black/5 rounded-md text-ui-text-muted transition-colors"
+              class="p-1.5 hover:bg-black/5 rounded-md text-ui-text-muted transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent"
+              :aria-label="isContextExpanded ? '收起详情' : '查看共享详情'"
+              :aria-expanded="isContextExpanded"
             >
-              <ChevronDown v-if="!isContextExpanded" :size="16" />
-              <ChevronUp v-else :size="16" />
+              <ChevronUp v-if="!isContextExpanded" :size="16" aria-hidden="true" />
+              <ChevronDown v-else :size="16" aria-hidden="true" />
             </button>
             <button 
-              v-if="selectedTabs.length > 0"
               @click="selectedTabs = []; isContextExpanded = false" 
-              class="p-1.5 hover:bg-black/5 rounded-md text-ui-text-muted transition-colors"
+              class="p-1.5 hover:bg-black/5 rounded-md text-ui-text-muted transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent"
+              aria-label="移除所有共享标签页"
             >
-              <X :size="16" />
+              <X :size="16" aria-hidden="true" />
             </button>
           </div>
         </div>
 
         <!-- Expanded Tab Details -->
-        <div v-if="isContextExpanded" class="px-4 pb-3 space-y-1.5 animate-in slide-in-from-top-1 duration-200">
+        <div v-if="isContextExpanded" class="px-4 pb-3 space-y-1 animate-in slide-in-from-top-1 duration-200" role="list">
           <div 
             v-for="tab in selectedTabs" 
             :key="tab.id"
-            class="flex items-center justify-between group/tab bg-ui-bg/50 border border-ui-border/50 px-2 py-1.5 rounded-md"
+            class="flex items-center justify-between group/tab bg-white/50 border border-ui-border/50 px-2 py-1 rounded-md"
+            role="listitem"
           >
-            <div class="flex items-center gap-2.5 overflow-hidden">
-              <img v-if="tab.favIconUrl" :src="tab.favIconUrl" class="w-3.5 h-3.5 shrink-0 rounded-sm" />
-              <Globe v-else :size="12" class="text-ui-text-muted shrink-0" />
-              <span class="text-[11px] font-medium text-ui-text truncate">{{ tab.title }}</span>
+            <div class="flex items-center gap-2 overflow-hidden">
+              <img v-if="tab.favIconUrl" :src="tab.favIconUrl" class="w-3 h-3 shrink-0 rounded-sm" aria-hidden="true" />
+              <Globe v-else :size="10" class="text-ui-text-muted shrink-0" aria-hidden="true" />
+              <span class="text-[11px] text-ui-text truncate">{{ tab.title }}</span>
             </div>
-            <button @click="removeTab(tab.id)" class="p-1 text-ui-text-muted hover:text-red-500 transition-all">
-              <X :size="12" />
+            <button @click="removeTab(tab.id)" class="p-1 text-ui-text-muted hover:text-red-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-red-500 rounded-sm" :aria-label="`移除 ${tab.title}`">
+              <X :size="10" aria-hidden="true" />
             </button>
           </div>
         </div>
       </div>
 
       <!-- Main Input Flow -->
-      <div class="flex flex-col min-h-[80px]">
+      <div class="flex flex-col">
         <textarea
           ref="textarea"
           v-model="text"
-          class="flex-1 w-full p-4 bg-transparent border-none resize-none text-[14px] leading-relaxed placeholder:text-ui-text-muted/70 font-sans text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent/70"
-          placeholder="给 Agent 发送指令或输入 @ 选择页面..."
+          class="w-full p-4 pb-2 bg-transparent border-none resize-none text-[15px] leading-relaxed placeholder:text-ui-text-muted/60 font-sans text-ui-text focus:outline-none min-h-[60px]"
+          placeholder="Type @ to ask about a tab"
           :disabled="disabled"
+          aria-label="消息输入框"
           @keydown="handleKeydown"
         />
 
-        <div class="flex items-center justify-between px-3 pb-3 mt-auto">
+        <div class="flex items-center justify-between px-3 pb-3">
           <div class="flex items-center gap-1">
             <button 
-              class="p-2 text-ui-text-muted hover:text-ui-text hover:bg-ui-surface rounded-md transition-all active:scale-95"
+              class="p-2 text-ui-text-muted hover:text-ui-text hover:bg-black/5 rounded-lg transition-all active:scale-95 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent"
+              aria-label="添加附件或引用标签页"
+              aria-haspopup="listbox"
+              :aria-expanded="showMentionList"
               @click="void refreshTabs(); showMentionList = !showMentionList"
             >
-              <Plus :size="18" />
+              <Plus :size="20" aria-hidden="true" />
             </button>
           </div>
 
-          <div class="flex items-center gap-2.5">
-            <button class="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold text-ui-text-muted hover:text-ui-text hover:bg-ui-surface rounded-md border border-ui-border transition-all">
-              <span>Fast</span>
-              <ChevronDown :size="12" />
-            </button>
-
+          <div class="flex items-center gap-2">
             <button
               v-if="isRunning"
-              class="p-2.5 bg-black text-white rounded-md hover:opacity-80 transition-all"
+              class="p-2.5 bg-black text-white rounded-xl hover:opacity-80 transition-all shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+              aria-label="停止生成"
               @click="$emit('stop')"
             >
-              <Square :size="14" fill="currentColor" />
+              <Square :size="14" fill="currentColor" aria-hidden="true" />
             </button>
             <button
               v-else
-              class="p-2.5 rounded-md transition-all"
-              :class="canSend ? 'bg-ui-accent text-white hover:opacity-90 shadow-sm' : 'bg-ui-surface text-ui-text-muted opacity-30 cursor-not-allowed'"
+              class="p-2.5 rounded-xl transition-all shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+              :class="canSend ? 'bg-ui-accent text-white hover:opacity-90' : 'bg-ui-surface text-ui-text-muted/30'"
               :disabled="!canSend"
+              aria-label="发送消息"
               @click="handleSend"
             >
-              <Send :size="18" />
+              <Send :size="18" aria-hidden="true" />
             </button>
           </div>
         </div>
