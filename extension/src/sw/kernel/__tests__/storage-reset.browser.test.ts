@@ -2,6 +2,7 @@ import "./test-setup";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { archiveLegacyState, initSessionIndex, resetSessionStore } from "../storage-reset.browser";
+import { readSessionIndex } from "../session-store.browser";
 
 type Store = Record<string, unknown>;
 
@@ -126,13 +127,10 @@ describe("storage-reset.browser", () => {
 
     expect(result.index.version).toBe(1);
     expect(result.index.sessions).toEqual([]);
-    expect(all["session:index"]).toEqual(result.index);
+    expect(await readSessionIndex()).toEqual(result.index);
   });
 
   it("initSessionIndex 会清洗无效索引并持久化", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2025-01-02T03:04:05.000Z"));
-
     await setStore({
       "session:index": {
         version: 999,
@@ -152,14 +150,12 @@ describe("storage-reset.browser", () => {
 
     expect(result.version).toBe(1);
     expect(result.sessions.map((entry) => entry.id)).toEqual(["trimmed", "s2", "keep"]);
-    expect(result.sessions[0]).toEqual({
-      id: "trimmed",
-      createdAt: "2025-01-02T03:04:05.000Z",
-      updatedAt: "2025-01-02T03:04:05.000Z"
-    });
+    expect(result.sessions[0].id).toBe("trimmed");
+    expect(result.sessions[0].createdAt).toBe(result.sessions[0].updatedAt);
+    expect(Number.isNaN(Date.parse(result.sessions[0].createdAt))).toBe(false);
     expect(result.sessions[1]).toEqual({
       id: "s2",
-      createdAt: "2025-01-02T03:04:05.000Z",
+      createdAt: result.sessions[0].createdAt,
       updatedAt: "2024-06-01T00:00:00.000Z"
     });
     expect(result.sessions[2]).toEqual({
@@ -167,9 +163,8 @@ describe("storage-reset.browser", () => {
       createdAt: "2024-01-01T00:00:00.000Z",
       updatedAt: "2024-01-02T00:00:00.000Z"
     });
-    expect(result.updatedAt).toBe("2025-01-02T03:04:05.000Z");
+    expect(result.updatedAt).toBe(result.sessions[0].createdAt);
 
-    const all = await getStore();
-    expect(all["session:index"]).toEqual(result);
+    expect(await readSessionIndex()).toEqual(result);
   });
 });

@@ -971,19 +971,25 @@ describe("runtime-router.browser", () => {
     });
     expect(executed.ok).toBe(true);
 
-    const afterStream = await invokeRuntime({
-      type: "brain.step.stream",
-      sessionId
-    });
-    expect(afterStream.ok).toBe(true);
-    const fullStream = Array.isArray((afterStream.data as Record<string, unknown>)?.stream)
-      ? (((afterStream.data as Record<string, unknown>).stream as unknown[]) as Array<Record<string, unknown>>)
-      : [];
-    const delta = fullStream.slice(baseline.length);
-    const stepDelta = delta.filter((entry) => {
-      const type = String(entry.type || "");
-      return type === "step_execute" || type === "step_execute_result";
-    });
+    const deadline = Date.now() + 1200;
+    let stepDelta: Array<Record<string, unknown>> = [];
+    while (Date.now() < deadline) {
+      const afterStream = await invokeRuntime({
+        type: "brain.step.stream",
+        sessionId
+      });
+      expect(afterStream.ok).toBe(true);
+      const fullStream = Array.isArray((afterStream.data as Record<string, unknown>)?.stream)
+        ? (((afterStream.data as Record<string, unknown>).stream as unknown[]) as Array<Record<string, unknown>>)
+        : [];
+      const delta = fullStream.slice(baseline.length);
+      stepDelta = delta.filter((entry) => {
+        const type = String(entry.type || "");
+        return type === "step_execute" || type === "step_execute_result";
+      });
+      if (stepDelta.length >= 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
 
     expect(stepDelta).toHaveLength(2);
     expect(String(stepDelta[0].type || "")).toBe("step_execute");

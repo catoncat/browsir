@@ -1,3 +1,4 @@
+import "fake-indexeddb/auto";
 import { beforeEach } from "vitest";
 
 type Store = Record<string, unknown>;
