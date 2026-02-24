@@ -2231,9 +2231,9 @@ async function main() {
             250
           ).catch(() => null);
           if (!fallbackReady?.hasComposer) {
-            console.warn("[WARN] panel.vnext 交互用例跳过：fallback 页面未就绪");
-            return;
+            throw new Error("panel.vnext 主 sidepanel 与 fallback 都未就绪：缺少可用 composer");
           }
+          throw new Error("panel.vnext 主 sidepanel 页面未就绪：fallback 就绪仅用于诊断，不计为通过");
         } else {
           assert(base.hasComposer === true, "缺少输入框");
         }

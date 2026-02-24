@@ -3,12 +3,15 @@
 ## 背景
 用户新需求是补 **BDD + 实现链路**：现在 UI 已经能选择/显示 “Sharing tabs”，但 AI 实际不知道用户共享了哪些 tab。
 
-当前断点：
-- `ChatInput` 已 emit `tabIds`：`extension/src/panel/components/ChatInput.vue:21`, `:166-169`
-- `App` 没继续透传 `tabIds`（仅按输入框文本发送）：`extension/src/panel/App.vue:84-90`
-- `runtime.sendPrompt` 仅发 `prompt/newSession`：`extension/src/panel/stores/runtime.ts:162-169`
-- `service-worker` 的 `brain.run.start` 仅处理 `prompt`，未接收共享 tab 上下文：`extension/service-worker.js:3190-3207`
-- LLM payload 构建未注入 shared tabs：`extension/service-worker.js:1965-1995`
+当前状态（已落地）：
+- `ChatInput` 已 emit `tabIds`：`extension/src/panel/components/ChatInput.vue::emit("send", ...)`
+- `App` 已透传 `tabIds`：`extension/src/panel/App.vue::handleSend`
+- `runtime.sendPrompt` 已透传 `tabIds`：`extension/src/panel/stores/runtime.ts::sendPrompt`
+- `runtime-router` 已透传到 runtime loop：`extension/src/sw/kernel/runtime-router.ts::handleBrainRun`
+- LLM payload 已注入 shared tabs：`extension/src/sw/kernel/runtime-loop.browser.ts::buildLlmMessagesFromContext`
+
+剩余重点：
+- 持续用 `bdd:validate` + `bdd:gate` + e2e 证据校验“每次发送覆盖旧值”的语义稳定性。
 
 ## 验收偏好（已确认）
 1. 断言要“三层都要”（请求层 + 回复层 + 兜底场景）
@@ -36,7 +39,7 @@
 - 不重复 `BHV-CHAT-HISTORY-INCLUDES-TOOL-RESULT`（tool role 历史）
 
 ### 2) 新增 feature：shared tabs 的三层可执行断言
-**文件：** `bdd/features/chat/shared-tabs-context.feature`
+**文件：** `bdd/features/business/chat/shared-tabs-context.feature`
 
 场景建议：
 1. `Scenario: Shared tabs are injected into run context`
@@ -56,8 +59,8 @@
 **文件：** `bdd/mappings/contract-to-tests.json`
 
 新增 `BHV-CHAT-SHARED-TABS-CONTEXT` 映射：
-- `unit`: `extension/src/panel/stores/runtime.ts::sendPrompt + extension/service-worker.js::handleBrainRunMessage + buildLlmPayloadFromSessionView`
-- `browser-cdp`: `bdd/features/chat/shared-tabs-context.feature`
+- `unit`: `extension/src/panel/stores/runtime.ts::sendPrompt + extension/src/sw/kernel/runtime-router.ts::handleBrainRun + extension/src/sw/kernel/runtime-loop.browser.ts::buildLlmMessagesFromContext`
+- `browser-cdp`: `bdd/features/business/chat/shared-tabs-context.feature`
 - `e2e`: `bdd/evidence/brain-e2e.latest.json`
 
 ### 4) 打通发送链路（最小改动）
@@ -72,16 +75,16 @@
 - 扩展 `sendPrompt` options：`tabIds?: number[]`
 - `sendMessage("brain.run.start", ...)` 增加 `tabIds`
 
-#### 4.3 service-worker 落地 shared tabs 元数据（每次发送覆盖）
-**文件：** `extension/service-worker.js`
-- 在 `handleBrainRunMessage`（`3190+`）解析 `msg.tabIds`
-- 复用 `queryAllTabsForBrain()`（`1864+`）按 id 解析出 `{ id, title, url }`
-- 写入 session metadata（复用 `writeBrainSessionMeta` / `ensureBrainSession` 的 `header.metadata` 结构，见 `2776-2800`）
+#### 4.3 runtime-loop 落地 shared tabs 元数据（每次发送覆盖）
+**文件：** `extension/src/sw/kernel/runtime-loop.browser.ts`
+- 在 `applySharedTabs` 解析 `tabIds`
+- 复用 `queryAllTabsForRuntime()` 按 id 解析出 `{ id, title, url }`
+- 写入 session metadata（复用 `writeSessionMeta` 的 `header.metadata` 结构）
 - 语义：每次 `brain.run.start` 带来的 shared tabs 覆盖上次值
 
 #### 4.4 注入 LLM payload（让 AI“开跑前可见”）
-**文件：** `extension/service-worker.js`
-- 在 `buildLlmPayloadFromSessionView`（`1965+`）中，从 `view.meta.header.metadata.sharedTabs` 读取
+**文件：** `extension/src/sw/kernel/runtime-loop.browser.ts`
+- 在 `buildLlmMessagesFromContext` 中，从 `meta.header.metadata.sharedTabs` 读取
 - 若存在，追加一条 system/context 消息，内容包含共享 tabs 的 title/url 列表
 - 若为空，不注入（保持 no-tab 兼容）
 
@@ -97,10 +100,10 @@
 ---
 
 ## 关键复用点（避免重复造轮子）
-- Tab 枚举：`extension/service-worker.js::queryAllTabsForBrain` (`1864+`)
-- Session metadata 管理：`readBrainSessionMeta / writeBrainSessionMeta / ensureBrainSession` (`2749+`, `2758+`, `2776+`)
-- LLM payload 统一入口：`buildLlmPayloadFromSessionView` (`1965+`)
-- 运行调试观测：`brain.debug.dump` (`3383+`)
+- Tab 枚举：`extension/src/sw/kernel/runtime-loop.browser.ts::queryAllTabsForRuntime`
+- Session metadata 管理：`extension/src/sw/kernel/runtime-loop.browser.ts::applySharedTabs` + `writeSessionMeta`
+- LLM payload 统一入口：`extension/src/sw/kernel/runtime-loop.browser.ts::buildLlmMessagesFromContext`
+- 运行调试观测：`brain.debug.dump`（runtime router）
 
 ## 验证步骤
 1. `bun run brain:ext:build`（确保 sidepanel dist 与源码一致）

@@ -10,7 +10,7 @@
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/chat/session-title.feature"
+          "target": "bdd/features/business/chat/session-title.feature"
         },
         {
           "layer": "e2e",
@@ -27,7 +27,7 @@
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/chat/max-steps-config.feature"
+          "target": "bdd/features/business/chat/max-steps-config.feature"
         }
       ]
     },
@@ -40,7 +40,7 @@
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/chat/no-tab-start.feature"
+          "target": "bdd/features/business/chat/no-tab-start.feature"
         }
       ]
     },
@@ -49,11 +49,11 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::queryAllTabsForRuntime + getActiveTabIdForRuntime + executeToolCall(list_tabs/open_tab)"
+          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::queryAllTabsForRuntime + getActiveTabIdForRuntime + executeToolCall"
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/chat/tab-ref-default.feature"
+          "target": "bdd/features/business/chat/tab-ref-default.feature"
         }
       ]
     },
@@ -66,11 +66,11 @@
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/chat/history-includes-tool-result.feature"
+          "target": "bdd/features/technical/chat/history-includes-tool-result.feature"
         },
         {
           "layer": "e2e",
-          "target": "bdd/evidence/brain-e2e.latest.json::sidepanel 渲染并支持复制/历史分叉/最后一条重试"
+          "target": "bdd/evidence/brain-e2e.latest.json::brain.runtime :: 同一会话第二轮继续执行不应触发 LLM HTTP 400"
         }
       ]
     },
@@ -79,15 +79,15 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::BRAIN_TOOL_DEFS + executeToolCall + safeStringify(tool envelope)"
+          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::summarizeToolTarget + executeToolCall + safeStringify"
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/chat/list-open-tabs-tools.feature"
+          "target": "bdd/features/technical/chat/list-open-tabs-tools.feature"
         },
         {
           "layer": "e2e",
-          "target": "bdd/evidence/brain-e2e.latest.json::sidepanel 渲染并支持复制/历史分叉/最后一条重试"
+          "target": "bdd/evidence/brain-e2e.latest.json::brain.runtime :: brain.run.start 支持 tool_calls 闭环并写入 step stream||brain.runtime :: brain.debug.dump 可观测 llm 原始调用与工具步骤"
         }
       ]
     },
@@ -104,7 +104,7 @@
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/cdp/on-demand.feature"
+          "target": "bdd/features/technical/cdp/on-demand.feature"
         },
         {
           "layer": "e2e",
@@ -121,7 +121,7 @@
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/panel/action-open.feature"
+          "target": "bdd/features/business/panel/action-open.feature"
         }
       ]
     },
@@ -134,7 +134,7 @@
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/chat/tool-renderer-registry.feature"
+          "target": "bdd/features/business/chat/tool-renderer-registry.feature"
         }
       ]
     },
@@ -147,7 +147,7 @@
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/chat/streaming-message-container.feature"
+          "target": "bdd/features/business/chat/streaming-message-container.feature"
         }
       ]
     },
@@ -160,11 +160,11 @@
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/chat/llm-capability-gate.feature"
+          "target": "bdd/features/technical/chat/llm-capability-gate.feature"
         },
         {
           "layer": "e2e",
-          "target": "bdd/evidence/brain-e2e.latest.json"
+          "target": "bdd/evidence/brain-e2e.latest.json::brain.runtime :: brain.run.start 支持 tool_calls 闭环并写入 step stream||brain.runtime :: LLM 工具超时后可按失败信号调整 timeout 重试成功||brain.runtime :: CDP 失败后不中断，LLM 可继续推进并完成||brain.runtime :: LLM HTTP 失败时应产生 auto_retry 事件并失败收口"
         }
       ]
     },
@@ -177,11 +177,11 @@
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/chat/llm-live-capability.feature"
+          "target": "bdd/features/technical/chat/llm-live-capability.feature"
         },
         {
           "layer": "e2e",
-          "target": "bdd/evidence/brain-e2e-live.latest.json"
+          "target": "bdd/evidence/brain-e2e-live.latest.json::sidepanel llm-live :: 真实 LLM 在浏览器目标上达到可验证成功率"
         }
       ]
     },
@@ -198,7 +198,7 @@
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/storage/session-metadata-split-storage.feature"
+          "target": "bdd/features/technical/storage/session-metadata-split-storage.feature"
         }
       ]
     },
@@ -219,7 +219,24 @@
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/session/compaction-state-machine.feature"
+          "target": "bdd/features/technical/session/compaction-state-machine.feature"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-SESSION-INTERRUPTION-RECOVERY",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/__tests__/orchestrator.browser.test.ts::重启后保留会话与 trace，但运行态不会自动恢复"
+        },
+        {
+          "layer": "integration",
+          "target": "extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts::service worker 重启后可恢复会话并继续同一 session 对话 + extension/src/sw/kernel/__tests__/runtime-router-interruption.browser.test.ts::user stop should not be treated as implicit interruption recovery"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/technical/session/interruption-recovery.feature"
         }
       ]
     },
@@ -236,11 +253,7 @@
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/session/agent-hook-lifecycle.feature"
-        },
-        {
-          "layer": "e2e",
-          "target": "bdd/evidence/brain-e2e.latest.json"
+          "target": "bdd/features/technical/session/agent-hook-lifecycle.feature"
         }
       ]
     },
@@ -257,11 +270,7 @@
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/session/capability-provider-routing.feature"
-        },
-        {
-          "layer": "e2e",
-          "target": "bdd/evidence/brain-e2e.latest.json"
+          "target": "bdd/features/technical/session/capability-provider-routing.feature"
         }
       ]
     },
@@ -274,11 +283,11 @@
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/session/list-title-delete.feature"
+          "target": "bdd/features/business/session/list-title-delete.feature"
         },
         {
           "layer": "e2e",
-          "target": "bdd/evidence/brain-e2e.latest.json"
+          "target": "bdd/evidence/brain-e2e.latest.json::brain.session :: session 标题生命周期：自动生成 + 菜单重刷 + 列表重命名 + 自动阈值"
         }
       ]
     },
@@ -299,7 +308,7 @@
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/storage/session-reset-bootstrap.feature"
+          "target": "bdd/features/technical/storage/session-reset-bootstrap.feature"
         }
       ]
     },
@@ -312,15 +321,15 @@
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/chat/message-actions-retry-copy.feature"
+          "target": "bdd/features/business/chat/message-actions-retry-copy.feature"
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/chat/regenerate-answer.feature"
+          "target": "bdd/features/business/chat/regenerate-answer.feature"
         },
         {
           "layer": "e2e",
-          "target": "bdd/evidence/brain-e2e.latest.json"
+          "target": "bdd/evidence/brain-e2e.latest.json::panel.vnext :: sidepanel 渲染并支持复制/历史分叉/最后一条重试||panel.vnext :: user inline 编辑：最后一条重跑，历史消息分叉重跑"
         }
       ]
     },
@@ -333,7 +342,7 @@
         },
         {
           "layer": "browser-cdp",
-          "target": "bdd/features/chat/shared-tabs-context.feature"
+          "target": "bdd/features/business/chat/shared-tabs-context.feature"
         },
         {
           "layer": "e2e",

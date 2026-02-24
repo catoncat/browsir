@@ -1,4 +1,4 @@
-import { readdir, readFile, stat } from "node:fs/promises";
+import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 export const ALLOWED_LAYERS = new Set(["unit", "integration", "browser-cdp", "e2e"]);
@@ -57,6 +57,7 @@ export interface ValidationSnapshot {
   contracts: LoadedContract[];
   contractsById: Map<string, LoadedContract>;
   featureRefs: Map<string, string[]>;
+  featuresWithoutScenario: string[];
   mappingFile: string;
   mappings: ContractMapping[];
   errors: string[];
@@ -117,14 +118,23 @@ function isSemver(value: string): boolean {
 
 export function parseFeatureContractRefs(content: string): string[] {
   const refs = new Set<string>();
-  const re = /@contract\(([^)]+)\)/g;
+  const lines = String(content || "").split(/\r?\n/);
+  const tagRegex = /(?:^|\s)@contract\(\s*([^)]+?)\s*\)/g;
 
-  let match: RegExpExecArray | null = null;
-  while ((match = re.exec(content))) {
-    const id = String(match[1] || "")
-      .replace(/['"`]/g, "")
-      .trim();
-    if (id) refs.add(id);
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    if (!trimmed.includes("@contract(")) continue;
+
+    tagRegex.lastIndex = 0;
+    let match: RegExpExecArray | null = null;
+    while ((match = tagRegex.exec(trimmed))) {
+      const id = String(match[1] || "")
+        .replace(/['"`]/g, "")
+        .replace(/\s+#.*$/, "")
+        .trim();
+      if (id) refs.add(id);
+    }
   }
 
   return Array.from(refs);
@@ -133,6 +143,92 @@ export function parseFeatureContractRefs(content: string): string[] {
 export function countScenarios(content: string): number {
   const matches = content.match(/^\s*Scenario(?: Outline)?:/gm);
   return matches?.length || 0;
+}
+
+export function isEvidenceJsonTargetPath(targetPath: string): boolean {
+  const normalized = String(targetPath || "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "");
+  return /^bdd\/evidence\/[^/]+\.json$/.test(normalized);
+}
+
+export function isFeatureFileTargetPath(targetPath: string): boolean {
+  const normalized = String(targetPath || "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "");
+  return normalized.endsWith(".feature");
+}
+
+function normalizeSelectorText(value: string): string {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseSelectorTokens(selector: string): string[] {
+  return String(selector || "")
+    .split("||")
+    .map((item) => normalizeSelectorText(item))
+    .filter(Boolean);
+}
+
+interface EvidenceSelectorCandidate {
+  index: number;
+  name: string;
+  full: string;
+}
+
+export function validateEvidenceSelector(
+  tests: unknown[],
+  selector: string
+): { ok: true } | { ok: false; error: string } {
+  const tokens = parseSelectorTokens(selector);
+  if (tokens.length === 0) return { ok: true };
+
+  const passed: EvidenceSelectorCandidate[] = [];
+  const source = Array.isArray(tests) ? tests : [];
+  for (let i = 0; i < source.length; i += 1) {
+    const item = source[i];
+    const status = normalizeSelectorText(String((item as any)?.status || "")).toLowerCase();
+    if (status !== "passed") continue;
+    const name = normalizeSelectorText(String((item as any)?.name || ""));
+    if (!name) continue;
+    const group = normalizeSelectorText(String((item as any)?.group || ""));
+    passed.push({
+      index: i,
+      name,
+      full: group ? `${group} :: ${name}` : name
+    });
+  }
+
+  if (passed.length === 0) {
+    return { ok: false, error: "evidence 缺少 passed tests，无法验证 selector" };
+  }
+
+  const used = new Set<number>();
+  for (const token of tokens) {
+    const expectsFull = token.includes("::");
+    const candidates = passed.filter((item) => {
+      if (used.has(item.index)) return false;
+      return expectsFull ? item.full === token : item.name === token;
+    });
+
+    if (!expectsFull && candidates.length > 1) {
+      return { ok: false, error: `selector "${token}" 命中多个 case，请使用 group :: name 精确匹配` };
+    }
+
+    const match = candidates[0];
+
+    if (!match) {
+      return { ok: false, error: `evidence 未命中 selector "${token}"` };
+    }
+
+    used.add(match.index);
+  }
+
+  return { ok: true };
 }
 
 export function parseProofTargets(target: string): ParsedProofTarget[] {
@@ -157,6 +253,11 @@ export function parseProofTargets(target: string): ParsedProofTarget[] {
     return out;
   }
 
+  const prefix = raw.slice(0, Number(matches[0]?.index || 0)).trim();
+  if (prefix) {
+    return [];
+  }
+
   for (let i = 0; i < matches.length; i += 1) {
     const current = matches[i];
     const next = matches[i + 1];
@@ -165,7 +266,29 @@ export function parseProofTargets(target: string): ParsedProofTarget[] {
     const start = Number(current.index || 0) + path.length;
     const end = typeof next?.index === "number" ? next.index : raw.length;
     const tail = raw.slice(start, end).trim();
-    const selector = tail.startsWith("::") ? tail.slice(2).trim().replace(/\+\s*$/, "").trim() : "";
+
+    let selector = "";
+    if (tail) {
+      if (next) {
+        if (tail === "+") {
+          selector = "";
+        } else if (tail.startsWith("::")) {
+          const selectorWithDelimiter = tail.slice(2).trim();
+          if (!/\+\s*$/.test(selectorWithDelimiter)) {
+            return [];
+          }
+          selector = selectorWithDelimiter.replace(/\+\s*$/, "").trim();
+        } else {
+          return [];
+        }
+      } else {
+        if (!tail.startsWith("::")) {
+          return [];
+        }
+        selector = tail.slice(2).trim();
+      }
+    }
+
     const key = `${path}@@${selector}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -311,14 +434,19 @@ async function loadContracts(repoRoot: string, errors: string[]): Promise<{ cont
   return { contracts, byId };
 }
 
-async function loadFeatureRefs(repoRoot: string, warnings: string[], errors: string[]): Promise<Map<string, string[]>> {
+async function loadFeatureRefs(
+  repoRoot: string,
+  warnings: string[],
+  errors: string[]
+): Promise<{ refs: Map<string, string[]>; featuresWithoutScenario: string[] }> {
   const featuresDir = path.join(repoRoot, "bdd", "features");
   const files = await walkFiles(featuresDir, [".feature"]);
   const refs = new Map<string, string[]>();
+  const featuresWithoutScenario: string[] = [];
 
   if (files.length === 0) {
     errors.push("bdd/features 下没有 .feature 文件");
-    return refs;
+    return { refs, featuresWithoutScenario };
   }
 
   for (const file of files) {
@@ -333,6 +461,7 @@ async function loadFeatureRefs(repoRoot: string, warnings: string[], errors: str
     const scenarios = countScenarios(text);
     if (scenarios === 0) {
       warnings.push(`${relFile}: 未找到 Scenario`);
+      featuresWithoutScenario.push(relFile);
     }
 
     for (const id of contractIds) {
@@ -342,7 +471,7 @@ async function loadFeatureRefs(repoRoot: string, warnings: string[], errors: str
     }
   }
 
-  return refs;
+  return { refs, featuresWithoutScenario };
 }
 
 async function loadMappings(repoRoot: string, errors: string[]): Promise<{ file: string; mappings: ContractMapping[] }> {
@@ -425,7 +554,7 @@ export async function runStructuralValidation(repoRoot: string): Promise<Validat
   }
 
   const { contracts, byId } = await loadContracts(repoRoot, errors);
-  const featureRefs = await loadFeatureRefs(repoRoot, warnings, errors);
+  const { refs: featureRefs, featuresWithoutScenario } = await loadFeatureRefs(repoRoot, warnings, errors);
   const { file: mappingFile, mappings } = await loadMappings(repoRoot, errors);
 
   for (const contract of contracts) {
@@ -462,6 +591,7 @@ export async function runStructuralValidation(repoRoot: string): Promise<Validat
     contracts,
     contractsById: byId,
     featureRefs,
+    featuresWithoutScenario,
     mappingFile,
     mappings,
     errors,
@@ -538,7 +668,33 @@ export async function loadContractCategories(repoRoot: string, errors: string[] 
 }
 
 export async function fileExistsInRepo(repoRoot: string, repoRelativePath: string): Promise<boolean> {
-  const normalized = repoRelativePath.replace(/^\.\//, "");
-  const abs = path.join(repoRoot, normalized);
-  return exists(abs);
+  const normalized = String(repoRelativePath || "")
+    .trim()
+    .replace(/^\.\/+/, "");
+  if (!normalized || path.isAbsolute(normalized)) {
+    return false;
+  }
+
+  const rootAbs = path.resolve(repoRoot);
+  const abs = path.resolve(rootAbs, normalized);
+  const relative = path.relative(rootAbs, abs);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    return false;
+  }
+
+  if (!(await exists(abs))) {
+    return false;
+  }
+
+  try {
+    const [rootReal, targetReal] = await Promise.all([realpath(rootAbs), realpath(abs)]);
+    const realRelative = path.relative(rootReal, targetReal);
+    if (realRelative.startsWith("..") || path.isAbsolute(realRelative)) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+
+  return true;
 }
