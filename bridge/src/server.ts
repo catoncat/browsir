@@ -248,6 +248,7 @@ export function startBridgeServer(): void {
               agentId: frame.agentId,
               data: {
                 tool: frame.tool,
+                canonicalTool: frame.canonicalTool,
               },
             });
             return;
@@ -280,6 +281,7 @@ export function startBridgeServer(): void {
               agentId: frame.agentId,
               data: {
                 tool: frame.tool,
+                canonicalTool: frame.canonicalTool,
               },
             });
             return;
@@ -310,7 +312,7 @@ export function startBridgeServer(): void {
             ws,
             eventFrame(
               "invoke.started",
-              { tool: frame.tool },
+              { tool: frame.tool, canonicalTool: frame.canonicalTool },
               {
                 id: frame.id,
                 sessionId: logicalSessionId,
@@ -330,6 +332,7 @@ export function startBridgeServer(): void {
             agentId: frame.agentId,
             data: {
               tool: frame.tool,
+              canonicalTool: frame.canonicalTool,
               args: frame.args,
             },
           });
@@ -357,7 +360,7 @@ export function startBridgeServer(): void {
               };
 
               const durationMs = Date.now() - startedAt;
-              const metrics = summarizeInvokeMetrics(frame.tool, data, durationMs);
+              const metrics = summarizeInvokeMetrics(frame.canonicalTool || frame.tool, data, durationMs);
               sendJson(
                 ws,
                 eventFrame(
@@ -384,6 +387,7 @@ export function startBridgeServer(): void {
                   ok: true,
                   durationMs,
                   tool: frame.tool,
+                  canonicalTool: frame.canonicalTool,
                   metrics,
                   result: data,
                 },
@@ -401,7 +405,7 @@ export function startBridgeServer(): void {
               };
 
               const durationMs = Date.now() - startedAt;
-              const metrics = summarizeInvokeMetrics(frame.tool, null, durationMs);
+              const metrics = summarizeInvokeMetrics(frame.canonicalTool || frame.tool, null, durationMs);
               sendJson(
                 ws,
                 eventFrame(
@@ -427,6 +431,7 @@ export function startBridgeServer(): void {
                 data: {
                   durationMs,
                   tool: frame.tool,
+                  canonicalTool: frame.canonicalTool,
                   metrics,
                   error,
                 },

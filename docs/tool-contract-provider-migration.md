@@ -6,7 +6,7 @@
 
 ### 1.1 当前问题（代码事实）
 
-1. LLM 工具定义硬编码且绑定本机语义：`extension/src/sw/kernel/runtime-loop.browser.ts:58`。
+1. LLM 工具定义曾硬编码且绑定本机语义（当前已迁移到 Tool Contract Registry）：`extension/src/sw/kernel/tool-contract-registry.ts`、`extension/src/sw/kernel/runtime-loop.browser.ts`。
 2. 执行分发硬编码 `switch`：`extension/src/sw/kernel/runtime-loop.browser.ts::executeToolCall`。
 3. Bridge 仅支持固定四工具：`bridge/src/types.ts:1`、`bridge/src/protocol.ts:4`。
 4. Bridge dispatcher 硬编码分派：`bridge/src/dispatcher.ts:20`。
@@ -18,6 +18,13 @@
 2. 默认 provider 是浏览器内 workspace，不依赖本机 Bridge。
 3. Bridge 变成可选 connector provider（`local-host`）。
 4. LLM 可继续看到稳定工具能力，但路由后端可替换。
+
+### 1.3 实现进度（截至 2026-02-24）
+
+1. 已完成：extension 侧已落 `ToolProviderRegistry + CapabilityPolicyRegistry + PluginRuntime`，`executeStep` 支持 capability/provider 路由与策略覆盖。
+2. 部分完成：`runtime-loop` 已按 capability 路由调用 orchestrator，且 LLM tools 已由 registry 驱动；`executeToolCall` 仍保留 legacy `switch`。
+3. 部分完成：Bridge `protocol + dispatcher` 已接入 registry 路由与 alias 解析，但 provider 动态注册与非内置 provider 尚未落地。
+4. 未完成：canonical 工具名（`fs.read_text/fs.write_text/fs.patch_text/command.run`）全量迁移、`workspace-opfs/workspace-command` 默认 provider 尚未落地。
 
 ## 2. 术语与命名
 
@@ -132,8 +139,9 @@ export interface ToolRegistry {
 
 ### 6.1 改造点
 
-1. 将 `BRAIN_TOOL_DEFS` 从静态常量改为 `registry.listContracts()` 输出：
-   - `extension/src/sw/kernel/runtime-loop.browser.ts:58`
+1. LLM tools 已改为 `ToolContractRegistry` 动态输出：
+   - `extension/src/sw/kernel/tool-contract-registry.ts`
+   - `extension/src/sw/kernel/runtime-loop.browser.ts`
 2. 将 `executeToolCall` 从 `switch` 改为 `registry.resolve + provider.invoke`：
    - `extension/src/sw/kernel/runtime-loop.browser.ts:846`
 3. `startFromPrompt` 可注入 provider 偏好（session metadata）：
@@ -154,13 +162,13 @@ export interface ToolRegistry {
 ### 7.1 改造点
 
 1. `bridge/src/types.ts`
-   - `ToolName` 从 union 扩展为 string（或 canonical+alias union）。
+   - `ToolName` 已从 union 扩展为 string，`InvokeRequest` 增加 `canonicalTool`。
 2. `bridge/src/protocol.ts`
-   - `TOOL_SET` 改由 registry 校验，不再硬编码。
+   - `TOOL_SET` 已改为 registry 校验，支持 alias -> canonical 解析。
 3. `bridge/src/dispatcher.ts`
-   - 固定 `switch` 改为 `registry.resolve + provider.invoke`。
+   - 固定 `switch` 已改为 `registry.resolve + handler` 映射。
 4. `bridge/src/server.ts`
-   - metrics 摘要由 `contract` 或 `provider` 提供，不再按工具名 `if/switch`。
+   - 已输出 `requested tool + canonicalTool`；metrics 摘要仍是内置逻辑，后续再切到 provider/contract 驱动。
 
 ### 7.2 兼容策略
 
@@ -237,6 +245,7 @@ export interface ToolRegistry {
 1. 新增 `bridge/src/tool-registry.ts`。
 2. 改 dispatcher/protocol 走 registry。
 3. 保持对外协议不变。
+4. 当前状态：已完成。
 
 验收：
 
@@ -245,7 +254,7 @@ export interface ToolRegistry {
 
 ### Phase 2（extension 工具调用 registry 化）
 
-1. `BRAIN_TOOL_DEFS` 动态化。
+1. LLM tool definitions 动态化（已完成）。
 2. `executeToolCall` 去 switch。
 3. 增加 `canonicalTool/providerId` 回包。
 
@@ -276,7 +285,7 @@ export interface ToolRegistry {
 ## 12. 回滚策略
 
 1. provider 路由可按开关回退到 legacy switch。
-2. 关闭 registry 动态能力，恢复静态工具定义。
+2. 关闭 registry 动态覆盖能力，仅保留默认内置 contracts。
 3. 保留 legacy alias 至少两个发布窗口。
 
 ## 13. 风险清单
@@ -299,4 +308,3 @@ export interface ToolRegistry {
 2. Bridge 不删除，改为可选 connector provider。
 3. 工具契约稳定优先，执行后端可插拔。
 4. 先 registry 化，再默认 provider 切换，再收敛 alias。
-

@@ -1,9 +1,10 @@
-export type ToolName = "read" | "write" | "edit" | "bash";
+export type ToolName = string;
 
 export interface InvokeRequest {
   id: string;
   type: "invoke";
   tool: ToolName;
+  canonicalTool: string;
   args: Record<string, unknown>;
   sessionId?: string;
   parentSessionId?: string;

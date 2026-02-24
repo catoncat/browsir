@@ -27,6 +27,12 @@
 2. 不在 v1 改写 Bridge 网络协议形状（`invoke` 帧先保持兼容）。
 3. 不在 v1 引入“无上限自治循环”或弱化 verify/lease 语义。
 
+### 1.4 实现进度（截至 2026-02-24）
+
+1. 已完成：`HookRunner`、`PluginRuntime`、`ToolProviderRegistry` 已落地；`runtime.route.*`、`step.*`、`tool.*`、`agent_end.*`、`compaction.*` 已接入。
+2. 已完成：`llm.before_request` / `llm.after_response` 已接入 LLM 主链路（`requestLlmWithRetry`），支持 `patch/block` 与非重试错误语义。
+3. 未完成：文档中的 `run/session/cdp/bridge` 全域 Hook、`policy-guard`、Bridge middleware 化、sub-plugin 仍未落地。
+
 ## 2. 第一性原理与设计铁律
 
 1. **决策一致性**：所有任务决策仍在浏览器内核（SW）完成。
@@ -70,7 +76,7 @@ export type HookDecision =
 
 ### 3.4 Hook 执行顺序
 
-1. 按 `priority ASC`，同优先级按 `pluginId ASC`（稳定序）。
+1. 按 `priority DESC`，同优先级按注册顺序（稳定序）。
 2. `before` 阶段：依次运行，可 `patch` 累积。
 3. `after` 阶段：依次运行，可 `patch` 累积。
 4. `error` 阶段：只允许降噪与补充上下文，不允许吞掉硬错误。

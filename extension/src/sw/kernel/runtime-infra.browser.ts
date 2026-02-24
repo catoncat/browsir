@@ -298,17 +298,25 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     });
   }
 
-  function resetBridgeSocket(): void {
+  function resetBridgeSocket(options: { skipClose?: boolean } = {}): void {
+    const currentSocket = bridgeSocket;
     bridgeConnected = false;
     bridgeConnectPromise = null;
-    if (bridgeSocket) {
+    bridgeSocket = null;
+
+    if (currentSocket && options.skipClose !== true) {
       try {
-        bridgeSocket.close();
+        currentSocket.onopen = null;
+        currentSocket.onmessage = null;
+        currentSocket.onerror = null;
+        currentSocket.onclose = null;
+        if (currentSocket.readyState === WebSocket.OPEN || currentSocket.readyState === WebSocket.CONNECTING) {
+          currentSocket.close();
+        }
       } catch {
         // ignore close failures
       }
     }
-    bridgeSocket = null;
 
     for (const pending of pendingInvokes.values()) {
       pending.reject(
@@ -484,7 +492,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
             const reason = event.reason ? ` reason=${event.reason}` : "";
             rejectOnce(new Error(`Bridge closed before ready: code=${event.code}${reason}; url=${wsHref}`));
           }
-          resetBridgeSocket();
+          resetBridgeSocket({ skipClose: true });
         };
       });
     })();

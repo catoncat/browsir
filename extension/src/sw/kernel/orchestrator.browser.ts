@@ -21,9 +21,17 @@ import {
 } from "./types";
 import { ToolProviderRegistry, type RegisterProviderOptions, type StepToolProvider } from "./tool-provider-registry";
 import { PluginRuntime, type AgentPluginDefinition, type PluginRuntimeView } from "./plugin-runtime";
+import {
+  ToolContractRegistry,
+  type RegisterToolContractOptions,
+  type ToolContract,
+  type ToolContractView,
+  type ToolDefinition
+} from "./tool-contract-registry";
 
 export type { ExecuteCapability, ExecuteMode, ExecuteStepInput, ExecuteStepResult } from "./types";
 export type { CapabilityExecutionPolicy, RegisterCapabilityPolicyOptions } from "./capability-policy";
+export type { RegisterToolContractOptions, ToolContract, ToolContractView, ToolDefinition } from "./tool-contract-registry";
 
 export interface OrchestratorOptions {
   retryMaxAttempts?: number;
@@ -97,6 +105,7 @@ export class BrainOrchestrator {
   private readonly verifyAdapter?: ExecutionAdapters["verify"];
   private readonly hooks = new HookRunner<OrchestratorHookMap>();
   private readonly toolProviders = new ToolProviderRegistry();
+  private readonly toolContracts = new ToolContractRegistry();
   private readonly capabilityPolicies = new CapabilityPolicyRegistry();
   private readonly plugins = new PluginRuntime({
     onHook: (hook, handler, options) => this.onHook(hook, handler, options),
@@ -146,6 +155,26 @@ export class BrainOrchestrator {
 
   listToolProviders(): Array<{ mode: ExecuteMode; id: string }> {
     return this.toolProviders.list();
+  }
+
+  registerToolContract(contract: ToolContract, options: RegisterToolContractOptions = {}): void {
+    this.toolContracts.register(contract, options);
+  }
+
+  unregisterToolContract(name: string): boolean {
+    return this.toolContracts.unregister(name);
+  }
+
+  resolveToolContract(nameOrAlias: string): ToolContract | null {
+    return this.toolContracts.resolve(nameOrAlias);
+  }
+
+  listToolContracts(): ToolContractView[] {
+    return this.toolContracts.listContracts();
+  }
+
+  listLlmToolDefinitions(options: { includeAliases?: boolean } = {}): ToolDefinition[] {
+    return this.toolContracts.listLlmToolDefinitions(options);
   }
 
   getToolProvider(mode: ExecuteMode): StepToolProvider | undefined {

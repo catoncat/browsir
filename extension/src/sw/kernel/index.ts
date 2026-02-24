@@ -9,6 +9,7 @@ export * from "./session-manager.browser";
 export * from "./compaction.browser";
 export * from "./orchestrator.browser";
 export * from "./tool-provider-registry";
+export * from "./tool-contract-registry";
 export * from "./plugin-runtime";
 export * from "./runtime-router";
 export * from "./runtime-infra.browser";

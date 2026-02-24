@@ -90,165 +90,6 @@ export interface RuntimeLoopController {
   refreshSessionTitle(sessionId: string, options?: { force?: boolean }): Promise<string>;
 }
 
-const BRAIN_TOOL_DEFS: JsonRecord[] = [
-  {
-    type: "function",
-    function: {
-      name: "bash",
-      description: "Execute a shell command via bash.exec.",
-      parameters: {
-        type: "object",
-        properties: {
-          command: { type: "string" },
-          timeoutMs: {
-            type: "number",
-            description: "Optional command timeout in milliseconds. For long tasks, increase this value."
-          }
-        },
-        required: ["command"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "read_file",
-      description: "Read a file's content",
-      parameters: {
-        type: "object",
-        properties: {
-          path: { type: "string" },
-          offset: { type: "number" },
-          limit: { type: "number" }
-        },
-        required: ["path"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "write_file",
-      description: "Write content to a file",
-      parameters: {
-        type: "object",
-        properties: {
-          path: { type: "string" },
-          content: { type: "string" },
-          mode: { type: "string", enum: ["overwrite", "append", "create"] }
-        },
-        required: ["path", "content"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "edit_file",
-      description: "Apply edits to a file",
-      parameters: {
-        type: "object",
-        properties: {
-          path: { type: "string" },
-          edits: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                old: { type: "string" },
-                new: { type: "string" }
-              },
-              required: ["old", "new"]
-            }
-          }
-        },
-        required: ["path", "edits"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "snapshot",
-      description: "Take an accessibility-first snapshot of the current browser tab",
-      parameters: {
-        type: "object",
-        properties: {
-          tabId: { type: "number" },
-          mode: { type: "string", enum: ["text", "interactive", "full"] },
-          selector: { type: "string" },
-          filter: { type: "string", enum: ["interactive", "all"] },
-          format: { type: "string", enum: ["compact", "json"] },
-          diff: { type: "boolean" },
-          maxTokens: { type: "number" },
-          depth: { type: "number" },
-          noAnimations: { type: "boolean" }
-        },
-        required: []
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "browser_action",
-      description: "Perform a browser action (click, type, fill, press, scroll, select, navigate)",
-      parameters: {
-        type: "object",
-        properties: {
-          tabId: { type: "number" },
-          kind: { type: "string", enum: ["click", "type", "fill", "press", "scroll", "select", "navigate"] },
-          ref: { type: "string" },
-          selector: { type: "string" },
-          key: { type: "string" },
-          value: { type: "string" },
-          url: { type: "string" },
-          expect: { type: "object" }
-        },
-        required: ["kind"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "browser_verify",
-      description: "Verify current browser state after action",
-      parameters: {
-        type: "object",
-        properties: {
-          tabId: { type: "number" },
-          expect: { type: "object" }
-        },
-        required: []
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "list_tabs",
-      description: "List available browser tabs",
-      parameters: { type: "object", properties: {}, required: [] }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "open_tab",
-      description: "Open a new browser tab",
-      parameters: {
-        type: "object",
-        properties: {
-          url: { type: "string" },
-          active: { type: "boolean" }
-        },
-        required: ["url"]
-      }
-    }
-  }
-];
-
 const TOOL_CAPABILITIES = {
   bash: "process.exec",
   read_file: "fs.read",
@@ -305,6 +146,20 @@ function normalizeIntInRange(raw: unknown, fallback: number, min: number, max: n
 function asRuntimeErrorWithMeta(error: unknown): RuntimeErrorWithMeta {
   if (error instanceof Error) return error as RuntimeErrorWithMeta;
   return new Error(String(error)) as RuntimeErrorWithMeta;
+}
+
+function isPlainJsonRecord(value: unknown): value is JsonRecord {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function createNonRetryableRuntimeError(code: string, message: string, details?: unknown): RuntimeErrorWithMeta {
+  const err = new Error(message) as RuntimeErrorWithMeta;
+  err.code = code;
+  err.retryable = false;
+  if (details !== undefined) {
+    err.details = details;
+  }
+  return err;
 }
 
 function normalizeErrorCode(code: unknown): string {
@@ -809,6 +664,27 @@ function buildSharedTabsContextMessage(sharedTabs: unknown): string {
   return ["Shared tabs context (user-selected):", ...lines, "Use this context directly before deciding whether to call list_tabs/open_tab."].join("\n");
 }
 
+function buildTaskProgressSystemMessage(input: {
+  llmStep: number;
+  maxLoopSteps: number;
+  toolStep: number;
+  retryAttempt: number;
+  retryMaxAttempts: number;
+}): string {
+  const llmStep = Math.max(1, Number(input.llmStep || 1));
+  const maxLoopSteps = Math.max(1, Number(input.maxLoopSteps || 1));
+  const toolStep = Math.max(0, Number(input.toolStep || 0));
+  const retryAttempt = Math.max(0, Number(input.retryAttempt || 0));
+  const retryMaxAttempts = Math.max(0, Number(input.retryMaxAttempts || 0));
+  return [
+    "Task progress (brief):",
+    `- loop_step: ${llmStep}/${maxLoopSteps}`,
+    `- tool_steps_done: ${toolStep}`,
+    `- retry_state: ${retryAttempt}/${retryMaxAttempts}`,
+    "- Keep moving toward the same user goal; avoid repeating already completed steps."
+  ].join("\n");
+}
+
 function buildLlmMessagesFromContext(meta: SessionMeta | null, contextMessages: Array<{ role: string; content: string }>): JsonRecord[] {
   const out: JsonRecord[] = [];
   out.push({
@@ -817,7 +693,8 @@ function buildLlmMessagesFromContext(meta: SessionMeta | null, contextMessages: 
       "Tool retry policy:",
       "1) For transient tool errors (retryable=true), retry the same goal with adjusted parameters.",
       "2) bash supports optional timeoutMs (milliseconds). Increase timeoutMs when timeout-related failures happen.",
-      "3) For non-retryable errors, stop retrying and explain the blocker clearly."
+      "3) For non-retryable errors, stop retrying and explain the blocker clearly.",
+      "4) A short task progress note will be provided each round via system message."
     ].join("\n")
   });
   const metadata = toRecord(meta?.header?.metadata);
@@ -1845,31 +1722,66 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       let rawBody = "";
       let contentType = "";
       try {
-        const payload: JsonRecord = {
+        const llmToolDefs = orchestrator.listLlmToolDefinitions({ includeAliases: true });
+        const basePayload: JsonRecord = {
           model: llmModel,
           messages,
-          tools: BRAIN_TOOL_DEFS,
+          tools: llmToolDefs,
           tool_choice: "auto",
           temperature: 0.2,
           stream: true
         };
-        const url = `${llmBase.replace(/\/$/, "")}/chat/completions`;
+        const baseUrl = `${llmBase.replace(/\/$/, "")}/chat/completions`;
+        const beforeRequest = await orchestrator.runHook("llm.before_request", {
+          request: {
+            sessionId,
+            step,
+            attempt,
+            url: baseUrl,
+            payload: basePayload
+          }
+        });
+        if (beforeRequest.blocked) {
+          throw createNonRetryableRuntimeError("E_LLM_HOOK_BLOCKED", `llm.before_request blocked: ${beforeRequest.reason || "blocked"}`);
+        }
+        const patchedRequest = toRecord(beforeRequest.value.request);
+        const requestUrlRaw = patchedRequest.url;
+        if (requestUrlRaw !== undefined && typeof requestUrlRaw !== "string") {
+          throw createNonRetryableRuntimeError("E_LLM_HOOK_INVALID_PATCH", "llm.before_request patch request.url must be a string");
+        }
+        const requestPayloadRaw = patchedRequest.payload;
+        if (requestPayloadRaw !== undefined && !isPlainJsonRecord(requestPayloadRaw)) {
+          throw createNonRetryableRuntimeError("E_LLM_HOOK_INVALID_PATCH", "llm.before_request patch request.payload must be an object");
+        }
+        const requestUrl = String(requestUrlRaw || baseUrl).trim() || baseUrl;
+        const requestPayload: JsonRecord = {
+          ...basePayload,
+          ...(requestPayloadRaw || {})
+        };
+        if (!Array.isArray(requestPayload.messages)) requestPayload.messages = messages;
+        if (!Array.isArray(requestPayload.tools)) requestPayload.tools = llmToolDefs;
+        if (!String(requestPayload.model || "").trim()) requestPayload.model = llmModel;
+        if (!requestPayload.tool_choice) requestPayload.tool_choice = "auto";
+        if (typeof requestPayload.temperature !== "number" || !Number.isFinite(requestPayload.temperature)) {
+          requestPayload.temperature = 0.2;
+        }
+        if (typeof requestPayload.stream !== "boolean") requestPayload.stream = true;
 
         orchestrator.events.emit("llm.request", sessionId, {
           step,
-          url,
+          url: requestUrl,
           model: llmModel,
-          messageCount: payload.messages && Array.isArray(payload.messages) ? payload.messages.length : 0,
-          payload
+          messageCount: requestPayload.messages && Array.isArray(requestPayload.messages) ? requestPayload.messages.length : 0,
+          payload: requestPayload
         });
 
-        const resp = await fetch(url, {
+        const resp = await fetch(requestUrl, {
           method: "POST",
           headers: {
             "content-type": "application/json",
             authorization: `Bearer ${llmKey}`
           },
-          body: JSON.stringify(payload),
+          body: JSON.stringify(requestPayload),
           signal: ctrl.signal
         });
         status = resp.status;
@@ -1941,6 +1853,25 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           ok,
           body: clipText(rawBody)
         });
+        const afterResponse = await orchestrator.runHook("llm.after_response", {
+          request: {
+            sessionId,
+            step,
+            attempt,
+            url: requestUrl,
+            payload: requestPayload,
+            status,
+            ok
+          },
+          response: message
+        });
+        if (afterResponse.blocked) {
+          throw createNonRetryableRuntimeError("E_LLM_HOOK_BLOCKED", `llm.after_response blocked: ${afterResponse.reason || "blocked"}`);
+        }
+        if (!isPlainJsonRecord(afterResponse.value.response)) {
+          throw createNonRetryableRuntimeError("E_LLM_HOOK_INVALID_PATCH", "llm.after_response patch response must be an object");
+        }
+        message = afterResponse.value.response;
 
         const state = orchestrator.getRunState(sessionId);
         if (state.retry.active) {
@@ -2082,6 +2013,19 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         }
 
         llmStep += 1;
+        const requestMessages = [
+          ...messages,
+          {
+            role: "system",
+            content: buildTaskProgressSystemMessage({
+              llmStep,
+              maxLoopSteps,
+              toolStep,
+              retryAttempt: Number(state.retry.attempt || 0),
+              retryMaxAttempts: Number(state.retry.maxAttempts || llmRetryMaxAttempts)
+            })
+          }
+        ];
         const message = await requestLlmWithRetry({
           sessionId,
           llmBase,
@@ -2090,7 +2034,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           llmTimeoutMs,
           llmMaxRetryDelayMs,
           step: llmStep,
-          messages
+          messages: requestMessages
         });
 
         const assistantText = parseLlmContent(message).trim();

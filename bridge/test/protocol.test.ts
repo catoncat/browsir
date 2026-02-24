@@ -17,9 +17,24 @@ describe("parseInvokeFrame", () => {
 
     expect(frame.id).toBe("u1");
     expect(frame.tool).toBe("read");
+    expect(frame.canonicalTool).toBe("read");
     expect(frame.sessionId).toBe("s1");
     expect(frame.parentSessionId).toBe("p0");
     expect(frame.agentId).toBe("a1");
+  });
+
+  test("accepts alias tool and resolves canonicalTool", () => {
+    const frame = parseInvokeFrame(
+      JSON.stringify({
+        id: "u2",
+        type: "invoke",
+        tool: "read_file",
+        args: { path: "README.md" },
+      }),
+    );
+
+    expect(frame.tool).toBe("read_file");
+    expect(frame.canonicalTool).toBe("read");
   });
 
   test("rejects unknown tool", () => {

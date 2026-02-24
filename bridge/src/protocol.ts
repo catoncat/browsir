@@ -1,7 +1,6 @@
 import { BridgeError } from "./errors";
 import type { InvokeRequest, ToolName } from "./types";
-
-const TOOL_SET = new Set<ToolName>(["read", "write", "edit", "bash"]);
+import { resolveToolName } from "./tool-registry";
 
 export function parseInvokeFrame(raw: string | Buffer): InvokeRequest {
   let value: unknown;
@@ -25,7 +24,12 @@ export function parseInvokeFrame(raw: string | Buffer): InvokeRequest {
     throw new BridgeError("E_ARGS", "id must be a non-empty string");
   }
 
-  if (typeof frame.tool !== "string" || !TOOL_SET.has(frame.tool as ToolName)) {
+  if (typeof frame.tool !== "string") {
+    throw new BridgeError("E_TOOL", "Unknown tool", { tool: frame.tool });
+  }
+  const requestedTool = frame.tool.trim();
+  const canonicalTool = resolveToolName(requestedTool);
+  if (!canonicalTool) {
     throw new BridgeError("E_TOOL", "Unknown tool", { tool: frame.tool });
   }
 
@@ -36,7 +40,8 @@ export function parseInvokeFrame(raw: string | Buffer): InvokeRequest {
   const out: InvokeRequest = {
     id: frame.id,
     type: "invoke",
-    tool: frame.tool as ToolName,
+    tool: requestedTool as ToolName,
+    canonicalTool,
     args: frame.args as Record<string, unknown>,
   };
 

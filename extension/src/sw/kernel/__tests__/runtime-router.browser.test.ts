@@ -1,6 +1,6 @@
 import "./test-setup";
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BrainOrchestrator } from "../orchestrator.browser";
 import { registerRuntimeRouter } from "../runtime-router";
 
@@ -37,12 +37,33 @@ function readConversationMessages(response: Record<string, unknown>): Array<Reco
   return Array.isArray(rawMessages) ? (rawMessages as Array<Record<string, unknown>>) : [];
 }
 
+async function waitForLoopDone(sessionId: string, timeoutMs = 2500): Promise<Array<Record<string, unknown>>> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const out = await invokeRuntime({
+      type: "brain.step.stream",
+      sessionId
+    });
+    const stream = Array.isArray((out.data as Record<string, unknown>)?.stream)
+      ? (((out.data as Record<string, unknown>).stream as unknown[]) as Array<Record<string, unknown>>)
+      : [];
+    if (stream.some((event) => String(event.type || "") === "loop_done")) {
+      return stream;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`waitForLoopDone timeout: ${sessionId}`);
+}
+
 describe("runtime-router.browser", () => {
   beforeEach(() => {
     runtimeListener = null;
     (chrome.runtime.onMessage as unknown as { addListener: (cb: RuntimeListener) => void }).addListener = (cb) => {
       runtimeListener = cb;
     };
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("supports fork session and exposes forkedFrom metadata in list/view", async () => {
@@ -373,6 +394,62 @@ describe("runtime-router.browser", () => {
     expect(String(edited.error || "")).toContain("sourceEntry 不存在");
   });
 
+  it("service worker 重启后可恢复会话并继续同一 session 对话", async () => {
+    const oldOrchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(oldOrchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "seed-user",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await oldOrchestrator.sessions.appendMessage({
+      sessionId,
+      role: "assistant",
+      text: "seed-assistant"
+    });
+    oldOrchestrator.setRunning(sessionId, true);
+
+    const restartedOrchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(restartedOrchestrator);
+
+    const viewed = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(viewed.ok).toBe(true);
+    const messages = readConversationMessages(viewed);
+    expect(messages.some((item) => String(item.content || "") === "seed-user")).toBe(true);
+    expect(messages.some((item) => String(item.content || "") === "seed-assistant")).toBe(true);
+    const conversationView = ((viewed.data as Record<string, unknown>) || {}).conversationView as Record<string, unknown>;
+    const lastStatus = (conversationView.lastStatus || {}) as Record<string, unknown>;
+    expect(Boolean(lastStatus.running)).toBe(false);
+
+    const continued = await invokeRuntime({
+      type: "brain.run.start",
+      sessionId,
+      prompt: "after-restart-user",
+      autoRun: false
+    });
+    expect(continued.ok).toBe(true);
+    const continuedData = (continued.data || {}) as Record<string, unknown>;
+    expect(String(continuedData.sessionId || "")).toBe(sessionId);
+    const continuedRuntime = (continuedData.runtime || {}) as Record<string, unknown>;
+    expect(Boolean(continuedRuntime.running)).toBe(false);
+
+    const viewedAfterContinue = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(viewedAfterContinue.ok).toBe(true);
+    const messagesAfterContinue = readConversationMessages(viewedAfterContinue);
+    expect(messagesAfterContinue.some((item) => String(item.content || "") === "after-restart-user")).toBe(true);
+  });
+
   it("supports capability provider in brain.step.execute", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -505,6 +582,260 @@ describe("runtime-router.browser", () => {
     expect(String((stepDelta[1].payload as Record<string, unknown> | undefined)?.capabilityUsed || "")).toBe("fs.virtual.read");
   });
 
+  it("brain.run.start 主链路会触发 llm.before_request 和 llm.after_response", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const timeline: string[] = [];
+    let beforeCount = 0;
+    let afterCount = 0;
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.llm.hook.timeline",
+        name: "llm-hook-timeline",
+        version: "1.0.0",
+        permissions: {
+          hooks: ["llm.before_request", "llm.after_response"]
+        }
+      },
+      hooks: {
+        "llm.before_request": () => {
+          beforeCount += 1;
+          timeline.push("before");
+          return { action: "continue" };
+        },
+        "llm.after_response": () => {
+          afterCount += 1;
+          timeline.push("after");
+          return { action: "continue" };
+        }
+      }
+    });
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      timeline.push("fetch");
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "llm-hook-ok"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test"
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "测试 llm hook 时序",
+      sessionOptions: {
+        title: "LLM Hook Timeline",
+        metadata: {
+          titleSource: "manual"
+        }
+      }
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(beforeCount).toBe(1);
+    expect(afterCount).toBe(1);
+    expect(timeline).toEqual(["before", "fetch", "after"]);
+    const eventTypes = stream.map((item) => String(item.type || ""));
+    expect(eventTypes).toContain("llm.request");
+    expect(eventTypes).toContain("llm.response.parsed");
+  });
+
+  it("llm.before_request patch 会改写真实请求 body", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    let capturedBody: Record<string, unknown> | null = null;
+    let afterResponseContent = "";
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.llm.hook.patch",
+        name: "llm-hook-patch",
+        version: "1.0.0",
+        permissions: {
+          hooks: ["llm.before_request", "llm.after_response"]
+        }
+      },
+      hooks: {
+        "llm.before_request": (event) => {
+          const request = (event.request || {}) as Record<string, unknown>;
+          const payload = ((request.payload || {}) as Record<string, unknown>) || {};
+          return {
+            action: "patch",
+            patch: {
+              request: {
+                ...request,
+                payload: {
+                  ...payload,
+                  temperature: 0.91
+                }
+              }
+            }
+          };
+        },
+        "llm.after_response": (event) => {
+          const response = (event.response || {}) as Record<string, unknown>;
+          afterResponseContent = String(response.content || "");
+          return { action: "continue" };
+        }
+      }
+    });
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const bodyText = String(init?.body || "");
+      capturedBody = (JSON.parse(bodyText || "{}") || {}) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "llm-hook-patch-ok"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test"
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "测试 llm hook patch",
+      sessionOptions: {
+        title: "LLM Hook Patch",
+        metadata: {
+          titleSource: "manual"
+        }
+      }
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(capturedBody).toBeTruthy();
+    expect(capturedBody?.temperature).toBe(0.91);
+    expect(afterResponseContent).toBe("llm-hook-patch-ok");
+  });
+
+  it("brain.run.start 的 LLM tools 来自 tool contract registry", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    orchestrator.registerToolContract(
+      {
+        name: "workspace_ls",
+        description: "List workspace files",
+        parameters: {
+          type: "object",
+          properties: {
+            path: { type: "string" }
+          },
+          required: []
+        }
+      },
+      { replace: true }
+    );
+
+    let capturedTools: Array<Record<string, unknown>> = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const bodyText = String(init?.body || "");
+      const body = (JSON.parse(bodyText || "{}") || {}) as Record<string, unknown>;
+      capturedTools = Array.isArray(body.tools) ? (body.tools as Array<Record<string, unknown>>) : [];
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "registry-tools-ok"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test"
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "测试 tool contract registry",
+      sessionOptions: {
+        title: "Tool Contract Registry",
+        metadata: {
+          titleSource: "manual"
+        }
+      }
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const toolNames = capturedTools
+      .map((item) => (item.function as Record<string, unknown> | undefined)?.name)
+      .map((name) => String(name || ""));
+    expect(toolNames).toContain("workspace_ls");
+    expect(toolNames).toContain("bash");
+  });
+
   it("supports brain.debug.plugins view", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -550,10 +881,12 @@ describe("runtime-router.browser", () => {
     const capabilities = Array.isArray(data.capabilityProviders)
       ? (data.capabilityProviders as Array<Record<string, unknown>>)
       : [];
+    const toolContracts = Array.isArray(data.toolContracts) ? (data.toolContracts as Array<Record<string, unknown>>) : [];
     const policies = Array.isArray(data.capabilityPolicies) ? (data.capabilityPolicies as Array<Record<string, unknown>>) : [];
     const plugin = plugins.find((item) => String(item.id || "") === "plugin.debug.view");
     expect(plugin).toBeDefined();
     expect(Boolean(plugin?.enabled)).toBe(true);
+    expect(toolContracts.some((item) => String(item.name || "") === "bash")).toBe(true);
     expect(capabilities.some((item) => String(item.capability || "") === "fs.virtual.read")).toBe(true);
     expect(policies.some((item) => String(item.capability || "") === "browser.action")).toBe(true);
   });
