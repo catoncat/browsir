@@ -1,12 +1,11 @@
 {
   "id": "BHV-SESSION-TITLE-LIFECYCLE",
-  "description": "Lifecycle of session titles including initial AI generation, periodic auto-summarization, manual regeneration, and manual renaming",
-  "category": "session",
-  "priority": "medium",
-  "pre_conditions": [
-    "session_exists",
-    "llm_configured"
-  ],
+  "intent": "会话标题生命周期应可预测：首轮自动生成、手动重刷、手动重命名与按阈值自动更新均符合预期且互不覆盖",
+  "context": {
+    "surface": "sidepanel.chat.session_list",
+    "titleActions": ["auto_generate", "manual_refresh", "manual_rename", "interval_auto_refresh"],
+    "configKey": "autoTitleInterval"
+  },
   "steps": [
     "observe_initial_title_generation",
     "trigger_manual_regeneration",
@@ -19,13 +18,29 @@
     "manual_title_persisted",
     "auto_trigger_on_interval_multiple"
   ],
-  "triggers": {
-    "on_message_count_multiple": [
-      "refreshSessionTitleAuto"
+  "risk": "medium",
+  "allowed_side_effects": [
+    "session_meta_write(title|updatedAt)",
+    "ui_state_toggle(isRegeneratingTitle)",
+    "llm_title_summary_request",
+    "event_emit(session_title_auto_updated|session_title_manual_refresh)"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "browser-cdp"],
+    "min_layers": 2
+  },
+  "degrade_policy": {
+    "on_llm_unavailable": [
+      "keep_current_title",
+      "fallback_to_existing_or_derived_title"
+    ],
+    "on_manual_rename": [
+      "manual_title_has_priority_over_auto_refresh",
+      "do_not_override_manual_title_without_force"
     ]
   },
   "rollback_or_compensation": [
     "retain_current_title_on_llm_failure"
   ],
-  "version": "1.0.0"
+  "version": "1.1.0"
 }
