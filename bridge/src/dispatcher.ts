@@ -2,7 +2,6 @@ import { BridgeError } from "./errors";
 import type { BridgeConfig } from "./config";
 import type { FsGuard } from "./fs-guard";
 import type { InvokeRequest } from "./types";
-import { resolveToolName } from "./tool-registry";
 import { runRead } from "./tools/read";
 import { runWrite } from "./tools/write";
 import { runEdit } from "./tools/edit";
@@ -78,7 +77,10 @@ export async function dispatchInvoke(
   ctx: DispatchContext,
   onBashChunk?: (stream: "stdout" | "stderr", chunk: string) => void,
 ): Promise<Record<string, unknown>> {
-  const canonicalTool = String(req.canonicalTool || resolveToolName(req.tool) || "").trim();
+  const canonicalTool = String(req.canonicalTool || "").trim();
+  if (!canonicalTool) {
+    throw new BridgeError("E_TOOL", "Unknown tool", { tool: req.tool, canonicalTool });
+  }
   const handler = overrideToolHandlers.get(canonicalTool) || BUILTIN_TOOL_HANDLERS[canonicalTool];
   if (!handler) {
     throw new BridgeError("E_TOOL", "Unknown tool", { tool: req.tool, canonicalTool });

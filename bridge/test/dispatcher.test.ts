@@ -7,6 +7,7 @@ import { FsGuard } from "../src/fs-guard";
 import type { BridgeConfig } from "../src/config";
 import type { InvokeRequest } from "../src/types";
 import { registerToolContract, unregisterToolContract } from "../src/tool-registry";
+import { parseInvokeFrame } from "../src/protocol";
 
 function createTestConfig(root: string): BridgeConfig {
   return {
@@ -33,16 +34,15 @@ describe("dispatchInvoke", () => {
       const filePath = path.join(root, "sample.txt");
       await writeFile(filePath, "hello-dispatch", "utf8");
 
-      const req: InvokeRequest = {
+      const req = parseInvokeFrame(JSON.stringify({
         id: "i1",
         type: "invoke",
         tool: "read_file",
-        canonicalTool: "",
         args: {
           path: "sample.txt",
           cwd: root,
         },
-      };
+      }));
       const out = await dispatchInvoke(req, {
         config: createTestConfig(root),
         fsGuard: new FsGuard("strict", [root]),
@@ -72,13 +72,12 @@ describe("dispatchInvoke", () => {
         { replace: true },
       );
 
-      const req: InvokeRequest = {
+      const req = parseInvokeFrame(JSON.stringify({
         id: "i2",
         type: "invoke",
         tool: "memory_read",
-        canonicalTool: "",
         args: {},
-      };
+      }));
 
       const out = await dispatchInvoke(req, {
         config: createTestConfig(root),
@@ -90,6 +89,30 @@ describe("dispatchInvoke", () => {
     } finally {
       unregisterInvokeToolHandler("memory.read");
       unregisterToolContract("memory.read");
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("fails fast when canonicalTool is missing", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "bridge-dispatch-missing-canonical-"));
+    try {
+      const req: InvokeRequest = {
+        id: "i3",
+        type: "invoke",
+        tool: "read_file",
+        canonicalTool: "",
+        args: {
+          path: "sample.txt",
+          cwd: root,
+        },
+      };
+      await expect(
+        dispatchInvoke(req, {
+          config: createTestConfig(root),
+          fsGuard: new FsGuard("strict", [root]),
+        })
+      ).rejects.toThrow("Unknown tool");
+    } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
