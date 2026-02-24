@@ -69,4 +69,11 @@
   .prose strong {
     @apply font-bold text-black dark:text-white;
   }
+
+  /* 隐藏 Markdown 渲染器内置的复制按钮和头部装饰，避免冲突 */
+  .prose button,
+  .prose [class*="copy"],
+  .prose [class*="header"] {
+    display: none !important;
+  }
 }
