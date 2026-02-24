@@ -185,6 +185,9 @@ export interface ExecuteStepResult {
   verifyReason?: string;
   data?: unknown;
   error?: string;
+  errorCode?: string;
+  errorDetails?: unknown;
+  retryable?: boolean;
 }
 
 export function randomId(prefix: string): string {
