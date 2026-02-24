@@ -1120,6 +1120,34 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       };
     }
 
+    if (normalizedCapability && !normalizedMode) {
+      const result: ExecuteStepResult = {
+        ok: false,
+        modeUsed: "bridge",
+        capabilityUsed: normalizedCapability,
+        verified: false,
+        error: `capability provider 未就绪: ${normalizedCapability}`,
+        errorCode: "E_RUNTIME_NOT_READY",
+        retryable: true
+      };
+      orchestrator.events.emit("step_execute", sessionId, {
+        mode: "bridge",
+        capability: normalizedCapability,
+        action: normalizedAction
+      });
+      orchestrator.events.emit("step_execute_result", sessionId, {
+        ok: result.ok,
+        modeUsed: result.modeUsed,
+        capabilityUsed: result.capabilityUsed || "",
+        verifyReason: result.verifyReason || "",
+        verified: result.verified,
+        error: result.error || "",
+        errorCode: result.errorCode || "",
+        retryable: result.retryable === true
+      });
+      return result;
+    }
+
     const executionMode = normalizedMode || capabilityPolicy.fallbackMode;
     if (!executionMode) {
       return {
@@ -1708,11 +1736,6 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     if (resolvedHandler) {
       return await resolvedHandler();
     }
-    const requestedHandler = handlers[requestedTool];
-    if (requestedHandler) {
-      return await requestedHandler();
-    }
-
     return {
       error: `未知工具: ${requestedTool}`,
       errorCode: "E_TOOL",

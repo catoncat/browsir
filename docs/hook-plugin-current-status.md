@@ -4,6 +4,9 @@
 
 - `main` 已完成 Hook/Plugin/Provider 主体集成并通过当前默认门禁。
 - 当前是“新机制主路径 + 兼容层并存”，不是 100% 旧路径下线。
+- 本轮讨论已确认两点（待实现）：
+  - `browser_action/snapshot` 这类路径应走能力路由，而不是保留 `runtime-loop` 内联执行分支：`extension/src/sw/kernel/runtime-loop.browser.ts:1450`。
+  - `capability` 未命中 provider 时不应静默 fallback，应显式报 `runtime not ready` 类错误，避免掩盖注册时序问题：`extension/src/sw/kernel/runtime-loop.browser.ts:1123`。
 
 ## 已完成
 
@@ -26,6 +29,7 @@
    - 命中 capability provider -> 新路径
    - 未命中 -> mode fallback（bridge/cdp/script）兼容路径
 3. Bridge 已支持动态 handler 注册，但默认仍以内置四工具 handler 为主：`bridge/src/dispatcher.ts`。
+4. Provider 仍是“单槽位”模型（同一 capability 只允许 1 个 provider），不满足“浏览器文件系统 + 本机环境并存”目标：`extension/src/sw/kernel/tool-provider-registry.ts`。
 
 ## 本轮补充
 
@@ -51,6 +55,26 @@
    - `registerToolContract/unregisterToolContract`（`bridge/src/tool-registry.ts`）
    - `registerInvokeToolHandler/unregisterInvokeToolHandler`（`bridge/src/dispatcher.ts`）
 
+## 本轮讨论决议（新增）
+
+1. 去掉开发期兼容 fallback（旧路径收口）：
+   - 收敛 `executeToolCall` 双分发兜底；
+   - 收敛 alias/legacy 二次解析兜底。
+2. Provider 语义修正为“并存路由”，不是“二选一替换”：
+   - 同一能力可同时有多个 provider；
+   - 路由依据目标对象（例如 `workspace://`、`local://`、`plugin://`）。
+3. 失败语义修正：
+   - provider 缺失/未就绪 -> 显式报错；
+   - 不再用 fallback 掩盖执行顺序或注册时序问题。
+
+## 任务进度（简版）
+
+1. Hook/Plugin 主干：已完成。
+2. Tool Contract + Bridge canonical：已完成。
+3. 去 fallback（开发期）：进行中。
+4. Provider 多路并存（非二选一）：待开始。
+5. `workspace/local/plugin` 对象路由与契约测试：待开始。
+
 ## 验证状态
 
 1. `bun run bdd:validate` 通过。
@@ -59,6 +83,6 @@
 
 ## 下一阶段建议
 
-1. 将 `executeToolCall` 的 legacy `switch` 收敛为 `ToolContractRegistry + Provider` 路由主路径。
-2. 让 Bridge 的动态 provider 注册与 `parseInvokeFrame` 完全联动（当前仍依赖进程内 API 注入）。
-3. 将 `llm` 相关 Hook 继续扩展到 `title refresh` 路径，统一语义与审计字段。
+1. 先完成去 fallback 收口（fail-fast）。
+2. 将 provider 从“单槽位”改为“多路由并存”（priority + matcher + `canHandle`）。
+3. 为工具调用补 `targetUri` 路由语义，明确 `workspace/local/plugin` 三类对象边界。

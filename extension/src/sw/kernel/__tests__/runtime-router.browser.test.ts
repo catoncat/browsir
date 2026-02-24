@@ -507,6 +507,37 @@ describe("runtime-router.browser", () => {
     });
   });
 
+  it("returns runtime-not-ready when capability provider is missing", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "capability-missing-provider",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const executed = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.virtual.read",
+      action: "read_file",
+      args: {
+        path: "mem://missing.txt"
+      },
+      verifyPolicy: "off"
+    });
+    expect(executed.ok).toBe(true);
+    const result = (executed.data || {}) as Record<string, unknown>;
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe("E_RUNTIME_NOT_READY");
+    expect(String(result.error || "")).toContain("capability provider 未就绪");
+    expect(result.capabilityUsed).toBe("fs.virtual.read");
+  });
+
   it("brain.step.execute 事件顺序严格为 step_execute -> step_execute_result（单次）", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);

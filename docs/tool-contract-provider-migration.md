@@ -26,6 +26,14 @@
 3. 部分完成：Bridge `protocol + dispatcher` 已接入 registry 路由与 alias 解析，且支持进程内动态 contract/handler 注册；非内置 provider 的外部装载入口尚未落地。
 4. 未完成：canonical 工具名（`fs.read_text/fs.write_text/fs.patch_text/command.run`）全量迁移、`workspace-opfs/workspace-command` 默认 provider 尚未落地。
 
+### 1.4 本轮设计修正（由评审讨论确认）
+
+1. `browser_action/snapshot` 应归入能力路由，不应保留 `runtime-loop` 内联 handler：`extension/src/sw/kernel/runtime-loop.browser.ts:1450`。
+2. `capability` 未命中 provider 不应静默 `fallbackMode`，应显式报错（如 `E_RUNTIME_NOT_READY`）：`extension/src/sw/kernel/runtime-loop.browser.ts:1123`。
+3. Provider 不是“二选一替换”，而是“并存路由”：
+   - 同一 capability 可同时有多个 provider；
+   - 按目标对象路由（`workspace://`、`local://`、`plugin://`）。
+
 ## 2. 术语与命名
 
 ### 2.1 Canonical 工具命名（建议）
@@ -88,6 +96,8 @@ export interface ToolResultEnvelope {
 export interface ToolProvider {
   id: string;
   capabilities: string[]; // fs.read_text, command.run ...
+  priority?: number;      // 越大越优先
+  canHandle(call: ToolCallEnvelope, ctx: ProviderRuntimeContext): boolean | Promise<boolean>;
   invoke(call: ToolCallEnvelope, ctx: ProviderRuntimeContext): Promise<ToolResultEnvelope>;
 }
 
@@ -121,8 +131,13 @@ export interface ProviderRuntimeContext {
 export interface ToolRegistry {
   registerContract(contract: ToolContract): void;
   registerProvider(provider: ToolProvider): void;
-  bind(toolName: string, providerId: string): void;
-  resolve(requestedTool: string): { contract: ToolContract; provider: ToolProvider; requestedTool: string };
+  listProviders(toolName: string): ToolProvider[];
+  resolve(requestedTool: string, args: Json, ctx: ProviderRuntimeContext): {
+    contract: ToolContract;
+    provider: ToolProvider;
+    requestedTool: string;
+    canonicalTool: string;
+  };
   listContracts(): ToolContract[];
 }
 ```
@@ -131,9 +146,16 @@ export interface ToolRegistry {
 
 1. 先按 canonical 精确匹配。
 2. 再按 alias 匹配 canonical。
-3. 若 session 有 provider override，优先 override。
-4. 否则走 contract 默认 provider。
-5. 再做 policy guard 校验。
+3. 取该能力的 provider 列表，按 `priority DESC` 排序。
+4. 逐个执行 `canHandle`，命中第一个即执行。
+5. 没有 provider 命中 -> 显式返回 `E_RUNTIME_NOT_READY`（开发期 fail-fast）。
+6. 最后做 policy guard 校验。
+
+### 5.3 并存路由示例（非二选一）
+
+1. `fs.read_text` + `targetUri=workspace://notes/a.md` -> `workspace-opfs`。
+2. `fs.read_text` + `targetUri=local:///Users/x/a.md` -> `bridge-local`。
+3. `fs.read_text` + `targetUri=plugin://pkg-x/data/a.md` -> `plugin-pkg-x-fs`。
 
 ## 6. extension 侧迁移方案
 
@@ -151,11 +173,11 @@ export interface ToolRegistry {
 
 ### 6.2 行为兼容
 
-1. 对 LLM 继续提供 legacy tool 名（alias）。
-2. 工具响应补充 `canonicalTool/providerId`，保留现有 `response.data` 结构。
-3. `edit_file` 参数兼容双栈：
+1. 工具响应补充 `canonicalTool/providerId`，保留现有 `response.data` 结构。
+2. `edit_file` 参数兼容双栈：
    - legacy `{old,new}`
    - canonical `{find,replace,all?}`
+3. 开发期策略：不新增 legacy fallback 路径，旧路径按里程碑直接删除。
 
 ## 7. bridge 侧迁移方案
 
@@ -173,8 +195,8 @@ export interface ToolRegistry {
 ### 7.2 兼容策略
 
 1. WS 帧保持 `{type,id,tool,args}` 不变。
-2. legacy tool 名通过 alias 自动路由。
-3. 增加开关：`BRIDGE_TOOL_ALIASES=true`（默认开），后续可关闭收敛。
+2. alias 仅作短期迁移输入兼容，不作为长期 fallback 机制。
+3. 开发期默认收敛旧名，目标是仅保留 canonical 路由。
 
 ## 8. `command.run` 详细语义（替代 bash）
 
@@ -255,8 +277,9 @@ export interface ToolRegistry {
 ### Phase 2（extension 工具调用 registry 化）
 
 1. LLM tool definitions 动态化（已完成）。
-2. `executeToolCall` 去 switch。
-3. 增加 `canonicalTool/providerId` 回包。
+2. `executeToolCall` 去 switch，改为 `contract + multi-provider` 路由。
+3. provider 未命中显式报错（不走 `fallbackMode`）。
+4. 增加 `canonicalTool/providerId` 回包。
 
 验收：
 
@@ -280,13 +303,13 @@ export interface ToolRegistry {
    - `BHV-TOOL-CONTRACT-PROVIDER-DECOUPLE`
    - `BHV-COMMAND-RUN-SAFETY-POLICY`
 2. 更新 README/Docs/BDD mapping。
-3. 可选关闭 legacy alias。
+3. 下线 legacy alias。
 
 ## 12. 回滚策略
 
-1. provider 路由可按开关回退到 legacy switch。
-2. 关闭 registry 动态覆盖能力，仅保留默认内置 contracts。
-3. 保留 legacy alias 至少两个发布窗口。
+1. 开发阶段不保留回退到 legacy switch 的路径。
+2. 仅允许回滚到“上一版 registry/provider 实现”，不回滚到旧架构分支。
+3. alias 仅保留迁移窗口，窗口结束后清理。
 
 ## 13. 风险清单
 
@@ -308,3 +331,5 @@ export interface ToolRegistry {
 2. Bridge 不删除，改为可选 connector provider。
 3. 工具契约稳定优先，执行后端可插拔。
 4. 先 registry 化，再默认 provider 切换，再收敛 alias。
+5. Provider 采用并存路由模型，不采用单槽位替换模型。
+6. 开发期策略：显式失败优先，不以 fallback 掩盖能力注册/执行时序问题。
