@@ -1935,8 +1935,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               expect: args.expect
             },
             expect: args.expect
-          },
-          verifyPolicy: "off"
+          }
         });
         if (!out.ok) {
           return buildStepFailureEnvelope(
