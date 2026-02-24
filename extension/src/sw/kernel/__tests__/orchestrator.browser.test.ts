@@ -3,6 +3,23 @@ import "./test-setup";
 import { describe, expect, it } from "vitest";
 import { BrainOrchestrator } from "../orchestrator.browser";
 
+async function waitForTraceEvent(
+  orchestrator: BrainOrchestrator,
+  sessionId: string,
+  eventType: string,
+  timeoutMs = 1000
+): Promise<Array<{ type: string; [key: string]: unknown }>> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const trace = (await orchestrator.getStepStream(sessionId)) as Array<{ type: string; [key: string]: unknown }>;
+    if (trace.some((record) => record.type === eventType)) {
+      return trace;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`waitForTraceEvent timeout: ${eventType}`);
+}
+
 describe("orchestrator.browser", () => {
   it("retryable 错误先触发 auto_retry_start", async () => {
     const orchestrator = new BrainOrchestrator({ retryMaxAttempts: 2, retryBaseDelayMs: 10, retryCapDelayMs: 20 });
@@ -42,6 +59,33 @@ describe("orchestrator.browser", () => {
     expect(events).toContain("auto_compaction_start");
     expect(events).toContain("session_compact");
     expect(events).toContain("auto_compaction_end");
+  });
+
+  it("重启后保留会话与 trace，但运行态不会自动恢复", async () => {
+    const oldOrchestrator = new BrainOrchestrator();
+    const created = await oldOrchestrator.createSession({ title: "restart-recovery" });
+    const sessionId = created.sessionId;
+
+    await oldOrchestrator.appendUserMessage(sessionId, "重启前用户消息");
+    oldOrchestrator.setRunning(sessionId, true);
+    oldOrchestrator.events.emit("loop_start", sessionId, {
+      prompt: "重启前进行中的任务"
+    });
+
+    const restoredOrchestrator = new BrainOrchestrator();
+    const restoredEntries = await restoredOrchestrator.sessions.getEntries(sessionId);
+    expect(
+      restoredEntries.some((entry) => {
+        if (entry.type !== "message") return false;
+        return String(entry.text || "") === "重启前用户消息";
+      })
+    ).toBe(true);
+
+    const restoredRunState = restoredOrchestrator.getRunState(sessionId);
+    expect(restoredRunState.running).toBe(false);
+
+    const restoredTrace = await waitForTraceEvent(restoredOrchestrator, sessionId, "loop_start");
+    expect(restoredTrace.some((record) => record.type === "loop_start")).toBe(true);
   });
 
   it("script 成功时不走 fallback", async () => {

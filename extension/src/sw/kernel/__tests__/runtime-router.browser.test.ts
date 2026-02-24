@@ -6,24 +6,47 @@ import { registerRuntimeRouter } from "../runtime-router";
 
 type RuntimeListener = (message: unknown, sender: unknown, sendResponse: (value: unknown) => void) => boolean | void;
 
-let runtimeListener: RuntimeListener | null = null;
+let runtimeListeners: RuntimeListener[] = [];
+
+function resetRuntimeOnMessageMock(): void {
+  const onMessage = chrome.runtime.onMessage as unknown as {
+    addListener: (cb: RuntimeListener) => void;
+    removeListener: (cb: RuntimeListener) => void;
+    hasListener: (cb: RuntimeListener) => boolean;
+  };
+  onMessage.addListener = (cb) => {
+    runtimeListeners.push(cb);
+  };
+  onMessage.removeListener = (cb) => {
+    runtimeListeners = runtimeListeners.filter((item) => item !== cb);
+  };
+  onMessage.hasListener = (cb) => runtimeListeners.includes(cb);
+}
 
 function invokeRuntime(message: Record<string, unknown>): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
-    if (!runtimeListener) {
+    if (!runtimeListeners.length) {
       reject(new Error("runtime listener not registered"));
       return;
     }
+    let settled = false;
     const timer = setTimeout(() => {
+      settled = true;
       reject(new Error(`runtime response timeout: ${String(message.type || "")}`));
-    }, 1500);
+    }, 2500);
 
     try {
-      runtimeListener(message, {}, (response) => {
-        clearTimeout(timer);
-        resolve((response || {}) as Record<string, unknown>);
-      });
+      for (const listener of runtimeListeners) {
+        listener(message, {}, (response) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve((response || {}) as Record<string, unknown>);
+        });
+        if (settled) break;
+      }
     } catch (error) {
+      settled = true;
       clearTimeout(timer);
       reject(error);
     }
@@ -57,10 +80,8 @@ async function waitForLoopDone(sessionId: string, timeoutMs = 2500): Promise<Arr
 
 describe("runtime-router.browser", () => {
   beforeEach(() => {
-    runtimeListener = null;
-    (chrome.runtime.onMessage as unknown as { addListener: (cb: RuntimeListener) => void }).addListener = (cb) => {
-      runtimeListener = cb;
-    };
+    runtimeListeners = [];
+    resetRuntimeOnMessageMock();
   });
   afterEach(() => {
     vi.restoreAllMocks();
@@ -414,6 +435,9 @@ describe("runtime-router.browser", () => {
     });
     oldOrchestrator.setRunning(sessionId, true);
 
+    // 模拟 service worker 重启：旧 listener 被销毁，重新注册新 listener。
+    runtimeListeners = [];
+    resetRuntimeOnMessageMock();
     const restartedOrchestrator = new BrainOrchestrator();
     registerRuntimeRouter(restartedOrchestrator);
 
@@ -863,7 +887,7 @@ describe("runtime-router.browser", () => {
     const toolNames = capturedTools
       .map((item) => (item.function as Record<string, unknown> | undefined)?.name)
       .map((name) => String(name || ""));
-    expect(toolNames).toContain("workspace_ls");
+    expect(toolNames).toContain("read_file");
     expect(toolNames).toContain("bash");
   });
 

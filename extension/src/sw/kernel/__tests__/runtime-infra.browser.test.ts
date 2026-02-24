@@ -62,6 +62,12 @@ class FakeWebSocket {
   }
 }
 
+async function flushMicrotasks(turns = 2): Promise<void> {
+  for (let i = 0; i < turns; i += 1) {
+    await Promise.resolve();
+  }
+}
+
 describe("runtime infra handler", () => {
   const originalWebSocket = globalThis.WebSocket;
 
@@ -283,7 +289,7 @@ describe("runtime infra handler", () => {
     const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
     expect(ws).toBeTruthy();
     ws?.close();
-    await Promise.resolve();
+    await flushMicrotasks();
 
     expect(sent.some((item) => item.type === "bridge.status" && item.status === "disconnected")).toBe(true);
   });
@@ -314,6 +320,82 @@ describe("runtime infra handler", () => {
       code: "E_BUSY",
       retryable: true
     });
+  });
+
+  it("keeps invoke success when response arrives before disconnect", async () => {
+    const infra = createRuntimeInfraHandler();
+    const connected = await infra.handleMessage({ type: "bridge.connect" });
+    expect(connected?.ok).toBe(true);
+
+    const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+    expect(ws).toBeTruthy();
+    const originalSend = ws.send.bind(ws);
+    ws.send = (data: string) => {
+      originalSend(data);
+      queueMicrotask(() => ws.close());
+    };
+
+    const invoked = await infra.handleMessage({
+      type: "bridge.invoke",
+      payload: {
+        tool: "read",
+        args: { path: "/tmp/response-first.txt" }
+      }
+    });
+    expect(invoked?.ok).toBe(true);
+    if (!invoked || invoked.ok !== true) return;
+    const out = (invoked.data ?? {}) as Record<string, unknown>;
+    const inner = (out.data ?? {}) as Record<string, unknown>;
+    expect(out.ok).toBe(true);
+    expect(inner.echoedTool).toBe("read");
+
+    await flushMicrotasks();
+  });
+
+  it("returns E_BRIDGE_DISCONNECTED on in-flight invoke and recovers after reconnect", async () => {
+    const infra = createRuntimeInfraHandler();
+    const connected = await infra.handleMessage({ type: "bridge.connect" });
+    expect(connected?.ok).toBe(true);
+
+    const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+    expect(ws).toBeTruthy();
+
+    ws.send = (_data: string) => {
+      ws.close();
+    };
+
+    const disconnectedInvoke = infra.handleMessage({
+      type: "bridge.invoke",
+      payload: {
+        tool: "read",
+        args: { path: "/tmp/disconnect.txt" }
+      }
+    });
+    await expect(disconnectedInvoke).rejects.toMatchObject({
+      message: expect.stringContaining("Bridge disconnected"),
+      code: "E_BRIDGE_DISCONNECTED",
+      retryable: true
+    });
+
+    const reconnected = await infra.handleMessage({ type: "bridge.connect" });
+    expect(reconnected?.ok).toBe(true);
+    expect(FakeWebSocket.instances.length).toBeGreaterThanOrEqual(2);
+    const ws2 = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+    expect(ws2).not.toBe(ws);
+
+    const recovered = await infra.handleMessage({
+      type: "bridge.invoke",
+      payload: {
+        tool: "read",
+        args: { path: "/tmp/recovered.txt" }
+      }
+    });
+    expect(recovered?.ok).toBe(true);
+    if (!recovered || recovered.ok !== true) return;
+    const out = (recovered.data ?? {}) as Record<string, unknown>;
+    const inner = (out.data ?? {}) as Record<string, unknown>;
+    expect(out.ok).toBe(true);
+    expect(inner.echoedTool).toBe("read");
   });
 
   it("supports cdp.observe/snapshot/action/verify with lease guard", async () => {
