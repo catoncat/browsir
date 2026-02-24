@@ -1,12 +1,12 @@
 {
   "version": "1.0.0",
-  "ts": "2026-02-24T08:36:01.583Z",
+  "ts": "2026-02-24T08:50:55.611Z",
   "passed": false,
   "summary": {
-    "total": 22,
-    "passed": 19,
-    "failed": 3,
-    "durationMs": 74331
+    "total": 24,
+    "passed": 22,
+    "failed": 2,
+    "durationMs": 76267
   },
   "env": {
     "chromeBin": "/Users/envvar/Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
@@ -23,67 +23,67 @@
       "group": "panel.vnext",
       "name": "dist sidepanel 路径可直接加载",
       "status": "passed",
-      "durationMs": 296
+      "durationMs": 32
     },
     {
       "group": "service-worker API",
       "name": "snapshot interactive 返回 ref/node handles",
       "status": "passed",
-      "durationMs": 12
+      "durationMs": 7
     },
     {
       "group": "service-worker API",
       "name": "lease + cdp_action + verify 闭环",
       "status": "passed",
-      "durationMs": 8
+      "durationMs": 7
     },
     {
       "group": "service-worker API",
       "name": "ref 存在但句柄过期时可 fallback",
       "status": "passed",
-      "durationMs": 7
+      "durationMs": 5
     },
     {
       "group": "service-worker API",
       "name": "ref 不存在时按现状返回稳定错误",
       "status": "passed",
-      "durationMs": 1
+      "durationMs": 2
     },
     {
       "group": "service-worker API",
       "name": "ref 过期且 selector 无效时返回稳定错误契约",
       "status": "passed",
-      "durationMs": 36
+      "durationMs": 28
     },
     {
       "group": "service-worker API",
       "name": "lease 冲突 + release + 过期后可恢复",
       "status": "passed",
-      "durationMs": 2411
+      "durationMs": 2410
     },
     {
       "group": "service-worker API",
       "name": "snapshot 支持 compact/maxTokens/a11y 字段",
       "status": "passed",
-      "durationMs": 162
+      "durationMs": 159
     },
     {
       "group": "service-worker API",
       "name": "cdp.verify 支持 urlChanged 断言",
       "status": "passed",
-      "durationMs": 154
+      "durationMs": 144
     },
     {
       "group": "brain.runtime",
       "name": "brain.step.execute 可执行 cdp action + verify",
       "status": "passed",
-      "durationMs": 158
+      "durationMs": 171
     },
     {
       "group": "brain.runtime",
       "name": "brain.run.start 支持 tool_calls 闭环并写入 step stream",
       "status": "passed",
-      "durationMs": 272
+      "durationMs": 565
     },
     {
       "group": "brain.runtime",
@@ -95,25 +95,25 @@
       "group": "brain.runtime",
       "name": "brain.run.start 注入 shared tabs 上下文并每次覆盖",
       "status": "passed",
-      "durationMs": 575
+      "durationMs": 571
     },
     {
       "group": "brain.runtime",
       "name": "brain.debug.dump 可观测 llm 原始调用与工具步骤",
       "status": "passed",
-      "durationMs": 305
+      "durationMs": 369
     },
     {
       "group": "brain.runtime",
       "name": "LLM HTTP 失败时应产生 auto_retry 事件并失败收口",
       "status": "passed",
-      "durationMs": 1545
+      "durationMs": 1799
     },
     {
       "group": "brain.runtime",
       "name": "LLM 工具超时后可按失败信号调整 timeout 重试成功",
       "status": "passed",
-      "durationMs": 2093
+      "durationMs": 2368
     },
     {
       "group": "brain.runtime",
@@ -122,24 +122,36 @@
       "durationMs": 306
     },
     {
+      "group": "brain.runtime",
+      "name": "LLM Retry-After 超上限时应快速失败且不进入长等待重试",
+      "status": "passed",
+      "durationMs": 268
+    },
+    {
+      "group": "brain.runtime",
+      "name": "重复可恢复工具失败应触发熔断并停止循环",
+      "status": "passed",
+      "durationMs": 4413
+    },
+    {
       "group": "panel.vnext",
       "name": "sidepanel 渲染并支持复制/历史分叉/最后一条重试",
       "status": "failed",
-      "durationMs": 17059,
-      "error": "wait timeout: panel header shows fork source"
+      "durationMs": 13637,
+      "error": "inline 编辑最后一条 user 失败: inline editor input missing"
     },
     {
       "group": "panel.vnext",
       "name": "user inline 编辑：最后一条重跑，历史消息分叉重跑",
       "status": "failed",
-      "durationMs": 45108,
+      "durationMs": 45093,
       "error": "wait timeout: panel second run ready for historical user edit scenario"
     },
     {
       "group": "debug.console",
       "name": "Live Events 可显示 brain.event",
       "status": "passed",
-      "durationMs": 31
+      "durationMs": 34
     },
     {
       "group": "brain.runtime",
@@ -150,12 +162,11 @@
     {
       "group": "brain.session",
       "name": "session 标题自动生成 + 手动刷新 + 删除",
-      "status": "failed",
-      "durationMs": 26,
-      "error": "自动生成的标题不符合预期，预期=\"AI 总结的标题\"，实际=\"\""
+      "status": "passed",
+      "durationMs": 290
     }
   ],
-  "fatalError": "3 个测试失败",
+  "fatalError": "2 个测试失败",
   "debug": {
     "bridgeLogsTail": [
       "$ bun src/index.ts",
@@ -163,12 +174,10 @@
       "error: script \"start\" was terminated by signal SIGTERM (Polite quit request)"
     ],
     "chromeLogsTail": [
-      "DevTools listening on ws://127.0.0.1:19333/devtools/browser/f87bbc8c-d8d7-4788-8501-6ce8a37925bb",
-      "2026-02-24 16:34:48.938 Google Chrome for Testing[58359:12348330] error messaging the mach port for IMKCFRunLoopWakeUpReliable",
-      "[58359:12348474:0224/163452.676199:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT",
-      "[58359:12348474:0224/163453.420819:ERROR:google_apis/gcm/engine/mcs_client.cc:700]   Error code: 401  Error message: Authentication Failed: wrong_secret",
-      "[58359:12348474:0224/163453.420830:ERROR:google_apis/gcm/engine/mcs_client.cc:702] Failed to log in to GCM, resetting connection.",
-      "[58359:12348474:0224/163514.096237:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT"
+      "DevTools listening on ws://127.0.0.1:19333/devtools/browser/289e30c4-6c16-4f19-bf84-75a874ee70ae",
+      "2026-02-24 16:49:40.874 Google Chrome for Testing[77889:12443090] error messaging the mach port for IMKCFRunLoopWakeUpReliable",
+      "[77889:12443207:0224/164945.139227:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT",
+      "[77889:12443207:0224/165008.809005:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT"
     ]
   }
 }
