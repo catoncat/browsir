@@ -62,8 +62,49 @@
   .prose {
     @apply leading-relaxed text-[14px] text-ui-text font-normal;
   }
+  .prose a {
+    @apply text-ui-accent underline-offset-4 hover:underline transition-all;
+  }
   /* 确保 Markdown 中的粗体足够显眼 */
   .prose strong {
     @apply font-bold text-black dark:text-white;
+  }
+
+  /* 代码块容器与 HLJS 简约主题 */
+  .code-block-wrapper {
+    @apply group/code relative my-4 rounded-lg overflow-hidden border border-ui-border bg-ui-surface/40;
+  }
+
+  .code-block-wrapper pre.hljs {
+    @apply m-0 p-4 overflow-x-auto text-[13px] leading-relaxed font-mono bg-transparent border-none;
+  }
+
+  /* 简约语法高亮 - Light Mode */
+  .hljs-keyword, .hljs-selector-tag, .hljs-built_in { color: #cf222e; font-weight: 500; }
+  .hljs-string, .hljs-attr { color: #0a3069; }
+  .hljs-comment { color: #6e7781; font-style: italic; }
+  .hljs-number, .hljs-variable { color: #953800; }
+  .hljs-type { color: #0550ae; font-weight: 500; }
+  .hljs-function { color: #8250df; }
+
+  /* 简约语法高亮 - Dark Mode */
+  @media (prefers-color-scheme: dark) {
+    .hljs-keyword, .hljs-selector-tag, .hljs-built_in { color: #ff7b72; }
+    .hljs-string, .hljs-attr { color: #a5d6ff; }
+    .hljs-comment { color: #8b949e; }
+    .hljs-number, .hljs-variable { color: #ffa657; }
+    .hljs-type { color: #79c0ff; }
+    .hljs-function { color: #d2a8ff; }
+  }
+
+  /* 复制代码按钮 */
+  .copy-code-button {
+    @apply absolute right-2 top-2 p-1.5 rounded-md border border-ui-border bg-ui-bg 
+           text-ui-text-muted hover:text-ui-text hover:bg-ui-surface
+           opacity-0 group-hover/code:opacity-100 transition-all duration-200
+           focus:opacity-100 outline-none;
+  }
+  .copy-code-button.copy-success {
+    @apply border-emerald-500/50 opacity-100;
   }
 }

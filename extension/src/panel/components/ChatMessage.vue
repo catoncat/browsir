@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from "vue";
+import { ref, computed, watch, nextTick, h } from "vue";
 import {
   Sparkles,
   ChevronDown,
@@ -16,8 +16,8 @@ import {
   Check,
   X
 } from "lucide-vue-next";
-import { renderMarkdown } from "../utils/markdown";
 import { resolveToolRender } from "../utils/tool-renderers";
+import { IncremarkContent } from "@incremark/vue";
 
 interface ToolPendingStepData {
   step: number;
@@ -77,6 +77,22 @@ const isAssistantPlaceholder = computed(() => props.role === "assistant_placehol
 const isTool = computed(() => props.role === "tool");
 const isToolPending = computed(() => props.role === "tool_pending" || props.toolPending === true);
 
+// Custom Link component for Incremark to ensure target="_blank"
+const IncremarkLink = (props: any, { slots }: any) => {
+  return h('a', { 
+    href: props.href, 
+    title: props.title, 
+    target: '_blank', 
+    rel: 'noopener noreferrer' 
+  }, slots.default?.());
+};
+
+const incremarkComponents = {
+  a: IncremarkLink
+};
+
+const isFinished = computed(() => props.role !== "assistant_streaming");
+
 const showThinking = ref(false);
 const inlineTextarea = ref<HTMLTextAreaElement | null>(null);
 const pendingActivityViewport = ref<HTMLElement | null>(null);
@@ -84,7 +100,6 @@ const pendingCardExpanded = ref(false);
 const pendingCardStickToBottom = ref(true);
 const STEP_LOG_PREVIEW_LINES = 4;
 
-const htmlContent = computed(() => renderMarkdown(props.content));
 const toolRender = computed(() =>
   resolveToolRender({
     content: props.content,
@@ -210,6 +225,33 @@ function handleFork() {
   emit("fork", { entryId: props.entryId });
 }
 
+async function handleMarkdownClick(event: MouseEvent) {
+  const target = event.target as HTMLElement;
+  const button = target.closest(".copy-code-button") as HTMLButtonElement | null;
+  if (!button) return;
+
+  const wrapper = button.closest(".code-block-wrapper");
+  const codeElement = wrapper?.querySelector("code");
+  if (!codeElement) return;
+
+  const code = codeElement.innerText;
+  try {
+    await navigator.clipboard.writeText(code);
+    
+    // Visual feedback
+    const originalHTML = button.innerHTML;
+    button.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`;
+    button.classList.add("copy-success");
+    
+    setTimeout(() => {
+      button.innerHTML = originalHTML;
+      button.classList.remove("copy-success");
+    }, 2000);
+  } catch (err) {
+    console.error("Failed to copy code:", err);
+  }
+}
+
 function syncPendingActivityScroll(forceBottom = false) {
   const el = pendingActivityViewport.value;
   if (!el) return;
@@ -278,11 +320,12 @@ watch(
     >
       <div
         v-if="!props.editing"
-        class="bg-ui-surface text-ui-text px-4 py-2.5 rounded-[20px] text-[14px] leading-relaxed border border-ui-border/50 transition-all duration-300"
+        class="bg-ui-surface text-ui-text px-4 py-2.5 rounded-[20px] text-[14px] leading-relaxed border border-ui-border/50 transition-all duration-300 prose"
         :class="props.forking ? 'border-ui-accent/45 scale-[0.99] -translate-y-0.5 shadow-[0_0_0_1px_rgba(37,99,235,0.06)]' : ''"
         data-testid="user-message-bubble"
-        v-html="htmlContent"
-      ></div>
+      >
+        <IncremarkContent :content="props.content" :is-finished="true" :components="incremarkComponents" />
+      </div>
       <div
         v-else
         class="w-full rounded-2xl border border-ui-accent/40 bg-ui-surface px-3 py-3 transition-all duration-300"
@@ -361,16 +404,11 @@ watch(
     >
       <!-- AI Content -->
       <div
-        v-if="isAssistantStreaming"
-        class="max-w-none whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ui-text font-normal focus:outline-none"
-        tabindex="0"
-      >{{ props.content }}</div>
-      <div
-        v-else
         class="prose max-w-none text-[14px] text-ui-text font-normal focus:outline-none"
-        v-html="htmlContent"
         tabindex="0"
-      ></div>
+      >
+        <IncremarkContent :content="props.content" :is-finished="isFinished" :components="incremarkComponents" />
+      </div>
 
       <div
         v-if="isAssistantStreaming"

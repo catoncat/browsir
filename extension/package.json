@@ -11,6 +11,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@incremark/vue": "^0.3.10",
     "@vueuse/core": "^13.9.0",
     "highlight.js": "^11.11.1",
     "lucide-vue-next": "^0.575.0",
