@@ -119,6 +119,21 @@ const BUILTIN_BRIDGE_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability
   }
 ];
 
+const BUILTIN_BROWSER_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [
+  {
+    capability: TOOL_CAPABILITIES.snapshot,
+    providerId: "runtime.builtin.capability.browser.snapshot.cdp"
+  },
+  {
+    capability: TOOL_CAPABILITIES.browser_action,
+    providerId: "runtime.builtin.capability.browser.action.cdp"
+  },
+  {
+    capability: TOOL_CAPABILITIES.browser_verify,
+    providerId: "runtime.builtin.capability.browser.verify.cdp"
+  }
+];
+
 const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
   "bash",
   "read_file",
@@ -1119,8 +1134,6 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
   };
 
-  ensureBuiltinBridgeCapabilityProviders();
-
   async function withTabLease<T>(tabId: number, sessionId: string, run: () => Promise<T>): Promise<T> {
     const acquired = await callInfra(infra, {
       type: "lease.acquire",
@@ -1142,6 +1155,205 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       });
     }
   }
+
+  function createRuntimeError(message: string, meta: { code?: string; retryable?: boolean; details?: unknown } = {}): RuntimeErrorWithMeta {
+    const error = new Error(message) as RuntimeErrorWithMeta;
+    if (meta.code) error.code = meta.code;
+    if (typeof meta.retryable === "boolean") error.retryable = meta.retryable;
+    if (meta.details !== undefined) error.details = meta.details;
+    return error;
+  }
+
+  const invokeBrowserSnapshotCapability = async (stepInput: {
+    sessionId: string;
+    action: string;
+    args: JsonRecord;
+  }): Promise<unknown> => {
+    const payload = toRecord(stepInput.args);
+    const options = toRecord(payload.options);
+    const tabId = parsePositiveInt(payload.tabId || options.tabId);
+    if (!tabId) {
+      throw createRuntimeError("snapshot 需要有效 tabId", {
+        code: "E_NO_TAB",
+        retryable: true
+      });
+    }
+    return await callInfra(infra, {
+      type: "cdp.snapshot",
+      tabId,
+      options: Object.keys(options).length > 0 ? options : payload
+    });
+  };
+
+  const invokeBrowserActionCapability = async (stepInput: {
+    sessionId: string;
+    action: string;
+    args: JsonRecord;
+    verifyPolicy?: StepVerifyPolicy;
+    capability?: ExecuteCapability;
+  }): Promise<unknown> => {
+    const payload = toRecord(stepInput.args);
+    const actionPayload = toRecord(payload.action) && Object.keys(toRecord(payload.action)).length > 0 ? toRecord(payload.action) : payload;
+    const tabId = parsePositiveInt(payload.tabId || actionPayload.tabId);
+    if (!tabId) {
+      throw createRuntimeError("browser_action 需要有效 tabId", {
+        code: "E_NO_TAB",
+        retryable: true
+      });
+    }
+
+    const cdpAction = Object.keys(toRecord(payload.action)).length > 0 ? { ...toRecord(payload.action) } : { ...payload };
+    if (!cdpAction.kind && stepInput.action && !stepInput.action.startsWith("cdp.")) {
+      cdpAction.kind = stepInput.action;
+    }
+    const kind = String(cdpAction.kind || "").trim();
+    if (!kind) {
+      throw createRuntimeError("cdp.action 缺少 kind", {
+        code: "E_ARGS",
+        retryable: false
+      });
+    }
+
+    const capabilityPolicy = orchestrator.resolveCapabilityPolicy(stepInput.capability);
+    const verifyPolicy = stepInput.verifyPolicy || capabilityPolicy.defaultVerifyPolicy || "on_critical";
+    const verifyEnabled = shouldVerifyStep(kind, verifyPolicy);
+    let preObserve: unknown = null;
+    if (verifyEnabled) {
+      preObserve = await callInfra(infra, {
+        type: "cdp.observe",
+        tabId
+      }).catch(() => null);
+    }
+
+    const actionResult = shouldAcquireLease(kind, capabilityPolicy)
+      ? await withTabLease(tabId, stepInput.sessionId, async () => {
+          return await callInfra(infra, {
+            type: "cdp.action",
+            tabId,
+            sessionId: stepInput.sessionId,
+            action: cdpAction
+          });
+        })
+      : await callInfra(infra, {
+          type: "cdp.action",
+          tabId,
+          sessionId: stepInput.sessionId,
+          action: cdpAction
+        });
+
+    let verified = false;
+    let verifyReason = "verify_policy_off";
+    let verifyData: unknown = null;
+    if (verifyEnabled) {
+      try {
+        const explicitExpect = normalizeVerifyExpect(payload.expect || actionPayload.expect || null);
+        if (explicitExpect) {
+          if (explicitExpect.urlChanged === true && toRecord(toRecord(preObserve).page).url) {
+            explicitExpect.previousUrl = String(toRecord(toRecord(preObserve).page).url || "");
+          }
+          verifyData = await callInfra(infra, {
+            type: "cdp.verify",
+            tabId,
+            action: { expect: explicitExpect },
+            result: toRecord(actionResult).result || actionResult
+          });
+        } else if (preObserve) {
+          const afterObserve = await callInfra(infra, {
+            type: "cdp.observe",
+            tabId
+          });
+          verifyData = buildObserveProgressVerify(preObserve, afterObserve);
+        }
+      } catch (verifyError) {
+        const runtimeVerifyError = asRuntimeErrorWithMeta(verifyError);
+        throw createRuntimeError(runtimeVerifyError.message, {
+          code: normalizeErrorCode(runtimeVerifyError.code) || "E_VERIFY_EXECUTE",
+          retryable: true,
+          details: runtimeVerifyError.details
+        });
+      }
+
+      verified = toRecord(verifyData).ok === true;
+      verifyReason = verifyData ? (verified ? "verified" : "verify_failed") : "verify_skipped";
+    }
+
+    let data: unknown = actionResult;
+    if (verifyData && data && typeof data === "object" && !Array.isArray(data)) {
+      data = {
+        ...(data as JsonRecord),
+        verify: verifyData
+      };
+    }
+
+    return {
+      data,
+      verified,
+      verifyReason
+    };
+  };
+
+  const invokeBrowserVerifyCapability = async (stepInput: {
+    sessionId: string;
+    action: string;
+    args: JsonRecord;
+  }): Promise<unknown> => {
+    const payload = toRecord(stepInput.args);
+    const tabId = parsePositiveInt(payload.tabId || toRecord(payload.action).tabId);
+    if (!tabId) {
+      throw createRuntimeError("browser_verify 需要有效 tabId", {
+        code: "E_NO_TAB",
+        retryable: true
+      });
+    }
+    const verifyAction = Object.keys(toRecord(payload.action)).length
+      ? toRecord(payload.action)
+      : {
+          expect: Object.keys(toRecord(payload.expect)).length ? toRecord(payload.expect) : payload
+        };
+    const verifyData = await callInfra(infra, {
+      type: "cdp.verify",
+      tabId,
+      action: verifyAction,
+      result: payload.result || null
+    });
+    const verified = toRecord(verifyData).ok === true;
+    return {
+      data: verifyData,
+      verified,
+      verifyReason: verified ? "verified" : "verify_failed"
+    };
+  };
+
+  const ensureBuiltinBrowserCapabilityProviders = (): void => {
+    for (const item of BUILTIN_BROWSER_CAPABILITY_PROVIDERS) {
+      const existed = orchestrator.getCapabilityProviders(item.capability).some((provider) => provider.id === item.providerId);
+      if (existed) continue;
+      orchestrator.registerCapabilityProvider(item.capability, {
+        id: item.providerId,
+        mode: "cdp",
+        priority: -100,
+        invoke: async (stepInput) => {
+          const input = {
+            sessionId: stepInput.sessionId,
+            action: String(stepInput.action || "").trim(),
+            args: toRecord(stepInput.args),
+            verifyPolicy: stepInput.verifyPolicy,
+            capability: stepInput.capability
+          };
+          if (item.capability === TOOL_CAPABILITIES.snapshot) {
+            return await invokeBrowserSnapshotCapability(input);
+          }
+          if (item.capability === TOOL_CAPABILITIES.browser_action) {
+            return await invokeBrowserActionCapability(input);
+          }
+          return await invokeBrowserVerifyCapability(input);
+        }
+      });
+    }
+  };
+
+  ensureBuiltinBridgeCapabilityProviders();
+  ensureBuiltinBrowserCapabilityProviders();
 
   async function executeStep(input: {
     sessionId: string;
@@ -1660,7 +1872,6 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const out = await executeStep({
           sessionId,
           capability,
-          mode: "cdp",
           action: "snapshot",
           args: {
             tabId,
@@ -1685,9 +1896,12 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             { defaultRetryable: true }
           );
         }
+        const snapshotData = toRecord(out.data);
         return buildToolResponseEnvelope("snapshot", out.data, {
           capabilityUsed: out.capabilityUsed || capability,
-          modeUsed: out.modeUsed
+          modeUsed: out.modeUsed,
+          verified: typeof snapshotData.verified === "boolean" ? snapshotData.verified : out.verified,
+          verifyReason: String(snapshotData.verifyReason || out.verifyReason || "")
         });
       },
       browser_action: async () => {
@@ -1708,7 +1922,6 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const out = await executeStep({
           sessionId,
           capability,
-          mode: "cdp",
           action: "action",
           args: {
             tabId,
@@ -1722,7 +1935,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               expect: args.expect
             },
             expect: args.expect
-          }
+          },
+          verifyPolicy: "off"
         });
         if (!out.ok) {
           return buildStepFailureEnvelope(
@@ -1733,9 +1947,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             { defaultRetryable: true }
           );
         }
+        const providerAction = toRecord(out.data);
+        const verified =
+          typeof providerAction.verified === "boolean" ? providerAction.verified : out.verified;
+        const verifyReason = String(providerAction.verifyReason || out.verifyReason || "");
+        const actionData = providerAction.data !== undefined ? providerAction.data : out.data;
         const explicitExpect = normalizeVerifyExpect(args.expect || null);
         const hardFail = !!explicitExpect || kind === "navigate";
-        if (!out.verified && hardFail) {
+        if (!verified && hardFail) {
           return {
             error: "browser_action 执行成功但未通过验证",
             errorCode: "E_VERIFY_FAILED",
@@ -1743,16 +1962,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             retryable: true,
             retryHint: "Adjust action args/expect and retry the browser action.",
             details: {
-              verifyReason: out.verifyReason,
-              data: out.data
+              verifyReason,
+              data: actionData
             }
           };
         }
-        return buildToolResponseEnvelope("cdp_action", out.data, {
+        return buildToolResponseEnvelope("cdp_action", actionData, {
           capabilityUsed: out.capabilityUsed || capability,
           modeUsed: out.modeUsed,
-          verifyReason: out.verifyReason,
-          verified: out.verified
+          verifyReason,
+          verified
         });
       },
       browser_verify: async () => {
@@ -1770,7 +1989,6 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const out = await executeStep({
           sessionId,
           capability,
-          mode: "cdp",
           action: "verify",
           args: {
             tabId,
@@ -1778,7 +1996,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               expect: normalizeVerifyExpect(args.expect || args) || {}
             }
           },
-          verifyPolicy: "always"
+          verifyPolicy: "off"
         });
         if (!out.ok) {
           return buildStepFailureEnvelope(
@@ -1789,17 +2007,21 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             { defaultRetryable: true }
           );
         }
-        if (!out.verified) {
+        const providerVerify = toRecord(out.data);
+        const verified =
+          typeof providerVerify.verified === "boolean" ? providerVerify.verified : out.verified;
+        const verifyData = providerVerify.data !== undefined ? providerVerify.data : out.data;
+        if (!verified) {
           return {
             error: "browser_verify 未通过",
             errorCode: "E_VERIFY_FAILED",
             errorReason: "failed_verify",
             retryable: true,
             retryHint: "Refine expect conditions and re-run browser_verify.",
-            details: out.data
+            details: verifyData
           };
         }
-        return buildToolResponseEnvelope("cdp", out.data, {
+        return buildToolResponseEnvelope("cdp", verifyData, {
           capabilityUsed: out.capabilityUsed || capability,
           modeUsed: out.modeUsed
         });

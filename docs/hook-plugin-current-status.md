@@ -23,10 +23,11 @@
 11. Orchestrator 已移除 legacy constructor adapter 注入（`wireLegacyAdapters` 下线），测试改为显式 `registerToolProvider`。
 12. `bash/read/write/edit` 已改为 capability-first 调度（不再强绑 `mode=bridge`），并补内置低优先级 bridge capability provider：`extension/src/sw/kernel/runtime-loop.browser.ts`。
 13. `runtime-loop` 已去掉 `script -> cdp` 自动 fallback，执行失败直接返回错误，避免隐式降级掩盖问题。
+14. `snapshot/browser_action/browser_verify` 已补内置 capability provider（`cdp`），tool_call 默认走 capability-first 路由，可被插件 provider 覆盖。
 
 ## 部分完成（仍有兼容层）
 
-1. `runtime-loop.executeToolCall` 仍保留较大内联 handler（尤其 `snapshot/browser_action/browser_verify`），尚未完全 provider 化。
+1. `runtime-loop.executeToolCall` 仍保留参数映射/错误归一化逻辑（不是纯 provider plan），但核心执行已走 capability provider。
 2. `runtime-loop.executeStep` 仍保留显式 mode 分支（`bridge/cdp/script`），还不是纯 provider-only 主干。
 3. Bridge 已支持动态 handler 注册，但默认仍以内置四工具 handler 为主：`bridge/src/dispatcher.ts`。
 4. `targetUri` 级对象路由（`workspace://` / `local://` / `plugin://`）尚未在 tool contract 层统一化。
@@ -84,5 +85,5 @@
 ## 下一阶段建议
 
 1. 先完成去 fallback 收口（fail-fast）。
-2. 完成 `snapshot/browser_action/browser_verify` 从内联执行到 provider 管线的下沉。
+2. 继续收口 `executeToolCall`（参数 plan/错误模板抽象），减少内联分支体积。
 3. 为工具调用补 `targetUri` 路由语义，明确 `workspace/local/plugin` 三类对象边界与测试矩阵。
