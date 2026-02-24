@@ -1,6 +1,7 @@
 import type { HookHandler, HookHandlerOptions } from "./hook-runner";
 import type { OrchestratorHookMap } from "./orchestrator-hooks";
 import type { ExecuteCapability, ExecuteMode } from "./types";
+import type { CapabilityExecutionPolicy, RegisterCapabilityPolicyOptions } from "./capability-policy";
 import type { RegisterProviderOptions, StepToolProvider } from "./tool-provider-registry";
 
 export interface AgentPluginPermissions {
@@ -34,6 +35,9 @@ export interface AgentPluginDefinition {
     modes?: Partial<Record<ExecuteMode, StepToolProvider>>;
     capabilities?: Record<ExecuteCapability, StepToolProvider>;
   };
+  policies?: {
+    capabilities?: Record<ExecuteCapability, CapabilityExecutionPolicy>;
+  };
 }
 
 export interface PluginRuntimeView {
@@ -47,6 +51,7 @@ export interface PluginRuntimeView {
   hooks: string[];
   modes: ExecuteMode[];
   capabilities: ExecuteCapability[];
+  policyCapabilities: ExecuteCapability[];
 }
 
 interface RuntimeHost {
@@ -59,6 +64,12 @@ interface RuntimeHost {
   unregisterToolProvider(mode: ExecuteMode, expectedProviderId?: string): boolean;
   registerCapabilityProvider(capability: ExecuteCapability, provider: StepToolProvider, options?: RegisterProviderOptions): void;
   unregisterCapabilityProvider(capability: ExecuteCapability, expectedProviderId?: string): boolean;
+  registerCapabilityPolicy(
+    capability: ExecuteCapability,
+    policy: CapabilityExecutionPolicy,
+    options?: RegisterCapabilityPolicyOptions
+  ): string;
+  unregisterCapabilityPolicy(capability: ExecuteCapability, expectedPolicyId?: string): boolean;
 }
 
 interface PluginState {
@@ -67,6 +78,7 @@ interface PluginState {
   unregisterHooks: Array<() => void>;
   ownedModeProviders: Array<{ mode: ExecuteMode; providerId: string }>;
   ownedCapabilityProviders: Array<{ capability: ExecuteCapability; providerId: string }>;
+  ownedCapabilityPolicies: Array<{ capability: ExecuteCapability; policyId: string }>;
   errorCount: number;
   lastError?: string;
 }
@@ -114,6 +126,7 @@ export class PluginRuntime {
       unregisterHooks: [],
       ownedModeProviders: [],
       ownedCapabilityProviders: [],
+      ownedCapabilityPolicies: [],
       errorCount: 0
     };
     this.plugins.set(id, state);
@@ -213,6 +226,21 @@ export class PluginRuntime {
         });
       }
 
+      for (const [capability, policy] of Object.entries(state.definition.policies?.capabilities || {})) {
+        if (!policy) continue;
+        if (!isAllowed(permissions.capabilities, capability)) {
+          throw new Error(`plugin ${id} 未授权 capability policy: ${capability}`);
+        }
+        const policyId = this.host.registerCapabilityPolicy(capability, policy, {
+          replace: permissions.replaceProviders === true,
+          id: `${id}:policy:${capability}`
+        });
+        state.ownedCapabilityPolicies.push({
+          capability,
+          policyId
+        });
+      }
+
       state.enabled = true;
       state.lastError = undefined;
     } catch (error) {
@@ -242,6 +270,9 @@ export class PluginRuntime {
     for (const item of state.ownedCapabilityProviders.splice(0)) {
       this.host.unregisterCapabilityProvider(item.capability, item.providerId);
     }
+    for (const item of state.ownedCapabilityPolicies.splice(0)) {
+      this.host.unregisterCapabilityPolicy(item.capability, item.policyId);
+    }
 
     state.enabled = false;
   }
@@ -259,7 +290,8 @@ export class PluginRuntime {
         errorCount: state.errorCount,
         hooks: Object.keys(state.definition.hooks || {}),
         modes: Object.keys(state.definition.providers?.modes || {}) as ExecuteMode[],
-        capabilities: Object.keys(state.definition.providers?.capabilities || {})
+        capabilities: Object.keys(state.definition.providers?.capabilities || {}),
+        policyCapabilities: Object.keys(state.definition.policies?.capabilities || {})
       };
     });
   }

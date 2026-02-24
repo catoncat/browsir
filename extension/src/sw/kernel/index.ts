@@ -2,6 +2,7 @@ export * from "./types";
 export * from "./events";
 export * from "./hook-runner";
 export * from "./orchestrator-hooks";
+export * from "./capability-policy";
 export * from "./session-store.browser";
 export * from "./storage-reset.browser";
 export * from "./session-manager.browser";

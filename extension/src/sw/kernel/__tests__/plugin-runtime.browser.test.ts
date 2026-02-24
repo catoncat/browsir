@@ -112,4 +112,43 @@ describe("plugin-runtime.browser", () => {
       path: "mem://notes.md"
     });
   });
+
+  it("支持 capability policy 覆盖并在 disable 后回滚", () => {
+    const orchestrator = new BrainOrchestrator();
+    const before = orchestrator.resolveCapabilityPolicy("browser.action");
+    expect(before.defaultVerifyPolicy).toBe("on_critical");
+    expect(before.allowScriptFallback).toBe(true);
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.policy.override",
+        name: "policy-override",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["browser.action"]
+        }
+      },
+      policies: {
+        capabilities: {
+          "browser.action": {
+            defaultVerifyPolicy: "always",
+            leasePolicy: "required",
+            allowScriptFallback: false
+          }
+        }
+      }
+    });
+
+    const applied = orchestrator.resolveCapabilityPolicy("browser.action");
+    expect(applied.defaultVerifyPolicy).toBe("always");
+    expect(applied.leasePolicy).toBe("required");
+    expect(applied.allowScriptFallback).toBe(false);
+
+    orchestrator.disablePlugin("plugin.policy.override");
+
+    const rolledBack = orchestrator.resolveCapabilityPolicy("browser.action");
+    expect(rolledBack.defaultVerifyPolicy).toBe("on_critical");
+    expect(rolledBack.leasePolicy).toBe("auto");
+    expect(rolledBack.allowScriptFallback).toBe(true);
+  });
 });

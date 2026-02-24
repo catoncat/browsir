@@ -662,7 +662,8 @@ async function handleBrainDebug(orchestrator: BrainOrchestrator, infra: RuntimeI
     return ok({
       plugins: orchestrator.listPlugins(),
       modeProviders: orchestrator.listToolProviders(),
-      capabilityProviders: orchestrator.listCapabilityProviders()
+      capabilityProviders: orchestrator.listCapabilityProviders(),
+      capabilityPolicies: orchestrator.listCapabilityPolicies()
     });
   }
 

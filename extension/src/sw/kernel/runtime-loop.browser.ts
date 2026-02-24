@@ -7,6 +7,7 @@ import {
 } from "./orchestrator.browser";
 import { writeSessionMeta } from "./session-store.browser";
 import { type BridgeConfig, type RuntimeInfraHandler } from "./runtime-infra.browser";
+import { type CapabilityExecutionPolicy, type StepVerifyPolicy } from "./capability-policy";
 import { nowIso, type SessionEntry, type SessionMeta } from "./types";
 
 type JsonRecord = Record<string, unknown>;
@@ -257,65 +258,6 @@ const TOOL_CAPABILITIES = {
   browser_action: "browser.action",
   browser_verify: "browser.verify"
 } as const;
-
-type StepVerifyPolicy = "off" | "on_critical" | "always";
-
-interface CapabilityExecutionPolicy {
-  fallbackMode?: ExecuteMode;
-  defaultVerifyPolicy?: StepVerifyPolicy;
-  leasePolicy?: "auto" | "required" | "none";
-  allowScriptFallback?: boolean;
-}
-
-const CAPABILITY_EXEC_POLICIES: Record<string, CapabilityExecutionPolicy> = {
-  "process.exec": {
-    fallbackMode: "bridge",
-    defaultVerifyPolicy: "off",
-    leasePolicy: "none",
-    allowScriptFallback: false
-  },
-  "fs.read": {
-    fallbackMode: "bridge",
-    defaultVerifyPolicy: "off",
-    leasePolicy: "none",
-    allowScriptFallback: false
-  },
-  "fs.write": {
-    fallbackMode: "bridge",
-    defaultVerifyPolicy: "off",
-    leasePolicy: "none",
-    allowScriptFallback: false
-  },
-  "fs.edit": {
-    fallbackMode: "bridge",
-    defaultVerifyPolicy: "off",
-    leasePolicy: "none",
-    allowScriptFallback: false
-  },
-  "browser.snapshot": {
-    fallbackMode: "cdp",
-    defaultVerifyPolicy: "off",
-    leasePolicy: "none",
-    allowScriptFallback: false
-  },
-  "browser.action": {
-    fallbackMode: "cdp",
-    defaultVerifyPolicy: "on_critical",
-    leasePolicy: "auto",
-    allowScriptFallback: true
-  },
-  "browser.verify": {
-    fallbackMode: "cdp",
-    defaultVerifyPolicy: "always",
-    leasePolicy: "none",
-    allowScriptFallback: false
-  }
-};
-
-function resolveCapabilityPolicy(capability?: string): CapabilityExecutionPolicy {
-  if (!capability) return {};
-  return CAPABILITY_EXEC_POLICIES[capability] || {};
-}
 
 function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" ? (value as JsonRecord) : {};
@@ -1256,7 +1198,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       ? (String(input.mode || "").trim() as ExecuteMode)
       : undefined;
     const normalizedCapability = String(input.capability || "").trim() || undefined;
-    const capabilityPolicy = resolveCapabilityPolicy(normalizedCapability);
+    const capabilityPolicy = orchestrator.resolveCapabilityPolicy(normalizedCapability);
     const effectiveVerifyPolicy: StepVerifyPolicy = input.verifyPolicy || capabilityPolicy.defaultVerifyPolicy || "on_critical";
     const normalizedAction = String(input.action || "").trim();
     const payload = toRecord(input.args);

@@ -5,6 +5,11 @@ import type { OrchestratorHookMap } from "./orchestrator-hooks";
 import { BrowserSessionManager } from "./session-manager.browser";
 import { appendTraceChunk, readTraceChunk } from "./session-store.browser";
 import {
+  CapabilityPolicyRegistry,
+  type CapabilityExecutionPolicy,
+  type RegisterCapabilityPolicyOptions
+} from "./capability-policy";
+import {
   type ExecuteCapability,
   nowIso,
   randomId,
@@ -18,6 +23,7 @@ import { ToolProviderRegistry, type RegisterProviderOptions, type StepToolProvid
 import { PluginRuntime, type AgentPluginDefinition, type PluginRuntimeView } from "./plugin-runtime";
 
 export type { ExecuteCapability, ExecuteMode, ExecuteStepInput, ExecuteStepResult } from "./types";
+export type { CapabilityExecutionPolicy, RegisterCapabilityPolicyOptions } from "./capability-policy";
 
 export interface OrchestratorOptions {
   retryMaxAttempts?: number;
@@ -85,6 +91,7 @@ export class BrainOrchestrator {
   private readonly verifyAdapter?: ExecutionAdapters["verify"];
   private readonly hooks = new HookRunner<OrchestratorHookMap>();
   private readonly toolProviders = new ToolProviderRegistry();
+  private readonly capabilityPolicies = new CapabilityPolicyRegistry();
   private readonly plugins = new PluginRuntime({
     onHook: (hook, handler, options) => this.onHook(hook, handler, options),
     registerToolProvider: (mode, provider, options) => this.registerToolProvider(mode, provider, options),
@@ -92,7 +99,11 @@ export class BrainOrchestrator {
     registerCapabilityProvider: (capability, provider, options) =>
       this.registerCapabilityProvider(capability, provider, options),
     unregisterCapabilityProvider: (capability, expectedProviderId) =>
-      this.unregisterCapabilityProvider(capability, expectedProviderId)
+      this.unregisterCapabilityProvider(capability, expectedProviderId),
+    registerCapabilityPolicy: (capability, policy, options) =>
+      this.registerCapabilityPolicy(capability, policy, options),
+    unregisterCapabilityPolicy: (capability, expectedPolicyId) =>
+      this.unregisterCapabilityPolicy(capability, expectedPolicyId)
   });
   private readonly runStateBySession = new Map<string, RunState>();
   private readonly streamBySession = new Map<string, StepTraceRecord[]>();
@@ -141,6 +152,40 @@ export class BrainOrchestrator {
 
   listCapabilityProviders(): Array<{ capability: ExecuteCapability; id: string; mode?: ExecuteMode }> {
     return this.toolProviders.listCapabilities();
+  }
+
+  registerCapabilityPolicy(
+    capability: ExecuteCapability,
+    policy: CapabilityExecutionPolicy,
+    options: RegisterCapabilityPolicyOptions = {}
+  ): string {
+    return this.capabilityPolicies.register(capability, policy, options);
+  }
+
+  unregisterCapabilityPolicy(capability: ExecuteCapability, expectedPolicyId?: string): boolean {
+    return this.capabilityPolicies.unregister(capability, expectedPolicyId);
+  }
+
+  getCapabilityPolicy(capability: ExecuteCapability): {
+    capability: ExecuteCapability;
+    source: "builtin" | "override";
+    id: string;
+    policy: CapabilityExecutionPolicy;
+  } | null {
+    return this.capabilityPolicies.get(capability);
+  }
+
+  resolveCapabilityPolicy(capability?: ExecuteCapability): CapabilityExecutionPolicy {
+    return this.capabilityPolicies.resolve(capability);
+  }
+
+  listCapabilityPolicies(): Array<{
+    capability: ExecuteCapability;
+    source: "builtin" | "override";
+    id: string;
+    policy: CapabilityExecutionPolicy;
+  }> {
+    return this.capabilityPolicies.list();
   }
 
   hasCapabilityProvider(capability: ExecuteCapability): boolean {

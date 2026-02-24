@@ -373,7 +373,7 @@ describe("runtime-router.browser", () => {
         version: "1.0.0",
         permissions: {
           hooks: ["tool.before_call"],
-          capabilities: ["fs.virtual.read"]
+          capabilities: ["fs.virtual.read", "browser.action"]
         }
       },
       hooks: {
@@ -385,6 +385,14 @@ describe("runtime-router.browser", () => {
             id: "plugin.debug.view.read",
             mode: "bridge",
             invoke: async () => ({ ok: true })
+          }
+        }
+      },
+      policies: {
+        capabilities: {
+          "browser.action": {
+            defaultVerifyPolicy: "always",
+            leasePolicy: "required"
           }
         }
       }
@@ -399,10 +407,12 @@ describe("runtime-router.browser", () => {
     const capabilities = Array.isArray(data.capabilityProviders)
       ? (data.capabilityProviders as Array<Record<string, unknown>>)
       : [];
+    const policies = Array.isArray(data.capabilityPolicies) ? (data.capabilityPolicies as Array<Record<string, unknown>>) : [];
     const plugin = plugins.find((item) => String(item.id || "") === "plugin.debug.view");
     expect(plugin).toBeDefined();
     expect(Boolean(plugin?.enabled)).toBe(true);
     expect(capabilities.some((item) => String(item.capability || "") === "fs.virtual.read")).toBe(true);
+    expect(policies.some((item) => String(item.capability || "") === "browser.action")).toBe(true);
   });
 
   it("supports title refresh + delete + debug config/dump", async () => {
