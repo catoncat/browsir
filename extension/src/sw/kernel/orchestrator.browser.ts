@@ -41,7 +41,6 @@ export interface OrchestratorOptions {
   keepTail?: number;
   splitTurn?: boolean;
   traceChunkSize?: number;
-  verifyAdapter?: (input: ExecuteStepInput, result: unknown) => Promise<{ verified: boolean; reason?: string }>;
 }
 
 export interface AgentEndInput {
@@ -63,6 +62,12 @@ export interface RuntimeView {
   paused: boolean;
   stopped: boolean;
   retry: RunState["retry"];
+}
+export interface ExecutionAdapters {
+  script?: (input: ExecuteStepInput) => Promise<unknown>;
+  cdp?: (input: ExecuteStepInput) => Promise<unknown>;
+  bridge?: (input: ExecuteStepInput) => Promise<unknown>;
+  verify?: (input: ExecuteStepInput, result: unknown) => Promise<{ verified: boolean; reason?: string }>;
 }
 
 function toPositiveInt(value: unknown, fallback: number): number {
@@ -97,7 +102,7 @@ export class BrainOrchestrator {
   readonly sessions = new BrowserSessionManager();
   readonly events = new BrainEventBus();
   private readonly options: Required<OrchestratorOptions>;
-  private readonly verifyAdapter?: (input: ExecuteStepInput, result: unknown) => Promise<{ verified: boolean; reason?: string }>;
+  private readonly verifyAdapter?: ExecutionAdapters["verify"];
   private readonly hooks = new HookRunner<OrchestratorHookMap>();
   private readonly toolProviders = new ToolProviderRegistry();
   private readonly toolContracts = new ToolContractRegistry();
@@ -123,7 +128,7 @@ export class BrainOrchestrator {
   private readonly streamBySession = new Map<string, StepTraceRecord[]>();
   private readonly traceWriteTailBySession = new Map<string, Promise<void>>();
 
-  constructor(options: OrchestratorOptions = {}) {
+  constructor(options: OrchestratorOptions = {}, adapters: ExecutionAdapters = {}) {
     this.options = {
       retryMaxAttempts: options.retryMaxAttempts ?? 2,
       retryBaseDelayMs: options.retryBaseDelayMs ?? 500,
@@ -133,7 +138,8 @@ export class BrainOrchestrator {
       splitTurn: options.splitTurn ?? true,
       traceChunkSize: toPositiveInt(options.traceChunkSize, 80)
     };
-    this.verifyAdapter = options.verifyAdapter;
+    this.verifyAdapter = adapters.verify;
+    this.wireLegacyAdapters(adapters);
 
     this.events.subscribe((event) => {
       this.schedulePersistEvent(event);
@@ -273,6 +279,39 @@ export class BrainOrchestrator {
 
   runHook<K extends keyof OrchestratorHookMap & string>(hook: K, payload: OrchestratorHookMap[K]) {
     return this.hooks.run(hook, payload);
+  }
+
+  private wireLegacyAdapters(adapters: ExecutionAdapters): void {
+    if (adapters.script) {
+      this.registerToolProvider(
+        "script",
+        {
+          id: "legacy:script-adapter",
+          invoke: adapters.script
+        },
+        { replace: true }
+      );
+    }
+    if (adapters.cdp) {
+      this.registerToolProvider(
+        "cdp",
+        {
+          id: "legacy:cdp-adapter",
+          invoke: adapters.cdp
+        },
+        { replace: true }
+      );
+    }
+    if (adapters.bridge) {
+      this.registerToolProvider(
+        "bridge",
+        {
+          id: "legacy:bridge-adapter",
+          invoke: adapters.bridge
+        },
+        { replace: true }
+      );
+    }
   }
 
   private async persistEvent(event: BrainEventEnvelope): Promise<void> {

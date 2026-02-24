@@ -1,0 +1,68 @@
+{
+  "id": "BHV-SESSION-INTERRUPTION-RECOVERY",
+  "intent": "非用户主动停止的中断（浏览器崩溃/扩展热重载/Bridge 断连）发生后，会话历史必须可恢复，并允许用户继续同一会话对话",
+  "context": {
+    "surface": "service-worker.kernel.runtime+panel.runtime",
+    "interruption_types": [
+      "service_worker_restart",
+      "extension_hot_reload",
+      "bridge_disconnect_or_timeout"
+    ],
+    "non_user_stop_only": true,
+    "runtime_actions": [
+      "brain.session.view",
+      "brain.step.stream",
+      "brain.run.start",
+      "brain.run.regenerate",
+      "bridge.connect"
+    ]
+  },
+  "steps": [
+    "start_session_and_append_entries_before_interruption",
+    "persist_trace_and_message_chunks_during_runtime_events",
+    "simulate_non_user_interruptions_without_stop_action",
+    "simulate_browser_restart_as_service_worker_recreation",
+    "reload_session_view_and_step_stream_after_runtime_recovery",
+    "verify_user_stop_path_is_not_classified_as_interruption_recovery",
+    "assert_inflight_loop_is_not_auto_resumed_silently",
+    "continue_conversation_in_same_session_after_recovery"
+  ],
+  "observables": [
+    "persisted_messages_remain_readable_after_restart_or_reload",
+    "trace_stream_is_recoverable_from_trace_chunks_for_diagnosis",
+    "runtime_state_recovers_as_not_running_until_explicit_restart",
+    "user_stop_requires_explicit_restart_or_new_prompt_not_implicit_recovery",
+    "new_prompt_or_regenerate_can_continue_same_session_context",
+    "interruption_failure_is_recorded_as_loop_error_or_tool_failure_message"
+  ],
+  "risk": "high",
+  "allowed_side_effects": [
+    "storage_read(session_meta|entry_chunks|trace_chunks)",
+    "storage_write(session_meta|entry_chunks|trace_chunks)",
+    "runtime_message(brain.session.view|brain.step.stream|brain.run.start|brain.run.regenerate)",
+    "bridge_reconnect_attempt(bridge.connect)"
+  ],
+  "proof_requirements": {
+    "required_layers": [
+      "unit",
+      "integration",
+      "browser-cdp"
+    ],
+    "min_layers": 3
+  },
+  "degrade_policy": {
+    "on_runtime_restart_during_inflight": [
+      "recover_session_history_from_storage",
+      "set_runtime_running_false_until_user_restarts"
+    ],
+    "on_bridge_disconnect_or_timeout": [
+      "record_failure_message_or_loop_error",
+      "allow_followup_prompt_after_bridge_reconnect"
+    ]
+  },
+  "rollback_or_compensation": [
+    "never_delete_session_history_due_to_runtime_interruptions",
+    "retain_trace_chunks_for_postmortem_debugging"
+  ],
+  "version": "1.0.0"
+}

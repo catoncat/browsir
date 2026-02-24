@@ -31,6 +31,14 @@ browser-brain-loop/
 
 ## 快速启动
 
+首次环境准备（必做）：
+
+```bash
+bun install
+cd bridge && bun install
+cd extension && bun install && bun run build
+```
+
 0. 一条命令启动（推荐）
 
 在仓库根目录执行：
@@ -89,7 +97,8 @@ bdd/
 ├── schemas/behavior-contract.schema.json  # 契约 schema
 ├── contracts/                             # Canonical behavior contracts
 ├── mappings/contract-categories.json      # 契约分类（ux/protocol/storage）
-├── features/                              # Gherkin 视图（@contract(...)）
+├── features/business/                     # 业务语义 feature（ux）
+├── features/technical/                    # 技术语义 feature（protocol/storage）
 └── mappings/contract-to-tests.json        # 契约到证明层映射
 ```
 
@@ -107,6 +116,7 @@ bdd/
 ```bash
 bun run brain:e2e
 bun run brain:e2e:live   # 真实 LLM 冒烟（需配置环境变量）
+bun run bdd:lint:features
 bun run bdd:validate
 bun run bdd:gate
 bun run bdd:gate:ux
@@ -187,7 +197,9 @@ vNext 已切到 `sidepanel.html + service-worker.js` 主路径：
 - `bun run brain:ext:test`
 - `bun run brain:e2e`
 - `bun run bdd:validate && bun run bdd:gate`
-- `bun run bdd:gate:ux|protocol|storage`（按职责分层校验）
+- `bun run bdd:gate:ux`（UX 分层校验）
+- `bun run bdd:gate:protocol`（协议分层校验）
+- `bun run bdd:gate:storage`（存储分层校验）
 
 ## 协议
 

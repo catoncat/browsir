@@ -100,40 +100,6 @@ const TOOL_CAPABILITIES = {
   browser_verify: "browser.verify"
 } as const;
 
-const BUILTIN_BRIDGE_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [
-  {
-    capability: TOOL_CAPABILITIES.bash,
-    providerId: "runtime.builtin.capability.process.exec.bridge"
-  },
-  {
-    capability: TOOL_CAPABILITIES.read_file,
-    providerId: "runtime.builtin.capability.fs.read.bridge"
-  },
-  {
-    capability: TOOL_CAPABILITIES.write_file,
-    providerId: "runtime.builtin.capability.fs.write.bridge"
-  },
-  {
-    capability: TOOL_CAPABILITIES.edit_file,
-    providerId: "runtime.builtin.capability.fs.edit.bridge"
-  }
-];
-
-const BUILTIN_BROWSER_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [
-  {
-    capability: TOOL_CAPABILITIES.snapshot,
-    providerId: "runtime.builtin.capability.browser.snapshot.cdp"
-  },
-  {
-    capability: TOOL_CAPABILITIES.browser_action,
-    providerId: "runtime.builtin.capability.browser.action.cdp"
-  },
-  {
-    capability: TOOL_CAPABILITIES.browser_verify,
-    providerId: "runtime.builtin.capability.browser.verify.cdp"
-  }
-];
-
 const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
   "bash",
   "read_file",
@@ -1086,53 +1052,61 @@ async function refreshSessionTitleAuto(
 }
 
 export function createRuntimeLoopController(orchestrator: BrainOrchestrator, infra: RuntimeInfraHandler): RuntimeLoopController {
-  const bridgeCapabilityInvoker = async (input: {
-    sessionId: string;
-    capability: ExecuteCapability;
-    args: JsonRecord;
-  }): Promise<JsonRecord> => {
-    const frame = (() => {
-      const rawFrame = toRecord(input.args.frame);
-      if (Object.keys(rawFrame).length === 0) {
-        throw new Error(`bridge capability provider 需要 args.frame: ${input.capability}`);
-      }
-      return { ...rawFrame };
-    })();
-    if (!String(frame.tool || "").trim()) {
-      throw new Error(`bridge capability provider 缺少 frame.tool: ${input.capability}`);
-    }
-    if (!frame.sessionId) frame.sessionId = input.sessionId;
-    const response = await callInfra(infra, {
-      type: "bridge.invoke",
-      payload: frame
-    });
-    return {
-      type: "invoke",
-      response
-    };
-  };
+  async function getSessionPrimaryTabId(sessionId: string): Promise<number | null> {
+    const meta = await orchestrator.sessions.getMeta(sessionId);
+    if (!meta) return null;
+    const header = toRecord(meta.header);
+    const metadata = toRecord(header.metadata);
+    return parsePositiveInt(metadata.primaryTabId);
+  }
 
-  const ensureBuiltinBridgeCapabilityProviders = (): void => {
-    for (const item of BUILTIN_BRIDGE_CAPABILITY_PROVIDERS) {
-      const existed = orchestrator.getCapabilityProviders(item.capability).some((provider) => provider.id === item.providerId);
-      if (existed) continue;
-      orchestrator.registerCapabilityProvider(item.capability, {
-        id: item.providerId,
-        mode: "bridge",
-        priority: -100,
-        canHandle: (stepInput) => {
-          const frame = toRecord(stepInput.args?.frame);
-          return String(frame.tool || "").trim().length > 0;
-        },
-        invoke: async (stepInput) =>
-          bridgeCapabilityInvoker({
-            sessionId: stepInput.sessionId,
-            capability: item.capability,
-            args: toRecord(stepInput.args)
-          })
-      });
+  async function setSessionPrimaryTabId(
+    sessionId: string,
+    tabId: number,
+    source: "shared_tabs" | "explicit_tool_tab" | "active_seed"
+  ): Promise<void> {
+    const normalized = parsePositiveInt(tabId);
+    if (!normalized) return;
+    const meta = await orchestrator.sessions.getMeta(sessionId);
+    if (!meta) return;
+    const header = toRecord(meta.header);
+    const metadata = toRecord(header.metadata);
+    if (parsePositiveInt(metadata.primaryTabId) === normalized) return;
+    metadata.primaryTabId = normalized;
+    metadata.primaryTabSource = source;
+    await writeSessionMeta(sessionId, {
+      ...meta,
+      header: {
+        ...meta.header,
+        metadata
+      },
+      updatedAt: nowIso()
+    });
+  }
+
+  async function resolveTargetTabId(
+    sessionId: string,
+    args: JsonRecord
+  ): Promise<{ tabId: number | null; source: "explicit" | "primary" | "active" | "none" }> {
+    const explicitTabId = parsePositiveInt(args.tabId);
+    if (explicitTabId) {
+      await setSessionPrimaryTabId(sessionId, explicitTabId, "explicit_tool_tab");
+      return { tabId: explicitTabId, source: "explicit" };
     }
-  };
+
+    const primaryTabId = await getSessionPrimaryTabId(sessionId);
+    if (primaryTabId) {
+      return { tabId: primaryTabId, source: "primary" };
+    }
+
+    const activeTabId = await getActiveTabIdForRuntime();
+    if (activeTabId) {
+      await setSessionPrimaryTabId(sessionId, activeTabId, "active_seed");
+      return { tabId: activeTabId, source: "active" };
+    }
+
+    return { tabId: null, source: "none" };
+  }
 
   async function withTabLease<T>(tabId: number, sessionId: string, run: () => Promise<T>): Promise<T> {
     const acquired = await callInfra(infra, {
@@ -1155,205 +1129,6 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       });
     }
   }
-
-  function createRuntimeError(message: string, meta: { code?: string; retryable?: boolean; details?: unknown } = {}): RuntimeErrorWithMeta {
-    const error = new Error(message) as RuntimeErrorWithMeta;
-    if (meta.code) error.code = meta.code;
-    if (typeof meta.retryable === "boolean") error.retryable = meta.retryable;
-    if (meta.details !== undefined) error.details = meta.details;
-    return error;
-  }
-
-  const invokeBrowserSnapshotCapability = async (stepInput: {
-    sessionId: string;
-    action: string;
-    args: JsonRecord;
-  }): Promise<unknown> => {
-    const payload = toRecord(stepInput.args);
-    const options = toRecord(payload.options);
-    const tabId = parsePositiveInt(payload.tabId || options.tabId);
-    if (!tabId) {
-      throw createRuntimeError("snapshot 需要有效 tabId", {
-        code: "E_NO_TAB",
-        retryable: true
-      });
-    }
-    return await callInfra(infra, {
-      type: "cdp.snapshot",
-      tabId,
-      options: Object.keys(options).length > 0 ? options : payload
-    });
-  };
-
-  const invokeBrowserActionCapability = async (stepInput: {
-    sessionId: string;
-    action: string;
-    args: JsonRecord;
-    verifyPolicy?: StepVerifyPolicy;
-    capability?: ExecuteCapability;
-  }): Promise<unknown> => {
-    const payload = toRecord(stepInput.args);
-    const actionPayload = toRecord(payload.action) && Object.keys(toRecord(payload.action)).length > 0 ? toRecord(payload.action) : payload;
-    const tabId = parsePositiveInt(payload.tabId || actionPayload.tabId);
-    if (!tabId) {
-      throw createRuntimeError("browser_action 需要有效 tabId", {
-        code: "E_NO_TAB",
-        retryable: true
-      });
-    }
-
-    const cdpAction = Object.keys(toRecord(payload.action)).length > 0 ? { ...toRecord(payload.action) } : { ...payload };
-    if (!cdpAction.kind && stepInput.action && !stepInput.action.startsWith("cdp.")) {
-      cdpAction.kind = stepInput.action;
-    }
-    const kind = String(cdpAction.kind || "").trim();
-    if (!kind) {
-      throw createRuntimeError("cdp.action 缺少 kind", {
-        code: "E_ARGS",
-        retryable: false
-      });
-    }
-
-    const capabilityPolicy = orchestrator.resolveCapabilityPolicy(stepInput.capability);
-    const verifyPolicy = stepInput.verifyPolicy || capabilityPolicy.defaultVerifyPolicy || "on_critical";
-    const verifyEnabled = shouldVerifyStep(kind, verifyPolicy);
-    let preObserve: unknown = null;
-    if (verifyEnabled) {
-      preObserve = await callInfra(infra, {
-        type: "cdp.observe",
-        tabId
-      }).catch(() => null);
-    }
-
-    const actionResult = shouldAcquireLease(kind, capabilityPolicy)
-      ? await withTabLease(tabId, stepInput.sessionId, async () => {
-          return await callInfra(infra, {
-            type: "cdp.action",
-            tabId,
-            sessionId: stepInput.sessionId,
-            action: cdpAction
-          });
-        })
-      : await callInfra(infra, {
-          type: "cdp.action",
-          tabId,
-          sessionId: stepInput.sessionId,
-          action: cdpAction
-        });
-
-    let verified = false;
-    let verifyReason = "verify_policy_off";
-    let verifyData: unknown = null;
-    if (verifyEnabled) {
-      try {
-        const explicitExpect = normalizeVerifyExpect(payload.expect || actionPayload.expect || null);
-        if (explicitExpect) {
-          if (explicitExpect.urlChanged === true && toRecord(toRecord(preObserve).page).url) {
-            explicitExpect.previousUrl = String(toRecord(toRecord(preObserve).page).url || "");
-          }
-          verifyData = await callInfra(infra, {
-            type: "cdp.verify",
-            tabId,
-            action: { expect: explicitExpect },
-            result: toRecord(actionResult).result || actionResult
-          });
-        } else if (preObserve) {
-          const afterObserve = await callInfra(infra, {
-            type: "cdp.observe",
-            tabId
-          });
-          verifyData = buildObserveProgressVerify(preObserve, afterObserve);
-        }
-      } catch (verifyError) {
-        const runtimeVerifyError = asRuntimeErrorWithMeta(verifyError);
-        throw createRuntimeError(runtimeVerifyError.message, {
-          code: normalizeErrorCode(runtimeVerifyError.code) || "E_VERIFY_EXECUTE",
-          retryable: true,
-          details: runtimeVerifyError.details
-        });
-      }
-
-      verified = toRecord(verifyData).ok === true;
-      verifyReason = verifyData ? (verified ? "verified" : "verify_failed") : "verify_skipped";
-    }
-
-    let data: unknown = actionResult;
-    if (verifyData && data && typeof data === "object" && !Array.isArray(data)) {
-      data = {
-        ...(data as JsonRecord),
-        verify: verifyData
-      };
-    }
-
-    return {
-      data,
-      verified,
-      verifyReason
-    };
-  };
-
-  const invokeBrowserVerifyCapability = async (stepInput: {
-    sessionId: string;
-    action: string;
-    args: JsonRecord;
-  }): Promise<unknown> => {
-    const payload = toRecord(stepInput.args);
-    const tabId = parsePositiveInt(payload.tabId || toRecord(payload.action).tabId);
-    if (!tabId) {
-      throw createRuntimeError("browser_verify 需要有效 tabId", {
-        code: "E_NO_TAB",
-        retryable: true
-      });
-    }
-    const verifyAction = Object.keys(toRecord(payload.action)).length
-      ? toRecord(payload.action)
-      : {
-          expect: Object.keys(toRecord(payload.expect)).length ? toRecord(payload.expect) : payload
-        };
-    const verifyData = await callInfra(infra, {
-      type: "cdp.verify",
-      tabId,
-      action: verifyAction,
-      result: payload.result || null
-    });
-    const verified = toRecord(verifyData).ok === true;
-    return {
-      data: verifyData,
-      verified,
-      verifyReason: verified ? "verified" : "verify_failed"
-    };
-  };
-
-  const ensureBuiltinBrowserCapabilityProviders = (): void => {
-    for (const item of BUILTIN_BROWSER_CAPABILITY_PROVIDERS) {
-      const existed = orchestrator.getCapabilityProviders(item.capability).some((provider) => provider.id === item.providerId);
-      if (existed) continue;
-      orchestrator.registerCapabilityProvider(item.capability, {
-        id: item.providerId,
-        mode: "cdp",
-        priority: -100,
-        invoke: async (stepInput) => {
-          const input = {
-            sessionId: stepInput.sessionId,
-            action: String(stepInput.action || "").trim(),
-            args: toRecord(stepInput.args),
-            verifyPolicy: stepInput.verifyPolicy,
-            capability: stepInput.capability
-          };
-          if (item.capability === TOOL_CAPABILITIES.snapshot) {
-            return await invokeBrowserSnapshotCapability(input);
-          }
-          if (item.capability === TOOL_CAPABILITIES.browser_action) {
-            return await invokeBrowserActionCapability(input);
-          }
-          return await invokeBrowserVerifyCapability(input);
-        }
-      });
-    }
-  };
-
-  ensureBuiltinBridgeCapabilityProviders();
-  ensureBuiltinBrowserCapabilityProviders();
 
   async function executeStep(input: {
     sessionId: string;
@@ -1383,34 +1158,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
 
     if (normalizedCapability && orchestrator.hasCapabilityProvider(normalizedCapability)) {
-      const capabilityMode = normalizedMode || orchestrator.resolveModeForCapability(normalizedCapability);
-      if (!capabilityMode) {
-        const result: ExecuteStepResult = {
-          ok: false,
-          modeUsed: "bridge",
-          capabilityUsed: normalizedCapability,
-          verified: false,
-          error: `capability provider 已注册但缺少 mode: ${normalizedCapability}`,
-          errorCode: "E_RUNTIME_NOT_READY",
-          retryable: true
-        };
-        orchestrator.events.emit("step_execute", sessionId, {
-          mode: "bridge",
-          capability: normalizedCapability,
-          action: normalizedAction
-        });
-        orchestrator.events.emit("step_execute_result", sessionId, {
-          ok: result.ok,
-          modeUsed: result.modeUsed,
-          capabilityUsed: result.capabilityUsed || "",
-          verifyReason: result.verifyReason || "",
-          verified: result.verified,
-          error: result.error || "",
-          errorCode: result.errorCode || "",
-          retryable: result.retryable === true
-        });
-        return result;
-      }
+      const capabilityMode =
+        normalizedMode || orchestrator.resolveModeForCapability(normalizedCapability) || capabilityPolicy.fallbackMode || "bridge";
       orchestrator.events.emit("step_execute", sessionId, {
         mode: capabilityMode,
         capability: normalizedCapability,
@@ -1439,7 +1188,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       };
     }
 
-    if (normalizedCapability) {
+    if (normalizedCapability && !normalizedMode) {
       const result: ExecuteStepResult = {
         ok: false,
         modeUsed: "bridge",
@@ -1467,14 +1216,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       return result;
     }
 
-    const executionMode = normalizedMode;
+    const executionMode = normalizedMode || capabilityPolicy.fallbackMode;
     if (!executionMode) {
       return {
         ok: false,
         modeUsed: "bridge",
         verified: false,
         error: normalizedCapability
-          ? `capability provider 未注册或未就绪: ${normalizedCapability}`
+          ? `capability provider 未注册且缺少 mode fallback: ${normalizedCapability}`
           : "mode 必须是 script/cdp/bridge"
       };
     }
@@ -1577,7 +1326,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     };
 
     let modeUsed: ExecuteMode = executionMode;
-    const fallbackFrom: ExecuteMode | undefined = undefined;
+    let fallbackFrom: ExecuteMode | undefined;
     let data: unknown;
     let preObserve: unknown = null;
     const verifyEnabled = shouldVerifyStep(String(actionPayload.kind || normalizedAction), effectiveVerifyPolicy);
@@ -1593,27 +1342,60 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       data = await runMode(executionMode);
     } catch (error) {
       const runtimeError = asRuntimeErrorWithMeta(error);
-      const result: ExecuteStepResult = {
-        ok: false,
-        modeUsed,
-        capabilityUsed: normalizedCapability,
-        verified: false,
-        error: runtimeError.message,
-        errorCode: normalizeErrorCode(runtimeError.code),
-        errorDetails: runtimeError.details,
-        retryable: runtimeError.retryable
-      };
-      orchestrator.events.emit("step_execute_result", sessionId, {
-        ok: result.ok,
-        modeUsed: result.modeUsed,
-        capabilityUsed: result.capabilityUsed || "",
-        verifyReason: result.verifyReason || "",
-        verified: result.verified,
-        error: result.error || "",
-        errorCode: result.errorCode || "",
-        retryable: result.retryable === true
-      });
-      return result;
+      if (executionMode !== "script" || capabilityPolicy.allowScriptFallback === false) {
+        const result: ExecuteStepResult = {
+          ok: false,
+          modeUsed,
+          capabilityUsed: normalizedCapability,
+          verified: false,
+          error: runtimeError.message,
+          errorCode: normalizeErrorCode(runtimeError.code),
+          errorDetails: runtimeError.details,
+          retryable: runtimeError.retryable
+        };
+        orchestrator.events.emit("step_execute_result", sessionId, {
+          ok: result.ok,
+          modeUsed: result.modeUsed,
+          capabilityUsed: result.capabilityUsed || "",
+          verifyReason: result.verifyReason || "",
+          verified: result.verified,
+          error: result.error || "",
+          errorCode: result.errorCode || "",
+          retryable: result.retryable === true
+        });
+        return result;
+      }
+
+      fallbackFrom = "script";
+      modeUsed = "cdp";
+      try {
+        data = await runMode("cdp");
+      } catch (fallbackError) {
+        const runtimeFallbackError = asRuntimeErrorWithMeta(fallbackError);
+        const result: ExecuteStepResult = {
+          ok: false,
+          modeUsed,
+          capabilityUsed: normalizedCapability,
+          fallbackFrom,
+          verified: false,
+          error: runtimeFallbackError.message,
+          errorCode: normalizeErrorCode(runtimeFallbackError.code),
+          errorDetails: runtimeFallbackError.details,
+          retryable: runtimeFallbackError.retryable
+        };
+        orchestrator.events.emit("step_execute_result", sessionId, {
+          ok: result.ok,
+          modeUsed: result.modeUsed,
+          capabilityUsed: result.capabilityUsed || "",
+          fallbackFrom: result.fallbackFrom || "",
+          verifyReason: result.verifyReason || "",
+          verified: result.verified,
+          error: result.error || "",
+          errorCode: result.errorCode || "",
+          retryable: result.retryable === true
+        });
+        return result;
+      }
     }
 
     let verified = false;
@@ -1722,6 +1504,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       const invoke = await executeStep({
         sessionId,
         capability,
+        mode: "bridge",
         action: "invoke",
         args: {
           frame: frameWithInvokeId
@@ -1760,69 +1543,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     };
   }
 
-  interface ResolvedToolCallContext {
-    requestedTool: string;
-    resolvedTool: string;
-    executionTool: string;
-    args: JsonRecord;
-  }
-
-  type ToolPlan =
-    | {
-        kind: "bridge";
-        toolName: "bash" | "read_file" | "write_file" | "edit_file";
-        capability: ExecuteCapability;
-        frame: JsonRecord;
-      }
-    | {
-        kind: "local.list_tabs";
-      }
-    | {
-        kind: "local.open_tab";
-        args: JsonRecord;
-      }
-    | {
-        kind: "step.snapshot";
-        capability: ExecuteCapability;
-        tabId: number;
-        options: JsonRecord;
-      }
-    | {
-        kind: "step.browser_action";
-        capability: ExecuteCapability;
-        tabId: number;
-        kindValue: string;
-        action: JsonRecord;
-        expect: unknown;
-      }
-    | {
-        kind: "step.browser_verify";
-        capability: ExecuteCapability;
-        tabId: number;
-        verifyExpect: JsonRecord;
-      };
-
-  function buildUnsupportedToolError(input: {
-    requestedTool: string;
-    resolvedTool: string;
-    hasContract: boolean;
-  }): JsonRecord {
-    const unsupported = input.hasContract;
-    return {
-      error: unsupported
-        ? `工具已注册但当前 runtime 不支持执行: ${input.requestedTool}`
-        : `未知工具: ${input.requestedTool}`,
-      errorCode: unsupported ? "E_TOOL_UNSUPPORTED" : "E_TOOL",
-      details: {
-        requestedTool: input.requestedTool,
-        resolvedTool: input.resolvedTool,
-        canonicalTool: input.resolvedTool || null,
-        supportedTools: Array.from(RUNTIME_EXECUTABLE_TOOL_NAMES)
-      }
-    };
-  }
-
-  function resolveToolCallContext(toolCall: ToolCallItem): { ok: true; value: ResolvedToolCallContext } | { ok: false; error: JsonRecord } {
+  async function executeToolCall(sessionId: string, toolCall: ToolCallItem): Promise<JsonRecord> {
     const requestedTool = String(toolCall.function.name || "").trim();
     const argsRaw = String(toolCall.function.arguments || "").trim();
     let args: JsonRecord = {};
@@ -1830,158 +1551,114 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       try {
         args = toRecord(JSON.parse(argsRaw));
       } catch (error) {
-        return {
-          ok: false,
-          error: { error: `参数解析失败: ${error instanceof Error ? error.message : String(error)}` }
-        };
+        return { error: `参数解析失败: ${error instanceof Error ? error.message : String(error)}` };
       }
     }
-
     const contract = orchestrator.resolveToolContract(requestedTool);
     const resolvedTool = String(contract?.name || requestedTool).trim();
     const executionTool = RUNTIME_EXECUTABLE_TOOL_NAMES.has(resolvedTool) ? resolvedTool : "";
-    if (!executionTool) {
-      return {
-        ok: false,
-        error: buildUnsupportedToolError({
-          requestedTool,
-          resolvedTool,
-          hasContract: Boolean(contract)
-        })
-      };
-    }
 
-    return {
-      ok: true,
-      value: {
-        requestedTool,
-        resolvedTool,
-        executionTool,
-        args
-      }
-    };
-  }
-
-  async function buildToolPlan(context: ResolvedToolCallContext): Promise<{ ok: true; plan: ToolPlan } | { ok: false; error: JsonRecord }> {
-    const args = context.args;
-    switch (context.executionTool) {
-      case "bash": {
+    const handlers: Record<string, () => Promise<JsonRecord>> = {
+      bash: async () => {
         const command = String(args.command || "").trim();
-        if (!command) return { ok: false, error: { error: "bash 需要 command" } };
+        if (!command) return { error: "bash 需要 command" };
+        const capability = TOOL_CAPABILITIES.bash;
         const timeoutMs =
           args.timeoutMs == null
             ? undefined
             : normalizeIntInRange(args.timeoutMs, DEFAULT_BASH_TIMEOUT_MS, MIN_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS);
-        return {
-          ok: true,
-          plan: {
-            kind: "bridge",
-            toolName: "bash",
-            capability: TOOL_CAPABILITIES.bash,
-            frame: {
-              tool: "bash",
-              args: {
-                cmdId: "bash.exec",
-                args: [command],
-                ...(timeoutMs == null ? {} : { timeoutMs })
-              }
-            }
+        return await invokeBridgeFrameWithRetry(sessionId, "bash", {
+          tool: "bash",
+          args: {
+            cmdId: "bash.exec",
+            args: [command],
+            ...(timeoutMs == null ? {} : { timeoutMs })
           }
-        };
-      }
-      case "read_file": {
+        }, capability);
+      },
+      read_file: async () => {
         const path = String(args.path || "").trim();
-        if (!path) return { ok: false, error: { error: "read_file 需要 path" } };
+        if (!path) return { error: "read_file 需要 path" };
+        const capability = TOOL_CAPABILITIES.read_file;
         const invokeArgs: JsonRecord = { path };
         if (args.offset != null) invokeArgs.offset = args.offset;
         if (args.limit != null) invokeArgs.limit = args.limit;
-        return {
-          ok: true,
-          plan: {
-            kind: "bridge",
-            toolName: "read_file",
-            capability: TOOL_CAPABILITIES.read_file,
-            frame: {
-              tool: "read",
-              args: invokeArgs
-            }
-          }
-        };
-      }
-      case "write_file": {
+        return await invokeBridgeFrameWithRetry(sessionId, "read_file", {
+          tool: "read",
+          args: invokeArgs
+        }, capability);
+      },
+      write_file: async () => {
         const path = String(args.path || "").trim();
-        if (!path) return { ok: false, error: { error: "write_file 需要 path" } };
-        return {
-          ok: true,
-          plan: {
-            kind: "bridge",
-            toolName: "write_file",
-            capability: TOOL_CAPABILITIES.write_file,
-            frame: {
-              tool: "write",
-              args: {
-                path,
-                content: String(args.content || ""),
-                mode: String(args.mode || "overwrite")
-              }
-            }
+        if (!path) return { error: "write_file 需要 path" };
+        const capability = TOOL_CAPABILITIES.write_file;
+        return await invokeBridgeFrameWithRetry(sessionId, "write_file", {
+          tool: "write",
+          args: {
+            path,
+            content: String(args.content || ""),
+            mode: String(args.mode || "overwrite")
           }
-        };
-      }
-      case "edit_file": {
+        }, capability);
+      },
+      edit_file: async () => {
         const path = String(args.path || "").trim();
-        if (!path) return { ok: false, error: { error: "edit_file 需要 path" } };
-        return {
-          ok: true,
-          plan: {
-            kind: "bridge",
-            toolName: "edit_file",
-            capability: TOOL_CAPABILITIES.edit_file,
-            frame: {
-              tool: "edit",
-              args: {
-                path,
-                edits: Array.isArray(args.edits) ? args.edits : []
-              }
-            }
+        if (!path) return { error: "edit_file 需要 path" };
+        const capability = TOOL_CAPABILITIES.edit_file;
+        return await invokeBridgeFrameWithRetry(sessionId, "edit_file", {
+          tool: "edit",
+          args: {
+            path,
+            edits: Array.isArray(args.edits) ? args.edits : []
           }
-        };
-      }
-      case "list_tabs":
-        return { ok: true, plan: { kind: "local.list_tabs" } };
-      case "open_tab": {
+        }, capability);
+      },
+      list_tabs: async () => {
+        const tabs = await queryAllTabsForRuntime();
+        const activeTabId = await getActiveTabIdForRuntime();
+        return buildToolResponseEnvelope("tabs", {
+          count: tabs.length,
+          activeTabId,
+          tabs
+        });
+      },
+      open_tab: async () => {
         const rawUrl = String(args.url || "").trim();
-        if (!rawUrl) return { ok: false, error: { error: "open_tab 需要 url" } };
-        return {
-          ok: true,
-          plan: {
-            kind: "local.open_tab",
-            args: {
-              url: rawUrl,
-              active: args.active
-            }
+        if (!rawUrl) return { error: "open_tab 需要 url" };
+        const created = await chrome.tabs.create({
+          url: rawUrl,
+          active: args.active !== false
+        });
+        return buildToolResponseEnvelope("tabs", {
+          opened: true,
+          tab: {
+            id: created?.id || null,
+            windowId: created?.windowId || null,
+            active: created?.active === true,
+            title: created?.title || "",
+            url: created?.url || created?.pendingUrl || ""
           }
-        };
-      }
-      case "snapshot": {
-        const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
+        });
+      },
+      snapshot: async () => {
+        const resolvedTarget = await resolveTargetTabId(sessionId, args);
+        const tabId = resolvedTarget.tabId;
         if (!tabId) {
           return {
-            ok: false,
-            error: {
-              error: "snapshot 需要 tabId，当前无可用 tab",
-              errorCode: "E_NO_TAB",
-              errorReason: "failed_execute",
-              retryable: true,
-              retryHint: "Call list_tabs and then retry snapshot with a valid tabId."
-            }
+            error: "snapshot 需要 tabId，当前无可用 tab",
+            errorCode: "E_NO_TAB",
+            errorReason: "failed_execute",
+            retryable: true,
+            retryHint: "Call list_tabs and then retry snapshot with a valid tabId."
           };
         }
-        return {
-          ok: true,
-          plan: {
-            kind: "step.snapshot",
-            capability: TOOL_CAPABILITIES.snapshot,
+        const capability = TOOL_CAPABILITIES.snapshot;
+        const out = await executeStep({
+          sessionId,
+          capability,
+          mode: "cdp",
+          action: "snapshot",
+          args: {
             tabId,
             options: {
               mode: args.mode || "interactive",
@@ -1994,117 +1671,6 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               noAnimations: args.noAnimations === true
             }
           }
-        };
-      }
-      case "browser_action": {
-        const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
-        if (!tabId) {
-          return {
-            ok: false,
-            error: {
-              error: "browser_action 需要 tabId，当前无可用 tab",
-              errorCode: "E_NO_TAB",
-              errorReason: "failed_execute",
-              retryable: true,
-              retryHint: "Call list_tabs and retry browser_action with a valid tabId."
-            }
-          };
-        }
-        const kindValue = String(args.kind || "").trim().toLowerCase();
-        return {
-          ok: true,
-          plan: {
-            kind: "step.browser_action",
-            capability: TOOL_CAPABILITIES.browser_action,
-            tabId,
-            kindValue,
-            action: {
-              kind: kindValue,
-              ref: args.ref,
-              selector: args.selector,
-              key: args.key || (kindValue === "press" ? args.value : undefined),
-              value: args.value,
-              url: args.url || (kindValue === "navigate" ? args.value : undefined),
-              expect: args.expect
-            },
-            expect: args.expect
-          }
-        };
-      }
-      case "browser_verify": {
-        const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
-        if (!tabId) {
-          return {
-            ok: false,
-            error: {
-              error: "browser_verify 需要 tabId，当前无可用 tab",
-              errorCode: "E_NO_TAB",
-              errorReason: "failed_execute",
-              retryable: true,
-              retryHint: "Call list_tabs and retry browser_verify with a valid tabId."
-            }
-          };
-        }
-        return {
-          ok: true,
-          plan: {
-            kind: "step.browser_verify",
-            capability: TOOL_CAPABILITIES.browser_verify,
-            tabId,
-            verifyExpect: normalizeVerifyExpect(args.expect || args) || {}
-          }
-        };
-      }
-      default:
-        return {
-          ok: false,
-          error: buildUnsupportedToolError({
-            requestedTool: context.requestedTool,
-            resolvedTool: context.resolvedTool,
-            hasContract: true
-          })
-        };
-    }
-  }
-
-  async function dispatchToolPlan(sessionId: string, plan: ToolPlan): Promise<JsonRecord> {
-    switch (plan.kind) {
-      case "bridge":
-        return await invokeBridgeFrameWithRetry(sessionId, plan.toolName, plan.frame, plan.capability);
-      case "local.list_tabs": {
-        const tabs = await queryAllTabsForRuntime();
-        const activeTabId = await getActiveTabIdForRuntime();
-        return buildToolResponseEnvelope("tabs", {
-          count: tabs.length,
-          activeTabId,
-          tabs
-        });
-      }
-      case "local.open_tab": {
-        const created = await chrome.tabs.create({
-          url: String(plan.args.url || ""),
-          active: plan.args.active !== false
-        });
-        return buildToolResponseEnvelope("tabs", {
-          opened: true,
-          tab: {
-            id: created?.id || null,
-            windowId: created?.windowId || null,
-            active: created?.active === true,
-            title: created?.title || "",
-            url: created?.url || created?.pendingUrl || ""
-          }
-        });
-      }
-      case "step.snapshot": {
-        const out = await executeStep({
-          sessionId,
-          capability: plan.capability,
-          action: "snapshot",
-          args: {
-            tabId: plan.tabId,
-            options: plan.options
-          }
         });
         if (!out.ok) {
           return buildStepFailureEnvelope(
@@ -2115,23 +1681,45 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             { defaultRetryable: true }
           );
         }
-        const snapshotData = toRecord(out.data);
         return buildToolResponseEnvelope("snapshot", out.data, {
-          capabilityUsed: out.capabilityUsed || plan.capability,
+          capabilityUsed: out.capabilityUsed || capability,
           modeUsed: out.modeUsed,
-          verified: typeof snapshotData.verified === "boolean" ? snapshotData.verified : out.verified,
-          verifyReason: String(snapshotData.verifyReason || out.verifyReason || "")
+          targetTabSource: resolvedTarget.source
         });
-      }
-      case "step.browser_action": {
+      },
+      browser_action: async () => {
+        const resolvedTarget = await resolveTargetTabId(sessionId, args);
+        const tabId = resolvedTarget.tabId;
+        if (!tabId) {
+          return {
+            error: "browser_action 需要 tabId，当前无可用 tab",
+            errorCode: "E_NO_TAB",
+            errorReason: "failed_execute",
+            retryable: true,
+            retryHint: "Call list_tabs and retry browser_action with a valid tabId."
+          };
+        }
+        const capability = TOOL_CAPABILITIES.browser_action;
+        const kind = String(args.kind || "")
+          .trim()
+          .toLowerCase();
         const out = await executeStep({
           sessionId,
-          capability: plan.capability,
+          capability,
+          mode: "cdp",
           action: "action",
           args: {
-            tabId: plan.tabId,
-            action: plan.action,
-            expect: plan.expect
+            tabId,
+            action: {
+              kind,
+              ref: args.ref,
+              selector: args.selector,
+              key: args.key || (kind === "press" ? args.value : undefined),
+              value: args.value,
+              url: args.url || (kind === "navigate" ? args.value : undefined),
+              expect: args.expect
+            },
+            expect: args.expect
           }
         });
         if (!out.ok) {
@@ -2143,13 +1731,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             { defaultRetryable: true }
           );
         }
-        const providerAction = toRecord(out.data);
-        const verified = typeof providerAction.verified === "boolean" ? providerAction.verified : out.verified;
-        const verifyReason = String(providerAction.verifyReason || out.verifyReason || "");
-        const actionData = providerAction.data !== undefined ? providerAction.data : out.data;
-        const explicitExpect = normalizeVerifyExpect(plan.expect || null);
-        const hardFail = !!explicitExpect || plan.kindValue === "navigate";
-        if (!verified && hardFail) {
+        const explicitExpect = normalizeVerifyExpect(args.expect || null);
+        const hardFail = !!explicitExpect || kind === "navigate";
+        if (!out.verified && hardFail) {
           return {
             error: "browser_action 执行成功但未通过验证",
             errorCode: "E_VERIFY_FAILED",
@@ -2157,30 +1741,44 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             retryable: true,
             retryHint: "Adjust action args/expect and retry the browser action.",
             details: {
-              verifyReason,
-              data: actionData
+              verifyReason: out.verifyReason,
+              data: out.data
             }
           };
         }
-        return buildToolResponseEnvelope("cdp_action", actionData, {
-          capabilityUsed: out.capabilityUsed || plan.capability,
+        return buildToolResponseEnvelope("cdp_action", out.data, {
+          capabilityUsed: out.capabilityUsed || capability,
           modeUsed: out.modeUsed,
-          verifyReason,
-          verified
+          verifyReason: out.verifyReason,
+          verified: out.verified,
+          targetTabSource: resolvedTarget.source
         });
-      }
-      case "step.browser_verify": {
+      },
+      browser_verify: async () => {
+        const resolvedTarget = await resolveTargetTabId(sessionId, args);
+        const tabId = resolvedTarget.tabId;
+        if (!tabId) {
+          return {
+            error: "browser_verify 需要 tabId，当前无可用 tab",
+            errorCode: "E_NO_TAB",
+            errorReason: "failed_execute",
+            retryable: true,
+            retryHint: "Call list_tabs and retry browser_verify with a valid tabId."
+          };
+        }
+        const capability = TOOL_CAPABILITIES.browser_verify;
         const out = await executeStep({
           sessionId,
-          capability: plan.capability,
+          capability,
+          mode: "cdp",
           action: "verify",
           args: {
-            tabId: plan.tabId,
+            tabId,
             action: {
-              expect: plan.verifyExpect
+              expect: normalizeVerifyExpect(args.expect || args) || {}
             }
           },
-          verifyPolicy: "off"
+          verifyPolicy: "always"
         });
         if (!out.ok) {
           return buildStepFailureEnvelope(
@@ -2191,35 +1789,39 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             { defaultRetryable: true }
           );
         }
-        const providerVerify = toRecord(out.data);
-        const verified = typeof providerVerify.verified === "boolean" ? providerVerify.verified : out.verified;
-        const verifyData = providerVerify.data !== undefined ? providerVerify.data : out.data;
-        if (!verified) {
+        if (!out.verified) {
           return {
             error: "browser_verify 未通过",
             errorCode: "E_VERIFY_FAILED",
             errorReason: "failed_verify",
             retryable: true,
             retryHint: "Refine expect conditions and re-run browser_verify.",
-            details: verifyData
+            details: out.data
           };
         }
-        return buildToolResponseEnvelope("cdp", verifyData, {
-          capabilityUsed: out.capabilityUsed || plan.capability,
-          modeUsed: out.modeUsed
+        return buildToolResponseEnvelope("cdp", out.data, {
+          capabilityUsed: out.capabilityUsed || capability,
+          modeUsed: out.modeUsed,
+          targetTabSource: resolvedTarget.source
         });
-      }
-      default:
-        return { error: "未知工具执行计划", errorCode: "E_TOOL_PLAN" };
-    }
-  }
+      },
+    };
 
-  async function executeToolCall(sessionId: string, toolCall: ToolCallItem): Promise<JsonRecord> {
-    const resolved = resolveToolCallContext(toolCall);
-    if (!resolved.ok) return resolved.error;
-    const planResult = await buildToolPlan(resolved.value);
-    if (!planResult.ok) return planResult.error;
-    return await dispatchToolPlan(sessionId, planResult.plan);
+    const resolvedHandler = executionTool ? handlers[executionTool] : undefined;
+    if (resolvedHandler) {
+      return await resolvedHandler();
+    }
+    const unsupported = Boolean(contract) && !executionTool;
+    return {
+      error: unsupported ? `工具已注册但当前 runtime 不支持执行: ${requestedTool}` : `未知工具: ${requestedTool}`,
+      errorCode: unsupported ? "E_TOOL_UNSUPPORTED" : "E_TOOL",
+      details: {
+        requestedTool,
+        resolvedTool,
+        canonicalTool: resolvedTool || null,
+        supportedTools: Array.from(RUNTIME_EXECUTABLE_TOOL_NAMES)
+      }
+    };
   }
 
   async function requestLlmWithRetry(input: LlmRequestInput): Promise<JsonRecord> {
@@ -2775,6 +2377,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       const metadata = toRecord(header.metadata);
       if (sharedTabs.length > 0) {
         metadata.sharedTabs = sharedTabs;
+        metadata.primaryTabId = Number(sharedTabs[0]?.id || 0) || metadata.primaryTabId;
+        metadata.primaryTabSource = "shared_tabs";
       } else {
         delete metadata.sharedTabs;
       }

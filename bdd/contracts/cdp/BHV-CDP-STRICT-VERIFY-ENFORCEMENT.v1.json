@@ -1,0 +1,49 @@
+{
+  "id": "BHV-CDP-STRICT-VERIFY-ENFORCEMENT",
+  "intent": "strict verify 模式下，浏览器动作必须通过可观察验证后才算推进成功，不能以执行成功替代目标推进成功",
+  "context": {
+    "surface": "sidepanel.chat.loop",
+    "verify_mode": "strict",
+    "actions": ["click", "fill", "navigate"],
+    "success_semantics": "done_requires_execute_and_verify"
+  },
+  "steps": [
+    "plan_browser_action_with_strict_verify",
+    "execute_action_with_tab_and_snapshot_context",
+    "run_post_action_verify_within_short_window",
+    "classify_step_outcome_by_verify_result",
+    "block_done_when_verify_not_passed"
+  ],
+  "observables": [
+    "strict_action_without_verify_pass_is_not_done",
+    "verify_failure_returns_failed_verify_or_progress_uncertain",
+    "fill_requires_observable_value_change",
+    "click_requires_observable_state_or_url_or_selector_change",
+    "verify_timeout_returns_retry_hint_with_fresh_snapshot_guidance"
+  ],
+  "risk": "high",
+  "allowed_side_effects": [
+    "cdp.action(click|fill|navigate)",
+    "cdp.verify(urlChanged|textIncludes|selectorExists)",
+    "loop_status_transition(failed_verify|progress_uncertain|done)"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "integration", "browser-cdp", "e2e"],
+    "min_layers": 4
+  },
+  "degrade_policy": {
+    "on_verify_failed": [
+      "mark_step_failed_verify",
+      "emit_retry_hint_with_adjusted_expectation"
+    ],
+    "on_verify_timeout": [
+      "mark_step_progress_uncertain",
+      "request_fresh_snapshot_before_retry"
+    ]
+  },
+  "rollback_or_compensation": [
+    "never_promote_verify_failed_to_done",
+    "preserve_verify_reason_for_postmortem"
+  ],
+  "version": "1.0.0"
+}

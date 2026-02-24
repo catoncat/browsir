@@ -2,6 +2,14 @@ import { BridgeError } from "./errors";
 import type { InvokeRequest, ToolName } from "./types";
 import { resolveToolName } from "./tool-registry";
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
 export function parseInvokeFrame(raw: string | Buffer): InvokeRequest {
   let value: unknown;
   try {
@@ -33,7 +41,7 @@ export function parseInvokeFrame(raw: string | Buffer): InvokeRequest {
     throw new BridgeError("E_TOOL", "Unknown tool", { tool: frame.tool });
   }
 
-  if (!frame.args || typeof frame.args !== "object") {
+  if (!isPlainObject(frame.args)) {
     throw new BridgeError("E_ARGS", "args must be an object");
   }
 

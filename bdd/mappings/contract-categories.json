@@ -14,6 +14,22 @@
       "category": "protocol"
     },
     {
+      "contractId": "BHV-CDP-STRICT-VERIFY-ENFORCEMENT",
+      "category": "protocol"
+    },
+    {
+      "contractId": "BHV-CDP-TAB-SNAPSHOT-BINDING",
+      "category": "protocol"
+    },
+    {
+      "contractId": "BHV-CHAT-AUTO-REPAIR-BOUNDARY",
+      "category": "protocol"
+    },
+    {
+      "contractId": "BHV-CHAT-DONE-SEMANTICS-STRICT",
+      "category": "protocol"
+    },
+    {
       "contractId": "BHV-CHAT-HISTORY-INCLUDES-TOOL-RESULT",
       "category": "protocol"
     },
@@ -24,6 +40,10 @@
     {
       "contractId": "BHV-CHAT-MAX-STEPS-CONFIG",
       "category": "ux"
+    },
+    {
+      "contractId": "BHV-CHAT-NO-PROGRESS-GUARD",
+      "category": "protocol"
     },
     {
       "contractId": "BHV-CHAT-MESSAGE-ACTIONS-RETRY-COPY",
@@ -40,6 +60,10 @@
     {
       "contractId": "BHV-CHAT-STREAMING-MESSAGE-CONTAINER",
       "category": "ux"
+    },
+    {
+      "contractId": "BHV-CHAT-TAB-STICKY-RUN-SCOPE",
+      "category": "protocol"
     },
     {
       "contractId": "BHV-CHAT-TOOL-RENDERER-REGISTRY",

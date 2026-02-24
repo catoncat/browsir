@@ -1,0 +1,49 @@
+{
+  "id": "BHV-CHAT-DONE-SEMANTICS-STRICT",
+  "intent": "Loop 的 done 语义必须严格：仅当动作执行成功且验证通过时才能判定任务推进成功",
+  "context": {
+    "surface": "sidepanel.chat.loop",
+    "status_domain": ["done", "failed_execute", "failed_verify", "progress_uncertain"],
+    "decision_rule": "done_requires_execute_success_and_verify_true"
+  },
+  "steps": [
+    "execute_tool_step_and_capture_raw_result",
+    "evaluate_verify_outcome_for_browser_related_steps",
+    "map_status_with_strict_done_rule",
+    "surface_failure_reason_to_step_stream_and_tool_feedback",
+    "finalize_loop_with_consistent_status_semantics"
+  ],
+  "observables": [
+    "verify_false_never_reports_done",
+    "failed_verify_is_distinct_from_failed_execute",
+    "progress_uncertain_is_explicit_when_verify_inconclusive",
+    "done_only_when_execute_success_and_verify_true",
+    "status_reason_is_visible_in_tool_feedback"
+  ],
+  "risk": "high",
+  "allowed_side_effects": [
+    "tool_call_execution",
+    "browser_verify",
+    "loop_status_transition(done|failed_execute|failed_verify|progress_uncertain)",
+    "step_stream_append"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "integration", "browser-cdp", "e2e"],
+    "min_layers": 4
+  },
+  "degrade_policy": {
+    "on_verify_false": [
+      "mark_failed_verify",
+      "avoid_done_status"
+    ],
+    "on_verify_inconclusive": [
+      "mark_progress_uncertain",
+      "allow_guided_retry_with_fresh_context"
+    ]
+  },
+  "rollback_or_compensation": [
+    "preserve_failure_reason_for_user_and_diagnostics",
+    "prevent_false_success_rollup"
+  ],
+  "version": "1.0.0"
+}

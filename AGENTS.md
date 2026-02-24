@@ -4,6 +4,15 @@ Browser Brain Loop：浏览器侧 AI Agent 系统。大脑（Planner + Loop Engi
 
 **架构铁律：大脑永远在浏览器侧，本地 WS 只做执行代理，不做任务决策。**
 
+## 外部参考仓库（LLM Provider）
+
+- Pi monorepo 固定位置：`~/work/repos/_research/pi-mono/`
+- 后续涉及 “LLM Provider 兼容 / 自动注册 / 多模型上下文切换” 时，默认先看：
+  - `~/work/repos/_research/pi-mono/packages/ai/`
+  - `~/work/repos/_research/pi-mono/packages/coding-agent/src/core/model-registry.ts`
+  - `~/work/repos/_research/pi-mono/packages/coding-agent/docs/custom-provider.md`
+  - `~/work/repos/_research/pi-mono/packages/ai/src/providers/transform-messages.ts`
+
 ## 常用命令
 
 ```bash

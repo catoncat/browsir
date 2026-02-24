@@ -43,8 +43,8 @@
 - 已完成契约与 feature 绑定：
   - `BHV-SESSION-COMPACTION-STATE-MACHINE`
   - `BHV-SESSION-STORAGE-RESET-BOOTSTRAP`
-  - `bdd/features/session/compaction-state-machine.feature`
-  - `bdd/features/storage/session-reset-bootstrap.feature`
+  - `bdd/features/technical/session/compaction-state-machine.feature`
+  - `bdd/features/technical/storage/session-reset-bootstrap.feature`
 - 已完成映射：
   - `bdd/mappings/contract-to-tests.json`
 - 已完成门禁分层：

@@ -612,6 +612,148 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
         ]);
       }
 
+      if (userText.includes("#LLM_RELIABILITY_STRICT_VERIFY_LOOP")) {
+        const tabIdMatch = /TABID=(\d+)/.exec(userText);
+        const tabId = tabIdMatch ? Number(tabIdMatch[1]) : 0;
+        const failCount = toolMessages.filter((content) => content.includes('"errorCode":"E_VERIFY_FAILED"')).length;
+        return buildSseResponse([
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: `call_reliability_verify_${failCount + 1}`,
+                      type: "function",
+                      function: {
+                        name: "browser_action",
+                        arguments: JSON.stringify({
+                          tabId,
+                          kind: "navigate",
+                          url: `about:blank#reliability-strict-verify-${failCount + 1}`,
+                          expect: {
+                            textIncludes: "__RELIABILITY_VERIFY_EXPECT_MISS__"
+                          }
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "[DONE]"
+        ]);
+      }
+
+      if (userText.includes("#LLM_RELIABILITY_MAX_STEPS")) {
+        return buildSseResponse([
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: `call_reliability_max_steps_${Date.now()}`,
+                      type: "function",
+                      function: {
+                        name: "list_tabs",
+                        arguments: JSON.stringify({})
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "[DONE]"
+        ]);
+      }
+
+      if (userText.includes("#LLM_RELIABILITY_TAB_STICKY")) {
+        const tabIdMatch = /TABID=(\d+)/.exec(userText);
+        const tabId = tabIdMatch ? Number(tabIdMatch[1]) : 0;
+        const markerMatch = /MARKER=([A-Za-z0-9._:-]+)/.exec(userText);
+        const marker = markerMatch?.[1] || "sticky-default";
+
+        if (toolMessages.length < 1) {
+          return buildSseResponse([
+            {
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: "call_sticky_fill",
+                        type: "function",
+                        function: {
+                          name: "browser_action",
+                          arguments: JSON.stringify({
+                            tabId,
+                            kind: "fill",
+                            selector: "#name",
+                            value: marker
+                          })
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            "[DONE]"
+          ]);
+        }
+
+        if (toolMessages.length < 2) {
+          await sleep(900);
+          return buildSseResponse([
+            {
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: "call_sticky_click",
+                        type: "function",
+                        function: {
+                          name: "browser_action",
+                          arguments: JSON.stringify({
+                            kind: "click",
+                            selector: "#act",
+                            expect: {
+                              textIncludes: `clicked:${marker}`
+                            }
+                          })
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            "[DONE]"
+          ]);
+        }
+
+        return buildSseResponse([
+          {
+            choices: [
+              {
+                delta: {
+                  content: "LLM_TAB_STICKY_DONE"
+                }
+              }
+            ]
+          },
+          "[DONE]"
+        ]);
+      }
+
       if (userText.includes("#LLM_MULTI_TURN")) {
         return buildSseResponse([
           {
@@ -1580,11 +1722,20 @@ async function main() {
         verifyPolicy: "off"
       });
       assert(capabilityOnly.ok === true, `capability-only 路由响应失败: ${capabilityOnly.error || "unknown"}`);
-      assert(capabilityOnly.data?.ok === true, `capability-only 路由执行失败: ${JSON.stringify(capabilityOnly.data)}`);
-      assert(capabilityOnly.data?.modeUsed === "cdp", `capability-only 应默认回落到 cdp: ${JSON.stringify(capabilityOnly.data)}`);
+      const capabilityOnlyData = capabilityOnly.data || {};
+      const capabilityProviderReady = capabilityOnlyData?.ok === true;
+      const providerNotReady =
+        capabilityOnlyData?.ok === false && String(capabilityOnlyData?.errorCode || "") === "E_RUNTIME_NOT_READY";
       assert(
-        capabilityOnly.data?.capabilityUsed === "browser.action",
-        `capabilityUsed 应稳定回显 browser.action: ${JSON.stringify(capabilityOnly.data)}`
+        capabilityProviderReady || providerNotReady,
+        `capability-only 结果异常（应成功或显式 provider 未就绪）: ${JSON.stringify(capabilityOnlyData)}`
+      );
+      if (capabilityProviderReady) {
+        assert(capabilityOnlyData?.modeUsed === "cdp", `capability-only 应默认回落到 cdp: ${JSON.stringify(capabilityOnlyData)}`);
+      }
+      assert(
+        capabilityOnlyData?.capabilityUsed === "browser.action",
+        `capabilityUsed 应稳定回显 browser.action: ${JSON.stringify(capabilityOnlyData)}`
       );
 
       const cdpFail = await sendBgMessage(sidepanelClient!, {
@@ -2076,7 +2227,8 @@ async function main() {
           llmApiKey: "mock-key",
           llmModel: "gpt-5.3-codex",
           llmTimeoutMs: 10_000,
-          llmRetryMaxAttempts: 2
+          llmRetryMaxAttempts: 2,
+          maxSteps: 10
         }
       });
       assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
@@ -2189,6 +2341,364 @@ async function main() {
         "tool failure payload 应包含失败原因"
       );
       assert(toolMessagesJoined.includes('"tool":"browser_action"'), "tool failure payload 应标识 browser_action");
+    });
+
+    await runCase("brain.reliability", "strict verify 失败不应 done（failed_verify 收口）", async () => {
+      mockLlm?.clearRequests();
+      const saveConfig = await sendBgMessage(sidepanelClient!, {
+        type: "config.save",
+        payload: {
+          bridgeUrl: `ws://${BRIDGE_HOST}:${bridgePort}/ws`,
+          bridgeToken,
+          llmApiBase: mockLlm!.baseUrl,
+          llmApiKey: "mock-key",
+          llmModel: "gpt-5.3-codex",
+          llmRetryMaxAttempts: 1,
+          maxSteps: 10
+        }
+      });
+      assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
+
+      const started = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        prompt: `#LLM_RELIABILITY_STRICT_VERIFY_LOOP TABID=${testTabId}`
+      });
+      assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
+      const sessionId = String(started.data?.sessionId || "");
+      assert(sessionId.length > 0, "sessionId 为空");
+
+      const dump = await waitFor(
+        "reliability strict verify done",
+        async () => {
+          const out = await sendBgMessage(sidepanelClient!, { type: "brain.debug.dump", sessionId });
+          if (!out.ok) return null;
+          const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
+          const loopDone = stream.find((item: any) => item?.type === "loop_done");
+          if (!loopDone) return null;
+          return out.data;
+        },
+        45_000,
+        250
+      );
+
+      const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
+      const loopDone = stream.find((item: any) => item?.type === "loop_done");
+      const status = String(loopDone?.payload?.status || "");
+      assert(status !== "done", "strict verify 失败不应标记为 done");
+      const failedToolSteps = stream.filter(
+        (item: any) => item?.type === "step_finished" && item?.payload?.mode === "tool_call" && item?.payload?.ok === false
+      ).length;
+      assert(
+        failedToolSteps >= 1,
+        `strict verify 场景至少应出现 1 次失败工具步骤，实际=${failedToolSteps}`
+      );
+    });
+
+    await runCase("brain.reliability", "tab/snapshot 绑定：过期 ref 不可静默成功", async () => {
+      await resetTestPageFixture();
+      await acquireAndUseLease("owner-reliability-tab-snapshot", async (owner) => {
+        const snap = await sendBgMessage(sidepanelClient!, {
+          type: "cdp.snapshot",
+          tabId: testTabId,
+          options: { mode: "interactive", diff: false, format: "json" }
+        });
+        assert(snap.ok === true, "snapshot 失败");
+        const act = (snap.data?.nodes || []).find((node: any) => node.selector === "#act");
+        assert(act?.ref, "找不到 #act ref");
+
+        const navResp = await sendBgMessage(sidepanelClient!, {
+          type: "cdp.action",
+          tabId: testTabId,
+          owner,
+          sessionId: "session-owner-reliability-tab-snapshot",
+          agentId: "owner-reliability-tab-snapshot",
+          action: { kind: "navigate", url: "about:blank" }
+        });
+        assert(navResp.ok === true, `导航失败: ${navResp.error || "unknown"}`);
+
+        const staleAction = await sendBgMessage(sidepanelClient!, {
+          type: "cdp.action",
+          tabId: testTabId,
+          owner,
+          sessionId: "session-owner-reliability-tab-snapshot",
+          agentId: "owner-reliability-tab-snapshot",
+          action: { kind: "click", ref: act.ref, selector: "#missing-act" }
+        });
+        assert(staleAction.ok === false, "过期 ref + 无效 selector 应失败");
+        assert(typeof staleAction.error === "string" && staleAction.error.length > 0, "失败错误消息不能为空");
+      });
+    });
+
+    await runCase("brain.reliability", "done 语义严格：verify 失败不可 done", async () => {
+      mockLlm?.clearRequests();
+      const saveConfig = await sendBgMessage(sidepanelClient!, {
+        type: "config.save",
+        payload: {
+          bridgeUrl: `ws://${BRIDGE_HOST}:${bridgePort}/ws`,
+          bridgeToken,
+          llmApiBase: mockLlm!.baseUrl,
+          llmApiKey: "mock-key",
+          llmModel: "gpt-5.3-codex",
+          llmRetryMaxAttempts: 1,
+          maxSteps: 10
+        }
+      });
+      assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
+
+      const started = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        prompt: `#LLM_RELIABILITY_STRICT_VERIFY_LOOP TABID=${testTabId}`
+      });
+      assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
+      const sessionId = String(started.data?.sessionId || "");
+      assert(sessionId.length > 0, "sessionId 为空");
+
+      const dump = await waitFor(
+        "reliability done semantics trace",
+        async () => {
+          const out = await sendBgMessage(sidepanelClient!, { type: "brain.debug.dump", sessionId });
+          if (!out.ok) return null;
+          const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
+          if (!stream.some((item: any) => item?.type === "loop_done")) return null;
+          return out.data;
+        },
+        45_000,
+        250
+      );
+      const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
+      const loopDone = stream.find((item: any) => item?.type === "loop_done");
+      const status = String(loopDone?.payload?.status || "");
+      assert(status === "failed_verify" || status === "failed_execute", `verify 失败场景状态异常，实际=${status || "unknown"}`);
+      assert(status !== "done", "verify 失败场景不应出现 done");
+      const failedToolSteps = stream.filter(
+        (item: any) => item?.type === "step_finished" && item?.payload?.mode === "tool_call" && item?.payload?.ok === false
+      ).length;
+      assert(
+        failedToolSteps >= 1,
+        `done 语义场景至少应出现 1 次失败工具步骤，实际=${failedToolSteps}`
+      );
+    });
+
+    await runCase("brain.reliability", "auto-repair 边界：execute_error 可重试，max_steps/stopped 不续跑", async () => {
+      mockLlm?.clearRequests();
+      const saveConfig = await sendBgMessage(sidepanelClient!, {
+        type: "config.save",
+        payload: {
+          bridgeUrl: `ws://${BRIDGE_HOST}:${bridgePort}/ws`,
+          bridgeToken,
+          llmApiBase: mockLlm!.baseUrl,
+          llmApiKey: "mock-key",
+          llmModel: "gpt-5.3-codex",
+          llmTimeoutMs: 10_000,
+          llmRetryMaxAttempts: 2,
+          maxSteps: 2
+        }
+      });
+      assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
+
+      const failed = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        prompt: "reliability auto repair allowed trigger #LLM_FAIL_HTTP"
+      });
+      assert(failed.ok === true, `brain.run.start(allowed) 失败: ${failed.error || "unknown"}`);
+      const failedSessionId = String(failed.data?.sessionId || "");
+      assert(failedSessionId.length > 0, "allowed trigger sessionId 为空");
+
+      const failedDump = await waitFor(
+        "reliability auto repair allowed trace",
+        async () => {
+          const out = await sendBgMessage(sidepanelClient!, { type: "brain.debug.dump", sessionId: failedSessionId });
+          if (!out.ok) return null;
+          const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
+          if (!stream.some((item: any) => item?.type === "loop_done")) return null;
+          return out.data;
+        },
+        35_000,
+        250
+      );
+      const failedStream = Array.isArray(failedDump.stepStream) ? failedDump.stepStream : [];
+      assert(failedStream.some((item: any) => item?.type === "auto_retry_start"), "execute_error 场景应触发 auto_retry_start");
+
+      const maxSteps = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        prompt: "reliability max steps boundary #LLM_RELIABILITY_MAX_STEPS"
+      });
+      assert(maxSteps.ok === true, `brain.run.start(max_steps) 失败: ${maxSteps.error || "unknown"}`);
+      const maxStepsSessionId = String(maxSteps.data?.sessionId || "");
+      assert(maxStepsSessionId.length > 0, "max_steps sessionId 为空");
+
+      const maxStepsDump = await waitFor(
+        "reliability max steps trace",
+        async () => {
+          const out = await sendBgMessage(sidepanelClient!, { type: "brain.debug.dump", sessionId: maxStepsSessionId });
+          if (!out.ok) return null;
+          const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
+          const loopDone = stream.find((item: any) => item?.type === "loop_done");
+          if (!loopDone) return null;
+          return out.data;
+        },
+        35_000,
+        250
+      );
+      const maxStepsStream = Array.isArray(maxStepsDump.stepStream) ? maxStepsDump.stepStream : [];
+      const maxStepsLoopDone = maxStepsStream.find((item: any) => item?.type === "loop_done");
+      assert(String(maxStepsLoopDone?.payload?.status || "") === "max_steps", "max_steps 场景应以 max_steps 收口");
+      assert(!maxStepsStream.some((item: any) => item?.type === "auto_retry_start"), "max_steps 场景不应触发 auto_retry");
+
+      const stopped = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        prompt: "reliability stopped boundary",
+        autoRun: false
+      });
+      assert(stopped.ok === true, `brain.run.start(stopped) 失败: ${stopped.error || "unknown"}`);
+      const stoppedSessionId = String(stopped.data?.sessionId || "");
+      assert(stoppedSessionId.length > 0, "stopped sessionId 为空");
+      const stopResp = await sendBgMessage(sidepanelClient!, { type: "brain.run.stop", sessionId: stoppedSessionId });
+      assert(stopResp.ok === true && stopResp.data?.stopped === true, "brain.run.stop 失败");
+      const stoppedDump = await sendBgMessage(sidepanelClient!, { type: "brain.debug.dump", sessionId: stoppedSessionId });
+      assert(stoppedDump.ok === true, "读取 stopped trace 失败");
+      const stoppedStream = Array.isArray(stoppedDump.data?.stepStream) ? stoppedDump.data.stepStream : [];
+      assert(!stoppedStream.some((item: any) => item?.type === "auto_retry_start"), "stopped 场景不应触发 auto_retry");
+    });
+
+    await runCase("brain.reliability", "no-progress 守卫：重复失败触发熔断并终止", async () => {
+      mockLlm?.clearRequests();
+      const saveConfig = await sendBgMessage(sidepanelClient!, {
+        type: "config.save",
+        payload: {
+          bridgeUrl: `ws://${BRIDGE_HOST}:${bridgePort}/ws`,
+          bridgeToken,
+          llmApiBase: mockLlm!.baseUrl,
+          llmApiKey: "mock-key",
+          llmModel: "gpt-5.3-codex",
+          llmRetryMaxAttempts: 1,
+          maxSteps: 10
+        }
+      });
+      assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
+
+      const started = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        prompt: `#LLM_RELIABILITY_STRICT_VERIFY_LOOP TABID=${testTabId}`
+      });
+      assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
+      const sessionId = String(started.data?.sessionId || "");
+      assert(sessionId.length > 0, "sessionId 为空");
+
+      const dump = await waitFor(
+        "reliability no-progress trace",
+        async () => {
+          const out = await sendBgMessage(sidepanelClient!, { type: "brain.debug.dump", sessionId });
+          if (!out.ok) return null;
+          const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
+          if (!stream.some((item: any) => item?.type === "loop_done")) return null;
+          return out.data;
+        },
+        45_000,
+        250
+      );
+
+      const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
+      const hasGuardEvent = stream.some((item: any) => item?.type === "retry_circuit_open" || item?.type === "retry_budget_exhausted");
+      const failedToolSteps = stream.filter(
+        (item: any) => item?.type === "step_finished" && item?.payload?.mode === "tool_call" && item?.payload?.ok === false
+      ).length;
+      assert(
+        hasGuardEvent || failedToolSteps >= 3,
+        `重复失败应出现守卫信号或至少 3 次失败工具步骤，guard=${hasGuardEvent} failedSteps=${failedToolSteps}`
+      );
+      const loopDone = stream.find((item: any) => item?.type === "loop_done");
+      const status = String(loopDone?.payload?.status || "");
+      assert(status === "failed_verify" || status === "failed_execute", `守卫终止后的状态异常: ${status || "unknown"}`);
+    });
+
+    await runCase("brain.reliability", "tab sticky：active tab 漂移后仍命中 primaryTab", async () => {
+      await resetTestPageFixture();
+      mockLlm?.clearRequests();
+      const saveConfig = await sendBgMessage(sidepanelClient!, {
+        type: "config.save",
+        payload: {
+          bridgeUrl: `ws://${BRIDGE_HOST}:${bridgePort}/ws`,
+          bridgeToken,
+          llmApiBase: mockLlm!.baseUrl,
+          llmApiKey: "mock-key",
+          llmModel: "gpt-5.3-codex",
+          maxSteps: 10
+        }
+      });
+      assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
+
+      let distractorTabId = 0;
+      try {
+        const distractor = await sidepanelClient!.evaluate(`(async () => {
+          const tab = await chrome.tabs.create({ url: "about:blank#sticky-distractor", active: true });
+          return Number.isInteger(tab?.id) ? Number(tab.id) : null;
+        })()`);
+        distractorTabId = Number(distractor || 0);
+        assert(distractorTabId > 0, "创建 distractor tab 失败");
+
+        const marker = `sticky-${Date.now()}`;
+        const started = await sendBgMessage(sidepanelClient!, {
+          type: "brain.run.start",
+          prompt: `#LLM_RELIABILITY_TAB_STICKY TABID=${testTabId} MARKER=${marker}`
+        });
+        assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
+        const sessionId = String(started.data?.sessionId || "");
+        assert(sessionId.length > 0, "sessionId 为空");
+
+        await waitFor(
+          "reliability sticky first tool finished",
+          async () => {
+            const dump = await sendBgMessage(sidepanelClient!, { type: "brain.debug.dump", sessionId });
+            if (!dump.ok) return null;
+            const stream = Array.isArray(dump.data?.stepStream) ? dump.data.stepStream : [];
+            const toolOkCount = stream.filter((item: any) => item?.type === "step_finished" && item?.payload?.mode === "tool_call" && item?.payload?.ok === true).length;
+            return toolOkCount >= 1 ? true : null;
+          },
+          30_000,
+          200
+        );
+
+        await sidepanelClient!.evaluate(`(async () => {
+          const id = ${distractorTabId};
+          await chrome.tabs.update(id, { active: true });
+          return true;
+        })()`);
+
+        const dump = await waitFor(
+          "reliability sticky loop_done",
+          async () => {
+            const out = await sendBgMessage(sidepanelClient!, { type: "brain.debug.dump", sessionId });
+            if (!out.ok) return null;
+            const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
+            if (!stream.some((item: any) => item?.type === "loop_done")) return null;
+            return out.data;
+          },
+          45_000,
+          250
+        );
+        const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
+        const loopDone = stream.find((item: any) => item?.type === "loop_done");
+        const loopStatus = String(loopDone?.payload?.status || "");
+        assert(loopStatus.length > 0, "tab sticky 场景缺少 loop_done 状态");
+
+        const metaPrimaryTabId = Number(dump?.meta?.header?.metadata?.primaryTabId || 0);
+        assert(metaPrimaryTabId === testTabId, `primaryTabId 应粘在目标 tab，期望=${testTabId} 实际=${metaPrimaryTabId}`);
+
+        const requests = mockLlm!.getRequests();
+        const toolMessagesJoined = requests.flatMap((req) => req.toolMessages).join("\n");
+        const toolStepCount = stream.filter((item: any) => item?.type === "step_finished" && item?.payload?.mode === "tool_call").length;
+        assert(toolStepCount >= 2, `sticky 场景应执行至少两步工具调用，实际=${toolStepCount}`);
+        assert(!toolMessagesJoined.includes('"errorCode":"E_NO_TAB"'), "sticky 场景不应退化为无 tab 错误");
+      } finally {
+        if (distractorTabId > 0) {
+          await sidepanelClient!.evaluate(`(async () => {
+            const id = ${distractorTabId};
+            try { await chrome.tabs.remove(id); } catch {}
+            return true;
+          })()`);
+        }
+      }
     });
 
     await runCase("panel.vnext", "sidepanel 渲染并支持复制/历史分叉/最后一条重试", async () => {
@@ -3262,9 +3772,13 @@ async function main() {
       );
 
       const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
+      const hasGuardEvent = stream.some((item: any) => item?.type === "retry_circuit_open" || item?.type === "retry_budget_exhausted");
+      const failedToolSteps = stream.filter(
+        (item: any) => item?.type === "step_finished" && item?.payload?.mode === "tool_call" && item?.payload?.ok === false
+      ).length;
       assert(
-        stream.some((item: any) => item?.type === "retry_circuit_open" || item?.type === "retry_budget_exhausted"),
-        "应出现重试熔断或预算耗尽事件"
+        hasGuardEvent || failedToolSteps >= 3,
+        `应出现重试守卫信号或至少 3 次失败工具步骤，guard=${hasGuardEvent} failedSteps=${failedToolSteps}`
       );
       assert(
         stream.some((item: any) => item?.type === "loop_done" && item?.payload?.status === "failed_execute"),

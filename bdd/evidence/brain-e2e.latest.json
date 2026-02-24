@@ -1,12 +1,12 @@
 {
   "version": "1.0.0",
-  "ts": "2026-02-24T09:12:54.139Z",
-  "passed": true,
+  "ts": "2026-02-24T13:58:56.329Z",
+  "passed": false,
   "summary": {
-    "total": 24,
-    "passed": 24,
-    "failed": 0,
-    "durationMs": 42953
+    "total": 32,
+    "passed": 29,
+    "failed": 3,
+    "durationMs": 48594
   },
   "env": {
     "chromeBin": "/Users/envvar/Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
@@ -23,59 +23,71 @@
       "group": "panel.vnext",
       "name": "dist sidepanel 路径可直接加载",
       "status": "passed",
-      "durationMs": 293
+      "durationMs": 291
     },
     {
       "group": "service-worker API",
       "name": "snapshot interactive 返回 ref/node handles",
       "status": "passed",
-      "durationMs": 14
+      "durationMs": 43
     },
     {
       "group": "service-worker API",
       "name": "lease + cdp_action + verify 闭环",
       "status": "passed",
-      "durationMs": 10
+      "durationMs": 8
     },
     {
       "group": "service-worker API",
       "name": "ref 存在但句柄过期时可 fallback",
       "status": "passed",
-      "durationMs": 5
+      "durationMs": 8
     },
     {
       "group": "service-worker API",
       "name": "ref 不存在时按现状返回稳定错误",
       "status": "passed",
-      "durationMs": 1
+      "durationMs": 2
     },
     {
       "group": "service-worker API",
       "name": "ref 过期且 selector 无效时返回稳定错误契约",
       "status": "passed",
-      "durationMs": 24
+      "durationMs": 26
     },
     {
       "group": "service-worker API",
       "name": "lease 冲突 + release + 过期后可恢复",
       "status": "passed",
-      "durationMs": 2407
+      "durationMs": 2410
     },
     {
       "group": "service-worker API",
       "name": "snapshot 支持 compact/maxTokens/a11y 字段",
       "status": "passed",
-      "durationMs": 140
+      "durationMs": 144
     },
     {
       "group": "service-worker API",
       "name": "cdp.verify 支持 urlChanged 断言",
       "status": "passed",
-      "durationMs": 139
+      "durationMs": 140
     },
     {
       "group": "brain.runtime",
       "name": "brain.step.execute 可执行 cdp action + verify",
+      "status": "passed",
+      "durationMs": 168
+    },
+    {
+      "group": "brain.runtime",
+      "name": "BHV-CAPABILITY-PROVIDER-ROUTING: mode 路由与回退语义可验证",
+      "status": "passed",
+      "durationMs": 152
+    },
+    {
+      "group": "brain.runtime",
+      "name": "BHV-AGENT-HOOK-LIFECYCLE: runtime 路由与步骤生命周期可观测",
       "status": "passed",
       "durationMs": 158
     },
@@ -83,88 +95,127 @@
       "group": "brain.runtime",
       "name": "brain.run.start 支持 tool_calls 闭环并写入 step stream",
       "status": "passed",
-      "durationMs": 529
+      "durationMs": 546
     },
     {
       "group": "brain.runtime",
       "name": "同一会话第二轮继续执行不应触发 LLM HTTP 400",
       "status": "passed",
-      "durationMs": 578
+      "durationMs": 362
     },
     {
       "group": "brain.runtime",
       "name": "brain.run.start 注入 shared tabs 上下文并每次覆盖",
       "status": "passed",
-      "durationMs": 566
+      "durationMs": 579
     },
     {
       "group": "brain.runtime",
       "name": "brain.debug.dump 可观测 llm 原始调用与工具步骤",
       "status": "passed",
-      "durationMs": 303
+      "durationMs": 306
     },
     {
       "group": "brain.runtime",
       "name": "LLM HTTP 失败时应产生 auto_retry 事件并失败收口",
       "status": "passed",
-      "durationMs": 1817
+      "durationMs": 1796
     },
     {
       "group": "brain.runtime",
       "name": "LLM 工具超时后可按失败信号调整 timeout 重试成功",
       "status": "passed",
-      "durationMs": 2347
+      "durationMs": 2316
     },
     {
       "group": "brain.runtime",
       "name": "CDP 失败后不中断，LLM 可继续推进并完成",
       "status": "passed",
-      "durationMs": 310
+      "durationMs": 295
+    },
+    {
+      "group": "brain.reliability",
+      "name": "strict verify 失败不应 done（failed_verify 收口）",
+      "status": "failed",
+      "durationMs": 323,
+      "error": "strict verify 场景应包含可识别的验证失败反馈"
+    },
+    {
+      "group": "brain.reliability",
+      "name": "tab/snapshot 绑定：过期 ref 不可静默成功",
+      "status": "passed",
+      "durationMs": 167
+    },
+    {
+      "group": "brain.reliability",
+      "name": "done 语义严格：verify 失败不可 done",
+      "status": "failed",
+      "durationMs": 315,
+      "error": "tool feedback 应暴露可识别的验证失败原因"
+    },
+    {
+      "group": "brain.reliability",
+      "name": "auto-repair 边界：execute_error 可重试，max_steps/stopped 不续跑",
+      "status": "passed",
+      "durationMs": 2092
+    },
+    {
+      "group": "brain.reliability",
+      "name": "no-progress 守卫：重复失败触发熔断并终止",
+      "status": "passed",
+      "durationMs": 336
+    },
+    {
+      "group": "brain.reliability",
+      "name": "tab sticky：active tab 漂移后仍命中 primaryTab",
+      "status": "failed",
+      "durationMs": 1438,
+      "error": "无 tabId 的后续动作应命中 primary tab"
     },
     {
       "group": "panel.vnext",
       "name": "sidepanel 渲染并支持复制/历史分叉/最后一条重试",
       "status": "passed",
-      "durationMs": 12427
+      "durationMs": 12216
     },
     {
       "group": "panel.vnext",
       "name": "user inline 编辑：最后一条重跑，历史消息分叉重跑",
       "status": "passed",
-      "durationMs": 7814
+      "durationMs": 8004
     },
     {
       "group": "brain.runtime",
       "name": "LLM Retry-After 超上限时应快速失败且不进入长等待重试",
       "status": "passed",
-      "durationMs": 280
+      "durationMs": 273
     },
     {
       "group": "brain.runtime",
       "name": "重复可恢复工具失败应触发熔断并停止循环",
       "status": "passed",
-      "durationMs": 4471
+      "durationMs": 4408
     },
     {
       "group": "debug.console",
       "name": "Live Events 可显示 brain.event",
       "status": "passed",
-      "durationMs": 20
+      "durationMs": 25
     },
     {
       "group": "brain.runtime",
       "name": "brain.run.stop 状态通过 session.view 回显",
       "status": "passed",
-      "durationMs": 6
+      "durationMs": 12
     },
     {
       "group": "brain.session",
       "name": "session 标题生命周期：自动生成 + 菜单重刷 + 列表重命名 + 自动阈值",
       "status": "passed",
-      "durationMs": 5047
+      "durationMs": 5314
     }
   ],
-  "fatalError": null,
+  "fatalError": "3 个测试失败",
   "debug": {
     "bridgeLogsTail": [
       "$ bun src/index.ts",
@@ -172,10 +223,12 @@
       "error: script \"start\" was terminated by signal SIGTERM (Polite quit request)"
     ],
     "chromeLogsTail": [
-      "DevTools listening on ws://127.0.0.1:19333/devtools/browser/83e9d4da-a6b5-47a6-882a-bbcaa6d17fdd",
-      "2026-02-24 17:12:12.946 Google Chrome for Testing[22838:12602143] error messaging the mach port for IMKCFRunLoopWakeUpReliable",
-      "[22838:12602249:0224/171216.751975:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT",
-      "[22838:12602249:0224/171242.444488:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT"
+      "DevTools listening on ws://127.0.0.1:19333/devtools/browser/ca9a5685-32fe-453d-8b94-0351864e351c",
+      "2026-02-24 21:58:10.025 Google Chrome for Testing[94543:13636397] error messaging the mach port for IMKCFRunLoopWakeUpReliable",
+      "[94543:13636397:0224/215814.449535:ERROR:mojo/public/cpp/bindings/lib/interface_endpoint_client.cc:748] Message 5 rejected by interface blink.mojom.WidgetHost",
+      "[94543:13636397:0224/215814.449553:ERROR:mojo/public/cpp/bindings/lib/interface_endpoint_client.cc:748] Message 4 rejected by interface blink.mojom.WidgetHost",
+      "[94543:13636515:0224/215816.190533:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT",
+      "[94543:13636515:0224/215842.405435:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT"
     ]
   }
 }

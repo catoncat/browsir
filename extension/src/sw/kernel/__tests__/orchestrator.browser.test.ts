@@ -89,14 +89,11 @@ describe("orchestrator.browser", () => {
   });
 
   it("script 成功时不走 fallback", async () => {
-    const orchestrator = new BrainOrchestrator();
-    orchestrator.registerToolProvider(
-      "script",
+    const orchestrator = new BrainOrchestrator(
+      {},
       {
-        id: "test.script.success",
-        invoke: async () => ({ ok: true, source: "script" })
-      },
-      { replace: true }
+        script: async () => ({ ok: true, source: "script" })
+      }
     );
     const created = await orchestrator.createSession({ title: "script-success" });
 
@@ -114,24 +111,14 @@ describe("orchestrator.browser", () => {
   });
 
   it("script 失败后降级到 cdp", async () => {
-    const orchestrator = new BrainOrchestrator();
-    orchestrator.registerToolProvider(
-      "script",
+    const orchestrator = new BrainOrchestrator(
+      {},
       {
-        id: "test.script.fail",
-        invoke: async () => {
+        script: async () => {
           throw new Error("script-failed");
-        }
-      },
-      { replace: true }
-    );
-    orchestrator.registerToolProvider(
-      "cdp",
-      {
-        id: "test.cdp.fallback",
-        invoke: async () => ({ ok: true, source: "cdp" })
-      },
-      { replace: true }
+        },
+        cdp: async () => ({ ok: true, source: "cdp" })
+      }
     );
     const created = await orchestrator.createSession({ title: "script-fallback" });
 
@@ -149,16 +136,13 @@ describe("orchestrator.browser", () => {
   });
 
   it("cdp 失败时直接返回失败", async () => {
-    const orchestrator = new BrainOrchestrator();
-    orchestrator.registerToolProvider(
-      "cdp",
+    const orchestrator = new BrainOrchestrator(
+      {},
       {
-        id: "test.cdp.fail",
-        invoke: async () => {
+        cdp: async () => {
           throw new Error("cdp-failed");
         }
-      },
-      { replace: true }
+      }
     );
     const created = await orchestrator.createSession({ title: "cdp-failed" });
 
@@ -176,16 +160,13 @@ describe("orchestrator.browser", () => {
   });
 
   it("script 失败且无 cdp provider 时保持抛错语义", async () => {
-    const orchestrator = new BrainOrchestrator();
-    orchestrator.registerToolProvider(
-      "script",
+    const orchestrator = new BrainOrchestrator(
+      {},
       {
-        id: "test.script.only",
-        invoke: async () => {
+        script: async () => {
           throw new Error("script-failed");
         }
-      },
-      { replace: true }
+      }
     );
     const created = await orchestrator.createSession({ title: "missing-cdp-provider" });
 
@@ -201,17 +182,14 @@ describe("orchestrator.browser", () => {
 
   it("tool.before_call hook 可阻断执行", async () => {
     let called = false;
-    const orchestrator = new BrainOrchestrator();
-    orchestrator.registerToolProvider(
-      "script",
+    const orchestrator = new BrainOrchestrator(
+      {},
       {
-        id: "test.script.hook.block",
-        invoke: async () => {
+        script: async () => {
           called = true;
           return { ok: true };
         }
-      },
-      { replace: true }
+      }
     );
     const created = await orchestrator.createSession({ title: "hook-block" });
     orchestrator.onHook("tool.before_call", () => ({ action: "block", reason: "policy-deny" }));
@@ -228,14 +206,11 @@ describe("orchestrator.browser", () => {
   });
 
   it("tool.after_result hook 可改写结果", async () => {
-    const orchestrator = new BrainOrchestrator();
-    orchestrator.registerToolProvider(
-      "script",
+    const orchestrator = new BrainOrchestrator(
+      {},
       {
-        id: "test.script.hook.patch",
-        invoke: async () => ({ value: 1 })
-      },
-      { replace: true }
+        script: async () => ({ value: 1 })
+      }
     );
     const created = await orchestrator.createSession({ title: "hook-patch" });
     orchestrator.onHook("tool.after_result", () => ({

@@ -49,4 +49,17 @@ describe("parseInvokeFrame", () => {
       ),
     ).toThrow();
   });
+
+  test("rejects args array (args must be plain object)", () => {
+    expect(() =>
+      parseInvokeFrame(
+        JSON.stringify({
+          id: "u3",
+          type: "invoke",
+          tool: "read",
+          args: ["README.md"],
+        }),
+      ),
+    ).toThrow("args must be an object");
+  });
 });

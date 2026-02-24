@@ -12,6 +12,17 @@
 
 分类清单见：`bdd/mappings/contract-categories.json`。
 
+## Feature 分层规则
+
+- `bdd/features/business/**`
+  - 仅写业务行为和可观察结果。
+  - 不写内部执行对象、协议字段、定位器、测试工件。
+- `bdd/features/technical/**`
+  - 允许写协议与内部契约语义（例如路由、错误码、存储流程）。
+- 分类绑定：
+  - `ux -> business`
+  - `protocol|storage -> technical`
+
 ## 必须遵守
 
 1. 只断言行为，不断言内部变量名。  
@@ -29,6 +40,10 @@
 5. 风险越高，层数越高。  
 `risk=high|critical` 的契约，`min_layers >= 2` 且至少包含 `browser-cdp` 或 `e2e`。
 
+6. business feature 禁止实现细节词。  
+反例：`kernel`、`orchestrator`、`cdp.action`、`aria-label`、`data-testid`、`contract-to-tests.json`；  
+正例：`用户发起重试后应出现加载反馈，完成后出现新回复`。
+
 ## 推荐写法
 
 - `intent`: 一句话描述业务结果。
@@ -38,6 +53,7 @@
 
 ## 门禁命令
 
+- 语义 lint：`bun run bdd:lint:features`
 - 全量：`bun run bdd:gate`
 - UX：`bun run bdd:gate:ux`
 - 协议：`bun run bdd:gate:protocol`

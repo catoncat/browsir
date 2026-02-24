@@ -1,0 +1,48 @@
+{
+  "id": "BHV-CHAT-AUTO-REPAIR-BOUNDARY",
+  "intent": "auto-repair 只在允许的失败类型触发，避免 max_steps/stopped/timeout 等终态被错误续跑",
+  "context": {
+    "surface": "sidepanel.chat.loop",
+    "allowed_triggers": ["execute_error", "failed_verify", "no_progress_signal"],
+    "blocked_triggers": ["max_steps", "stopped"]
+  },
+  "steps": [
+    "finish_step_with_terminal_reason",
+    "evaluate_auto_repair_eligibility",
+    "trigger_auto_repair_for_allowed_reasons",
+    "skip_auto_repair_for_blocked_reasons",
+    "persist_final_status_without_semantic_drift"
+  ],
+  "observables": [
+    "execute_error_can_trigger_auto_repair",
+    "failed_verify_can_trigger_auto_repair",
+    "no_progress_signal_can_trigger_auto_repair",
+    "max_steps_and_stopped_must_not_trigger_auto_repair",
+    "auto_repair_decision_is_visible_in_events"
+  ],
+  "risk": "high",
+  "allowed_side_effects": [
+    "loop_event(auto_retry_start|auto_retry_end|loop_skip_stopped)",
+    "llm_retry_or_replan",
+    "loop_status_transition"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "integration", "browser-cdp", "e2e"],
+    "min_layers": 4
+  },
+  "degrade_policy": {
+    "on_allowed_trigger": [
+      "run_single_repair_cycle_with_budget_guard",
+      "emit_repair_start_end_events"
+    ],
+    "on_blocked_trigger": [
+      "keep_terminal_status",
+      "reject_implicit_next_round"
+    ]
+  },
+  "rollback_or_compensation": [
+    "stop_repair_when_budget_exhausted",
+    "preserve_terminal_reason_for_audit"
+  ],
+  "version": "1.0.0"
+}

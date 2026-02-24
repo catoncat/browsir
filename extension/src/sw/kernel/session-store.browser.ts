@@ -1,34 +1,12 @@
 import { nowIso, type SessionEntry, type SessionHeader, type SessionMeta } from "./types";
+import { getDB, kvGet, kvSet, kvRemove } from "./idb-storage";
 
 export const SESSION_INDEX_KEY = "session:index";
 const SESSION_META_KEY_RE = /^session:([^:]+):meta$/;
+
+// Chunks are no longer needed for IDB, but we keep the regex for migration if needed
 const SESSION_ENTRIES_CHUNK_KEY_RE = /^session:([^:]+):entries:(\d+)$/;
 const TRACE_CHUNK_KEY_RE = /^trace:([^:]+):(\d+)$/;
-
-export interface SessionIndexEntry {
-  id: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface SessionIndex {
-  version: 1;
-  sessions: SessionIndexEntry[];
-  updatedAt: string;
-}
-
-export interface InitSessionOptions {
-  chunkSize?: number;
-  leafId?: string | null;
-}
-
-export interface AppendSessionEntryOptions {
-  chunkSize?: number;
-}
-
-function storage(): chrome.storage.StorageArea {
-  return chrome.storage.local;
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -123,16 +101,33 @@ function normalizeSessionMeta(raw: unknown, fallbackHeader?: SessionHeader): Ses
 }
 
 async function storageGet(keys: string | string[] | null): Promise<Record<string, unknown>> {
-  return (await storage().get(keys)) as Record<string, unknown>;
+  if (keys === null) {
+    const bag = await (await storage()).get(null);
+    return bag as Record<string, unknown>;
+  }
+  
+  const keyList = Array.isArray(keys) ? keys : [keys];
+  const result: Record<string, unknown> = {};
+  for (const key of keyList) {
+    result[key] = await kvGet(key);
+  }
+  return result;
 }
 
 async function storageSet(items: Record<string, unknown>): Promise<void> {
-  await storage().set(items);
+  for (const [key, value] of Object.entries(items)) {
+    await kvSet(key, value);
+  }
 }
 
 async function storageRemove(keys: string[]): Promise<void> {
-  if (keys.length === 0) return;
-  await storage().remove(keys);
+  for (const key of keys) {
+    await kvRemove(key);
+  }
+}
+
+function storage(): chrome.storage.StorageArea {
+  return chrome.storage.local;
 }
 
 export function buildSessionMetaKey(sessionId: string): string {
@@ -170,9 +165,10 @@ export function isSessionStoreKey(key: string): boolean {
 }
 
 export async function initSessionIndex(): Promise<SessionIndex> {
-  const bag = await storageGet(SESSION_INDEX_KEY);
-  const normalized = normalizeSessionIndex(bag[SESSION_INDEX_KEY]);
-  await storageSet({ [SESSION_INDEX_KEY]: normalized });
+  await migrateFromLocalStorage();
+  const raw = await kvGet(SESSION_INDEX_KEY);
+  const normalized = normalizeSessionIndex(raw);
+  await kvSet(SESSION_INDEX_KEY, normalized);
   return normalized;
 }
 
@@ -209,13 +205,12 @@ export async function removeSessionIndexEntry(sessionId: string, at = nowIso()):
 }
 
 export async function initSessionStorage(header: SessionHeader, options: InitSessionOptions = {}): Promise<SessionMeta> {
-  const chunkSize = sanitizeChunkSize(options.chunkSize ?? 64);
   const meta: SessionMeta = {
     header,
     leafId: options.leafId ?? null,
     entryCount: 0,
-    chunkCount: 0,
-    chunkSize,
+    chunkCount: 1,
+    chunkSize: 999999, // In IDB we don't really need chunks
     updatedAt: nowIso()
   };
   await writeSessionMeta(header.id, meta);
@@ -224,106 +219,95 @@ export async function initSessionStorage(header: SessionHeader, options: InitSes
 }
 
 export async function readSessionMeta(sessionId: string): Promise<SessionMeta | null> {
-  const key = buildSessionMetaKey(sessionId);
-  const bag = await storageGet(key);
-  return normalizeSessionMeta(bag[key]);
+  const db = await getDB();
+  const raw = await db.get("sessions", sessionId);
+  return normalizeSessionMeta(raw);
 }
 
 export async function writeSessionMeta(sessionId: string, meta: SessionMeta): Promise<void> {
-  const key = buildSessionMetaKey(sessionId);
+  const db = await getDB();
   const next: SessionMeta = {
     ...meta,
     updatedAt: nowIso()
   };
-  await storageSet({ [key]: next });
+  await db.put("sessions", next);
   await upsertSessionIndexEntry(sessionId, next.updatedAt);
 }
 
 export async function removeSessionMeta(sessionId: string): Promise<void> {
-  await storageRemove([buildSessionMetaKey(sessionId)]);
+  const db = await getDB();
+  const tx = db.transaction(["sessions", "entries"], "readwrite");
+  await tx.objectStore("sessions").delete(sessionId);
+  
+  // Delete all entries for this session using the index
+  const index = tx.objectStore("entries").index("by-session");
+  let cursor = await index.openKeyCursor(IDBKeyRange.only(sessionId));
+  while (cursor) {
+    await tx.objectStore("entries").delete(cursor.primaryKey);
+    cursor = await cursor.continue();
+  }
+  await tx.done;
 }
 
-export async function readSessionEntriesChunk<TEntry = unknown>(sessionId: string, chunk: number): Promise<TEntry[]> {
-  const key = buildSessionEntriesChunkKey(sessionId, chunk);
-  const bag = await storageGet(key);
-  const value = bag[key];
-  return Array.isArray(value) ? (value as TEntry[]) : [];
-}
-
-export async function writeSessionEntriesChunk<TEntry = unknown>(
-  sessionId: string,
-  chunk: number,
-  entries: TEntry[]
-): Promise<void> {
-  const key = buildSessionEntriesChunkKey(sessionId, chunk);
-  await storageSet({ [key]: entries });
-}
-
-export async function appendSessionEntriesChunk<TEntry = unknown>(
-  sessionId: string,
-  chunk: number,
-  entries: TEntry[]
-): Promise<TEntry[]> {
-  const current = await readSessionEntriesChunk<TEntry>(sessionId, chunk);
-  const merged = current.concat(entries);
-  await writeSessionEntriesChunk(sessionId, chunk, merged);
-  return merged;
+export async function readAllSessionEntries(sessionId: string): Promise<SessionEntry[]> {
+  const db = await getDB();
+  return db.getAllFromIndex("entries", "by-session", sessionId);
 }
 
 export async function appendSessionEntry(
   sessionId: string,
   entry: SessionEntry,
-  options: AppendSessionEntryOptions = {}
+  _options: AppendSessionEntryOptions = {}
 ): Promise<SessionMeta> {
-  const meta = await readSessionMeta(sessionId);
+  const db = await getDB();
+  const tx = db.transaction(["sessions", "entries"], "readwrite");
+  const metaStore = tx.objectStore("sessions");
+  const entryStore = tx.objectStore("entries");
+
+  const rawMeta = await metaStore.get(sessionId);
+  const meta = normalizeSessionMeta(rawMeta);
   if (!meta) throw new Error(`session meta 不存在: ${sessionId}`);
 
-  const chunkSize = sanitizeChunkSize(options.chunkSize ?? meta.chunkSize);
-  const chunk = Math.floor(meta.entryCount / chunkSize);
-  await appendSessionEntriesChunk<SessionEntry>(sessionId, chunk, [entry]);
+  // Add the entry with sessionId for the index
+  await entryStore.put({
+    ...entry,
+    sessionId
+  });
 
   const nextMeta: SessionMeta = {
     ...meta,
     leafId: entry.id,
     entryCount: meta.entryCount + 1,
-    chunkCount: Math.max(meta.chunkCount, chunk + 1),
-    chunkSize,
+    chunkCount: 1, // Legacy compatibility
     updatedAt: nowIso()
   };
-  await writeSessionMeta(sessionId, nextMeta);
+  
+  await metaStore.put(nextMeta);
+  await tx.done;
+  
+  await upsertSessionIndexEntry(sessionId, nextMeta.updatedAt);
   return nextMeta;
-}
-
-export async function readAllSessionEntries(sessionId: string): Promise<SessionEntry[]> {
-  const meta = await readSessionMeta(sessionId);
-  if (!meta || meta.chunkCount <= 0) return [];
-  const entries: SessionEntry[] = [];
-
-  for (let chunk = 0; chunk < meta.chunkCount; chunk += 1) {
-    const items = await readSessionEntriesChunk<SessionEntry>(sessionId, chunk);
-    entries.push(...items);
-  }
-
-  if (entries.length > meta.entryCount) {
-    return entries.slice(0, meta.entryCount);
-  }
-  return entries;
 }
 
 export async function removeSessionEntriesChunk(sessionId: string, chunk: number): Promise<void> {
   await storageRemove([buildSessionEntriesChunkKey(sessionId, chunk)]);
 }
 
-export async function readTraceChunk<TTrace = unknown>(traceId: string, chunk: number): Promise<TTrace[]> {
-  const key = buildTraceChunkKey(traceId, chunk);
-  const bag = await storageGet(key);
-  const value = bag[key];
-  return Array.isArray(value) ? (value as TTrace[]) : [];
+export async function readTraceChunk<TTrace = unknown>(traceId: string, _chunk: number): Promise<TTrace[]> {
+  const db = await getDB();
+  return db.getAllFromIndex("traces", "by-trace", traceId) as Promise<TTrace[]>;
 }
 
-export async function writeTraceChunk<TTrace = unknown>(traceId: string, chunk: number, records: TTrace[]): Promise<void> {
-  const key = buildTraceChunkKey(traceId, chunk);
-  await storageSet({ [key]: records });
+export async function writeTraceChunk<TTrace = unknown>(traceId: string, _chunk: number, records: TTrace[]): Promise<void> {
+  const db = await getDB();
+  const tx = db.transaction("traces", "readwrite");
+  for (const record of records) {
+    await tx.store.put({
+      ...(record as any),
+      traceId
+    });
+  }
+  await tx.done;
 }
 
 export async function appendTraceChunk<TTrace = unknown>(
@@ -331,10 +315,8 @@ export async function appendTraceChunk<TTrace = unknown>(
   chunk: number,
   records: TTrace[]
 ): Promise<TTrace[]> {
-  const current = await readTraceChunk<TTrace>(traceId, chunk);
-  const merged = current.concat(records);
-  await writeTraceChunk(traceId, chunk, merged);
-  return merged;
+  await writeTraceChunk(traceId, chunk, records);
+  return readTraceChunk<TTrace>(traceId, chunk);
 }
 
 export async function listStorageKeys(): Promise<string[]> {
@@ -375,6 +357,55 @@ export async function listTraceChunkKeys(traceId: string): Promise<string[]> {
     })
     .filter((item): item is { key: string; chunk: number } => item !== null);
   return sortChunkKeys(prefixed).map((item) => item.key);
+}
+
+export async function migrateFromLocalStorage(): Promise<void> {
+  const migratedKey = "__idb_migrated";
+  const alreadyMigrated = await chrome.storage.local.get(migratedKey);
+  if (alreadyMigrated[migratedKey]) return;
+
+  console.log("[Storage] Starting migration from localStorage to IndexedDB...");
+  const all = await chrome.storage.local.get(null);
+  const keys = Object.keys(all);
+
+  // 1. Migrate Session Index
+  if (all[SESSION_INDEX_KEY]) {
+    await kvSet(SESSION_INDEX_KEY, all[SESSION_INDEX_KEY]);
+  }
+
+  // 2. Migrate Sessions and Entries
+  const sessionIds = keys
+    .map(k => parseSessionMetaKey(k)?.sessionId)
+    .filter((id): id is string => !!id);
+
+  for (const sessionId of sessionIds) {
+    const meta = normalizeSessionMeta(all[buildSessionMetaKey(sessionId)]);
+    if (!meta) continue;
+
+    // Load all chunks from the old storage
+    const entries: any[] = [];
+    for (let i = 0; i < meta.chunkCount; i++) {
+      const chunkKey = buildSessionEntriesChunkKey(sessionId, i);
+      if (all[chunkKey] && Array.isArray(all[chunkKey])) {
+        entries.push(...all[chunkKey]);
+      }
+    }
+
+    // Write to IDB
+    const db = await getDB();
+    const tx = db.transaction(["sessions", "entries"], "readwrite");
+    await tx.objectStore("sessions").put(meta);
+    const entryStore = tx.objectStore("entries");
+    for (const entry of entries) {
+      await entryStore.put({ ...entry, sessionId });
+    }
+    await tx.done;
+    console.log(`[Storage] Migrated session ${sessionId} (${entries.length} entries)`);
+  }
+
+  // 3. Mark as migrated
+  await chrome.storage.local.set({ [migratedKey]: true });
+  console.log("[Storage] Migration completed.");
 }
 
 export async function removeStorageKeys(keys: string[]): Promise<void> {

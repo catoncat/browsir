@@ -3,20 +3,21 @@ import { readFile } from "node:fs/promises";
 import {
   ALLOWED_CONTRACT_CATEGORIES,
   fileExistsInRepo,
+  isEvidenceJsonTargetPath,
+  isFeatureFileTargetPath,
   loadContractCategories,
   parseProofTargets,
   runStructuralValidation,
+  validateEvidenceSelector,
   type ContractCategory
 } from "./bdd-lib";
 
 async function validateEvidence(repoRoot: string, targetPath: string, selector: string): Promise<string | null> {
-  const normalized = path.normalize(targetPath);
-  const evidencePrefix = path.normalize("bdd/evidence/");
-
-  if (!normalized.startsWith(evidencePrefix) || path.extname(normalized) !== ".json") {
-    return null;
+  if (!isEvidenceJsonTargetPath(targetPath)) {
+    return `e2e target 非法，必须是 bdd/evidence/*.json: ${targetPath}`;
   }
 
+  const normalized = path.normalize(targetPath);
   const abs = path.join(repoRoot, normalized);
 
   let parsed: any;
@@ -31,28 +32,10 @@ async function validateEvidence(repoRoot: string, targetPath: string, selector: 
     return `evidence 未通过: ${normalized} (expected passed=true)`;
   }
 
-  const expected = String(selector || "")
-    .split("||")
-    .map((item) => item.trim())
-    .filter(Boolean);
-  if (expected.length === 0) {
-    return null;
-  }
-
   const tests = Array.isArray(parsed?.tests) ? parsed.tests : [];
-  if (tests.length === 0) {
-    return `evidence 缺少 tests，无法验证 selector: ${normalized}`;
-  }
-
-  const passedTexts = tests
-    .filter((item: any) => String(item?.status || "").toLowerCase() === "passed")
-    .map((item: any) => `${String(item?.group || "")} / ${String(item?.name || "")}`);
-
-  for (const token of expected) {
-    const hit = passedTexts.some((text: string) => text.includes(token));
-    if (!hit) {
-      return `evidence 未命中 selector "${token}": ${normalized}`;
-    }
+  const result = validateEvidenceSelector(tests, selector);
+  if (!result.ok) {
+    return `${result.error}: ${normalized}`;
   }
 
   return null;
@@ -104,6 +87,10 @@ async function main() {
   let checkedContracts = 0;
 
   const mappingByContractId = new Map(snapshot.mappings.map((item) => [item.contractId, item]));
+
+  for (const feature of snapshot.featuresWithoutScenario) {
+    gateErrors.push(`gate: feature 缺少 Scenario，不允许进入门禁绿灯: ${feature}`);
+  }
 
   for (const loaded of snapshot.contracts) {
     if (!categories.categories.has(loaded.contract.id)) {
@@ -170,6 +157,12 @@ async function main() {
 
       for (const targetItem of targets) {
         const target = targetItem.path;
+
+        if (proof.layer === "browser-cdp" && !isFeatureFileTargetPath(target)) {
+          gateErrors.push(`gate: contract ${contract.id} layer=${proof.layer} target 必须是 .feature: ${target}`);
+          continue;
+        }
+
         const exists = await fileExistsInRepo(repoRoot, target);
         if (!exists) {
           gateErrors.push(`gate: contract ${contract.id} layer=${proof.layer} target 不存在: ${target}`);
@@ -183,7 +176,7 @@ async function main() {
           }
         }
 
-        if (proof.layer === "browser-cdp" && path.extname(target) === ".feature") {
+        if (proof.layer === "browser-cdp") {
           const refs = snapshot.featureRefs.get(contract.id) || [];
           const normalized = refs.map((x) => path.normalize(path.relative(repoRoot, x)));
           if (!normalized.includes(path.normalize(target))) {
