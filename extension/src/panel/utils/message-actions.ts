@@ -254,7 +254,6 @@ export function useMessageActions(options: UseMessageActionsOptions) {
         insertAfterUserEntryId: previousUserEntryId
       };
       await regenerateFromAssistantEntry(entryId, { mode: "fork" });
-      showActionNotice("success", "已分叉到新对话");
     } catch (err) {
       forkingEntryId.value = "";
       pendingRegenerate.value = null;
@@ -279,7 +278,6 @@ export function useMessageActions(options: UseMessageActionsOptions) {
         insertAfterUserEntryId: previousUserEntryId
       };
       await regenerateFromAssistantEntry(entryId, { mode: "retry" });
-      showActionNotice("success", "已发起重新回答");
     } catch (err) {
       retryingEntryId.value = "";
       pendingRegenerate.value = null;

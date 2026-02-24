@@ -54,6 +54,7 @@ interface DisplayMessage extends PanelMessageLike {
   toolPending?: boolean;
   toolPendingAction?: string;
   toolPendingDetail?: string;
+  toolPendingSteps?: string[];
   toolPendingLogs?: string[];
   busyPlaceholder?: boolean;
   busyMode?: "retry" | "fork";
@@ -112,6 +113,7 @@ const forkSceneTargetSessionId = ref("");
 const forkSessionHighlight = ref(false);
 const activeToolRun = ref<ToolRunSnapshot | null>(null);
 const activeRunHint = ref<RuntimeProgressHint | null>(null);
+const toolPendingSteps = ref<string[]>([]);
 const toolPendingLogs = ref<string[]>([]);
 const activeRunToken = ref(0);
 const llmStreamingText = ref("");
@@ -125,6 +127,7 @@ const USER_FORK_SCENE_LEAVE_MS = 170;
 const USER_FORK_SCENE_ENTER_MS = 240;
 const FORK_SWITCH_HIGHLIGHT_MS = 1800;
 const TOOL_STREAM_SYNC_INTERVAL_MS = 3200;
+const TOOL_STEP_MAX_LINES = 24;
 const TOOL_LOG_MAX_LINES = 120;
 const MAIN_SCROLL_BOTTOM_THRESHOLD_PX = 120;
 
@@ -333,6 +336,10 @@ function clearToolPendingLogs() {
   toolPendingLogs.value = [];
 }
 
+function clearToolPendingSteps() {
+  toolPendingSteps.value = [];
+}
+
 function resetLlmStreamingState() {
   llmStreamingText.value = "";
   llmStreamingSessionId.value = "";
@@ -357,14 +364,16 @@ function appendToolPendingLogs(stream: "stdout" | "stderr", chunk: string) {
   toolPendingLogs.value = merged;
 }
 
-function appendToolTraceLog(text: string) {
+function appendToolPendingStep(text: string) {
   const line = String(text || "").trim();
   if (!line) return;
-  const merged = [...toolPendingLogs.value, line];
-  if (merged.length > TOOL_LOG_MAX_LINES) {
-    merged.splice(0, merged.length - TOOL_LOG_MAX_LINES);
+  const list = toolPendingSteps.value;
+  if (list.length > 0 && list[list.length - 1] === line) return;
+  const merged = [...list, line];
+  if (merged.length > TOOL_STEP_MAX_LINES) {
+    merged.splice(0, merged.length - TOOL_STEP_MAX_LINES);
   }
-  toolPendingLogs.value = merged;
+  toolPendingSteps.value = merged;
 }
 
 function setLlmRunHint(label: string, detail = "") {
@@ -429,13 +438,14 @@ function applyRuntimeEventToolRun(event: unknown) {
   if (type === "loop_start") {
     activeToolRun.value = null;
     resetLlmStreamingState();
+    clearToolPendingSteps();
     clearToolPendingLogs();
-    appendToolTraceLog("开始执行");
+    appendToolPendingStep("开始执行");
     setLlmRunHint("分析任务", "正在规划下一步动作");
     return;
   }
   if (type === "llm.request") {
-    appendToolTraceLog("调用模型：生成下一步计划");
+    appendToolPendingStep("思考：调用模型生成下一步计划");
     setLlmRunHint("调用模型", "正在生成下一步计划");
     return;
   }
@@ -474,7 +484,7 @@ function applyRuntimeEventToolRun(event: unknown) {
     resetLlmStreamingState();
     const action = String(payload.action || "");
     const detail = formatToolPendingDetail(action, String(payload.arguments || ""));
-    appendToolTraceLog(`计划：${prettyToolAction(action)}${detail ? ` · ${detail}` : ""}`);
+    appendToolPendingStep(`步骤 ${step}：${prettyToolAction(action)}${detail ? ` · ${detail}` : ""}`);
     activeToolRun.value = {
       step,
       action,
@@ -490,10 +500,10 @@ function applyRuntimeEventToolRun(event: unknown) {
     const action = String(payload.action || "");
     const ok = payload.ok === true;
     const errorText = String(payload.error || "").trim();
-    appendToolTraceLog(
+    appendToolPendingStep(
       ok
-        ? `完成：${prettyToolAction(action)}`
-        : `失败：${prettyToolAction(action)}${errorText ? ` · ${clipText(errorText, 160)}` : ""}`
+        ? `步骤 ${step} 完成：${prettyToolAction(action)}`
+        : `步骤 ${step} 失败：${prettyToolAction(action)}${errorText ? ` · ${clipText(errorText, 160)}` : ""}`
     );
     if (activeToolRun.value && activeToolRun.value.step === step) {
       activeToolRun.value = null;
@@ -508,8 +518,8 @@ function applyRuntimeEventToolRun(event: unknown) {
   if (["loop_done", "loop_error", "loop_skip_stopped", "loop_internal_error", "loop_start"].includes(type)) {
     activeToolRun.value = null;
     resetLlmStreamingState();
+    clearToolPendingSteps();
     clearToolPendingLogs();
-    appendToolTraceLog("执行结束");
     activeRunHint.value = null;
   }
 }
@@ -523,7 +533,7 @@ function applyBridgeEventToolOutput(rawEvent: unknown) {
   const data = toRecord(envelope.data);
 
   if (eventName === "invoke.started") {
-    appendToolTraceLog("工具开始执行");
+    appendToolPendingStep("工具开始执行");
     return;
   }
   if (eventName === "invoke.stdout") {
@@ -537,7 +547,7 @@ function applyBridgeEventToolOutput(rawEvent: unknown) {
   if (eventName === "invoke.finished") {
     const ok = data.ok === true;
     const durationMs = Number(data.durationMs || 0);
-    appendToolTraceLog(ok ? `工具完成${durationMs > 0 ? `（${durationMs}ms）` : ""}` : "工具失败");
+    appendToolPendingStep(ok ? `工具完成${durationMs > 0 ? `（${durationMs}ms）` : ""}` : "工具失败");
   }
 }
 
@@ -601,15 +611,17 @@ const shouldShowStreamingAssistant = computed(() => {
 });
 
 const displayMessages = computed<DisplayMessage[]>(() => {
-  const rendered = (messages.value || []).map((item) => ({
-    role: String(item?.role || ""),
-    content: String(item?.content || ""),
-    entryId: String(item?.entryId || ""),
-    toolName: String(item?.toolName || ""),
-    toolCallId: String(item?.toolCallId || "")
-  }));
+  const rendered = (messages.value || [])
+    .filter((item) => String(item?.role || "") !== "tool")
+    .map((item) => ({
+      role: String(item?.role || ""),
+      content: String(item?.content || ""),
+      entryId: String(item?.entryId || ""),
+      toolName: String(item?.toolName || ""),
+      toolCallId: String(item?.toolCallId || "")
+    }));
   const pending = pendingRegenerate.value || userPendingRegenerate.value;
-  if (pending) {
+  if (pending && !isRunning.value) {
     const placeholder: DisplayMessage = {
       role: "assistant_placeholder",
       content: "正在重新生成回复…",
@@ -656,6 +668,7 @@ const displayMessages = computed<DisplayMessage[]>(() => {
       toolPending: true,
       toolPendingAction: runningStatus.value.action,
       toolPendingDetail: runningStatus.value.detail,
+      toolPendingSteps: toolPendingSteps.value,
       toolPendingLogs: toolPendingLogs.value
     });
   }
@@ -667,6 +680,7 @@ watch(isRunning, (running, wasRunning) => {
   if (running) {
     if (!wasRunning) {
       activeRunToken.value += 1;
+      clearToolPendingSteps();
       clearToolPendingLogs();
     }
     if (!activeRunHint.value) {
@@ -682,6 +696,7 @@ watch(isRunning, (running, wasRunning) => {
   }
   userPendingRegenerate.value = null;
   clearActiveToolRun();
+  clearToolPendingSteps();
   clearToolPendingLogs();
   resetLlmStreamingState();
   activeRunHint.value = null;
@@ -698,6 +713,7 @@ watch(activeSessionId, () => {
     resetForkSceneState();
   }
   clearActiveToolRun();
+  clearToolPendingSteps();
   clearToolPendingLogs();
   resetLlmStreamingState();
   activeRunHint.value = null;
@@ -1180,6 +1196,7 @@ onUnmounted(() => {
               :tool-pending="msg.toolPending"
               :tool-pending-action="msg.toolPendingAction"
               :tool-pending-detail="msg.toolPendingDetail"
+              :tool-pending-steps="msg.toolPendingSteps"
               :tool-pending-logs="msg.toolPendingLogs"
               :busy-placeholder="msg.busyPlaceholder"
                 :busy-mode="msg.busyMode"

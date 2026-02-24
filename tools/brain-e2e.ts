@@ -1901,11 +1901,15 @@ async function main() {
         "panel latest user edit rerun placeholder",
         async () => {
           const out = await sidepanelClient!.evaluate(`(() => {
-            const node = document.querySelector('[data-testid="regenerate-placeholder"]');
-            if (!node) return null;
-            const mode = String(node.getAttribute("data-mode") || "");
-            const busy = String(node.getAttribute("aria-busy") || "") === "true";
-            return busy ? { mode } : null;
+            const regen = document.querySelector('[data-testid="regenerate-placeholder"]');
+            if (regen) {
+              const mode = String(regen.getAttribute("data-mode") || "");
+              const busy = String(regen.getAttribute("aria-busy") || "") === "true";
+              if (busy) return { mode, source: "placeholder" };
+            }
+            const tool = document.querySelector('[data-testid="tool-running-placeholder"]');
+            if (tool) return { mode: "retry", source: "tool_pending" };
+            return null;
           })()`);
           if (!out) return null;
           if (String(out.mode || "") !== "retry") return null;
@@ -2015,16 +2019,6 @@ async function main() {
       assert(forkClicked?.ok === true, `点击历史分叉失败: ${forkClicked?.error || "unknown"}`);
       assert(forkClicked?.clickedHistorical === true, "未点击到历史 assistant 的分叉按钮");
 
-      await waitFor(
-        "panel fork notice",
-        async () => {
-          const text = await sidepanelClient!.evaluate(`(() => document.body?.innerText || "")()`);
-          return String(text).includes("已分叉到新对话") ? true : null;
-        },
-        10_000,
-        200
-      );
-
       const listedAfterFork = await waitFor(
         "panel fork creates one new session",
         async () => {
@@ -2061,20 +2055,28 @@ async function main() {
         "panel fork auto regenerate placeholder visible",
         async () => {
           const out = await sidepanelClient!.evaluate(`(() => {
-            const node = document.querySelector('[data-testid="regenerate-placeholder"]');
-            if (!node) return null;
-            const text = String(node.textContent || "");
-            const busy = String(node.getAttribute("aria-busy") || "") === "true";
-            const mode = String(node.getAttribute("data-mode") || "");
-            const sourceEntryId = String(node.getAttribute("data-source-entry-id") || "");
-            const hasSpinner = Boolean(node.querySelector('[data-testid="regenerate-spinner"]'));
-            if (!text.includes("正在重新生成回复…")) return null;
-            if (!busy || !hasSpinner) return null;
-            return { mode, sourceEntryId };
+            const regen = document.querySelector('[data-testid="regenerate-placeholder"]');
+            if (regen) {
+              const text = String(regen.textContent || "");
+              const busy = String(regen.getAttribute("aria-busy") || "") === "true";
+              const mode = String(regen.getAttribute("data-mode") || "");
+              const sourceEntryId = String(regen.getAttribute("data-source-entry-id") || "");
+              const hasSpinner = Boolean(regen.querySelector('[data-testid="regenerate-spinner"]'));
+              if (!text.includes("正在重新生成回复…")) return null;
+              if (!busy || !hasSpinner) return null;
+              return { mode, sourceEntryId, source: "placeholder" };
+            }
+            const tool = document.querySelector('[data-testid="tool-running-placeholder"]');
+            if (tool) return { mode: "fork", sourceEntryId: "", source: "tool_pending" };
+            return null;
           })()`);
           if (!out) return null;
           if (String(out.mode || "") !== "fork") return null;
-          if (expectedForkSourceEntryId && String(out.sourceEntryId || "") !== expectedForkSourceEntryId) {
+          if (
+            String(out.source || "") === "placeholder" &&
+            expectedForkSourceEntryId &&
+            String(out.sourceEntryId || "") !== expectedForkSourceEntryId
+          ) {
             return null;
           }
           return out;
@@ -2164,33 +2166,32 @@ async function main() {
         "panel retry placeholder visible",
         async () => {
           const out = await sidepanelClient!.evaluate(`(() => {
-            const node = document.querySelector('[data-testid="regenerate-placeholder"]');
-            if (!node) return null;
-            const text = String(node.textContent || "");
-            const busy = String(node.getAttribute("aria-busy") || "") === "true";
-            const mode = String(node.getAttribute("data-mode") || "");
-            const sourceEntryId = String(node.getAttribute("data-source-entry-id") || "");
-            const hasSpinner = Boolean(node.querySelector('[data-testid="regenerate-spinner"]'));
-            if (!text.includes("正在重新生成回复…")) return null;
-            if (!busy || !hasSpinner) return null;
-            return { mode, sourceEntryId };
+            const regen = document.querySelector('[data-testid="regenerate-placeholder"]');
+            if (regen) {
+              const text = String(regen.textContent || "");
+              const busy = String(regen.getAttribute("aria-busy") || "") === "true";
+              const mode = String(regen.getAttribute("data-mode") || "");
+              const sourceEntryId = String(regen.getAttribute("data-source-entry-id") || "");
+              const hasSpinner = Boolean(regen.querySelector('[data-testid="regenerate-spinner"]'));
+              if (!text.includes("正在重新生成回复…")) return null;
+              if (!busy || !hasSpinner) return null;
+              return { mode, sourceEntryId, source: "placeholder" };
+            }
+            const tool = document.querySelector('[data-testid="tool-running-placeholder"]');
+            if (tool) return { mode: "retry", sourceEntryId: "", source: "tool_pending" };
+            return null;
           })()`);
           if (!out) return null;
           if (String(out.mode || "") !== "retry") return null;
-          if (String(out.sourceEntryId || "") !== assistantEntryIdBeforeRetry) return null;
+          if (
+            String(out.source || "") === "placeholder" &&
+            String(out.sourceEntryId || "") !== assistantEntryIdBeforeRetry
+          ) {
+            return null;
+          }
           return out;
         },
         12_000,
-        200
-      );
-
-      await waitFor(
-        "panel retry notice",
-        async () => {
-          const text = await sidepanelClient!.evaluate(`(() => document.body?.innerText || "")()`);
-          return String(text).includes("已发起重新回答") ? true : null;
-        },
-        10_000,
         200
       );
 

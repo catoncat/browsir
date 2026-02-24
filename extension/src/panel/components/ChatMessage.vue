@@ -28,6 +28,7 @@ const props = defineProps<{
   toolPending?: boolean;
   toolPendingAction?: string;
   toolPendingDetail?: string;
+  toolPendingSteps?: string[];
   toolPendingLogs?: string[];
   busyPlaceholder?: boolean;
   busyMode?: "retry" | "fork";
@@ -113,6 +114,9 @@ const toolIcon = computed(() => {
 });
 const pendingLogs = computed(() =>
   Array.isArray(props.toolPendingLogs) ? props.toolPendingLogs.filter((item) => String(item || "").trim().length > 0) : []
+);
+const pendingSteps = computed(() =>
+  Array.isArray(props.toolPendingSteps) ? props.toolPendingSteps.filter((item) => String(item || "").trim().length > 0) : []
 );
 const pendingLogExpandable = computed(() => pendingLogs.value.length > 6);
 
@@ -422,6 +426,18 @@ watch(
         >
           {{ props.toolPendingDetail }}
         </p>
+        <div v-if="pendingSteps.length" class="mt-2.5 rounded-md border border-ui-accent/20 bg-white/55 px-2.5 py-2">
+          <p class="text-[10px] font-semibold text-ui-accent/90">执行步骤</p>
+          <ol class="mt-1.5 space-y-1">
+            <li
+              v-for="(line, idx) in pendingSteps"
+              :key="`${idx}-${line}`"
+              class="text-[11px] leading-snug text-ui-text break-all"
+            >
+              {{ line }}
+            </li>
+          </ol>
+        </div>
         <div v-if="pendingLogs.length" class="mt-2.5 rounded-md border border-ui-accent/20 bg-white/50">
           <div
             ref="pendingLogViewport"
@@ -440,7 +456,7 @@ watch(
             </div>
           </div>
           <div class="flex items-center justify-between border-t border-ui-accent/15 px-2.5 py-1.5 text-[10px] text-ui-text-muted">
-            <span>实时输出 {{ pendingLogs.length }} 行</span>
+            <span>工具输出 {{ pendingLogs.length }} 行</span>
             <button
               v-if="pendingLogExpandable"
               type="button"
