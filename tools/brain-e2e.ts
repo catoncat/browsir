@@ -276,6 +276,7 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
 
       // 处理标题总结请求
       if (systemText.includes("生成一个非常简短、精准的标题")) {
+        await sleep(220);
         return buildSseResponse([
           {
             choices: [
@@ -2467,8 +2468,13 @@ async function main() {
       await waitFor(
         "panel header shows fork source",
         async () => {
-          const text = await sidepanelClient!.evaluate(`(() => document.body?.innerText || "")()`);
-          return String(text).includes("分叉自") ? true : null;
+          const out = await sidepanelClient!.evaluate(`(() => {
+            const node = document.querySelector('[data-testid="fork-session-indicator"]');
+            if (!(node instanceof HTMLElement)) return null;
+            const label = String(node.getAttribute("aria-label") || "");
+            return { label };
+          })()`);
+          return String(out?.label || "").includes("来自分叉") ? true : null;
         },
         10_000,
         200
@@ -2945,13 +2951,18 @@ async function main() {
           const out = await sidepanelClient!.evaluate(`(() => {
             const node = document.querySelector('[data-testid="fork-session-indicator"]');
             if (!(node instanceof HTMLElement)) return null;
-            const text = (node.textContent || "").replace(/\\s+/g, " ").trim();
-            return text ? { text } : null;
+            const label = String(node.getAttribute("aria-label") || "");
+            const jumpButton = Array.from(document.querySelectorAll("button")).find((btn) =>
+              String(btn.textContent || "").includes("跳回来源对话")
+            );
+            return {
+              label,
+              hasJump: jumpButton instanceof HTMLButtonElement
+            };
           })()`);
           if (!out) return null;
-          const expectedTail = String(sourceSessionId || "").slice(-8);
-          if (!expectedTail) return null;
-          return String(out.text || "").endsWith(expectedTail) ? out : null;
+          if (!String(out.label || "").includes("来自分叉")) return null;
+          return out.hasJump ? out : null;
         },
         12_000,
         200
