@@ -258,6 +258,65 @@ const TOOL_CAPABILITIES = {
   browser_verify: "browser.verify"
 } as const;
 
+type StepVerifyPolicy = "off" | "on_critical" | "always";
+
+interface CapabilityExecutionPolicy {
+  fallbackMode?: ExecuteMode;
+  defaultVerifyPolicy?: StepVerifyPolicy;
+  leasePolicy?: "auto" | "required" | "none";
+  allowScriptFallback?: boolean;
+}
+
+const CAPABILITY_EXEC_POLICIES: Record<string, CapabilityExecutionPolicy> = {
+  "process.exec": {
+    fallbackMode: "bridge",
+    defaultVerifyPolicy: "off",
+    leasePolicy: "none",
+    allowScriptFallback: false
+  },
+  "fs.read": {
+    fallbackMode: "bridge",
+    defaultVerifyPolicy: "off",
+    leasePolicy: "none",
+    allowScriptFallback: false
+  },
+  "fs.write": {
+    fallbackMode: "bridge",
+    defaultVerifyPolicy: "off",
+    leasePolicy: "none",
+    allowScriptFallback: false
+  },
+  "fs.edit": {
+    fallbackMode: "bridge",
+    defaultVerifyPolicy: "off",
+    leasePolicy: "none",
+    allowScriptFallback: false
+  },
+  "browser.snapshot": {
+    fallbackMode: "cdp",
+    defaultVerifyPolicy: "off",
+    leasePolicy: "none",
+    allowScriptFallback: false
+  },
+  "browser.action": {
+    fallbackMode: "cdp",
+    defaultVerifyPolicy: "on_critical",
+    leasePolicy: "auto",
+    allowScriptFallback: true
+  },
+  "browser.verify": {
+    fallbackMode: "cdp",
+    defaultVerifyPolicy: "always",
+    leasePolicy: "none",
+    allowScriptFallback: false
+  }
+};
+
+function resolveCapabilityPolicy(capability?: string): CapabilityExecutionPolicy {
+  if (!capability) return {};
+  return CAPABILITY_EXEC_POLICIES[capability] || {};
+}
+
 function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" ? (value as JsonRecord) : {};
 }
@@ -861,6 +920,13 @@ function actionRequiresLease(kind: string): boolean {
   return ["click", "type", "fill", "press", "scroll", "select", "navigate"].includes(kind);
 }
 
+function shouldAcquireLease(kind: string, policy: CapabilityExecutionPolicy): boolean {
+  const leasePolicy = policy.leasePolicy || "auto";
+  if (leasePolicy === "none") return false;
+  if (leasePolicy === "required") return true;
+  return actionRequiresLease(kind);
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1183,13 +1249,15 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     capability?: ExecuteCapability;
     action: string;
     args?: JsonRecord;
-    verifyPolicy?: "off" | "on_critical" | "always";
+    verifyPolicy?: StepVerifyPolicy;
   }): Promise<ExecuteStepResult> {
     const sessionId = String(input.sessionId || "").trim();
     const normalizedMode = ["script", "cdp", "bridge"].includes(String(input.mode || "").trim())
       ? (String(input.mode || "").trim() as ExecuteMode)
       : undefined;
     const normalizedCapability = String(input.capability || "").trim() || undefined;
+    const capabilityPolicy = resolveCapabilityPolicy(normalizedCapability);
+    const effectiveVerifyPolicy: StepVerifyPolicy = input.verifyPolicy || capabilityPolicy.defaultVerifyPolicy || "on_critical";
     const normalizedAction = String(input.action || "").trim();
     const payload = toRecord(input.args);
     const actionPayload = toRecord(payload.action) && Object.keys(toRecord(payload.action)).length > 0 ? toRecord(payload.action) : payload;
@@ -1203,7 +1271,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
 
     if (normalizedCapability && orchestrator.hasCapabilityProvider(normalizedCapability)) {
-      const capabilityMode = normalizedMode || orchestrator.resolveModeForCapability(normalizedCapability) || "bridge";
+      const capabilityMode =
+        normalizedMode || orchestrator.resolveModeForCapability(normalizedCapability) || capabilityPolicy.fallbackMode || "bridge";
       orchestrator.events.emit("step_execute", sessionId, {
         mode: capabilityMode,
         capability: normalizedCapability,
@@ -1215,7 +1284,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         capability: normalizedCapability,
         action: normalizedAction,
         args: payload,
-        verifyPolicy: input.verifyPolicy
+        verifyPolicy: effectiveVerifyPolicy
       });
       orchestrator.events.emit("step_execute_result", sessionId, {
         ok: result.ok,
@@ -1226,22 +1295,26 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         verifyReason: result.verifyReason,
         error: result.error
       });
-      return result;
+      return {
+        ...result,
+        capabilityUsed: result.capabilityUsed || normalizedCapability
+      };
     }
 
-    if (!normalizedMode) {
+    const executionMode = normalizedMode || capabilityPolicy.fallbackMode;
+    if (!executionMode) {
       return {
         ok: false,
         modeUsed: "bridge",
         verified: false,
         error: normalizedCapability
-          ? `capability provider 未注册: ${normalizedCapability}`
+          ? `capability provider 未注册且缺少 mode fallback: ${normalizedCapability}`
           : "mode 必须是 script/cdp/bridge"
       };
     }
 
     orchestrator.events.emit("step_execute", sessionId, {
-      mode: normalizedMode,
+      mode: executionMode,
       capability: normalizedCapability,
       action: normalizedAction
     });
@@ -1318,7 +1391,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       const kind = String(cdpAction.kind || "").trim();
       if (!kind) throw new Error("cdp.action 缺少 kind");
 
-      if (actionRequiresLease(kind)) {
+      if (shouldAcquireLease(kind, capabilityPolicy)) {
         return await withTabLease(tabId, sessionId, async () => {
           return await callInfra(infra, {
             type: "cdp.action",
@@ -1337,13 +1410,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       });
     };
 
-    let modeUsed: ExecuteMode = normalizedMode;
+    let modeUsed: ExecuteMode = executionMode;
     let fallbackFrom: ExecuteMode | undefined;
     let data: unknown;
     let preObserve: unknown = null;
-    const verifyEnabled = shouldVerifyStep(String(actionPayload.kind || normalizedAction), input.verifyPolicy);
+    const verifyEnabled = shouldVerifyStep(String(actionPayload.kind || normalizedAction), effectiveVerifyPolicy);
 
-    if (verifyEnabled && tabId && normalizedMode !== "bridge" && normalizedAction !== "verify" && normalizedAction !== "cdp.verify") {
+    if (verifyEnabled && tabId && executionMode !== "bridge" && normalizedAction !== "verify" && normalizedAction !== "cdp.verify") {
       preObserve = await callInfra(infra, {
         type: "cdp.observe",
         tabId
@@ -1351,13 +1424,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
 
     try {
-      data = await runMode(normalizedMode);
+      data = await runMode(executionMode);
     } catch (error) {
       const runtimeError = asRuntimeErrorWithMeta(error);
-      if (normalizedMode !== "script") {
+      if (executionMode !== "script" || capabilityPolicy.allowScriptFallback === false) {
         const result: ExecuteStepResult = {
           ok: false,
           modeUsed,
+          capabilityUsed: normalizedCapability,
           verified: false,
           error: runtimeError.message,
           errorCode: normalizeErrorCode(runtimeError.code),
@@ -1367,6 +1441,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         orchestrator.events.emit("step_execute_result", sessionId, {
           ok: result.ok,
           modeUsed: result.modeUsed,
+          capabilityUsed: result.capabilityUsed || "",
           verifyReason: result.verifyReason || "",
           verified: result.verified,
           error: result.error || "",
@@ -1385,6 +1460,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const result: ExecuteStepResult = {
           ok: false,
           modeUsed,
+          capabilityUsed: normalizedCapability,
           fallbackFrom,
           verified: false,
           error: runtimeFallbackError.message,
@@ -1395,6 +1471,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         orchestrator.events.emit("step_execute_result", sessionId, {
           ok: result.ok,
           modeUsed: result.modeUsed,
+          capabilityUsed: result.capabilityUsed || "",
           fallbackFrom: result.fallbackFrom || "",
           verifyReason: result.verifyReason || "",
           verified: result.verified,
@@ -1476,6 +1553,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const result: ExecuteStepResult = {
       ok: true,
       modeUsed,
+      capabilityUsed: normalizedCapability,
       fallbackFrom,
       verified,
       verifyReason,
@@ -1484,6 +1562,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     orchestrator.events.emit("step_execute_result", sessionId, {
       ok: result.ok,
       modeUsed: result.modeUsed,
+      capabilityUsed: result.capabilityUsed || "",
       fallbackFrom: result.fallbackFrom || "",
       verifyReason: result.verifyReason || "",
       verified: result.verified

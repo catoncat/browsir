@@ -1567,6 +1567,26 @@ async function main() {
       assert(routed.data?.fallbackFrom === "script", `fallbackFrom 应为 script: ${JSON.stringify(routed.data)}`);
       assert(routed.data?.verifyReason === "verify_policy_off", `verifyReason 应稳定: ${JSON.stringify(routed.data)}`);
 
+      const capabilityOnly = await sendBgMessage(sidepanelClient!, {
+        type: "brain.step.execute",
+        sessionId,
+        capability: "browser.action",
+        action: "fill",
+        args: {
+          tabId: testTabId,
+          selector: "#name",
+          value: "capability-only-route"
+        },
+        verifyPolicy: "off"
+      });
+      assert(capabilityOnly.ok === true, `capability-only 路由响应失败: ${capabilityOnly.error || "unknown"}`);
+      assert(capabilityOnly.data?.ok === true, `capability-only 路由执行失败: ${JSON.stringify(capabilityOnly.data)}`);
+      assert(capabilityOnly.data?.modeUsed === "cdp", `capability-only 应默认回落到 cdp: ${JSON.stringify(capabilityOnly.data)}`);
+      assert(
+        capabilityOnly.data?.capabilityUsed === "browser.action",
+        `capabilityUsed 应稳定回显 browser.action: ${JSON.stringify(capabilityOnly.data)}`
+      );
+
       const cdpFail = await sendBgMessage(sidepanelClient!, {
         type: "brain.step.execute",
         sessionId,

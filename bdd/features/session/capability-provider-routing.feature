@@ -6,6 +6,7 @@ Feature: Capability provider routing decouples tool contract from execution obje
     When kernel executes brain.step.execute with capability browser.action and script mode fallback
     Then invoke should be routed via registered script provider
     And fallback should route to cdp provider only when script invocation fails
+    And capability-only request should use policy fallback mode when mode is omitted
 
   Scenario: Capability provider can override mode-target binding
     Given capability provider fs.virtual.read is registered by plugin runtime

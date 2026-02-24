@@ -8,6 +8,7 @@
     "routingInvariants": [
       "legacy_adapters_are_wrapped_as_default_providers",
       "capability_provider_is_preferred_when_registered",
+      "capability_only_request_uses_policy_mode_fallback_when_provider_missing",
       "capability_missing_falls_back_to_explicit_mode_without_silent_switch",
       "script_failure_fallbacks_to_cdp_only",
       "cdp_or_bridge_failure_returns_ok_false_without_forced_fallback"
