@@ -1,31 +1,41 @@
 {
   "id": "BHV-CHAT-MAX-STEPS-CONFIG",
-  "description": "Ensure max_steps is configurable and enforced by the runtime loop",
-  "category": "chat",
-  "priority": "medium",
-  "pre_conditions": [
-    "system_idle",
-    "settings_accessible"
-  ],
+  "intent": "用户可在设置页修改 max_steps，运行循环必须按该阈值收口，并在非法配置时退回默认安全值。",
+  "context": {
+    "surface": "sidepanel.settings",
+    "setting_key": "maxSteps",
+    "runtime_surface": "runtime_loop"
+  },
   "steps": [
-    "configure_max_steps_in_ui",
-    "save_and_reload_config",
-    "trigger_multi_step_loop",
-    "observe_loop_termination_on_max_steps"
+    "set_max_steps_value_in_settings",
+    "save_config_and_reload_runtime",
+    "run_multi_step_task",
+    "verify_loop_stops_when_reaching_limit"
   ],
   "observables": [
-    "config_persisted_in_storage",
-    "runtime_loop_reads_dynamic_limit",
-    "final_status_is_max_steps_when_limit_reached"
+    "config_get_returns_saved_max_steps",
+    "loop_done_status_is_max_steps_when_limit_hit",
+    "assistant_message_reports_max_steps_termination"
   ],
-  "triggers": {
-    "on_limit_reached": [
-      "append_max_steps_reached_message",
-      "set_final_status_to_max_steps"
-    ]
+  "risk": "medium",
+  "allowed_side_effects": [
+    "persist_runtime_config",
+    "append_assistant_message"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "browser-cdp"],
+    "min_layers": 2
+  },
+  "degrade_policy": {
+    "invalid_max_steps_value": {
+      "on_trigger": [
+        "fallback_to_default_max_steps_100",
+        "continue_runtime_without_crash"
+      ]
+    }
   },
   "rollback_or_compensation": [
-    "fallback_to_default_100_if_config_invalid"
+    "max_steps_fallback_must_not_corrupt_existing_sessions"
   ],
   "version": "1.0.0"
 }

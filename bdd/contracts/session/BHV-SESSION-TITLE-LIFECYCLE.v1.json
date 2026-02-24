@@ -1,31 +1,48 @@
 {
   "id": "BHV-SESSION-TITLE-LIFECYCLE",
-  "description": "Lifecycle of session titles including initial AI generation, periodic auto-summarization, manual regeneration, and manual renaming",
-  "category": "session",
-  "priority": "medium",
-  "pre_conditions": [
-    "session_exists",
-    "llm_configured"
-  ],
-  "steps": [
-    "observe_initial_title_generation",
-    "trigger_manual_regeneration",
-    "perform_manual_rename",
-    "verify_periodic_trigger"
-  ],
-  "observables": [
-    "title_matches_ai_summary",
-    "ui_shows_regeneration_feedback",
-    "manual_title_persisted",
-    "auto_trigger_on_interval_multiple"
-  ],
-  "triggers": {
-    "on_message_count_multiple": [
-      "refreshSessionTitleAuto"
+  "intent": "会话标题应覆盖完整生命周期：首轮 AI 自动生成、更多菜单手动重生成、列表手动重命名持久化、以及 autoTitleInterval 周期触发。",
+  "context": {
+    "surface": "sidepanel.chat+session_list+settings",
+    "setting_key": "autoTitleInterval",
+    "entrypoints": [
+      "brain.session.title.refresh(force=true)",
+      "brain.session.title.refresh(title=...)"
     ]
   },
+  "steps": [
+    "run_first_turn_and_wait_auto_title_generation",
+    "trigger_manual_regeneration_from_more_menu",
+    "rename_title_in_session_list_and_save",
+    "update_auto_title_interval_in_settings",
+    "verify_periodic_auto_title_refresh_on_interval_boundary"
+  ],
+  "observables": [
+    "session_list_title_matches_ai_summary",
+    "header_shows_regeneration_feedback_during_manual_refresh",
+    "manual_title_update_persisted_in_session_list",
+    "manual_title_not_overwritten_by_next_turn_auto_refresh",
+    "auto_title_refresh_event_emitted_on_interval_multiple"
+  ],
+  "risk": "medium",
+  "allowed_side_effects": [
+    "persist_session_title_metadata",
+    "persist_runtime_config",
+    "emit_runtime_event(session_title_auto_updated)"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "browser-cdp", "e2e"],
+    "min_layers": 3
+  },
+  "degrade_policy": {
+    "llm_title_refresh_failed": {
+      "on_trigger": [
+        "keep_current_title_unchanged",
+        "fallback_to_existing_or_derived_title"
+      ]
+    }
+  },
   "rollback_or_compensation": [
-    "retain_current_title_on_llm_failure"
+    "manual_title_should_remain_intact_when_auto_refresh_not_forced"
   ],
   "version": "1.0.0"
 }

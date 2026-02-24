@@ -14,6 +14,10 @@
       "category": "protocol"
     },
     {
+      "contractId": "BHV-CHAT-MAX-STEPS-CONFIG",
+      "category": "ux"
+    },
+    {
       "contractId": "BHV-CHAT-MESSAGE-ACTIONS-RETRY-COPY",
       "category": "ux"
     },
@@ -51,6 +55,10 @@
     },
     {
       "contractId": "BHV-SESSION-LIST-TITLE-DELETE",
+      "category": "ux"
+    },
+    {
+      "contractId": "BHV-SESSION-TITLE-LIFECYCLE",
       "category": "ux"
     },
     {
