@@ -2,6 +2,19 @@
   "version": "1.0.0",
   "mappings": [
     {
+      "contractId": "BHV-SESSION-TITLE-LIFECYCLE",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::refreshSessionTitleAuto + extension/src/panel/App.vue::handleRefreshSession"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/chat/session-title.feature"
+        }
+      ]
+    },
+    {
       "contractId": "BHV-CHAT-MAX-STEPS-CONFIG",
       "proofs": [
         {

@@ -19,6 +19,18 @@ Feature: Loop LLM capability gate
     Then 会话状态应为 done
     And 失败的 browser_action 应作为 tool 消息反馈给 LLM
 
+  Scenario: LLM 返回超长 Retry-After 时快速失败
+    Given sidepanel 配置可用的 LLM API 且 Retry-After 超过上限
+    When 用户发送触发限流重试的目标
+    Then 会话状态应为 failed_execute
+    And 不应进入长等待自动重试
+
+  Scenario: 重复可恢复失败应触发熔断
+    Given sidepanel 配置可用的 LLM API 且同一工具目标持续返回可恢复失败
+    When 用户发送触发持续失败的目标
+    Then 会话状态应为 failed_execute
+    And step stream 应包含重试熔断或预算耗尽事件
+
   Scenario: LLM 不可用但规则可解析时降级成功
     Given sidepanel 未配置 LLM API
     When 用户发送可被规则 planner 解析的目标

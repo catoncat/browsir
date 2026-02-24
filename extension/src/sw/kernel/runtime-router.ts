@@ -26,6 +26,7 @@ type RuntimeResult<T = unknown> = RuntimeOk<T> | RuntimeErr;
 
 const SESSION_TITLE_MAX = 28;
 const SESSION_TITLE_MIN = 2;
+const SESSION_TITLE_SOURCE_MANUAL = "manual";
 
 function ok<T>(data: T): RuntimeResult<T> {
   return { ok: true, data };
@@ -57,19 +58,16 @@ function normalizeSessionTitle(value: unknown, fallback = ""): string {
   return `${compact.slice(0, SESSION_TITLE_MAX)}…`;
 }
 
-function deriveSessionTitle(entries: SessionEntry[]): string {
-  const messages = entries.filter((entry) => entry.type === "message");
-  const firstUser = messages.find((entry) => entry.role === "user" && String(entry.text || "").trim());
-  const firstAssistant = messages.find((entry) => entry.role === "assistant" && String(entry.text || "").trim());
-
-  const candidates = [firstUser?.text, firstAssistant?.text]
-    .map((item) => String(item || ""))
-    .map((item) => item.split("\n").find((line) => String(line || "").trim()) || item)
-    .map((item) => item.replace(/^(请(你)?(帮我)?|帮我|请|麻烦你)\s*/u, ""))
-    .map((item) => normalizeSessionTitle(item, ""))
-    .filter((item) => item.length >= SESSION_TITLE_MIN);
-
-  return candidates[0] || "";
+function deriveSessionTitleFromEntries(entries: SessionEntry[]): string {
+  const list = Array.isArray(entries) ? entries : [];
+  for (const item of list) {
+    if (item.type !== "message") continue;
+    if (item.role !== "user" && item.role !== "assistant") continue;
+    const text = normalizeSessionTitle(item.text, "");
+    if (!text || text.length < SESSION_TITLE_MIN) continue;
+    return text;
+  }
+  return "新对话";
 }
 
 function readForkedFrom(meta: SessionMeta | null): {
@@ -411,7 +409,11 @@ async function handleBrainRun(
   return fail(`unsupported brain.run action: ${action}`);
 }
 
-async function handleSession(orchestrator: BrainOrchestrator, message: unknown): Promise<RuntimeResult> {
+async function handleSession(
+  orchestrator: BrainOrchestrator,
+  runtimeLoop: ReturnType<typeof createRuntimeLoopController>,
+  message: unknown
+): Promise<RuntimeResult> {
   const payload = toRecord(message);
   const action = String(payload.type || "");
 
@@ -469,42 +471,58 @@ async function handleSession(orchestrator: BrainOrchestrator, message: unknown):
     if (!meta) {
       return fail(`session 不存在: ${sessionId}`);
     }
-    const entries = await orchestrator.sessions.getEntries(sessionId);
+    const hasExplicitTitle = typeof payload.title === "string";
+    if (hasExplicitTitle) {
+      const manualTitle = normalizeSessionTitle(payload.title, "");
+      if (!manualTitle) {
+        return fail("title 不能为空");
+      }
+      const metadata = {
+        ...toRecord(meta.header.metadata),
+        titleSource: SESSION_TITLE_SOURCE_MANUAL
+      };
+      await writeSessionMeta(sessionId, {
+        ...meta,
+        header: {
+          ...meta.header,
+          title: manualTitle,
+          metadata
+        },
+        updatedAt: nowIso()
+      });
+      return ok({
+        sessionId,
+        title: manualTitle,
+        updated: manualTitle !== normalizeSessionTitle(meta.header.title, "")
+      });
+    }
     const currentTitle = normalizeSessionTitle(meta.header.title, "");
     const force = payload.force === true;
-    const derivedTitle = normalizeSessionTitle(payload.title || deriveSessionTitle(entries), "");
+    const derivedTitle = await runtimeLoop.refreshSessionTitle(sessionId, { force });
     if (!derivedTitle) {
+      const entries = await orchestrator.sessions.getEntries(sessionId);
+      const fallbackTitle = currentTitle || deriveSessionTitleFromEntries(entries);
+      const normalizedFallback = normalizeSessionTitle(fallbackTitle, "新对话");
+      if (normalizedFallback && normalizedFallback !== currentTitle) {
+        await writeSessionMeta(sessionId, {
+          ...meta,
+          header: {
+            ...meta.header,
+            title: normalizedFallback
+          },
+          updatedAt: nowIso()
+        });
+      }
       return ok({
         sessionId,
-        title: currentTitle,
-        updated: false
+        title: normalizedFallback || currentTitle,
+        updated: normalizedFallback !== currentTitle
       });
     }
-    if (!force && derivedTitle === currentTitle) {
-      return ok({
-        sessionId,
-        title: currentTitle,
-        updated: false
-      });
-    }
-
-    const nextMeta: SessionMeta = {
-      ...meta,
-      header: {
-        ...meta.header,
-        title: derivedTitle
-      },
-      updatedAt: nowIso()
-    };
-    await writeSessionMeta(sessionId, nextMeta);
-    orchestrator.events.emit("session_title_manual_refresh", sessionId, {
-      title: derivedTitle,
-      updated: true
-    });
     return ok({
       sessionId,
       title: derivedTitle,
-      updated: true
+      updated: derivedTitle !== currentTitle
     });
   }
 
@@ -624,6 +642,7 @@ async function handleBrainDebug(orchestrator: BrainOrchestrator, infra: RuntimeI
       bridgeInvokeTimeoutMs: Number(cfg.bridgeInvokeTimeoutMs || 0),
       llmTimeoutMs: Number(cfg.llmTimeoutMs || 0),
       llmRetryMaxAttempts: Number(cfg.llmRetryMaxAttempts || 0),
+      llmMaxRetryDelayMs: Number(cfg.llmMaxRetryDelayMs || 0),
       hasLlmApiKey: !!String(cfg.llmApiKey || "").trim()
     });
   }
@@ -651,7 +670,7 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
         }
 
         if (type.startsWith("brain.session.")) {
-          return await handleSession(orchestrator, message);
+          return await handleSession(orchestrator, runtimeLoop, message);
         }
 
         if (type.startsWith("brain.step.")) {

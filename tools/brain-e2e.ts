@@ -270,7 +270,25 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
       }
 
       const lastUser = [...messages].reverse().find((item) => item?.role === "user");
+      const systemMessage = messages.find((item) => item?.role === "system");
+      const systemText = String(systemMessage?.content || "");
       const userText = String(lastUser?.content || "");
+
+      // 处理标题总结请求
+      if (systemText.includes("生成一个非常简短、精准的标题")) {
+        return buildSseResponse([
+          {
+            choices: [
+              {
+                delta: {
+                  content: "AI 总结的标题"
+                }
+              }
+            ]
+          },
+          "[DONE]"
+        ]);
+      }
       const delayMatch = /#LLM_DELAY_(\d{2,5})/.exec(userText);
       const delayMs = delayMatch ? Math.max(0, Math.min(10_000, Number(delayMatch[1]))) : 0;
       if (delayMs > 0) {
@@ -295,6 +313,24 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
       });
       if (requests.length > 180) {
         requests.splice(0, requests.length - 180);
+      }
+
+      if (userText.includes("#LLM_RETRY_AFTER_CAP")) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              type: "rate_limit",
+              message: "Your quota will reset after 120s"
+            }
+          }),
+          {
+            status: 429,
+            headers: {
+              "content-type": "application/json",
+              "retry-after": "120"
+            }
+          }
+        );
       }
 
       if (userText.includes("#LLM_FAIL_HTTP")) {
@@ -538,6 +574,35 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
               {
                 delta: {
                   content: "LLM_CDP_VERIFY_RECOVERED"
+                }
+              }
+            ]
+          },
+          "[DONE]"
+        ]);
+      }
+
+      if (userText.includes("#LLM_RETRY_CIRCUIT")) {
+        const failCount = toolMessages.filter((content) => content.includes('"errorCode":"E_TIMEOUT"')).length;
+        return buildSseResponse([
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: `call_bash_circuit_${failCount + 1}`,
+                      type: "function",
+                      function: {
+                        name: "bash",
+                        arguments: JSON.stringify({
+                          command: "sleep 1; echo CIRCUIT",
+                          timeoutMs: 200
+                        })
+                      }
+                    }
+                  ]
                 }
               }
             ]
@@ -1995,6 +2060,116 @@ async function main() {
       assert(toolMessagesJoined.includes('"tool":"browser_action"'), "tool failure payload 应标识 browser_action");
     });
 
+    await runCase("brain.runtime", "LLM Retry-After 超上限时应快速失败且不进入长等待重试", async () => {
+      mockLlm?.clearRequests();
+      const saveConfig = await sendBgMessage(sidepanelClient!, {
+        type: "config.save",
+        payload: {
+          bridgeUrl: `ws://${BRIDGE_HOST}:${bridgePort}/ws`,
+          bridgeToken,
+          llmApiBase: mockLlm!.baseUrl,
+          llmApiKey: "mock-key",
+          llmModel: "gpt-5.3-codex",
+          llmTimeoutMs: 10_000,
+          llmRetryMaxAttempts: 2,
+          llmMaxRetryDelayMs: 1_000
+        }
+      });
+      assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
+
+      const started = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        prompt: "触发 Retry-After 上限治理 #LLM_RETRY_AFTER_CAP"
+      });
+      assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
+      const sessionId = String(started.data?.sessionId || "");
+      assert(sessionId.length > 0, "sessionId 为空");
+
+      const dump = await waitFor(
+        "brain.debug.dump llm-retry-after-cap trace",
+        async () => {
+          const out = await sendBgMessage(sidepanelClient!, {
+            type: "brain.debug.dump",
+            sessionId
+          });
+          if (!out.ok) return null;
+          const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
+          if (!stream.some((item: any) => item?.type === "loop_done")) return null;
+          return out.data;
+        },
+        20_000,
+        250
+      );
+
+      const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
+      assert(
+        stream.some((item: any) => item?.type === "loop_done" && item?.payload?.status === "failed_execute"),
+        "Retry-After 超上限应 failed_execute 收口"
+      );
+      assert(
+        !stream.some((item: any) => item?.type === "auto_retry_start"),
+        "Retry-After 超上限不应进入自动重试"
+      );
+      assert(
+        stream.some(
+          (item: any) =>
+            item?.type === "loop_error" && String(item?.payload?.message || "").includes("exceeds cap")
+        ),
+        "应包含超上限错误信息"
+      );
+    });
+
+    await runCase("brain.runtime", "重复可恢复工具失败应触发熔断并停止循环", async () => {
+      mockLlm?.clearRequests();
+      const saveConfig = await sendBgMessage(sidepanelClient!, {
+        type: "config.save",
+        payload: {
+          bridgeUrl: `ws://${BRIDGE_HOST}:${bridgePort}/ws`,
+          bridgeToken,
+          llmApiBase: mockLlm!.baseUrl,
+          llmApiKey: "mock-key",
+          llmModel: "gpt-5.3-codex",
+          llmTimeoutMs: 10_000,
+          llmRetryMaxAttempts: 2
+        }
+      });
+      assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
+
+      const started = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        prompt: "触发可恢复失败熔断 #LLM_RETRY_CIRCUIT"
+      });
+      assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
+      const sessionId = String(started.data?.sessionId || "");
+      assert(sessionId.length > 0, "sessionId 为空");
+
+      const dump = await waitFor(
+        "brain.debug.dump retry-circuit trace",
+        async () => {
+          const out = await sendBgMessage(sidepanelClient!, {
+            type: "brain.debug.dump",
+            sessionId
+          });
+          if (!out.ok) return null;
+          const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
+          if (!stream.some((item: any) => item?.type === "loop_done")) return null;
+          return out.data;
+        },
+        40_000,
+        250
+      );
+
+      const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
+      assert(
+        stream.some((item: any) => item?.type === "retry_circuit_open" || item?.type === "retry_budget_exhausted"),
+        "应出现重试熔断或预算耗尽事件"
+      );
+      assert(
+        stream.some((item: any) => item?.type === "loop_done" && item?.payload?.status === "failed_execute"),
+        "熔断后应以 failed_execute 收口"
+      );
+    });
+
     await runCase("panel.vnext", "sidepanel 渲染并支持复制/历史分叉/最后一条重试", async () => {
       const marker = `panel-actions-${Date.now()}`;
 
@@ -2931,14 +3106,14 @@ async function main() {
       const listedSessions = Array.isArray(listed.data?.sessions) ? listed.data.sessions : [];
       const row = listedSessions.find((item: any) => String(item?.id || "") === sessionId);
       assert(!!row, "新会话应出现在 session.list");
-      assert(String(row?.title || "").trim().length > 0, "第一轮完成后应自动生成会话标题");
+      assert(String(row?.title || "") === "AI 总结的标题", `自动生成的标题不符合预期，预期="AI 总结的标题"，实际="${row?.title}"`);
 
       const refreshed = await sendBgMessage(sidepanelClient!, {
         type: "brain.session.title.refresh",
         sessionId
       });
       assert(refreshed.ok === true, `brain.session.title.refresh 失败: ${refreshed.error || "unknown"}`);
-      assert(String(refreshed.data?.title || "").trim().length > 0, "手动刷新标题后 title 不能为空");
+      assert(String(refreshed.data?.title || "") === "AI 总结的标题", `手动刷新后的标题不符合预期，预期="AI 总结的标题"，实际="${refreshed.data?.title}"`);
 
       const deleted = await sendBgMessage(sidepanelClient!, {
         type: "brain.session.delete",

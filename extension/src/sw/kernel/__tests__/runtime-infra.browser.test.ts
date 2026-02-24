@@ -175,7 +175,8 @@ describe("runtime infra handler", () => {
         llmModel: "gpt-test",
         bridgeInvokeTimeoutMs: 180000,
         llmTimeoutMs: 175000,
-        llmRetryMaxAttempts: 4
+        llmRetryMaxAttempts: 4,
+        llmMaxRetryDelayMs: 45000
       }
     });
     expect(saved?.ok).toBe(true);
@@ -190,6 +191,7 @@ describe("runtime infra handler", () => {
     expect(updated.bridgeInvokeTimeoutMs).toBe(180000);
     expect(updated.llmTimeoutMs).toBe(175000);
     expect(updated.llmRetryMaxAttempts).toBe(4);
+    expect(updated.llmMaxRetryDelayMs).toBe(45000);
   });
 
   it("supports lease acquire/heartbeat/release contract", async () => {
@@ -261,6 +263,27 @@ describe("runtime infra handler", () => {
     expect(invokeData.ok).toBe(true);
     expect(innerData.echoedTool).toBe("read");
     expect(FakeWebSocket.instances.length).toBeGreaterThan(0);
+  });
+
+  it("broadcasts bridge.status on connect/disconnect", async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    (chrome as unknown as { runtime: { sendMessage: (message: Record<string, unknown>) => Promise<unknown> } }).runtime.sendMessage =
+      async (message: Record<string, unknown>) => {
+        sent.push(message);
+        return { ok: true };
+      };
+
+    const infra = createRuntimeInfraHandler();
+    const connect = await infra.handleMessage({ type: "bridge.connect" });
+    expect(connect?.ok).toBe(true);
+    expect(sent.some((item) => item.type === "bridge.status" && item.status === "connected")).toBe(true);
+
+    const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+    expect(ws).toBeTruthy();
+    ws?.close();
+    await Promise.resolve();
+
+    expect(sent.some((item) => item.type === "bridge.status" && item.status === "disconnected")).toBe(true);
   });
 
   it("propagates bridge invoke error code/details", async () => {

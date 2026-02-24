@@ -29,7 +29,9 @@ export type BrainEventType =
   | "step_planned"
   | "step_finished"
   | "step_execute"
-  | "step_execute_result";
+  | "step_execute_result"
+  | "retry_circuit_open"
+  | "retry_budget_exhausted";
 
 export interface BrainEventEnvelope<TType extends BrainEventType = BrainEventType> {
   type: TType;

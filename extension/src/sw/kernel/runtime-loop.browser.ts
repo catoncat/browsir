@@ -9,6 +9,8 @@ const MAX_LLM_RETRIES = 2;
 const MAX_DEBUG_CHARS = 24_000;
 const SESSION_TITLE_MAX = 28;
 const SESSION_TITLE_MIN = 2;
+const SESSION_TITLE_SOURCE_MANUAL = "manual";
+const SESSION_TITLE_SOURCE_AI = "ai";
 const DEFAULT_LLM_TIMEOUT_MS = 120_000;
 const MIN_LLM_TIMEOUT_MS = 1_000;
 const MAX_LLM_TIMEOUT_MS = 300_000;
@@ -18,6 +20,13 @@ const MAX_BASH_TIMEOUT_MS = 300_000;
 const TOOL_AUTO_RETRY_MAX = 2;
 const TOOL_AUTO_RETRY_BASE_DELAY_MS = 300;
 const TOOL_AUTO_RETRY_CAP_DELAY_MS = 2_000;
+const DEFAULT_LLM_MAX_RETRY_DELAY_MS = 60_000;
+const MIN_LLM_MAX_RETRY_DELAY_MS = 0;
+const MAX_LLM_MAX_RETRY_DELAY_MS = 300_000;
+const TOOL_RETRYABLE_FAILURE_MAX_TOTAL = 8;
+const TOOL_RETRYABLE_FAILURE_MAX_PER_SIGNATURE = 3;
+
+type ToolRetryAction = "auto_replay" | "llm_replan" | "fail_fast";
 
 interface ToolCallItem {
   id: string;
@@ -48,6 +57,7 @@ interface LlmRequestInput {
   llmKey: string;
   llmModel: string;
   llmTimeoutMs: number;
+  llmMaxRetryDelayMs: number;
   step: number;
   messages: JsonRecord[];
 }
@@ -59,7 +69,7 @@ type RuntimeErrorWithMeta = Error & {
   status?: number;
 };
 
-interface RuntimeLoopController {
+export interface RuntimeLoopController {
   startFromPrompt(input: RunStartInput): Promise<{ sessionId: string; runtime: RuntimeView }>;
   startFromRegenerate(input: RegenerateRunInput): Promise<{ sessionId: string; runtime: RuntimeView }>;
   executeStep(input: {
@@ -69,6 +79,7 @@ interface RuntimeLoopController {
     args?: JsonRecord;
     verifyPolicy?: "off" | "on_critical" | "always";
   }): Promise<ExecuteStepResult>;
+  refreshSessionTitle(sessionId: string, options?: { force?: boolean }): Promise<string>;
 }
 
 const BRAIN_TOOL_DEFS: JsonRecord[] = [
@@ -284,12 +295,82 @@ function normalizeErrorCode(code: unknown): string {
     .toUpperCase();
 }
 
-function isRetryableToolErrorCode(code: string): boolean {
-  return ["E_BUSY", "E_TIMEOUT", "E_CLIENT_TIMEOUT", "E_BRIDGE_DISCONNECTED"].includes(normalizeErrorCode(code));
+function isSideEffectingToolName(toolName: string): boolean {
+  const normalized = String(toolName || "").trim().toLowerCase();
+  return ["write_file", "edit_file", "browser_action", "open_tab"].includes(normalized);
 }
 
-function shouldAutoRetryToolErrorCode(code: string): boolean {
-  return ["E_BUSY", "E_CLIENT_TIMEOUT", "E_BRIDGE_DISCONNECTED"].includes(normalizeErrorCode(code));
+function classifyToolRetryDecision(toolName: string, errorCode: string): {
+  action: ToolRetryAction;
+  retryable: boolean;
+  retryHint: string;
+} {
+  const normalizedCode = normalizeErrorCode(errorCode);
+  const sideEffecting = isSideEffectingToolName(toolName);
+
+  if (normalizedCode === "E_BUSY") {
+    return {
+      action: "auto_replay",
+      retryable: true,
+      retryHint: "Bridge is busy, retry after a short delay."
+    };
+  }
+
+  if (normalizedCode === "E_BRIDGE_DISCONNECTED") {
+    return {
+      action: "auto_replay",
+      retryable: true,
+      retryHint: "Bridge connection was unstable; retry this tool call."
+    };
+  }
+
+  if (normalizedCode === "E_TIMEOUT") {
+    return {
+      action: "llm_replan",
+      retryable: true,
+      retryHint:
+        String(toolName || "").trim().toLowerCase() === "bash"
+          ? "Increase bash.timeoutMs and retry the same goal."
+          : "Operation timed out; adjust parameters and retry the same goal."
+    };
+  }
+
+  if (normalizedCode === "E_CLIENT_TIMEOUT") {
+    if (sideEffecting) {
+      return {
+        action: "llm_replan",
+        retryable: true,
+        retryHint: "Client timed out. Re-evaluate state with a fresh read/snapshot before retrying side effects."
+      };
+    }
+    return {
+      action: "auto_replay",
+      retryable: true,
+      retryHint: "Client timed out before receiving result; retry the same call."
+    };
+  }
+
+  if (normalizedCode === "E_NO_TAB" || normalizedCode === "E_VERIFY_FAILED") {
+    return {
+      action: "llm_replan",
+      retryable: true,
+      retryHint: "Refresh context (list_tabs/snapshot) and retry with updated target."
+    };
+  }
+
+  return {
+    action: "fail_fast",
+    retryable: false,
+    retryHint: "Retry only when the failure is transient."
+  };
+}
+
+function isRetryableToolErrorCode(toolName: string, code: string): boolean {
+  return classifyToolRetryDecision(toolName, code).retryable;
+}
+
+function shouldAutoReplayToolCall(toolName: string, code: string): boolean {
+  return classifyToolRetryDecision(toolName, code).action === "auto_replay";
 }
 
 function computeToolRetryDelayMs(attempt: number): number {
@@ -298,17 +379,7 @@ function computeToolRetryDelayMs(attempt: number): number {
 }
 
 function buildToolRetryHint(toolName: string, errorCode: string): string {
-  const normalized = normalizeErrorCode(errorCode);
-  if (toolName === "bash" && normalized === "E_TIMEOUT") {
-    return "Increase bash.timeoutMs and retry the same command.";
-  }
-  if (normalized === "E_BUSY") {
-    return "Bridge is busy, retry after a short delay.";
-  }
-  if (normalized === "E_CLIENT_TIMEOUT" || normalized === "E_BRIDGE_DISCONNECTED") {
-    return "Bridge connection was unstable; retry this tool call.";
-  }
-  return "Retry only when the failure is transient.";
+  return classifyToolRetryDecision(toolName, errorCode).retryHint;
 }
 
 function normalizeTabIds(input: unknown[]): number[] {
@@ -334,19 +405,33 @@ function normalizeSessionTitle(value: unknown, fallback = ""): string {
   return `${compact.slice(0, SESSION_TITLE_MAX)}…`;
 }
 
-function deriveSessionTitle(entries: SessionEntry[]): string {
-  const messages = entries.filter((entry) => entry.type === "message");
-  const firstUser = messages.find((entry) => entry.role === "user" && String(entry.text || "").trim());
-  const firstAssistant = messages.find((entry) => entry.role === "assistant" && String(entry.text || "").trim());
+function readSessionTitleSource(meta: SessionMeta | null): string {
+  const metadata = toRecord(meta?.header?.metadata);
+  const source = String(metadata.titleSource || "").trim().toLowerCase();
+  if (source === SESSION_TITLE_SOURCE_MANUAL || source === SESSION_TITLE_SOURCE_AI) {
+    return source;
+  }
+  return "";
+}
 
-  const candidates = [firstUser?.text, firstAssistant?.text]
-    .map((item) => String(item || ""))
-    .map((item) => item.split("\n").find((line) => String(line || "").trim()) || item)
-    .map((item) => item.replace(/^(请(你)?(帮我)?|帮我|请|麻烦你)\s*/u, ""))
-    .map((item) => normalizeSessionTitle(item, ""))
-    .filter((item) => item.length >= SESSION_TITLE_MIN);
-
-  return candidates[0] || "";
+function withSessionTitleMeta(meta: SessionMeta, title: string, source: string): SessionMeta {
+  const metadata = {
+    ...toRecord(meta.header.metadata)
+  };
+  if (source) {
+    metadata.titleSource = source;
+  } else {
+    delete metadata.titleSource;
+  }
+  return {
+    ...meta,
+    header: {
+      ...meta.header,
+      title,
+      metadata
+    },
+    updatedAt: nowIso()
+  };
 }
 
 function parseLlmContent(message: unknown): string {
@@ -487,7 +572,7 @@ function buildToolFailurePayload(toolCall: ToolCallItem, result: JsonRecord): Js
   const args = parseToolCallArgs(rawArgs);
   const target = summarizeToolTarget(toolName, args, rawArgs);
   const errorCode = normalizeErrorCode(result.errorCode);
-  const retryable = result.retryable === true || isRetryableToolErrorCode(errorCode);
+  const retryable = result.retryable === true || isRetryableToolErrorCode(toolName, errorCode);
   return {
     error: String(result.error || "工具执行失败"),
     errorReason: String(result.errorReason || "failed_execute"),
@@ -774,6 +859,65 @@ function computeRetryDelayMs(attempt: number): number {
   return Math.min(cap, next);
 }
 
+function parseRetryAfterHeaderValue(raw: string): number | null {
+  const value = String(raw || "").trim();
+  if (!value) return null;
+  const sec = Number(value);
+  if (Number.isFinite(sec) && sec > 0) return Math.ceil(sec * 1000);
+  const ts = new Date(value).getTime();
+  if (!Number.isFinite(ts)) return null;
+  const delta = ts - Date.now();
+  if (delta <= 0) return null;
+  return Math.ceil(delta);
+}
+
+function extractRetryDelayHintMs(rawBody: string, resp: Response): number | null {
+  const retryAfter = parseRetryAfterHeaderValue(String(resp.headers.get("retry-after") || ""));
+  if (retryAfter !== null) return retryAfter;
+
+  const xRateLimitReset = String(resp.headers.get("x-ratelimit-reset") || "").trim();
+  if (xRateLimitReset) {
+    const sec = Number.parseInt(xRateLimitReset, 10);
+    if (Number.isFinite(sec)) {
+      const delta = sec * 1000 - Date.now();
+      if (delta > 0) return Math.ceil(delta);
+    }
+  }
+
+  const xRateLimitResetAfter = String(resp.headers.get("x-ratelimit-reset-after") || "").trim();
+  if (xRateLimitResetAfter) {
+    const sec = Number(xRateLimitResetAfter);
+    if (Number.isFinite(sec) && sec > 0) return Math.ceil(sec * 1000);
+  }
+
+  const text = String(rawBody || "");
+  const retryDelayField = /"retryDelay"\s*:\s*"([\d.]+)s"/i.exec(text);
+  if (retryDelayField) {
+    const sec = Number(retryDelayField[1]);
+    if (Number.isFinite(sec) && sec > 0) return Math.ceil(sec * 1000);
+  }
+
+  const resetAfter = /reset after (?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s/i.exec(text);
+  if (resetAfter) {
+    const hours = resetAfter[1] ? Number.parseInt(resetAfter[1], 10) : 0;
+    const minutes = resetAfter[2] ? Number.parseInt(resetAfter[2], 10) : 0;
+    const seconds = Number(resetAfter[3]);
+    if (Number.isFinite(seconds) && seconds > 0) {
+      return Math.ceil(((hours * 60 + minutes) * 60 + seconds) * 1000);
+    }
+  }
+
+  const retryIn = /retry in (\d+(?:\.\d+)?)\s*(ms|s)/i.exec(text);
+  if (retryIn) {
+    const amount = Number(retryIn[1]);
+    if (Number.isFinite(amount) && amount > 0) {
+      return Math.ceil(retryIn[2].toLowerCase() === "ms" ? amount : amount * 1000);
+    }
+  }
+
+  return null;
+}
+
 function buildToolResponseEnvelope(type: string, data: unknown, extra: JsonRecord = {}): JsonRecord {
   return {
     type,
@@ -798,7 +942,7 @@ function buildStepFailureEnvelope(
     error: out.error || fallbackError,
     errorCode: errorCode || undefined,
     errorReason: options.errorReason || "failed_execute",
-    retryable: out.retryable === true || defaultRetryable || isRetryableToolErrorCode(errorCode),
+    retryable: out.retryable === true || defaultRetryable || isRetryableToolErrorCode(toolName, errorCode),
     retryHint,
     details: out.errorDetails || null
   };
@@ -868,32 +1012,127 @@ function extractLlmConfig(raw: JsonRecord): BridgeConfig {
     llmApiKey: String(raw.llmApiKey || ""),
     llmModel: String(raw.llmModel || "gpt-5.3-codex"),
     maxSteps: normalizeIntInRange(raw.maxSteps, 100, 1, 500),
+    autoTitleInterval: normalizeIntInRange(raw.autoTitleInterval, 10, 0, 100),
     bridgeInvokeTimeoutMs: normalizeIntInRange(raw.bridgeInvokeTimeoutMs, DEFAULT_BASH_TIMEOUT_MS, 1_000, MAX_BASH_TIMEOUT_MS),
     llmTimeoutMs: normalizeIntInRange(raw.llmTimeoutMs, DEFAULT_LLM_TIMEOUT_MS, MIN_LLM_TIMEOUT_MS, MAX_LLM_TIMEOUT_MS),
     llmRetryMaxAttempts: normalizeIntInRange(raw.llmRetryMaxAttempts, MAX_LLM_RETRIES, 0, 6),
+    llmMaxRetryDelayMs: normalizeIntInRange(
+      raw.llmMaxRetryDelayMs,
+      DEFAULT_LLM_MAX_RETRY_DELAY_MS,
+      MIN_LLM_MAX_RETRY_DELAY_MS,
+      MAX_LLM_MAX_RETRY_DELAY_MS
+    ),
     devAutoReload: raw.devAutoReload !== false,
     devReloadIntervalMs: Number(raw.devReloadIntervalMs || 1500)
   };
 }
 
-async function refreshSessionTitleAuto(orchestrator: BrainOrchestrator, sessionId: string): Promise<void> {
+async function requestSessionTitleFromLlm(input: {
+  llmBase: string;
+  llmKey: string;
+  llmModel: string;
+  llmTimeoutMs: number;
+  messages: { role: string; content: string }[];
+}): Promise<string> {
+  const { llmBase, llmKey, llmModel, llmTimeoutMs, messages } = input;
+  if (!llmBase || !llmKey || messages.length === 0) return "";
+
+  const systemPrompt = "你是一个专业助手。请根据提供的对话内容，生成一个非常简短、精准的标题（不超过 10 个字）。直接返回标题文本，不要包含引号、序号或任何解释。";
+  const userContent = messages
+    .slice(0, 5) // 取前 5 条消息以节省 token 并加速响应
+    .map((m) => `${m.role === "user" ? "用户" : "助手"}: ${clipText(m.content, 200)}`)
+    .join("\n");
+
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort("title-timeout"), Math.min(30_000, llmTimeoutMs));
+    try {
+      const response = await fetch(`${llmBase.replace(/\/+$/, "")}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${llmKey}`
+        },
+        signal: ctrl.signal,
+        body: JSON.stringify({
+          model: llmModel,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: `请总结以下对话的标题：\n\n${userContent}` }
+          ],
+          max_tokens: 30,
+          temperature: 0.3
+        })
+      });
+      if (!response.ok) return "";
+      const contentType = String(response.headers.get("content-type") || "");
+      const rawBody = await response.text();
+      const message = parseLlmMessageFromBody(rawBody, contentType);
+      const title = normalizeSessionTitle(parseLlmContent(message), "").trim();
+      return title
+        .replace(/^[`"'“”‘’《》「」()（）【】\s]+/, "")
+        .replace(/[`"'“”‘’《》「」()（）【】\s]+$/, "")
+        .slice(0, 20);
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (err) {
+    console.error("Failed to request session title:", err);
+    return "";
+  }
+}
+
+async function refreshSessionTitleAuto(
+  orchestrator: BrainOrchestrator,
+  sessionId: string,
+  infra: RuntimeInfraHandler,
+  options: { force?: boolean } = {}
+): Promise<void> {
   const meta = await orchestrator.sessions.getMeta(sessionId);
   if (!meta) return;
   const currentTitle = normalizeSessionTitle(meta.header.title, "");
-  if (currentTitle) return;
-
+  const titleSource = readSessionTitleSource(meta);
+  if (titleSource === SESSION_TITLE_SOURCE_MANUAL && !options.force) {
+    return;
+  }
+  
   const entries = await orchestrator.sessions.getEntries(sessionId);
-  const derived = normalizeSessionTitle(deriveSessionTitle(entries), "");
+  const contextMessages = entries
+    .filter((entry) => entry.type === "message")
+    .map((m: any) => ({ role: String(m.role), content: String(m.text || "") }))
+    .filter((m) => m.content.trim().length > 0);
+
+  const messageCount = contextMessages.length;
+  if (messageCount === 0) return;
+
+  const cfgRaw = await callInfra(infra, { type: "config.get" });
+  const config = extractLlmConfig(cfgRaw);
+  const interval = config.autoTitleInterval;
+
+  // 触发逻辑：
+  // 1. 显式强制刷新 (options.force)
+  // 2. 当前是默认标题 ("新会话")
+  // 3. 消息数量是配置阈值 (interval) 的倍数，进行周期性重命名。如果 interval 为 0 则不自动重命名。
+  const isDefaultTitle =
+    !currentTitle || currentTitle === "新会话" || currentTitle === "新对话";
+  const shouldRefresh = 
+    options.force || 
+    isDefaultTitle || 
+    (interval > 0 && messageCount > 0 && messageCount % interval === 0);
+
+  if (!shouldRefresh) return;
+
+  const derived = await requestSessionTitleFromLlm({
+    llmBase: config.llmApiBase,
+    llmKey: config.llmApiKey,
+    llmModel: config.llmModel,
+    llmTimeoutMs: config.llmTimeoutMs,
+    messages: contextMessages
+  });
+
   if (!derived) return;
 
-  const nextMeta: SessionMeta = {
-    ...meta,
-    header: {
-      ...meta.header,
-      title: derived
-    },
-    updatedAt: nowIso()
-  };
+  const nextMeta: SessionMeta = withSessionTitleMeta(meta, derived, SESSION_TITLE_SOURCE_AI);
   await writeSessionMeta(sessionId, nextMeta);
   orchestrator.events.emit("session_title_auto_updated", sessionId, { title: derived });
 }
@@ -1200,6 +1439,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     frame: JsonRecord,
     autoRetryMax = TOOL_AUTO_RETRY_MAX
   ): Promise<JsonRecord> {
+    const invokeId = String(frame.id || `invoke-${crypto.randomUUID()}`);
+    const frameWithInvokeId: JsonRecord = {
+      ...frame,
+      id: invokeId
+    };
     const totalAttempts = Math.max(1, autoRetryMax + 1);
     let lastFailure: ExecuteStepResult | null = null;
 
@@ -1209,7 +1453,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         mode: "bridge",
         action: "invoke",
         args: {
-          frame
+          frame: frameWithInvokeId
         }
       });
       if (invoke.ok) {
@@ -1221,7 +1465,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
       lastFailure = invoke;
       const code = normalizeErrorCode(invoke.errorCode);
-      const canAutoRetry = attempt < totalAttempts && shouldAutoRetryToolErrorCode(code);
+      const canAutoRetry = attempt < totalAttempts && shouldAutoReplayToolCall(toolName, code);
       if (!canAutoRetry) break;
       await delay(computeToolRetryDelayMs(attempt));
     }
@@ -1237,7 +1481,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       error: failure.error || `${toolName} 执行失败`,
       errorCode: errorCode || undefined,
       errorReason: "failed_execute",
-      retryable: failure.retryable === true || isRetryableToolErrorCode(errorCode),
+      retryable: failure.retryable === true || isRetryableToolErrorCode(toolName, errorCode),
       retryHint: buildToolRetryHint(toolName, errorCode),
       details: failure.errorDetails || null
     };
@@ -1482,7 +1726,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
   }
 
   async function requestLlmWithRetry(input: LlmRequestInput): Promise<JsonRecord> {
-    const { sessionId, llmBase, llmKey, llmModel, llmTimeoutMs, step, messages } = input;
+    const { sessionId, llmBase, llmKey, llmModel, llmTimeoutMs, llmMaxRetryDelayMs, step, messages } = input;
     let lastError: unknown = null;
     const maxAttempts = Math.max(0, Number(orchestrator.getRunState(sessionId).retry.maxAttempts || MAX_LLM_RETRIES));
     const totalAttempts = maxAttempts + 1;
@@ -1528,13 +1772,28 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
         if (!ok) {
           rawBody = await resp.text();
+          const retryDelayHintMs = extractRetryDelayHintMs(rawBody, resp);
           orchestrator.events.emit("llm.response.raw", sessionId, {
             step,
             attempt,
             status,
             ok,
+            retryDelayHintMs,
             body: clipText(rawBody)
           });
+          if (retryDelayHintMs != null && llmMaxRetryDelayMs > 0 && retryDelayHintMs > llmMaxRetryDelayMs) {
+            const exceeded = new Error(
+              `LLM retry delay ${Math.ceil(retryDelayHintMs / 1000)}s exceeds cap ${Math.ceil(llmMaxRetryDelayMs / 1000)}s`
+            ) as RuntimeErrorWithMeta;
+            exceeded.code = "E_LLM_RETRY_DELAY_EXCEEDED";
+            exceeded.status = status;
+            exceeded.details = {
+              retryDelayHintMs,
+              llmMaxRetryDelayMs
+            };
+            exceeded.retryable = false;
+            throw exceeded;
+          }
           const err = new Error(`LLM HTTP ${status}`) as Error & { status?: number };
           err.status = status;
           throw err;
@@ -1590,9 +1849,12 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         return message;
       } catch (error) {
         lastError = error;
-        const err = error as Error & { status?: number };
+        const err = error as RuntimeErrorWithMeta;
         const statusCode = Number(err?.status || status || 0);
-        const retryable = isRetryableLlmStatus(statusCode) || /timeout|network|temporar|unavailable|rate limit/i.test(String(err?.message || ""));
+        const retryable =
+          typeof err.retryable === "boolean"
+            ? err.retryable
+            : isRetryableLlmStatus(statusCode) || /timeout|network|temporar|unavailable|rate limit/i.test(String(err?.message || ""));
         const canRetry = retryable && attempt <= maxAttempts;
         if (!canRetry) {
           const state = orchestrator.getRunState(sessionId);
@@ -1647,6 +1909,12 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const maxLoopSteps = normalizeIntInRange(config.maxSteps, 100, 1, 500);
     const llmTimeoutMs = normalizeIntInRange(config.llmTimeoutMs, DEFAULT_LLM_TIMEOUT_MS, MIN_LLM_TIMEOUT_MS, MAX_LLM_TIMEOUT_MS);
     const llmRetryMaxAttempts = normalizeIntInRange(config.llmRetryMaxAttempts, MAX_LLM_RETRIES, 0, 6);
+    const llmMaxRetryDelayMs = normalizeIntInRange(
+      config.llmMaxRetryDelayMs,
+      DEFAULT_LLM_MAX_RETRY_DELAY_MS,
+      MIN_LLM_MAX_RETRY_DELAY_MS,
+      MAX_LLM_MAX_RETRY_DELAY_MS
+    );
     orchestrator.updateRetryState(sessionId, {
       maxAttempts: llmRetryMaxAttempts
     });
@@ -1686,6 +1954,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     let llmStep = 0;
     let toolStep = 0;
     let finalStatus = "done";
+    const retryableFailureBySignature = new Map<string, number>();
+    let retryableFailureTotal = 0;
 
     try {
       while (llmStep < maxLoopSteps) {
@@ -1710,6 +1980,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           llmKey,
           llmModel,
           llmTimeoutMs,
+          llmMaxRetryDelayMs,
           step: llmStep,
           messages
         });
@@ -1785,6 +2056,48 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               error: String(result.error)
             });
             if (result.retryable === true) {
+              const failureSignature = [
+                String(tc.function.name || "").trim().toLowerCase(),
+                String(failurePayload.errorCode || "").trim().toUpperCase(),
+                String(failurePayload.target || "").trim().toLowerCase()
+              ].join("|");
+              const currentSignatureHits = (retryableFailureBySignature.get(failureSignature) || 0) + 1;
+              retryableFailureBySignature.set(failureSignature, currentSignatureHits);
+              retryableFailureTotal += 1;
+
+              if (currentSignatureHits > TOOL_RETRYABLE_FAILURE_MAX_PER_SIGNATURE) {
+                const circuitMessage = `工具 ${tc.function.name} 在同一目标连续失败，已停止自动重试。`;
+                orchestrator.events.emit("retry_circuit_open", sessionId, {
+                  tool: tc.function.name,
+                  signature: failureSignature,
+                  hits: currentSignatureHits,
+                  maxPerSignature: TOOL_RETRYABLE_FAILURE_MAX_PER_SIGNATURE,
+                  total: retryableFailureTotal
+                });
+                await orchestrator.sessions.appendMessage({
+                  sessionId,
+                  role: "assistant",
+                  text: circuitMessage
+                });
+                finalStatus = result.errorReason === "failed_verify" ? "failed_verify" : "failed_execute";
+                throw new Error(circuitMessage);
+              }
+
+              if (retryableFailureTotal > TOOL_RETRYABLE_FAILURE_MAX_TOTAL) {
+                const budgetMessage = "可恢复失败次数已超出预算，已停止自动重试并结束本轮。";
+                orchestrator.events.emit("retry_budget_exhausted", sessionId, {
+                  total: retryableFailureTotal,
+                  maxTotal: TOOL_RETRYABLE_FAILURE_MAX_TOTAL
+                });
+                await orchestrator.sessions.appendMessage({
+                  sessionId,
+                  role: "assistant",
+                  text: budgetMessage
+                });
+                finalStatus = result.errorReason === "failed_verify" ? "failed_verify" : "failed_execute";
+                throw new Error(budgetMessage);
+              }
+
               shouldContinueAfterToolFailure = true;
               break;
             }
@@ -1851,7 +2164,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       });
     } finally {
       try {
-        await refreshSessionTitleAuto(orchestrator, sessionId);
+        await refreshSessionTitleAuto(orchestrator, sessionId, infra);
       } catch (titleError) {
         orchestrator.events.emit("session_title_auto_update_failed", sessionId, {
           error: titleError instanceof Error ? titleError.message : String(titleError)
@@ -2001,6 +2314,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
   return {
     startFromPrompt,
     startFromRegenerate,
-    executeStep
+    executeStep,
+    async refreshSessionTitle(sessionId: string, options: { force?: boolean } = {}): Promise<string> {
+      await refreshSessionTitleAuto(orchestrator, sessionId, infra, options);
+      const meta = await orchestrator.sessions.getMeta(sessionId);
+      return normalizeSessionTitle(meta?.header.title, "");
+    }
   };
 }

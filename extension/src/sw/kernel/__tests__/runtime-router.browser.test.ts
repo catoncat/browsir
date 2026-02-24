@@ -319,7 +319,8 @@ describe("runtime-router.browser", () => {
         llmModel: "gpt-test",
         bridgeInvokeTimeoutMs: 180000,
         llmTimeoutMs: 160000,
-        llmRetryMaxAttempts: 3
+        llmRetryMaxAttempts: 3,
+        llmMaxRetryDelayMs: 45000
       }
     });
     expect(saved.ok).toBe(true);
@@ -347,6 +348,23 @@ describe("runtime-router.browser", () => {
     const refreshedData = (refreshed.data || {}) as Record<string, unknown>;
     expect(String(refreshedData.title || "").length).toBeGreaterThan(0);
 
+    const renamed = await invokeRuntime({
+      type: "brain.session.title.refresh",
+      sessionId,
+      title: "我自定义的标题"
+    });
+    expect(renamed.ok).toBe(true);
+    const renamedData = (renamed.data || {}) as Record<string, unknown>;
+    expect(String(renamedData.title || "")).toBe("我自定义的标题");
+
+    const refreshedAfterRename = await invokeRuntime({
+      type: "brain.session.title.refresh",
+      sessionId
+    });
+    expect(refreshedAfterRename.ok).toBe(true);
+    const refreshedAfterRenameData = (refreshedAfterRename.data || {}) as Record<string, unknown>;
+    expect(String(refreshedAfterRenameData.title || "")).toBe("我自定义的标题");
+
     const debugCfg = await invokeRuntime({
       type: "brain.debug.config"
     });
@@ -357,6 +375,7 @@ describe("runtime-router.browser", () => {
     expect(debugCfgData.bridgeInvokeTimeoutMs).toBe(180000);
     expect(debugCfgData.llmTimeoutMs).toBe(160000);
     expect(debugCfgData.llmRetryMaxAttempts).toBe(3);
+    expect(debugCfgData.llmMaxRetryDelayMs).toBe(45000);
 
     const dumped = await invokeRuntime({
       type: "brain.debug.dump",

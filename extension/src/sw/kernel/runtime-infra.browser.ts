@@ -8,6 +8,8 @@ const DEFAULT_LLM_TIMEOUT_MS = 120_000;
 const MAX_LLM_TIMEOUT_MS = 300_000;
 const DEFAULT_LLM_RETRY_MAX_ATTEMPTS = 2;
 const MAX_LLM_RETRY_MAX_ATTEMPTS = 6;
+const DEFAULT_LLM_MAX_RETRY_DELAY_MS = 60_000;
+const MAX_LLM_MAX_RETRY_DELAY_MS = 300_000;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -18,9 +20,11 @@ export interface BridgeConfig {
   llmApiKey: string;
   llmModel: string;
   maxSteps: number;
+  autoTitleInterval: number;
   bridgeInvokeTimeoutMs: number;
   llmTimeoutMs: number;
   llmRetryMaxAttempts: number;
+  llmMaxRetryDelayMs: number;
   devAutoReload: boolean;
   devReloadIntervalMs: number;
 }
@@ -361,9 +365,11 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       "llmApiKey",
       "llmModel",
       "maxSteps",
+      "autoTitleInterval",
       "bridgeInvokeTimeoutMs",
       "llmTimeoutMs",
       "llmRetryMaxAttempts",
+      "llmMaxRetryDelayMs",
       "devAutoReload",
       "devReloadIntervalMs"
     ]);
@@ -374,6 +380,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       llmApiKey: String(data.llmApiKey || ""),
       llmModel: String(data.llmModel || "gpt-5.3-codex"),
       maxSteps: toIntInRange(data.maxSteps, 100, 1, 500),
+      autoTitleInterval: toIntInRange(data.autoTitleInterval, 10, 0, 100),
       bridgeInvokeTimeoutMs: toIntInRange(
         data.bridgeInvokeTimeoutMs,
         DEFAULT_BRIDGE_INVOKE_TIMEOUT_MS,
@@ -386,6 +393,12 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         DEFAULT_LLM_RETRY_MAX_ATTEMPTS,
         0,
         MAX_LLM_RETRY_MAX_ATTEMPTS
+      ),
+      llmMaxRetryDelayMs: toIntInRange(
+        data.llmMaxRetryDelayMs,
+        DEFAULT_LLM_MAX_RETRY_DELAY_MS,
+        0,
+        MAX_LLM_MAX_RETRY_DELAY_MS
       ),
       devAutoReload: data.devAutoReload !== false,
       devReloadIntervalMs: Number.isFinite(Number(data.devReloadIntervalMs)) ? Number(data.devReloadIntervalMs) : 1500
@@ -403,6 +416,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       llmApiKey: String(source.llmApiKey ?? current.llmApiKey ?? ""),
       llmModel: String(source.llmModel || current.llmModel || "gpt-5.3-codex").trim(),
       maxSteps: toIntInRange(source.maxSteps, current.maxSteps || 100, 1, 500),
+      autoTitleInterval: toIntInRange(source.autoTitleInterval, current.autoTitleInterval ?? 10, 0, 100),
       bridgeInvokeTimeoutMs: toIntInRange(
         source.bridgeInvokeTimeoutMs,
         current.bridgeInvokeTimeoutMs || DEFAULT_BRIDGE_INVOKE_TIMEOUT_MS,
@@ -415,6 +429,12 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         current.llmRetryMaxAttempts || DEFAULT_LLM_RETRY_MAX_ATTEMPTS,
         0,
         MAX_LLM_RETRY_MAX_ATTEMPTS
+      ),
+      llmMaxRetryDelayMs: toIntInRange(
+        source.llmMaxRetryDelayMs,
+        current.llmMaxRetryDelayMs || DEFAULT_LLM_MAX_RETRY_DELAY_MS,
+        0,
+        MAX_LLM_MAX_RETRY_DELAY_MS
       ),
       devAutoReload: source.devAutoReload === undefined ? current.devAutoReload : source.devAutoReload !== false,
       devReloadIntervalMs: Math.max(500, Number(source.devReloadIntervalMs || current.devReloadIntervalMs || 1500))
