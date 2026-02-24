@@ -49,11 +49,14 @@ describe("plugin-runtime.browser", () => {
   });
 
   it("支持插件 enable/disable 生命周期", async () => {
-    const orchestrator = new BrainOrchestrator(
-      {},
+    const orchestrator = new BrainOrchestrator();
+    orchestrator.registerToolProvider(
+      "script",
       {
-        script: async () => ({ source: "script" })
-      }
+        id: "test.plugin.lifecycle.script",
+        invoke: async () => ({ source: "script" })
+      },
+      { replace: true }
     );
     const { sessionId } = await orchestrator.createSession({ title: "plugin-lifecycle" });
 
@@ -268,11 +271,14 @@ describe("plugin-runtime.browser", () => {
   });
 
   it("hook id 同名时，禁用单个插件不会误删其他插件 hook", async () => {
-    const orchestrator = new BrainOrchestrator(
-      {},
+    const orchestrator = new BrainOrchestrator();
+    orchestrator.registerToolProvider(
+      "script",
       {
-        script: async () => ({ source: "script" })
-      }
+        id: "test.plugin.hook.scope.script",
+        invoke: async () => ({ source: "script" })
+      },
+      { replace: true }
     );
     const { sessionId } = await orchestrator.createSession({ title: "plugin-hook-id-scope" });
 
@@ -424,11 +430,14 @@ describe("plugin-runtime.browser", () => {
   });
 
   it("tool.after_result 多 handler 可以链式 patch", async () => {
-    const orchestrator = new BrainOrchestrator(
-      {},
+    const orchestrator = new BrainOrchestrator();
+    orchestrator.registerToolProvider(
+      "script",
       {
-        script: async () => ({ chain: ["base"] })
-      }
+        id: "test.plugin.chain.patch.script",
+        invoke: async () => ({ chain: ["base"] })
+      },
+      { replace: true }
     );
     const { sessionId } = await orchestrator.createSession({ title: "plugin-chain-patch" });
 
@@ -488,14 +497,17 @@ describe("plugin-runtime.browser", () => {
 
   it("hook 异常/超时 fail-open，但 block 仍能阻断执行", async () => {
     let invoked = 0;
-    const orchestrator = new BrainOrchestrator(
-      {},
+    const orchestrator = new BrainOrchestrator();
+    orchestrator.registerToolProvider(
+      "script",
       {
-        script: async () => {
+        id: "test.plugin.fail-open.script",
+        invoke: async () => {
           invoked += 1;
           return { source: "script" };
         }
-      }
+      },
+      { replace: true }
     );
     const { sessionId } = await orchestrator.createSession({ title: "plugin-fail-open-block" });
 

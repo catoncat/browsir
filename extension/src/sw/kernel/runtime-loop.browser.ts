@@ -1158,8 +1158,34 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
 
     if (normalizedCapability && orchestrator.hasCapabilityProvider(normalizedCapability)) {
-      const capabilityMode =
-        normalizedMode || orchestrator.resolveModeForCapability(normalizedCapability) || capabilityPolicy.fallbackMode || "bridge";
+      const capabilityMode = normalizedMode || orchestrator.resolveModeForCapability(normalizedCapability);
+      if (!capabilityMode) {
+        const result: ExecuteStepResult = {
+          ok: false,
+          modeUsed: "bridge",
+          capabilityUsed: normalizedCapability,
+          verified: false,
+          error: `capability provider 已注册但缺少 mode: ${normalizedCapability}`,
+          errorCode: "E_RUNTIME_NOT_READY",
+          retryable: true
+        };
+        orchestrator.events.emit("step_execute", sessionId, {
+          mode: "bridge",
+          capability: normalizedCapability,
+          action: normalizedAction
+        });
+        orchestrator.events.emit("step_execute_result", sessionId, {
+          ok: result.ok,
+          modeUsed: result.modeUsed,
+          capabilityUsed: result.capabilityUsed || "",
+          verifyReason: result.verifyReason || "",
+          verified: result.verified,
+          error: result.error || "",
+          errorCode: result.errorCode || "",
+          retryable: result.retryable === true
+        });
+        return result;
+      }
       orchestrator.events.emit("step_execute", sessionId, {
         mode: capabilityMode,
         capability: normalizedCapability,
@@ -1216,14 +1242,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       return result;
     }
 
-    const executionMode = normalizedMode || capabilityPolicy.fallbackMode;
+    const executionMode = normalizedMode;
     if (!executionMode) {
       return {
         ok: false,
         modeUsed: "bridge",
         verified: false,
         error: normalizedCapability
-          ? `capability provider 未注册且缺少 mode fallback: ${normalizedCapability}`
+          ? `capability provider 未注册或未就绪: ${normalizedCapability}`
           : "mode 必须是 script/cdp/bridge"
       };
     }
@@ -1326,7 +1352,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     };
 
     let modeUsed: ExecuteMode = executionMode;
-    let fallbackFrom: ExecuteMode | undefined;
+    const fallbackFrom: ExecuteMode | undefined = undefined;
     let data: unknown;
     let preObserve: unknown = null;
     const verifyEnabled = shouldVerifyStep(String(actionPayload.kind || normalizedAction), effectiveVerifyPolicy);
@@ -1342,60 +1368,27 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       data = await runMode(executionMode);
     } catch (error) {
       const runtimeError = asRuntimeErrorWithMeta(error);
-      if (executionMode !== "script" || capabilityPolicy.allowScriptFallback === false) {
-        const result: ExecuteStepResult = {
-          ok: false,
-          modeUsed,
-          capabilityUsed: normalizedCapability,
-          verified: false,
-          error: runtimeError.message,
-          errorCode: normalizeErrorCode(runtimeError.code),
-          errorDetails: runtimeError.details,
-          retryable: runtimeError.retryable
-        };
-        orchestrator.events.emit("step_execute_result", sessionId, {
-          ok: result.ok,
-          modeUsed: result.modeUsed,
-          capabilityUsed: result.capabilityUsed || "",
-          verifyReason: result.verifyReason || "",
-          verified: result.verified,
-          error: result.error || "",
-          errorCode: result.errorCode || "",
-          retryable: result.retryable === true
-        });
-        return result;
-      }
-
-      fallbackFrom = "script";
-      modeUsed = "cdp";
-      try {
-        data = await runMode("cdp");
-      } catch (fallbackError) {
-        const runtimeFallbackError = asRuntimeErrorWithMeta(fallbackError);
-        const result: ExecuteStepResult = {
-          ok: false,
-          modeUsed,
-          capabilityUsed: normalizedCapability,
-          fallbackFrom,
-          verified: false,
-          error: runtimeFallbackError.message,
-          errorCode: normalizeErrorCode(runtimeFallbackError.code),
-          errorDetails: runtimeFallbackError.details,
-          retryable: runtimeFallbackError.retryable
-        };
-        orchestrator.events.emit("step_execute_result", sessionId, {
-          ok: result.ok,
-          modeUsed: result.modeUsed,
-          capabilityUsed: result.capabilityUsed || "",
-          fallbackFrom: result.fallbackFrom || "",
-          verifyReason: result.verifyReason || "",
-          verified: result.verified,
-          error: result.error || "",
-          errorCode: result.errorCode || "",
-          retryable: result.retryable === true
-        });
-        return result;
-      }
+      const result: ExecuteStepResult = {
+        ok: false,
+        modeUsed,
+        capabilityUsed: normalizedCapability,
+        verified: false,
+        error: runtimeError.message,
+        errorCode: normalizeErrorCode(runtimeError.code),
+        errorDetails: runtimeError.details,
+        retryable: runtimeError.retryable
+      };
+      orchestrator.events.emit("step_execute_result", sessionId, {
+        ok: result.ok,
+        modeUsed: result.modeUsed,
+        capabilityUsed: result.capabilityUsed || "",
+        verifyReason: result.verifyReason || "",
+        verified: result.verified,
+        error: result.error || "",
+        errorCode: result.errorCode || "",
+        retryable: result.retryable === true
+      });
+      return result;
     }
 
     let verified = false;
