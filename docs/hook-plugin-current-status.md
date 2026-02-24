@@ -24,6 +24,7 @@
 12. `bash/read/write/edit` 已改为 capability-first 调度（不再强绑 `mode=bridge`），并补内置低优先级 bridge capability provider：`extension/src/sw/kernel/runtime-loop.browser.ts`。
 13. `runtime-loop` 已去掉 `script -> cdp` 自动 fallback，执行失败直接返回错误，避免隐式降级掩盖问题。
 14. `snapshot/browser_action/browser_verify` 已补内置 capability provider（`cdp`），tool_call 默认走 capability-first 路由，可被插件 provider 覆盖。
+15. `executeToolCall` 已重构为 `resolve -> buildPlan -> dispatch` 三段，外部契约（错误码/文案/回包结构）保持不变。
 
 ## 部分完成（仍有兼容层）
 

@@ -1760,7 +1760,69 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     };
   }
 
-  async function executeToolCall(sessionId: string, toolCall: ToolCallItem): Promise<JsonRecord> {
+  interface ResolvedToolCallContext {
+    requestedTool: string;
+    resolvedTool: string;
+    executionTool: string;
+    args: JsonRecord;
+  }
+
+  type ToolPlan =
+    | {
+        kind: "bridge";
+        toolName: "bash" | "read_file" | "write_file" | "edit_file";
+        capability: ExecuteCapability;
+        frame: JsonRecord;
+      }
+    | {
+        kind: "local.list_tabs";
+      }
+    | {
+        kind: "local.open_tab";
+        args: JsonRecord;
+      }
+    | {
+        kind: "step.snapshot";
+        capability: ExecuteCapability;
+        tabId: number;
+        options: JsonRecord;
+      }
+    | {
+        kind: "step.browser_action";
+        capability: ExecuteCapability;
+        tabId: number;
+        kindValue: string;
+        action: JsonRecord;
+        expect: unknown;
+      }
+    | {
+        kind: "step.browser_verify";
+        capability: ExecuteCapability;
+        tabId: number;
+        verifyExpect: JsonRecord;
+      };
+
+  function buildUnsupportedToolError(input: {
+    requestedTool: string;
+    resolvedTool: string;
+    hasContract: boolean;
+  }): JsonRecord {
+    const unsupported = input.hasContract;
+    return {
+      error: unsupported
+        ? `工具已注册但当前 runtime 不支持执行: ${input.requestedTool}`
+        : `未知工具: ${input.requestedTool}`,
+      errorCode: unsupported ? "E_TOOL_UNSUPPORTED" : "E_TOOL",
+      details: {
+        requestedTool: input.requestedTool,
+        resolvedTool: input.resolvedTool,
+        canonicalTool: input.resolvedTool || null,
+        supportedTools: Array.from(RUNTIME_EXECUTABLE_TOOL_NAMES)
+      }
+    };
+  }
+
+  function resolveToolCallContext(toolCall: ToolCallItem): { ok: true; value: ResolvedToolCallContext } | { ok: false; error: JsonRecord } {
     const requestedTool = String(toolCall.function.name || "").trim();
     const argsRaw = String(toolCall.function.arguments || "").trim();
     let args: JsonRecord = {};
@@ -1768,112 +1830,158 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       try {
         args = toRecord(JSON.parse(argsRaw));
       } catch (error) {
-        return { error: `参数解析失败: ${error instanceof Error ? error.message : String(error)}` };
+        return {
+          ok: false,
+          error: { error: `参数解析失败: ${error instanceof Error ? error.message : String(error)}` }
+        };
       }
     }
+
     const contract = orchestrator.resolveToolContract(requestedTool);
     const resolvedTool = String(contract?.name || requestedTool).trim();
     const executionTool = RUNTIME_EXECUTABLE_TOOL_NAMES.has(resolvedTool) ? resolvedTool : "";
+    if (!executionTool) {
+      return {
+        ok: false,
+        error: buildUnsupportedToolError({
+          requestedTool,
+          resolvedTool,
+          hasContract: Boolean(contract)
+        })
+      };
+    }
 
-    const handlers: Record<string, () => Promise<JsonRecord>> = {
-      bash: async () => {
+    return {
+      ok: true,
+      value: {
+        requestedTool,
+        resolvedTool,
+        executionTool,
+        args
+      }
+    };
+  }
+
+  async function buildToolPlan(context: ResolvedToolCallContext): Promise<{ ok: true; plan: ToolPlan } | { ok: false; error: JsonRecord }> {
+    const args = context.args;
+    switch (context.executionTool) {
+      case "bash": {
         const command = String(args.command || "").trim();
-        if (!command) return { error: "bash 需要 command" };
-        const capability = TOOL_CAPABILITIES.bash;
+        if (!command) return { ok: false, error: { error: "bash 需要 command" } };
         const timeoutMs =
           args.timeoutMs == null
             ? undefined
             : normalizeIntInRange(args.timeoutMs, DEFAULT_BASH_TIMEOUT_MS, MIN_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS);
-        return await invokeBridgeFrameWithRetry(sessionId, "bash", {
-          tool: "bash",
-          args: {
-            cmdId: "bash.exec",
-            args: [command],
-            ...(timeoutMs == null ? {} : { timeoutMs })
+        return {
+          ok: true,
+          plan: {
+            kind: "bridge",
+            toolName: "bash",
+            capability: TOOL_CAPABILITIES.bash,
+            frame: {
+              tool: "bash",
+              args: {
+                cmdId: "bash.exec",
+                args: [command],
+                ...(timeoutMs == null ? {} : { timeoutMs })
+              }
+            }
           }
-        }, capability);
-      },
-      read_file: async () => {
+        };
+      }
+      case "read_file": {
         const path = String(args.path || "").trim();
-        if (!path) return { error: "read_file 需要 path" };
-        const capability = TOOL_CAPABILITIES.read_file;
+        if (!path) return { ok: false, error: { error: "read_file 需要 path" } };
         const invokeArgs: JsonRecord = { path };
         if (args.offset != null) invokeArgs.offset = args.offset;
         if (args.limit != null) invokeArgs.limit = args.limit;
-        return await invokeBridgeFrameWithRetry(sessionId, "read_file", {
-          tool: "read",
-          args: invokeArgs
-        }, capability);
-      },
-      write_file: async () => {
-        const path = String(args.path || "").trim();
-        if (!path) return { error: "write_file 需要 path" };
-        const capability = TOOL_CAPABILITIES.write_file;
-        return await invokeBridgeFrameWithRetry(sessionId, "write_file", {
-          tool: "write",
-          args: {
-            path,
-            content: String(args.content || ""),
-            mode: String(args.mode || "overwrite")
+        return {
+          ok: true,
+          plan: {
+            kind: "bridge",
+            toolName: "read_file",
+            capability: TOOL_CAPABILITIES.read_file,
+            frame: {
+              tool: "read",
+              args: invokeArgs
+            }
           }
-        }, capability);
-      },
-      edit_file: async () => {
+        };
+      }
+      case "write_file": {
         const path = String(args.path || "").trim();
-        if (!path) return { error: "edit_file 需要 path" };
-        const capability = TOOL_CAPABILITIES.edit_file;
-        return await invokeBridgeFrameWithRetry(sessionId, "edit_file", {
-          tool: "edit",
-          args: {
-            path,
-            edits: Array.isArray(args.edits) ? args.edits : []
+        if (!path) return { ok: false, error: { error: "write_file 需要 path" } };
+        return {
+          ok: true,
+          plan: {
+            kind: "bridge",
+            toolName: "write_file",
+            capability: TOOL_CAPABILITIES.write_file,
+            frame: {
+              tool: "write",
+              args: {
+                path,
+                content: String(args.content || ""),
+                mode: String(args.mode || "overwrite")
+              }
+            }
           }
-        }, capability);
-      },
-      list_tabs: async () => {
-        const tabs = await queryAllTabsForRuntime();
-        const activeTabId = await getActiveTabIdForRuntime();
-        return buildToolResponseEnvelope("tabs", {
-          count: tabs.length,
-          activeTabId,
-          tabs
-        });
-      },
-      open_tab: async () => {
+        };
+      }
+      case "edit_file": {
+        const path = String(args.path || "").trim();
+        if (!path) return { ok: false, error: { error: "edit_file 需要 path" } };
+        return {
+          ok: true,
+          plan: {
+            kind: "bridge",
+            toolName: "edit_file",
+            capability: TOOL_CAPABILITIES.edit_file,
+            frame: {
+              tool: "edit",
+              args: {
+                path,
+                edits: Array.isArray(args.edits) ? args.edits : []
+              }
+            }
+          }
+        };
+      }
+      case "list_tabs":
+        return { ok: true, plan: { kind: "local.list_tabs" } };
+      case "open_tab": {
         const rawUrl = String(args.url || "").trim();
-        if (!rawUrl) return { error: "open_tab 需要 url" };
-        const created = await chrome.tabs.create({
-          url: rawUrl,
-          active: args.active !== false
-        });
-        return buildToolResponseEnvelope("tabs", {
-          opened: true,
-          tab: {
-            id: created?.id || null,
-            windowId: created?.windowId || null,
-            active: created?.active === true,
-            title: created?.title || "",
-            url: created?.url || created?.pendingUrl || ""
+        if (!rawUrl) return { ok: false, error: { error: "open_tab 需要 url" } };
+        return {
+          ok: true,
+          plan: {
+            kind: "local.open_tab",
+            args: {
+              url: rawUrl,
+              active: args.active
+            }
           }
-        });
-      },
-      snapshot: async () => {
+        };
+      }
+      case "snapshot": {
         const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
         if (!tabId) {
           return {
-            error: "snapshot 需要 tabId，当前无可用 tab",
-            errorCode: "E_NO_TAB",
-            errorReason: "failed_execute",
-            retryable: true,
-            retryHint: "Call list_tabs and then retry snapshot with a valid tabId."
+            ok: false,
+            error: {
+              error: "snapshot 需要 tabId，当前无可用 tab",
+              errorCode: "E_NO_TAB",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint: "Call list_tabs and then retry snapshot with a valid tabId."
+            }
           };
         }
-        const capability = TOOL_CAPABILITIES.snapshot;
-        const out = await executeStep({
-          sessionId,
-          capability,
-          action: "snapshot",
-          args: {
+        return {
+          ok: true,
+          plan: {
+            kind: "step.snapshot",
+            capability: TOOL_CAPABILITIES.snapshot,
             tabId,
             options: {
               mode: args.mode || "interactive",
@@ -1885,6 +1993,117 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               depth: args.depth,
               noAnimations: args.noAnimations === true
             }
+          }
+        };
+      }
+      case "browser_action": {
+        const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
+        if (!tabId) {
+          return {
+            ok: false,
+            error: {
+              error: "browser_action 需要 tabId，当前无可用 tab",
+              errorCode: "E_NO_TAB",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint: "Call list_tabs and retry browser_action with a valid tabId."
+            }
+          };
+        }
+        const kindValue = String(args.kind || "").trim().toLowerCase();
+        return {
+          ok: true,
+          plan: {
+            kind: "step.browser_action",
+            capability: TOOL_CAPABILITIES.browser_action,
+            tabId,
+            kindValue,
+            action: {
+              kind: kindValue,
+              ref: args.ref,
+              selector: args.selector,
+              key: args.key || (kindValue === "press" ? args.value : undefined),
+              value: args.value,
+              url: args.url || (kindValue === "navigate" ? args.value : undefined),
+              expect: args.expect
+            },
+            expect: args.expect
+          }
+        };
+      }
+      case "browser_verify": {
+        const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
+        if (!tabId) {
+          return {
+            ok: false,
+            error: {
+              error: "browser_verify 需要 tabId，当前无可用 tab",
+              errorCode: "E_NO_TAB",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint: "Call list_tabs and retry browser_verify with a valid tabId."
+            }
+          };
+        }
+        return {
+          ok: true,
+          plan: {
+            kind: "step.browser_verify",
+            capability: TOOL_CAPABILITIES.browser_verify,
+            tabId,
+            verifyExpect: normalizeVerifyExpect(args.expect || args) || {}
+          }
+        };
+      }
+      default:
+        return {
+          ok: false,
+          error: buildUnsupportedToolError({
+            requestedTool: context.requestedTool,
+            resolvedTool: context.resolvedTool,
+            hasContract: true
+          })
+        };
+    }
+  }
+
+  async function dispatchToolPlan(sessionId: string, plan: ToolPlan): Promise<JsonRecord> {
+    switch (plan.kind) {
+      case "bridge":
+        return await invokeBridgeFrameWithRetry(sessionId, plan.toolName, plan.frame, plan.capability);
+      case "local.list_tabs": {
+        const tabs = await queryAllTabsForRuntime();
+        const activeTabId = await getActiveTabIdForRuntime();
+        return buildToolResponseEnvelope("tabs", {
+          count: tabs.length,
+          activeTabId,
+          tabs
+        });
+      }
+      case "local.open_tab": {
+        const created = await chrome.tabs.create({
+          url: String(plan.args.url || ""),
+          active: plan.args.active !== false
+        });
+        return buildToolResponseEnvelope("tabs", {
+          opened: true,
+          tab: {
+            id: created?.id || null,
+            windowId: created?.windowId || null,
+            active: created?.active === true,
+            title: created?.title || "",
+            url: created?.url || created?.pendingUrl || ""
+          }
+        });
+      }
+      case "step.snapshot": {
+        const out = await executeStep({
+          sessionId,
+          capability: plan.capability,
+          action: "snapshot",
+          args: {
+            tabId: plan.tabId,
+            options: plan.options
           }
         });
         if (!out.ok) {
@@ -1898,43 +2117,21 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         }
         const snapshotData = toRecord(out.data);
         return buildToolResponseEnvelope("snapshot", out.data, {
-          capabilityUsed: out.capabilityUsed || capability,
+          capabilityUsed: out.capabilityUsed || plan.capability,
           modeUsed: out.modeUsed,
           verified: typeof snapshotData.verified === "boolean" ? snapshotData.verified : out.verified,
           verifyReason: String(snapshotData.verifyReason || out.verifyReason || "")
         });
-      },
-      browser_action: async () => {
-        const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
-        if (!tabId) {
-          return {
-            error: "browser_action 需要 tabId，当前无可用 tab",
-            errorCode: "E_NO_TAB",
-            errorReason: "failed_execute",
-            retryable: true,
-            retryHint: "Call list_tabs and retry browser_action with a valid tabId."
-          };
-        }
-        const capability = TOOL_CAPABILITIES.browser_action;
-        const kind = String(args.kind || "")
-          .trim()
-          .toLowerCase();
+      }
+      case "step.browser_action": {
         const out = await executeStep({
           sessionId,
-          capability,
+          capability: plan.capability,
           action: "action",
           args: {
-            tabId,
-            action: {
-              kind,
-              ref: args.ref,
-              selector: args.selector,
-              key: args.key || (kind === "press" ? args.value : undefined),
-              value: args.value,
-              url: args.url || (kind === "navigate" ? args.value : undefined),
-              expect: args.expect
-            },
-            expect: args.expect
+            tabId: plan.tabId,
+            action: plan.action,
+            expect: plan.expect
           }
         });
         if (!out.ok) {
@@ -1947,12 +2144,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           );
         }
         const providerAction = toRecord(out.data);
-        const verified =
-          typeof providerAction.verified === "boolean" ? providerAction.verified : out.verified;
+        const verified = typeof providerAction.verified === "boolean" ? providerAction.verified : out.verified;
         const verifyReason = String(providerAction.verifyReason || out.verifyReason || "");
         const actionData = providerAction.data !== undefined ? providerAction.data : out.data;
-        const explicitExpect = normalizeVerifyExpect(args.expect || null);
-        const hardFail = !!explicitExpect || kind === "navigate";
+        const explicitExpect = normalizeVerifyExpect(plan.expect || null);
+        const hardFail = !!explicitExpect || plan.kindValue === "navigate";
         if (!verified && hardFail) {
           return {
             error: "browser_action 执行成功但未通过验证",
@@ -1967,32 +2163,21 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           };
         }
         return buildToolResponseEnvelope("cdp_action", actionData, {
-          capabilityUsed: out.capabilityUsed || capability,
+          capabilityUsed: out.capabilityUsed || plan.capability,
           modeUsed: out.modeUsed,
           verifyReason,
           verified
         });
-      },
-      browser_verify: async () => {
-        const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
-        if (!tabId) {
-          return {
-            error: "browser_verify 需要 tabId，当前无可用 tab",
-            errorCode: "E_NO_TAB",
-            errorReason: "failed_execute",
-            retryable: true,
-            retryHint: "Call list_tabs and retry browser_verify with a valid tabId."
-          };
-        }
-        const capability = TOOL_CAPABILITIES.browser_verify;
+      }
+      case "step.browser_verify": {
         const out = await executeStep({
           sessionId,
-          capability,
+          capability: plan.capability,
           action: "verify",
           args: {
-            tabId,
+            tabId: plan.tabId,
             action: {
-              expect: normalizeVerifyExpect(args.expect || args) || {}
+              expect: plan.verifyExpect
             }
           },
           verifyPolicy: "off"
@@ -2007,8 +2192,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           );
         }
         const providerVerify = toRecord(out.data);
-        const verified =
-          typeof providerVerify.verified === "boolean" ? providerVerify.verified : out.verified;
+        const verified = typeof providerVerify.verified === "boolean" ? providerVerify.verified : out.verified;
         const verifyData = providerVerify.data !== undefined ? providerVerify.data : out.data;
         if (!verified) {
           return {
@@ -2021,27 +2205,21 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           };
         }
         return buildToolResponseEnvelope("cdp", verifyData, {
-          capabilityUsed: out.capabilityUsed || capability,
+          capabilityUsed: out.capabilityUsed || plan.capability,
           modeUsed: out.modeUsed
         });
-      },
-    };
-
-    const resolvedHandler = executionTool ? handlers[executionTool] : undefined;
-    if (resolvedHandler) {
-      return await resolvedHandler();
-    }
-    const unsupported = Boolean(contract) && !executionTool;
-    return {
-      error: unsupported ? `工具已注册但当前 runtime 不支持执行: ${requestedTool}` : `未知工具: ${requestedTool}`,
-      errorCode: unsupported ? "E_TOOL_UNSUPPORTED" : "E_TOOL",
-      details: {
-        requestedTool,
-        resolvedTool,
-        canonicalTool: resolvedTool || null,
-        supportedTools: Array.from(RUNTIME_EXECUTABLE_TOOL_NAMES)
       }
-    };
+      default:
+        return { error: "未知工具执行计划", errorCode: "E_TOOL_PLAN" };
+    }
+  }
+
+  async function executeToolCall(sessionId: string, toolCall: ToolCallItem): Promise<JsonRecord> {
+    const resolved = resolveToolCallContext(toolCall);
+    if (!resolved.ok) return resolved.error;
+    const planResult = await buildToolPlan(resolved.value);
+    if (!planResult.ok) return planResult.error;
+    return await dispatchToolPlan(sessionId, planResult.plan);
   }
 
   async function requestLlmWithRetry(input: LlmRequestInput): Promise<JsonRecord> {
