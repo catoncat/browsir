@@ -100,6 +100,25 @@ const TOOL_CAPABILITIES = {
   browser_verify: "browser.verify"
 } as const;
 
+const BUILTIN_BRIDGE_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [
+  {
+    capability: TOOL_CAPABILITIES.bash,
+    providerId: "runtime.builtin.capability.process.exec.bridge"
+  },
+  {
+    capability: TOOL_CAPABILITIES.read_file,
+    providerId: "runtime.builtin.capability.fs.read.bridge"
+  },
+  {
+    capability: TOOL_CAPABILITIES.write_file,
+    providerId: "runtime.builtin.capability.fs.write.bridge"
+  },
+  {
+    capability: TOOL_CAPABILITIES.edit_file,
+    providerId: "runtime.builtin.capability.fs.edit.bridge"
+  }
+];
+
 const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
   "bash",
   "read_file",
@@ -1052,61 +1071,55 @@ async function refreshSessionTitleAuto(
 }
 
 export function createRuntimeLoopController(orchestrator: BrainOrchestrator, infra: RuntimeInfraHandler): RuntimeLoopController {
-  async function getSessionPrimaryTabId(sessionId: string): Promise<number | null> {
-    const meta = await orchestrator.sessions.getMeta(sessionId);
-    if (!meta) return null;
-    const header = toRecord(meta.header);
-    const metadata = toRecord(header.metadata);
-    return parsePositiveInt(metadata.primaryTabId);
-  }
-
-  async function setSessionPrimaryTabId(
-    sessionId: string,
-    tabId: number,
-    source: "shared_tabs" | "explicit_tool_tab" | "active_seed"
-  ): Promise<void> {
-    const normalized = parsePositiveInt(tabId);
-    if (!normalized) return;
-    const meta = await orchestrator.sessions.getMeta(sessionId);
-    if (!meta) return;
-    const header = toRecord(meta.header);
-    const metadata = toRecord(header.metadata);
-    if (parsePositiveInt(metadata.primaryTabId) === normalized) return;
-    metadata.primaryTabId = normalized;
-    metadata.primaryTabSource = source;
-    await writeSessionMeta(sessionId, {
-      ...meta,
-      header: {
-        ...meta.header,
-        metadata
-      },
-      updatedAt: nowIso()
+  const bridgeCapabilityInvoker = async (input: {
+    sessionId: string;
+    capability: ExecuteCapability;
+    args: JsonRecord;
+  }): Promise<JsonRecord> => {
+    const frame = (() => {
+      const rawFrame = toRecord(input.args.frame);
+      if (Object.keys(rawFrame).length === 0) {
+        throw new Error(`bridge capability provider 需要 args.frame: ${input.capability}`);
+      }
+      return { ...rawFrame };
+    })();
+    if (!String(frame.tool || "").trim()) {
+      throw new Error(`bridge capability provider 缺少 frame.tool: ${input.capability}`);
+    }
+    if (!frame.sessionId) frame.sessionId = input.sessionId;
+    const response = await callInfra(infra, {
+      type: "bridge.invoke",
+      payload: frame
     });
-  }
+    return {
+      type: "invoke",
+      response
+    };
+  };
 
-  async function resolveTargetTabId(
-    sessionId: string,
-    args: JsonRecord
-  ): Promise<{ tabId: number | null; source: "explicit" | "primary" | "active" | "none" }> {
-    const explicitTabId = parsePositiveInt(args.tabId);
-    if (explicitTabId) {
-      await setSessionPrimaryTabId(sessionId, explicitTabId, "explicit_tool_tab");
-      return { tabId: explicitTabId, source: "explicit" };
+  const ensureBuiltinBridgeCapabilityProviders = (): void => {
+    for (const item of BUILTIN_BRIDGE_CAPABILITY_PROVIDERS) {
+      const existed = orchestrator.getCapabilityProviders(item.capability).some((provider) => provider.id === item.providerId);
+      if (existed) continue;
+      orchestrator.registerCapabilityProvider(item.capability, {
+        id: item.providerId,
+        mode: "bridge",
+        priority: -100,
+        canHandle: (stepInput) => {
+          const frame = toRecord(stepInput.args?.frame);
+          return String(frame.tool || "").trim().length > 0;
+        },
+        invoke: async (stepInput) =>
+          bridgeCapabilityInvoker({
+            sessionId: stepInput.sessionId,
+            capability: item.capability,
+            args: toRecord(stepInput.args)
+          })
+      });
     }
+  };
 
-    const primaryTabId = await getSessionPrimaryTabId(sessionId);
-    if (primaryTabId) {
-      return { tabId: primaryTabId, source: "primary" };
-    }
-
-    const activeTabId = await getActiveTabIdForRuntime();
-    if (activeTabId) {
-      await setSessionPrimaryTabId(sessionId, activeTabId, "active_seed");
-      return { tabId: activeTabId, source: "active" };
-    }
-
-    return { tabId: null, source: "none" };
-  }
+  ensureBuiltinBridgeCapabilityProviders();
 
   async function withTabLease<T>(tabId: number, sessionId: string, run: () => Promise<T>): Promise<T> {
     const acquired = await callInfra(infra, {
@@ -1497,7 +1510,6 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       const invoke = await executeStep({
         sessionId,
         capability,
-        mode: "bridge",
         action: "invoke",
         args: {
           frame: frameWithInvokeId
@@ -1634,8 +1646,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         });
       },
       snapshot: async () => {
-        const resolvedTarget = await resolveTargetTabId(sessionId, args);
-        const tabId = resolvedTarget.tabId;
+        const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
         if (!tabId) {
           return {
             error: "snapshot 需要 tabId，当前无可用 tab",
@@ -1676,13 +1687,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         }
         return buildToolResponseEnvelope("snapshot", out.data, {
           capabilityUsed: out.capabilityUsed || capability,
-          modeUsed: out.modeUsed,
-          targetTabSource: resolvedTarget.source
+          modeUsed: out.modeUsed
         });
       },
       browser_action: async () => {
-        const resolvedTarget = await resolveTargetTabId(sessionId, args);
-        const tabId = resolvedTarget.tabId;
+        const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
         if (!tabId) {
           return {
             error: "browser_action 需要 tabId，当前无可用 tab",
@@ -1743,13 +1752,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           capabilityUsed: out.capabilityUsed || capability,
           modeUsed: out.modeUsed,
           verifyReason: out.verifyReason,
-          verified: out.verified,
-          targetTabSource: resolvedTarget.source
+          verified: out.verified
         });
       },
       browser_verify: async () => {
-        const resolvedTarget = await resolveTargetTabId(sessionId, args);
-        const tabId = resolvedTarget.tabId;
+        const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
         if (!tabId) {
           return {
             error: "browser_verify 需要 tabId，当前无可用 tab",
@@ -1794,8 +1801,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         }
         return buildToolResponseEnvelope("cdp", out.data, {
           capabilityUsed: out.capabilityUsed || capability,
-          modeUsed: out.modeUsed,
-          targetTabSource: resolvedTarget.source
+          modeUsed: out.modeUsed
         });
       },
     };
@@ -2370,8 +2376,6 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       const metadata = toRecord(header.metadata);
       if (sharedTabs.length > 0) {
         metadata.sharedTabs = sharedTabs;
-        metadata.primaryTabId = Number(sharedTabs[0]?.id || 0) || metadata.primaryTabId;
-        metadata.primaryTabSource = "shared_tabs";
       } else {
         delete metadata.sharedTabs;
       }
