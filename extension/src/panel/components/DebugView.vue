@@ -20,6 +20,11 @@ const selectedSessionId = ref("");
 const diagnosticsText = ref("");
 const diagnosticsPayload = ref<Record<string, unknown> | null>(null);
 
+function sessionTitle(value: unknown) {
+  const text = String(value || "").trim();
+  return text || "未命名会话";
+}
+
 function shortId(value: unknown) {
   const text = String(value || "").trim();
   if (!text) return "N/A";
@@ -47,7 +52,18 @@ const currentSessionId = computed(() => {
   return String(activeSessionId.value || "").trim();
 });
 
-const sessionLabel = computed(() => shortId(currentSessionId.value));
+const currentSessionTitle = computed(() => {
+  const matched = sessions.value.find((item) => String(item.id || "") === currentSessionId.value);
+  return sessionTitle(matched?.title);
+});
+
+const sessionLabel = computed(() => currentSessionTitle.value);
+
+function sessionOptionLabel(session: { id?: string; title?: string; updatedAt?: string }) {
+  const title = sessionTitle(session?.title);
+  const id = shortId(session?.id);
+  return `${title} · ${id}`;
+}
 
 function syncSelectedSession() {
   const selected = String(selectedSessionId.value || "").trim();
@@ -126,43 +142,41 @@ onMounted(() => {
   >
     <header class="h-12 flex items-center px-2 border-b border-ui-border bg-ui-bg shrink-0">
       <button
-        class="p-2.5 hover:bg-ui-surface rounded-sm transition-colors text-ui-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+        class="p-2 hover:bg-ui-surface rounded-full text-ui-text transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
         aria-label="关闭调试面板"
         @click="$emit('close')"
       >
         <ArrowLeft :size="18" />
       </button>
       <h2 class="ml-2 font-bold text-[14px] text-ui-text tracking-tight">运行调试</h2>
-      <div class="ml-auto flex items-center gap-1.5">
+      <div class="ml-auto flex items-center gap-0.5" role="toolbar" aria-label="调试操作">
         <button
-          class="px-2.5 py-1.5 text-[11px] rounded-sm border border-ui-border hover:bg-ui-surface text-ui-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-          :class="autoRefresh ? 'bg-ui-surface text-ui-text' : ''"
+          class="p-2 hover:bg-ui-surface rounded-full text-ui-text transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+          :class="autoRefresh ? 'text-ui-accent bg-ui-accent/10' : ''"
+          :title="autoRefresh ? '关闭自动刷新' : '开启自动刷新'"
+          :aria-label="autoRefresh ? '关闭自动刷新' : '开启自动刷新'"
           @click="autoRefresh = !autoRefresh"
         >
-          <span class="inline-flex items-center gap-1">
-            <Clock3 :size="12" /> 自动刷新
-          </span>
+          <Clock3 :size="16" aria-hidden="true" />
         </button>
         <button
-          class="px-2.5 py-1.5 text-[11px] rounded-sm border border-ui-border hover:bg-ui-surface text-ui-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+          class="p-2 hover:bg-ui-surface rounded-full text-ui-text transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
           :disabled="loading"
+          title="刷新"
+          aria-label="刷新调试信息"
           @click="refreshReport()"
         >
-          <span class="inline-flex items-center gap-1">
-            <RefreshCw :size="12" :class="loading ? 'animate-spin' : ''" />
-            刷新
-          </span>
+          <RefreshCw :size="16" :class="loading ? 'animate-spin' : ''" aria-hidden="true" />
         </button>
         <button
-          class="px-2.5 py-1.5 text-[11px] rounded-sm border border-ui-border hover:bg-ui-surface text-ui-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+          class="p-2 hover:bg-ui-surface rounded-full text-ui-text transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
           :disabled="copying"
+          :title="copied ? '已复制' : '复制诊断信息'"
+          :aria-label="copied ? '已复制' : '复制诊断信息'"
           @click="handleCopyReport"
         >
-          <span class="inline-flex items-center gap-1">
-            <Check v-if="copied" :size="12" class="text-emerald-600" />
-            <Copy v-else :size="12" />
-            {{ copied ? "已复制" : "复制诊断" }}
-          </span>
+          <Check v-if="copied" :size="16" class="text-emerald-600" aria-hidden="true" />
+          <Copy v-else :size="16" aria-hidden="true" />
         </button>
       </div>
     </header>
@@ -178,7 +192,7 @@ onMounted(() => {
           >
             <option value="">当前活跃会话</option>
             <option v-for="session in sessions" :key="session.id" :value="session.id">
-              {{ shortId(session.id) }} · {{ session.updatedAt }}
+              {{ sessionOptionLabel(session) }}
             </option>
           </select>
         </div>
@@ -218,7 +232,7 @@ onMounted(() => {
       </section>
 
       <section class="rounded-md border border-ui-border bg-ui-bg">
-        <header class="px-3 py-2 border-b border-ui-border text-[12px] font-semibold text-ui-text">关键轨迹（可直接发给工程师）</header>
+        <header class="px-3 py-2 border-b border-ui-border text-[12px] font-semibold text-ui-text">关键轨迹</header>
         <div class="max-h-64 overflow-y-auto px-3 py-2.5">
           <ul v-if="timeline.length" class="space-y-1.5 text-[12px] text-ui-text">
             <li v-for="(line, idx) in timeline" :key="`${idx}-${line}`" class="rounded bg-ui-surface/60 px-2 py-1.5">

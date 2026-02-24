@@ -13,6 +13,7 @@ const apiBaseId = "settings-api-base";
 const apiKeyId = "settings-api-key";
 const modelNameId = "settings-model-name";
 const maxStepsId = "settings-max-steps";
+const autoTitleIntervalId = "settings-auto-title-interval";
 const bridgeUrlId = "settings-bridge-url";
 
 async function handleSave() {
@@ -94,6 +95,18 @@ onMounted(() => {
               max="500"
               class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
             />
+          </div>
+          <div class="space-y-1.5">
+            <label :for="autoTitleIntervalId" class="block text-[11px] font-bold text-ui-text-muted/80 ml-0.5 uppercase tracking-tighter">Title Auto-Summarize Interval (msgs)</label>
+            <input
+              :id="autoTitleIntervalId"
+              v-model.number="config.autoTitleInterval"
+              type="number"
+              min="0"
+              max="100"
+              class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+            />
+            <p class="text-[10px] text-ui-text-muted/60 px-0.5">每隔多少条消息重刷标题。0 表示禁用自动重总结。</p>
           </div>
         </div>
       </section>

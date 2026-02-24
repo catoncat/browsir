@@ -11,11 +11,11 @@ import ChatMessage from "./components/ChatMessage.vue";
 import ChatInput from "./components/ChatInput.vue";
 import SettingsView from "./components/SettingsView.vue";
 import DebugView from "./components/DebugView.vue";
-import { Loader2, Plus, Settings, Bug, Activity, History, MoreVertical, FileUp, Download, ExternalLink, Copy, GitBranch } from "lucide-vue-next";
+import { Loader2, Plus, Settings, Bug, Activity, History, MoreVertical, FileText, Download, ExternalLink, Copy, GitBranch, RefreshCcw } from "lucide-vue-next";
 import { onClickOutside } from "@vueuse/core";
 
 const store = useRuntimeStore();
-const { loading, error, sessions, activeSessionId, messages, runtime, health } = storeToRefs(store);
+const { loading, error, sessions, activeSessionId, messages, runtime, isRegeneratingTitle } = storeToRefs(store);
 
 const prompt = ref("");
 const scrollContainer = ref<HTMLElement | null>(null);
@@ -24,14 +24,18 @@ const showSettings = ref(false);
 const showDebug = ref(false);
 const showMoreMenu = ref(false);
 const showExportMenu = ref(false);
+const creatingSession = ref(false);
 const moreMenuRef = ref(null);
 const exportMenuRef = ref(null);
+let createSessionTask: Promise<void> | null = null;
+const bridgeConnectionStatus = ref<"unknown" | "connected" | "disconnected">("unknown");
+const forkSourceResolvedTitle = ref("");
 
 onClickOutside(moreMenuRef, () => showMoreMenu.value = false);
 onClickOutside(exportMenuRef, () => showExportMenu.value = false);
 
 const isRunning = computed(() => Boolean(runtime.value?.running && !runtime.value?.stopped));
-const hasBridge = computed(() => Boolean(health.value.bridgeUrl));
+const showBridgeOfflineDot = computed(() => bridgeConnectionStatus.value === "disconnected");
 const activeSession = computed(() => sessions.value.find((item) => item.id === activeSessionId.value) || null);
 
 const activeSessionTitle = computed(() => {
@@ -39,11 +43,22 @@ const activeSessionTitle = computed(() => {
   return session?.title || "新对话";
 });
 
-const activeForkSourceText = computed(() => {
-  const sourceId = String(activeSession.value?.forkedFrom?.sessionId || "").trim();
-  if (!sourceId) return "";
-  const tail = sourceId.length > 8 ? sourceId.slice(-8) : sourceId;
-  return `分叉自 ${tail}`;
+const activeForkSourceSessionId = computed(() =>
+  String(activeSession.value?.forkedFrom?.sessionId || "").trim()
+);
+
+const activeForkSourceSession = computed(() => {
+  const sourceId = activeForkSourceSessionId.value;
+  if (!sourceId) return null;
+  return sessions.value.find((item) => item.id === sourceId) || null;
+});
+
+const activeForkSourceTitle = computed(() => {
+  const title = String(activeForkSourceSession.value?.title || "").trim();
+  if (title) return title;
+  const resolved = String(forkSourceResolvedTitle.value || "").trim();
+  if (resolved) return resolved;
+  return "未命名会话";
 });
 
 interface DisplayMessage extends PanelMessageLike {
@@ -100,6 +115,15 @@ interface ToolPendingStepState {
   logs: string[];
 }
 
+type RunViewPhase = "idle" | "llm" | "tool_running" | "tool_handoff_leaving" | "final_assistant";
+
+interface RunViewState {
+  phase: RunViewPhase;
+  epoch: number;
+  activeToolRun: ToolRunSnapshot | null;
+  toolPendingStepStates: ToolPendingStepState[];
+}
+
 interface RuntimeEventDigest {
   source: "brain" | "bridge";
   ts: string;
@@ -152,17 +176,17 @@ const forkSceneToken = ref(0);
 const forkSceneSwitching = ref(false);
 const forkSceneTargetSessionId = ref("");
 const forkSessionHighlight = ref(false);
-const activeToolRun = ref<ToolRunSnapshot | null>(null);
 const activeRunHint = ref<RuntimeProgressHint | null>(null);
-const toolPendingStepStates = ref<ToolPendingStepState[]>([]);
-const activeRunToken = ref(0);
+const runViewState = ref<RunViewState>({
+  phase: "idle",
+  epoch: 0,
+  activeToolRun: null,
+  toolPendingStepStates: []
+});
 const llmStreamingText = ref("");
 const llmStreamingSessionId = ref("");
 const llmStreamingActive = ref(false);
 const llmStreamingReplaceOnNextDelta = ref(false);
-const finalAssistantStreamingPhase = ref(false);
-const toolPendingCardLeaving = ref(false);
-const toolPendingCardDismissed = ref(false);
 const recentRuntimeEvents = ref<RuntimeEventDigest[]>([]);
 let forkSessionHighlightTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingStepLogFlushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -190,6 +214,60 @@ const LOOP_TERMINAL_TYPES = new Set([
   "loop_skip_stopped",
   "loop_internal_error"
 ]);
+
+function patchRunViewState(patch: Partial<RunViewState>) {
+  runViewState.value = {
+    ...runViewState.value,
+    ...patch
+  };
+}
+
+function bumpRunViewEpoch(phase: RunViewPhase) {
+  runViewState.value = {
+    phase,
+    epoch: runViewState.value.epoch + 1,
+    activeToolRun: null,
+    toolPendingStepStates: []
+  };
+}
+
+const runPhase = computed<RunViewPhase>({
+  get: () => runViewState.value.phase,
+  set: (value) => {
+    if (value === runViewState.value.phase) return;
+    patchRunViewState({ phase: value });
+  }
+});
+
+const activeToolRun = computed<ToolRunSnapshot | null>({
+  get: () => runViewState.value.activeToolRun,
+  set: (value) => {
+    patchRunViewState({ activeToolRun: value });
+  }
+});
+
+const toolPendingStepStates = computed<ToolPendingStepState[]>({
+  get: () => runViewState.value.toolPendingStepStates,
+  set: (value) => {
+    patchRunViewState({ toolPendingStepStates: Array.isArray(value) ? value : [] });
+  }
+});
+
+const activeRunToken = ref(0);
+
+const toolPendingCardLeaving = computed(() => runPhase.value === "tool_handoff_leaving");
+
+const finalAssistantStreamingPhase = computed({
+  get: () => runPhase.value === "final_assistant",
+  set: (value: boolean) => {
+    if (value) {
+      runPhase.value = "final_assistant";
+      return;
+    }
+    if (runPhase.value !== "final_assistant") return;
+    runPhase.value = isRunning.value ? "llm" : "idle";
+  }
+});
 
 const isForkSceneActive = computed(() => forkScenePhase.value !== "idle");
 
@@ -513,18 +591,21 @@ function clearToolPendingCardLeaveTimer() {
 
 function resetToolPendingCardHandoff() {
   clearToolPendingCardLeaveTimer();
-  toolPendingCardLeaving.value = false;
-  toolPendingCardDismissed.value = false;
+  if (runPhase.value === "tool_handoff_leaving") {
+    runPhase.value = "tool_running";
+  }
 }
 
 function dismissToolPendingCardWithHandoff() {
-  if (toolPendingCardDismissed.value || toolPendingCardLeaving.value) return;
-  toolPendingCardLeaving.value = true;
+  if (runPhase.value !== "tool_running") return;
+  const epoch = runViewState.value.epoch;
+  runPhase.value = "tool_handoff_leaving";
   clearToolPendingCardLeaveTimer();
   toolPendingCardLeaveTimer = setTimeout(() => {
     toolPendingCardLeaveTimer = null;
-    toolPendingCardLeaving.value = false;
-    toolPendingCardDismissed.value = true;
+    if (epoch !== runViewState.value.epoch) return;
+    if (runPhase.value !== "tool_handoff_leaving") return;
+    runPhase.value = isRunning.value ? "final_assistant" : "idle";
   }, TOOL_CARD_HANDOFF_MS);
 }
 
@@ -545,7 +626,8 @@ function startInitialToolSync() {
     const hasStableActivity =
       Boolean(activeToolRun.value) ||
       toolPendingStepStates.value.length > 0 ||
-      toolPendingCardDismissed.value;
+      runPhase.value === "final_assistant" ||
+      runPhase.value === "tool_handoff_leaving";
     if (hasStableActivity) return;
     attempts += 1;
     void runSafely(() => syncActiveToolRun(sessionId), "同步工具运行状态失败");
@@ -816,14 +898,17 @@ function applyRuntimeEventToolRun(event: unknown) {
   const ts = normalizeEventTs(envelope);
   const eventSessionId = String(envelope.sessionId || "").trim();
   if (type === "loop_start") {
-    activeToolRun.value = null;
+    activeRunToken.value += 1;
+    bumpRunViewEpoch("llm");
+    clearToolPendingCardLeaveTimer();
     resetLlmStreamingState();
-    resetToolPendingCardHandoff();
-    clearToolPendingSteps();
     setLlmRunHint("分析任务", "正在规划下一步动作");
     return;
   }
   if (type === "llm.request") {
+    if (runPhase.value === "idle") {
+      runPhase.value = "llm";
+    }
     setLlmRunHint("调用模型", "正在生成下一步计划");
     return;
   }
@@ -836,6 +921,9 @@ function applyRuntimeEventToolRun(event: unknown) {
       llmStreamingReplaceOnNextDelta.value = false;
     }
     llmStreamingActive.value = true;
+    if (runPhase.value !== "tool_running" && runPhase.value !== "tool_handoff_leaving") {
+      runPhase.value = "final_assistant";
+    }
     setLlmRunHint("回答中", "正在生成回复");
     return;
   }
@@ -862,6 +950,9 @@ function applyRuntimeEventToolRun(event: unknown) {
     const toolCalls = Number(payload.toolCalls || 0);
     if (Number.isFinite(toolCalls) && toolCalls > 0) {
       finalAssistantStreamingPhase.value = false;
+      if (runPhase.value !== "tool_running") {
+        runPhase.value = "llm";
+      }
     } else {
       finalAssistantStreamingPhase.value = true;
       setLlmRunHint("整理回复", "正在生成最终回答");
@@ -872,6 +963,7 @@ function applyRuntimeEventToolRun(event: unknown) {
     const step = normalizeStep(payload.step);
     if (!step) return;
     finalAssistantStreamingPhase.value = false;
+    runPhase.value = "tool_running";
     resetToolPendingCardHandoff();
     pauseLlmStreamingState();
     const action = String(payload.action || "");
@@ -910,6 +1002,7 @@ function applyRuntimeEventToolRun(event: unknown) {
     if (activeToolRun.value && activeToolRun.value.step === step) {
       activeToolRun.value = null;
     }
+    runPhase.value = "tool_running";
     setLlmRunHint("继续推理", "正在处理工具结果");
     return;
   }
@@ -917,10 +1010,11 @@ function applyRuntimeEventToolRun(event: unknown) {
     llmStreamingActive.value = false;
     return;
   }
-  if (["loop_done", "loop_error", "loop_skip_stopped", "loop_internal_error", "loop_start"].includes(type)) {
+  if (["loop_done", "loop_error", "loop_skip_stopped", "loop_internal_error"].includes(type)) {
     activeToolRun.value = null;
     resetLlmStreamingState();
-    resetToolPendingCardHandoff();
+    clearToolPendingCardLeaveTimer();
+    runPhase.value = "idle";
     clearToolPendingSteps();
     activeRunHint.value = null;
   }
@@ -957,6 +1051,16 @@ async function syncActiveToolRun(sessionId: string) {
   }
   const stream = Array.isArray(response?.data?.stream) ? response.data?.stream || [] : [];
   const currentLoop = deriveCurrentLoopWindow(stream);
+  if (!currentLoop.inProgress) {
+    if (!isRunning.value) {
+      runPhase.value = "idle";
+    } else if (runPhase.value !== "final_assistant") {
+      runPhase.value = "llm";
+    }
+    clearActiveToolRun();
+    clearToolPendingSteps();
+    return;
+  }
   if (toolPendingStepStates.value.length === 0 && currentLoop.inProgress) {
     const recovered = deriveToolPendingStepStatesFromStream(currentLoop.stream);
     if (recovered.length > 0) {
@@ -965,6 +1069,23 @@ async function syncActiveToolRun(sessionId: string) {
   }
   const latest = deriveActiveToolRunFromStream(currentLoop.stream);
   activeToolRun.value = latest;
+  if (
+    latest ||
+    toolPendingStepStates.value.some((item) => item.status === "running") ||
+    toolPendingStepStates.value.length > 0
+  ) {
+    runPhase.value = "tool_running";
+  } else {
+    const sawFinal = currentLoop.stream.some((row) => {
+      const rowType = String(row?.type || "");
+      if (rowType === "llm.stream.start" || rowType === "llm.stream.delta") return true;
+      if (rowType !== "llm.response.parsed") return false;
+      const data = toRecord(row?.payload);
+      const toolCalls = Number(data.toolCalls || 0);
+      return !(Number.isFinite(toolCalls) && toolCalls > 0);
+    });
+    runPhase.value = sawFinal ? "final_assistant" : "llm";
+  }
   if (latest) {
     setToolRunHint(latest.action, latest.arguments, latest.ts);
   } else if (isRunning.value && !activeRunHint.value) {
@@ -1078,8 +1199,9 @@ const shouldShowStreamingAssistant = computed(() => {
 
 const shouldShowToolPendingCard = computed(() => {
   if (!isRunning.value) return false;
-  if (toolPendingCardDismissed.value) return false;
-  return hasToolPendingActivity.value || toolPendingCardLeaving.value;
+  if (runPhase.value === "tool_handoff_leaving") return true;
+  if (runPhase.value === "tool_running") return hasToolPendingActivity.value;
+  return false;
 });
 
 const toolPendingCardAction = computed(() => {
@@ -1173,6 +1295,9 @@ const displayMessages = computed<DisplayMessage[]>(() => {
 
 watch(isRunning, (running, wasRunning) => {
   if (running) {
+    if (runPhase.value === "idle") {
+      runPhase.value = "llm";
+    }
     resetToolPendingCardHandoff();
     if (!wasRunning) {
       activeRunToken.value += 1;
@@ -1193,6 +1318,7 @@ watch(isRunning, (running, wasRunning) => {
   stopInitialToolSync();
   resetToolPendingCardHandoff();
   userPendingRegenerate.value = null;
+  runPhase.value = "idle";
   clearActiveToolRun();
   clearToolPendingSteps();
   resetLlmStreamingState();
@@ -1202,6 +1328,7 @@ watch(isRunning, (running, wasRunning) => {
 watch(activeSessionId, () => {
   stopInitialToolSync();
   resetToolPendingCardHandoff();
+  runPhase.value = isRunning.value ? "llm" : "idle";
   const currentSessionId = String(activeSessionId.value || "").trim();
   const isExpectedForkSwitch =
     forkSceneSwitching.value &&
@@ -1260,6 +1387,7 @@ watch(
     clearActiveToolRun();
     clearToolPendingSteps();
     finalAssistantStreamingPhase.value = false;
+    runPhase.value = "llm";
     if (isRunning.value) {
       startInitialToolSync();
     }
@@ -1274,6 +1402,38 @@ watch(
     if (!exists) resetEditingState();
   },
   { deep: true }
+);
+
+watch(
+  [activeForkSourceSessionId, activeForkSourceSession],
+  async ([sourceId, sourceSession]) => {
+    const id = String(sourceId || "").trim();
+    if (!id) {
+      forkSourceResolvedTitle.value = "";
+      return;
+    }
+
+    const titleInList = String((sourceSession as { title?: string } | null)?.title || "").trim();
+    if (titleInList) {
+      forkSourceResolvedTitle.value = "";
+      return;
+    }
+
+    try {
+      const response = (await chrome.runtime.sendMessage({
+        type: "brain.session.get",
+        sessionId: id
+      })) as { ok?: boolean; data?: Record<string, unknown> };
+      if (response?.ok !== true) return;
+      const meta = toRecord(response.data?.meta);
+      const header = toRecord(meta.header);
+      const title = String(header.title || "").trim();
+      forkSourceResolvedTitle.value = title;
+    } catch {
+      // 忽略来源标题查询失败，继续使用兜底文案。
+    }
+  },
+  { immediate: true }
 );
 
 function isMainScrollNearBottom() {
@@ -1400,14 +1560,34 @@ async function runSafely(task: () => Promise<void>, fallback: string) {
   }
 }
 
+async function refreshBridgeConnectionStatus() {
+  try {
+    const response = (await chrome.runtime.sendMessage({
+      type: "bridge.connect",
+      force: false
+    })) as { ok?: boolean };
+    bridgeConnectionStatus.value = response?.ok ? "connected" : "disconnected";
+  } catch {
+    bridgeConnectionStatus.value = "disconnected";
+  }
+}
+
 const onRuntimeMessage = (message: unknown) => {
   const payload = message as {
     type?: string;
+    status?: string;
     event?: { sessionId?: string };
     payload?: { sessionId?: string; event?: string; data?: Record<string, unknown> };
   };
 
+  if (payload?.type === "bridge.status") {
+    const status = String(payload.status || "").trim();
+    bridgeConnectionStatus.value = status === "connected" ? "connected" : "disconnected";
+    return;
+  }
+
   if (payload?.type === "bridge.event") {
+    bridgeConnectionStatus.value = "connected";
     if (payload.payload) {
       pushRecentRuntimeEvent("bridge", payload.payload);
     }
@@ -1438,6 +1618,7 @@ onMounted(() => {
   chrome.runtime.onMessage.addListener(onRuntimeMessage);
   void runSafely(async () => {
     await store.bootstrap();
+    await refreshBridgeConnectionStatus();
     if (activeSessionId.value && isRunning.value) {
       await syncActiveToolRun(activeSessionId.value);
     }
@@ -1457,11 +1638,24 @@ useIntervalFn(() => {
   );
 }, TOOL_STREAM_SYNC_INTERVAL_MS);
 
+useIntervalFn(() => {
+  void refreshBridgeConnectionStatus();
+}, 6000);
+
 async function handleCreateSession() {
-  await runSafely(async () => {
+  if (createSessionTask) {
+    await createSessionTask;
+    return;
+  }
+  creatingSession.value = true;
+  createSessionTask = runSafely(async () => {
     await store.createSession();
     listOpen.value = false;
-  }, "新建会话失败");
+  }, "新建会话失败").finally(() => {
+    creatingSession.value = false;
+    createSessionTask = null;
+  });
+  await createSessionTask;
 }
 
 async function handleSelectSession(id: string) {
@@ -1471,8 +1665,23 @@ async function handleSelectSession(id: string) {
   }, "切换会话失败");
 }
 
+async function handleJumpToForkSourceSession() {
+  const sourceId = activeForkSourceSessionId.value;
+  if (!sourceId) return;
+  await runSafely(async () => {
+    if (!sessions.value.some((item) => item.id === sourceId)) {
+      await store.refreshSessions();
+    }
+    await playForkSceneSwitch(sourceId);
+  }, "跳转分叉来源失败");
+}
+
 async function handleDeleteSession(id: string) {
   await runSafely(() => store.deleteSession(id), "删除会话失败");
+}
+
+async function handleUpdateSessionTitle(id: string, title: string) {
+  await runSafely(() => store.updateSessionTitle(id, title), "重命名失败");
 }
 
 async function handleRefreshSession(id: string) {
@@ -1484,9 +1693,12 @@ async function handleStopRun() {
 }
 
 async function handleSend(payload: { text: string; tabIds: number[] }) {
+  if (createSessionTask) {
+    await createSessionTask;
+  }
   const text = String(payload.text || "");
   if (!text.trim()) return;
-  const isNew = !activeSessionId.value && sessions.value.length === 0;
+  const isNew = !activeSessionId.value;
 
   try {
     await store.sendPrompt(text, {
@@ -1607,7 +1819,7 @@ onUnmounted(() => {
       @new="handleCreateSession"
       @select="handleSelectSession"
       @delete="handleDeleteSession"
-      @refresh="handleRefreshSession"
+      @update-title="handleUpdateSessionTitle"
     />
 
     <SettingsView v-if="showSettings" @close="showSettings = false" />
@@ -1628,34 +1840,53 @@ onUnmounted(() => {
       >
 
       <header class="h-12 flex items-center px-3 shrink-0 border-b border-ui-border bg-ui-bg z-30" role="banner">
-        <div class="flex-1 overflow-hidden flex items-center gap-2">
-          <h1 class="text-[15px] font-bold text-ui-text truncate tracking-tight ml-1">
-            {{ activeSessionTitle }}
-          </h1>
-          <span
-            v-if="activeForkSourceText"
-            class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide transition-all duration-200"
-            :class="forkSessionHighlight
-              ? 'text-ui-accent border-ui-accent/40 bg-ui-accent/10 shadow-[0_0_0_1px_rgba(37,99,235,0.08)]'
-              : 'text-ui-text-muted border-ui-border/70 bg-ui-surface/60'"
-            data-testid="fork-session-indicator"
+        <div class="flex-1 min-w-0 flex items-center gap-2">
+          <div
+            v-if="activeForkSourceSessionId"
+            class="relative shrink-0 group"
           >
-            <GitBranch :size="10" :class="forkSessionHighlight ? 'animate-pulse' : ''" aria-hidden="true" />
-            <span>{{ activeForkSourceText }}</span>
-          </span>
-          <div v-if="hasBridge" class="w-2 h-2 bg-green-500 rounded-full shrink-0 shadow-[0_0_8px_rgba(34,197,94,0.4)]" :title="'Bridge Connected'" role="status" aria-label="Bridge Connected"></div>
+            <span
+              tabindex="0"
+              data-testid="fork-session-indicator"
+              class="inline-flex h-6 w-6 items-center justify-center rounded-full border transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+              :class="forkSessionHighlight
+                ? 'text-ui-accent border-ui-accent/45 bg-ui-accent/10 shadow-[0_0_0_1px_rgba(37,99,235,0.08)]'
+                : 'text-ui-text-muted border-ui-border/70 bg-ui-surface/60'"
+              role="note"
+              aria-label="当前会话来自分叉，悬浮可查看来源信息"
+              title="分叉来源信息"
+            >
+              <GitBranch :size="11" :class="forkSessionHighlight ? 'animate-pulse' : ''" aria-hidden="true" />
+            </span>
+            <div
+              class="pointer-events-none absolute left-0 top-full z-20 mt-1 w-64 max-w-[calc(100vw-24px)] rounded-md border border-ui-border bg-ui-bg px-3 py-2 opacity-0 shadow-xl transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"
+            >
+              <p class="text-[11px] font-semibold text-ui-text">分叉来源：{{ activeForkSourceTitle }}</p>
+              <button
+                type="button"
+                class="mt-1 text-[11px] font-semibold text-ui-accent underline underline-offset-2 hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent rounded-sm"
+                @click.stop="handleJumpToForkSourceSession"
+              >
+                跳回来源对话
+              </button>
+            </div>
+          </div>
+          <div class="flex-1 min-w-0 flex flex-col justify-center ml-1">
+            <h1 v-if="!isRegeneratingTitle" class="min-w-0 text-[15px] font-bold text-ui-text truncate tracking-tight">
+              {{ activeSessionTitle }}
+            </h1>
+            <div v-else class="flex items-center gap-1.5 text-ui-accent">
+              <span class="text-[13px] font-bold tracking-tight animate-pulse">正在重新生成标题</span>
+              <span class="flex gap-0.5">
+                <span class="animate-bounce [animation-delay:-0.3s]">.</span>
+                <span class="animate-bounce [animation-delay:-0.15s]">.</span>
+                <span class="animate-bounce">.</span>
+              </span>
+            </div>
+          </div>
         </div>
 
         <div class="flex items-center gap-0.5 shrink-0" role="toolbar" aria-label="会话操作">
-          <button
-            class="p-2 hover:bg-ui-surface rounded-full text-ui-text transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-            title="会话历史"
-            aria-label="查看会话历史列表"
-            @click="listOpen = true"
-          >
-            <History :size="18" aria-hidden="true" />
-          </button>
-          
           <button
             class="p-2 hover:bg-ui-surface rounded-full text-ui-text transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
             title="新建对话"
@@ -1667,11 +1898,11 @@ onUnmounted(() => {
 
           <button
             class="p-2 hover:bg-ui-surface rounded-full text-ui-text transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-            title="复制诊断信息"
-            aria-label="复制诊断信息"
-            @click="handleCopyDiagnostics"
+            title="会话历史"
+            aria-label="查看会话历史列表"
+            @click="listOpen = true"
           >
-            <Copy :size="18" aria-hidden="true" />
+            <History :size="18" aria-hidden="true" />
           </button>
 
           <!-- Export Menu -->
@@ -1684,7 +1915,7 @@ onUnmounted(() => {
               :aria-expanded="showExportMenu"
               @click="showExportMenu = !showExportMenu"
             >
-              <FileUp :size="18" aria-hidden="true" />
+              <FileText :size="18" aria-hidden="true" />
             </button>
             <div 
               v-if="showExportMenu" 
@@ -1717,10 +1948,16 @@ onUnmounted(() => {
             </button>
             <div 
               v-if="showMoreMenu" 
-              class="absolute right-0 mt-1 w-32 bg-ui-bg border border-ui-border rounded-lg shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-100"
+              class="absolute right-0 mt-1 w-40 bg-ui-bg border border-ui-border rounded-lg shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-100"
               role="menu"
             >
-              <button role="menuitem" @click="showDebug = true; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none">
+              <button role="menuitem" @click="handleCopyDiagnostics(); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none">
+                <Copy :size="14" aria-hidden="true" /> 复制诊断信息
+              </button>
+              <button role="menuitem" @click="handleRefreshSession(activeSessionId); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
+                <RefreshCcw :size="14" aria-hidden="true" /> 重新生成标题
+              </button>
+              <button role="menuitem" @click="showDebug = true; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
                 <Bug :size="14" aria-hidden="true" /> 运行调试
               </button>
               <button role="menuitem" @click="showSettings = true; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none">
@@ -1821,10 +2058,21 @@ onUnmounted(() => {
         <ChatInput
           v-model="prompt"
           :is-running="isRunning"
-          :disabled="loading"
+          :disabled="loading || creatingSession"
           @send="handleSend"
           @stop="handleStopRun"
         />
+      </div>
+
+      <div
+        v-if="showBridgeOfflineDot"
+        class="absolute bottom-3 right-3 z-20"
+        role="status"
+        aria-live="polite"
+        aria-label="Bridge 未连接"
+        title="Bridge 未连接"
+      >
+        <span class="inline-flex h-2.5 w-2.5 rounded-full bg-rose-500 shadow-[0_0_10px_rgba(244,63,94,0.45)]" aria-hidden="true"></span>
       </div>
 
       </div>

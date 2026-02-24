@@ -50,6 +50,11 @@ interface PanelConfig {
   llmApiKey: string;
   llmModel: string;
   maxSteps: number;
+  autoTitleInterval: number;
+  bridgeInvokeTimeoutMs: number;
+  llmTimeoutMs: number;
+  llmRetryMaxAttempts: number;
+  llmMaxRetryDelayMs: number;
   devAutoReload: boolean;
   devReloadIntervalMs: number;
 }
@@ -105,6 +110,11 @@ function normalizeConfig(raw: Record<string, unknown> | null | undefined): Panel
     llmApiKey: String(raw?.llmApiKey || ""),
     llmModel: String(raw?.llmModel || "gpt-5.3-codex"),
     maxSteps: Number.isFinite(Number(raw?.maxSteps)) ? Number(raw?.maxSteps) : 100,
+    autoTitleInterval: Number.isFinite(Number(raw?.autoTitleInterval)) ? Number(raw?.autoTitleInterval) : 10,
+    bridgeInvokeTimeoutMs: Number.isFinite(Number(raw?.bridgeInvokeTimeoutMs)) ? Number(raw?.bridgeInvokeTimeoutMs) : 120000,
+    llmTimeoutMs: Number.isFinite(Number(raw?.llmTimeoutMs)) ? Number(raw?.llmTimeoutMs) : 120000,
+    llmRetryMaxAttempts: Number.isFinite(Number(raw?.llmRetryMaxAttempts)) ? Number(raw?.llmRetryMaxAttempts) : 2,
+    llmMaxRetryDelayMs: Number.isFinite(Number(raw?.llmMaxRetryDelayMs)) ? Number(raw?.llmMaxRetryDelayMs) : 60000,
     devAutoReload: raw?.devAutoReload !== false,
     devReloadIntervalMs: Number.isFinite(Number(raw?.devReloadIntervalMs)) ? Number(raw?.devReloadIntervalMs) : 1500
   };
@@ -122,6 +132,7 @@ function normalizeHealth(raw: Record<string, unknown> | null | undefined): Runti
 export const useRuntimeStore = defineStore("runtime", () => {
   const loading = ref(false);
   const savingConfig = ref(false);
+  const isRegeneratingTitle = ref(false);
   const error = ref("");
   const sessions = ref<SessionIndexEntry[]>([]);
   const activeSessionId = ref("");
@@ -139,7 +150,12 @@ export const useRuntimeStore = defineStore("runtime", () => {
     normalizeConfig({
       bridgeUrl: "ws://127.0.0.1:8787/ws",
       llmApiBase: "https://ai.chen.rs/v1",
-      llmModel: "gpt-5.3-codex"
+      llmModel: "gpt-5.3-codex",
+      autoTitleInterval: 10,
+      bridgeInvokeTimeoutMs: 120000,
+      llmTimeoutMs: 120000,
+      llmRetryMaxAttempts: 2,
+      llmMaxRetryDelayMs: 60000
     })
   );
 
@@ -200,13 +216,12 @@ export const useRuntimeStore = defineStore("runtime", () => {
   async function sendPrompt(prompt: string, options: { newSession?: boolean; tabIds?: number[] } = {}) {
     const text = prompt.trim();
     if (!text) return;
-    const preferredSessionId = String(activeSessionId.value || sessions.value[0]?.id || "").trim();
-    const useCurrentSession = !options.newSession && !!preferredSessionId;
+    const useCurrentSession = !options.newSession && !!activeSessionId.value;
     const tabIds = Array.isArray(options.tabIds)
       ? options.tabIds.filter((id) => Number.isInteger(id)).map((id) => Number(id))
       : [];
     const result = await sendMessage<{ sessionId: string; runtime: RuntimeStateView }>("brain.run.start", {
-      sessionId: useCurrentSession ? preferredSessionId : undefined,
+      sessionId: useCurrentSession ? activeSessionId.value : undefined,
       prompt: text,
       tabIds
     });
@@ -386,9 +401,23 @@ export const useRuntimeStore = defineStore("runtime", () => {
     runtime.value = await sendMessage<RuntimeStateView>(type, { sessionId: activeSessionId.value });
   }
 
-  async function refreshSessionTitle(sessionId = activeSessionId.value) {
+  async function refreshSessionTitle(sessionId = activeSessionId.value, force = true) {
     if (!sessionId) return;
-    await sendMessage("brain.session.title.refresh", { sessionId });
+    isRegeneratingTitle.value = true;
+    try {
+      await sendMessage("brain.session.title.refresh", { sessionId, force });
+      await refreshSessions();
+      if (activeSessionId.value === sessionId) {
+        await loadConversation(sessionId, { setActive: false });
+      }
+    } finally {
+      isRegeneratingTitle.value = false;
+    }
+  }
+
+  async function updateSessionTitle(sessionId: string, title: string) {
+    if (!sessionId) return;
+    await sendMessage("brain.session.title.refresh", { sessionId, title });
     await refreshSessions();
     if (activeSessionId.value === sessionId) {
       await loadConversation(sessionId, { setActive: false });
@@ -441,6 +470,11 @@ export const useRuntimeStore = defineStore("runtime", () => {
           llmApiKey: config.value.llmApiKey,
           llmModel: config.value.llmModel.trim(),
           maxSteps: Math.max(1, Number(config.value.maxSteps || 100)),
+          autoTitleInterval: Math.max(0, Number(config.value.autoTitleInterval ?? 10)),
+          bridgeInvokeTimeoutMs: Math.max(1000, Number(config.value.bridgeInvokeTimeoutMs || 120000)),
+          llmTimeoutMs: Math.max(1000, Number(config.value.llmTimeoutMs || 120000)),
+          llmRetryMaxAttempts: Math.max(0, Math.min(6, Number(config.value.llmRetryMaxAttempts || 2))),
+          llmMaxRetryDelayMs: Math.max(0, Number(config.value.llmMaxRetryDelayMs || 60000)),
           devAutoReload: config.value.devAutoReload,
           devReloadIntervalMs: Math.max(500, Number(config.value.devReloadIntervalMs || 1500))
         }
@@ -458,6 +492,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
   return {
     loading,
     savingConfig,
+    isRegeneratingTitle,
     error,
     sessions,
     activeSessionId,
@@ -477,6 +512,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
     editUserMessageAndRerun,
     runAction,
     refreshSessionTitle,
+    updateSessionTitle,
     deleteSession,
     saveConfig
   };

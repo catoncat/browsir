@@ -1,0 +1,31 @@
+{
+  "id": "BHV-SESSION-TITLE-LIFECYCLE",
+  "description": "Lifecycle of session titles including initial AI generation, periodic auto-summarization, manual regeneration, and manual renaming",
+  "category": "session",
+  "priority": "medium",
+  "pre_conditions": [
+    "session_exists",
+    "llm_configured"
+  ],
+  "steps": [
+    "observe_initial_title_generation",
+    "trigger_manual_regeneration",
+    "perform_manual_rename",
+    "verify_periodic_trigger"
+  ],
+  "observables": [
+    "title_matches_ai_summary",
+    "ui_shows_regeneration_feedback",
+    "manual_title_persisted",
+    "auto_trigger_on_interval_multiple"
+  ],
+  "triggers": {
+    "on_message_count_multiple": [
+      "refreshSessionTitleAuto"
+    ]
+  },
+  "rollback_or_compensation": [
+    "retain_current_title_on_llm_failure"
+  ],
+  "version": "1.0.0"
+}

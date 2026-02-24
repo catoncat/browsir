@@ -5,10 +5,12 @@ import {
   Search,
   MessageSquare,
   Trash2,
-  RefreshCcw,
+  Pencil,
   ArrowLeft,
   Clock,
-  GitBranch
+  GitBranch,
+  Check,
+  X
 } from "lucide-vue-next";
 
 interface Session {
@@ -35,11 +37,13 @@ const emit = defineEmits<{
   (e: "select", id: string): void;
   (e: "new"): void;
   (e: "delete", id: string): void;
-  (e: "refresh", id: string): void;
+  (e: "updateTitle", id: string, title: string): void;
   (e: "close"): void;
 }>();
 
 const searchQuery = ref("");
+const renamingId = ref("");
+const renameDraft = ref("");
 const dialogRef = ref<HTMLElement | null>(null);
 const listRefs = ref<HTMLElement[]>([]);
 const focusedIndex = ref(-1);
@@ -57,6 +61,7 @@ const filteredSessions = computed(() => {
 });
 
 function handleKeydown(e: KeyboardEvent) {
+  if (renamingId.value) return; // 编辑时禁用快捷键切换
   const total = filteredSessions.value.length;
   if (total === 0) return;
 
@@ -72,6 +77,24 @@ function handleKeydown(e: KeyboardEvent) {
     const session = filteredSessions.value[focusedIndex.value];
     if (session) emit("select", session.id);
   }
+}
+
+function handleStartRename(session: Session) {
+  renamingId.value = session.id;
+  renameDraft.value = session.title || "";
+}
+
+function handleCancelRename() {
+  renamingId.value = "";
+  renameDraft.value = "";
+}
+
+function handleSaveRename(id: string) {
+  const title = renameDraft.value.trim();
+  if (title) {
+    emit("updateTitle", id, title);
+  }
+  handleCancelRename();
 }
 
 function scrollToFocused() {
@@ -183,8 +206,24 @@ onMounted(() => {
             </div>
 
             <div class="flex-1 min-w-0 pr-10">
-              <div class="truncate text-[14px] leading-snug" :class="activeId === session.id ? 'font-bold text-ui-text' : 'font-medium text-ui-text/90'">
+              <div v-if="renamingId !== session.id" class="truncate text-[14px] leading-snug" :class="activeId === session.id ? 'font-bold text-ui-text' : 'font-medium text-ui-text/90'">
                 {{ displayTitle(session) }}
+              </div>
+              <div v-else class="flex items-center gap-1 -ml-1">
+                <input
+                  v-model="renameDraft"
+                  type="text"
+                  class="flex-1 min-w-0 bg-ui-bg border border-ui-accent rounded px-1.5 py-0.5 text-[14px] focus:outline-none"
+                  @click.stop
+                  @keydown.enter.stop="handleSaveRename(session.id)"
+                  @keydown.esc.stop="handleCancelRename"
+                />
+                <button class="p-1 text-ui-accent hover:bg-ui-accent/10 rounded" @click.stop="handleSaveRename(session.id)">
+                  <Check :size="14" />
+                </button>
+                <button class="p-1 text-ui-text-muted hover:bg-ui-surface rounded" @click.stop="handleCancelRename">
+                  <X :size="14" />
+                </button>
               </div>
               
               <div class="flex items-center gap-3 mt-1.5">
@@ -204,13 +243,13 @@ onMounted(() => {
           </button>
 
           <!-- Actions hidden by default, shown on hover -->
-          <div class="absolute right-3 top-1/2 -translate-y-1/2 flex gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-all duration-200 translate-x-1 group-hover:translate-x-0">
+          <div v-if="renamingId !== session.id" class="absolute right-3 top-1/2 -translate-y-1/2 flex gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-all duration-200 translate-x-1 group-hover:translate-x-0">
             <button
               class="p-2 text-ui-text-muted hover:text-ui-accent hover:bg-white rounded-lg shadow-sm border border-ui-border/50 bg-ui-bg transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-              :aria-label="`刷新会话标题: ${displayTitle(session)}`"
-              @click.stop="$emit('refresh', session.id)"
+              :aria-label="`重命名会话: ${displayTitle(session)}`"
+              @click.stop="handleStartRename(session)"
             >
-              <RefreshCcw :size="14" aria-hidden="true" />
+              <Pencil :size="14" aria-hidden="true" />
             </button>
             <button
               class="p-2 text-ui-text-muted hover:text-red-500 hover:bg-white rounded-lg shadow-sm border border-ui-border/50 bg-ui-bg transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
