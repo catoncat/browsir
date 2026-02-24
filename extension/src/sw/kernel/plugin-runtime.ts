@@ -62,14 +62,38 @@ interface RuntimeHost {
   ): () => void;
   registerToolProvider(mode: ExecuteMode, provider: StepToolProvider, options?: RegisterProviderOptions): void;
   unregisterToolProvider(mode: ExecuteMode, expectedProviderId?: string): boolean;
+  getToolProvider(mode: ExecuteMode): StepToolProvider | undefined;
   registerCapabilityProvider(capability: ExecuteCapability, provider: StepToolProvider, options?: RegisterProviderOptions): void;
   unregisterCapabilityProvider(capability: ExecuteCapability, expectedProviderId?: string): boolean;
+  getCapabilityProvider(capability: ExecuteCapability): StepToolProvider | undefined;
   registerCapabilityPolicy(
     capability: ExecuteCapability,
     policy: CapabilityExecutionPolicy,
     options?: RegisterCapabilityPolicyOptions
   ): string;
   unregisterCapabilityPolicy(capability: ExecuteCapability, expectedPolicyId?: string): boolean;
+  getCapabilityPolicy(capability: ExecuteCapability): {
+    capability: ExecuteCapability;
+    source: "builtin" | "override";
+    id: string;
+    policy: CapabilityExecutionPolicy;
+  } | null;
+}
+
+interface ReplacedModeProvider {
+  mode: ExecuteMode;
+  provider: StepToolProvider;
+}
+
+interface ReplacedCapabilityProvider {
+  capability: ExecuteCapability;
+  provider: StepToolProvider;
+}
+
+interface ReplacedCapabilityPolicy {
+  capability: ExecuteCapability;
+  policyId: string;
+  policy: CapabilityExecutionPolicy;
 }
 
 interface PluginState {
@@ -79,6 +103,9 @@ interface PluginState {
   ownedModeProviders: Array<{ mode: ExecuteMode; providerId: string }>;
   ownedCapabilityProviders: Array<{ capability: ExecuteCapability; providerId: string }>;
   ownedCapabilityPolicies: Array<{ capability: ExecuteCapability; policyId: string }>;
+  replacedModeProviders: ReplacedModeProvider[];
+  replacedCapabilityProviders: ReplacedCapabilityProvider[];
+  replacedCapabilityPolicies: ReplacedCapabilityPolicy[];
   errorCount: number;
   lastError?: string;
 }
@@ -127,6 +154,9 @@ export class PluginRuntime {
       ownedModeProviders: [],
       ownedCapabilityProviders: [],
       ownedCapabilityPolicies: [],
+      replacedModeProviders: [],
+      replacedCapabilityProviders: [],
+      replacedCapabilityPolicies: [],
       errorCount: 0
     };
     this.plugins.set(id, state);
@@ -152,6 +182,7 @@ export class PluginRuntime {
 
     const manifest = state.definition.manifest;
     const permissions = manifest.permissions ?? {};
+    const allowReplace = permissions.replaceProviders === true;
     const timeoutMs = Math.max(50, Math.min(10_000, Number(manifest.timeoutMs || 1500)));
 
     try {
@@ -179,7 +210,8 @@ export class PluginRuntime {
           },
           {
             ...entry.options,
-            id: entry.options.id || `${id}:${hook}`
+            // Hook id 总是挂插件命名空间，避免跨插件冲突卸载。
+            id: `${id}:${hook}:${String(entry.options.id || "handler").trim() || "handler"}`
           }
         );
         state.unregisterHooks.push(unregister);
@@ -192,17 +224,24 @@ export class PluginRuntime {
         if (!isAllowed(permissions.modes, mode)) {
           throw new Error(`plugin ${id} 未授权 mode provider: ${mode}`);
         }
+        const nextProviderId = provider.id || `${id}:mode:${mode}`;
+        if (allowReplace) {
+          const previous = this.host.getToolProvider(mode);
+          if (previous) {
+            state.replacedModeProviders.push({ mode, provider: previous });
+          }
+        }
         this.host.registerToolProvider(
           mode,
           {
             ...provider,
-            id: provider.id || `${id}:mode:${mode}`
+            id: nextProviderId
           },
           {
-            replace: permissions.replaceProviders === true
+            replace: allowReplace
           }
         );
-        state.ownedModeProviders.push({ mode, providerId: provider.id || `${id}:mode:${mode}` });
+        state.ownedModeProviders.push({ mode, providerId: nextProviderId });
       }
 
       for (const [capability, provider] of Object.entries(state.definition.providers?.capabilities || {})) {
@@ -210,19 +249,26 @@ export class PluginRuntime {
         if (!isAllowed(permissions.capabilities, capability)) {
           throw new Error(`plugin ${id} 未授权 capability provider: ${capability}`);
         }
+        const nextProviderId = provider.id || `${id}:capability:${capability}`;
+        if (allowReplace) {
+          const previous = this.host.getCapabilityProvider(capability);
+          if (previous) {
+            state.replacedCapabilityProviders.push({ capability, provider: previous });
+          }
+        }
         this.host.registerCapabilityProvider(
           capability,
           {
             ...provider,
-            id: provider.id || `${id}:capability:${capability}`
+            id: nextProviderId
           },
           {
-            replace: permissions.replaceProviders === true
+            replace: allowReplace
           }
         );
         state.ownedCapabilityProviders.push({
           capability,
-          providerId: provider.id || `${id}:capability:${capability}`
+          providerId: nextProviderId
         });
       }
 
@@ -231,8 +277,18 @@ export class PluginRuntime {
         if (!isAllowed(permissions.capabilities, capability)) {
           throw new Error(`plugin ${id} 未授权 capability policy: ${capability}`);
         }
+        if (allowReplace) {
+          const previous = this.host.getCapabilityPolicy(capability);
+          if (previous?.source === "override") {
+            state.replacedCapabilityPolicies.push({
+              capability,
+              policyId: previous.id,
+              policy: previous.policy
+            });
+          }
+        }
         const policyId = this.host.registerCapabilityPolicy(capability, policy, {
-          replace: permissions.replaceProviders === true,
+          replace: allowReplace,
           id: `${id}:policy:${capability}`
         });
         state.ownedCapabilityPolicies.push({
@@ -265,14 +321,36 @@ export class PluginRuntime {
     }
 
     for (const item of state.ownedModeProviders.splice(0)) {
-      this.host.unregisterToolProvider(item.mode, item.providerId);
+      const removed = this.host.unregisterToolProvider(item.mode, item.providerId);
+      if (!removed) continue;
+      const replaced = state.replacedModeProviders.find((entry) => entry.mode === item.mode);
+      if (!replaced) continue;
+      if (this.host.getToolProvider(item.mode)) continue;
+      this.host.registerToolProvider(item.mode, replaced.provider, { replace: false });
     }
     for (const item of state.ownedCapabilityProviders.splice(0)) {
-      this.host.unregisterCapabilityProvider(item.capability, item.providerId);
+      const removed = this.host.unregisterCapabilityProvider(item.capability, item.providerId);
+      if (!removed) continue;
+      const replaced = state.replacedCapabilityProviders.find((entry) => entry.capability === item.capability);
+      if (!replaced) continue;
+      if (this.host.getCapabilityProvider(item.capability)) continue;
+      this.host.registerCapabilityProvider(item.capability, replaced.provider, { replace: false });
     }
     for (const item of state.ownedCapabilityPolicies.splice(0)) {
-      this.host.unregisterCapabilityPolicy(item.capability, item.policyId);
+      const removed = this.host.unregisterCapabilityPolicy(item.capability, item.policyId);
+      if (!removed) continue;
+      const replaced = state.replacedCapabilityPolicies.find((entry) => entry.capability === item.capability);
+      if (!replaced) continue;
+      const current = this.host.getCapabilityPolicy(item.capability);
+      if (current?.source === "override") continue;
+      this.host.registerCapabilityPolicy(item.capability, replaced.policy, {
+        replace: false,
+        id: replaced.policyId
+      });
     }
+    state.replacedModeProviders = [];
+    state.replacedCapabilityProviders = [];
+    state.replacedCapabilityPolicies = [];
 
     state.enabled = false;
   }

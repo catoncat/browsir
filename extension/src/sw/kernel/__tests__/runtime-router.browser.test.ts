@@ -305,6 +305,34 @@ describe("runtime-router.browser", () => {
     expect(String(firstUserSource?.content || "")).toBe("问题一");
   });
 
+  it("rejects edit_rerun when sourceEntry is not user message", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "原始问题"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const assistantEntry = await orchestrator.sessions.appendMessage({
+      sessionId,
+      role: "assistant",
+      text: "这是一条 assistant 消息"
+    });
+
+    const edited = await invokeRuntime({
+      type: "brain.run.edit_rerun",
+      sessionId,
+      sourceEntryId: assistantEntry.id,
+      prompt: "编辑后的问题"
+    });
+    expect(edited.ok).toBe(false);
+    expect(String(edited.error || "")).toContain("sourceEntry 必须是 user 消息");
+  });
+
   it("supports capability provider in brain.step.execute", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -486,6 +514,7 @@ describe("runtime-router.browser", () => {
     expect(debugCfgData.llmTimeoutMs).toBe(160000);
     expect(debugCfgData.llmRetryMaxAttempts).toBe(3);
     expect(debugCfgData.llmMaxRetryDelayMs).toBe(45000);
+    expect(debugCfgData.llmApiKey).toBeUndefined();
 
     const dumped = await invokeRuntime({
       type: "brain.debug.dump",

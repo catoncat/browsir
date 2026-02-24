@@ -62,6 +62,12 @@ export interface ExecutionAdapters {
   verify?: (input: ExecuteStepInput, result: unknown) => Promise<{ verified: boolean; reason?: string }>;
 }
 
+function toPositiveInt(value: unknown, fallback: number): number {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n <= 0) return fallback;
+  return n;
+}
+
 function isRetryableError(error: AgentEndInput["error"]): boolean {
   if (!error) return false;
   const status = Number(error.status ?? 0);
@@ -96,17 +102,21 @@ export class BrainOrchestrator {
     onHook: (hook, handler, options) => this.onHook(hook, handler, options),
     registerToolProvider: (mode, provider, options) => this.registerToolProvider(mode, provider, options),
     unregisterToolProvider: (mode, expectedProviderId) => this.unregisterToolProvider(mode, expectedProviderId),
+    getToolProvider: (mode) => this.getToolProvider(mode),
     registerCapabilityProvider: (capability, provider, options) =>
       this.registerCapabilityProvider(capability, provider, options),
     unregisterCapabilityProvider: (capability, expectedProviderId) =>
       this.unregisterCapabilityProvider(capability, expectedProviderId),
+    getCapabilityProvider: (capability) => this.getCapabilityProvider(capability),
     registerCapabilityPolicy: (capability, policy, options) =>
       this.registerCapabilityPolicy(capability, policy, options),
     unregisterCapabilityPolicy: (capability, expectedPolicyId) =>
-      this.unregisterCapabilityPolicy(capability, expectedPolicyId)
+      this.unregisterCapabilityPolicy(capability, expectedPolicyId),
+    getCapabilityPolicy: (capability) => this.getCapabilityPolicy(capability)
   });
   private readonly runStateBySession = new Map<string, RunState>();
   private readonly streamBySession = new Map<string, StepTraceRecord[]>();
+  private readonly traceWriteTailBySession = new Map<string, Promise<void>>();
 
   constructor(options: OrchestratorOptions = {}, adapters: ExecutionAdapters = {}) {
     this.options = {
@@ -116,13 +126,13 @@ export class BrainOrchestrator {
       thresholdTokens: options.thresholdTokens ?? 1800,
       keepTail: options.keepTail ?? 30,
       splitTurn: options.splitTurn ?? true,
-      traceChunkSize: options.traceChunkSize ?? 80
+      traceChunkSize: toPositiveInt(options.traceChunkSize, 80)
     };
     this.verifyAdapter = adapters.verify;
     this.wireLegacyAdapters(adapters);
 
     this.events.subscribe((event) => {
-      void this.persistEvent(event);
+      this.schedulePersistEvent(event);
     });
   }
 
@@ -136,6 +146,10 @@ export class BrainOrchestrator {
 
   listToolProviders(): Array<{ mode: ExecuteMode; id: string }> {
     return this.toolProviders.list();
+  }
+
+  getToolProvider(mode: ExecuteMode): StepToolProvider | undefined {
+    return this.toolProviders.get(mode);
   }
 
   registerCapabilityProvider(
@@ -152,6 +166,10 @@ export class BrainOrchestrator {
 
   listCapabilityProviders(): Array<{ capability: ExecuteCapability; id: string; mode?: ExecuteMode }> {
     return this.toolProviders.listCapabilities();
+  }
+
+  getCapabilityProvider(capability: ExecuteCapability): StepToolProvider | undefined {
+    return this.toolProviders.getCapability(capability);
   }
 
   registerCapabilityPolicy(
@@ -278,6 +296,22 @@ export class BrainOrchestrator {
 
     const chunk = Math.floor((records.length - 1) / this.options.traceChunkSize);
     await appendTraceChunk(traceId, chunk, [record]);
+  }
+
+  private schedulePersistEvent(event: BrainEventEnvelope): void {
+    const key = String(event.sessionId || "").trim();
+    const previous = this.traceWriteTailBySession.get(key) ?? Promise.resolve();
+    const run = previous.catch(() => undefined).then(() => this.persistEvent(event));
+    const nextTail = run.then(
+      () => undefined,
+      () => undefined
+    );
+    this.traceWriteTailBySession.set(key, nextTail);
+    void run.catch(() => undefined).finally(() => {
+      if (this.traceWriteTailBySession.get(key) === nextTail) {
+        this.traceWriteTailBySession.delete(key);
+      }
+    });
   }
 
   async createSession(input?: Parameters<BrowserSessionManager["createSession"]>[0]): Promise<{ sessionId: string }> {

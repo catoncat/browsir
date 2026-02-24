@@ -1721,7 +1721,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           };
         }
         const capability = TOOL_CAPABILITIES.browser_action;
-        const kind = String(args.kind || "");
+        const kind = String(args.kind || "")
+          .trim()
+          .toLowerCase();
         const out = await executeStep({
           sessionId,
           capability,
@@ -1829,7 +1831,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
   async function requestLlmWithRetry(input: LlmRequestInput): Promise<JsonRecord> {
     const { sessionId, llmBase, llmKey, llmModel, llmTimeoutMs, llmMaxRetryDelayMs, step, messages } = input;
     let lastError: unknown = null;
-    const maxAttempts = Math.max(0, Number(orchestrator.getRunState(sessionId).retry.maxAttempts || MAX_LLM_RETRIES));
+    const configuredMaxAttempts = Number(orchestrator.getRunState(sessionId).retry.maxAttempts ?? MAX_LLM_RETRIES);
+    const maxAttempts = Number.isFinite(configuredMaxAttempts)
+      ? Math.max(0, configuredMaxAttempts)
+      : MAX_LLM_RETRIES;
     const totalAttempts = maxAttempts + 1;
 
     for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
@@ -1951,11 +1956,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       } catch (error) {
         lastError = error;
         const err = error as RuntimeErrorWithMeta;
+        const errText = error instanceof Error ? error.message : String(error);
         const statusCode = Number(err?.status || status || 0);
+        const signalReason = String(ctrl.signal.reason || "");
         const retryable =
           typeof err.retryable === "boolean"
             ? err.retryable
-            : isRetryableLlmStatus(statusCode) || /timeout|network|temporar|unavailable|rate limit/i.test(String(err?.message || ""));
+            : isRetryableLlmStatus(statusCode) || /timeout|network|temporar|unavailable|rate limit/i.test(`${errText} ${signalReason}`);
         const canRetry = retryable && attempt <= maxAttempts;
         if (!canRetry) {
           const state = orchestrator.getRunState(sessionId);
@@ -1964,7 +1971,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               success: false,
               attempt: state.retry.attempt,
               maxAttempts: state.retry.maxAttempts,
-              finalError: err instanceof Error ? err.message : String(err)
+              finalError: errText
             });
           }
           orchestrator.resetRetryState(sessionId);
@@ -1982,7 +1989,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           maxAttempts: next.retry.maxAttempts,
           delayMs,
           status: statusCode || null,
-          reason: err instanceof Error ? err.message : String(err)
+          reason: errText
         });
         await delay(delayMs);
       } finally {
