@@ -80,7 +80,7 @@
 
 1. `bun run bdd:validate` 通过。
 2. `bun run bdd:gate` 通过（default）。
-3. `cd extension && bun run test` 通过（63 tests）。
+3. `cd extension && bun run test` 通过（64 tests）。
 
 ## 下一阶段建议
 
