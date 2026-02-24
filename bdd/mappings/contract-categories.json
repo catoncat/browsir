@@ -1,0 +1,69 @@
+{
+  "version": "1.0.0",
+  "mappings": [
+    {
+      "contractId": "BHV-CDP-ON-DEMAND",
+      "category": "protocol"
+    },
+    {
+      "contractId": "BHV-CHAT-HISTORY-INCLUDES-TOOL-RESULT",
+      "category": "protocol"
+    },
+    {
+      "contractId": "BHV-CHAT-LIST-OPEN-TABS-TOOLS",
+      "category": "protocol"
+    },
+    {
+      "contractId": "BHV-CHAT-MESSAGE-ACTIONS-RETRY-COPY",
+      "category": "ux"
+    },
+    {
+      "contractId": "BHV-CHAT-NO-TAB-START",
+      "category": "ux"
+    },
+    {
+      "contractId": "BHV-CHAT-SHARED-TABS-CONTEXT",
+      "category": "ux"
+    },
+    {
+      "contractId": "BHV-CHAT-STREAMING-MESSAGE-CONTAINER",
+      "category": "ux"
+    },
+    {
+      "contractId": "BHV-CHAT-TOOL-RENDERER-REGISTRY",
+      "category": "ux"
+    },
+    {
+      "contractId": "BHV-LLM-CAPABILITY-GATE",
+      "category": "protocol"
+    },
+    {
+      "contractId": "BHV-LLM-LIVE-CAPABILITY",
+      "category": "protocol"
+    },
+    {
+      "contractId": "BHV-PANEL-ACTION-OPEN",
+      "category": "ux"
+    },
+    {
+      "contractId": "BHV-SESSION-COMPACTION-STATE-MACHINE",
+      "category": "storage"
+    },
+    {
+      "contractId": "BHV-SESSION-LIST-TITLE-DELETE",
+      "category": "ux"
+    },
+    {
+      "contractId": "BHV-SESSION-METADATA-SPLIT-STORAGE",
+      "category": "storage"
+    },
+    {
+      "contractId": "BHV-SESSION-STORAGE-RESET-BOOTSTRAP",
+      "category": "storage"
+    },
+    {
+      "contractId": "BHV-TAB-REF-DEFAULT",
+      "category": "ux"
+    }
+  ]
+}

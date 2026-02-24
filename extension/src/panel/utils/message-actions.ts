@@ -1,4 +1,4 @@
-import { computed, ref, type Ref } from "vue";
+import { ref, watch, type Ref } from "vue";
 
 export interface PanelMessageLike {
   role?: string;
@@ -12,7 +12,11 @@ export interface CopyPayload {
   role: string;
 }
 
-export interface RegeneratePayload {
+export interface RetryPayload {
+  entryId: string;
+}
+
+export interface ForkPayload {
   entryId: string;
 }
 
@@ -21,10 +25,17 @@ export interface ActionNotice {
   message: string;
 }
 
+export interface PendingRegenerateState {
+  mode: "retry" | "fork";
+  sourceEntryId: string;
+  insertAfterUserEntryId: string;
+  strategy?: "replace" | "insert";
+}
+
 interface UseMessageActionsOptions {
   messages: Ref<PanelMessageLike[]>;
   isRunning: Ref<boolean>;
-  regenerateFromAssistantEntry: (entryId: string) => Promise<void>;
+  regenerateFromAssistantEntry: (entryId: string, options?: { mode?: "fork" | "retry" }) => Promise<{ sessionId: string }>;
 }
 
 function isValidAssistantMessage(message: PanelMessageLike) {
@@ -38,6 +49,32 @@ function hasPreviousUserMessage(messages: PanelMessageLike[], index: number) {
     if (String(candidate.content || "").trim().length > 0) return true;
   }
   return false;
+}
+
+function isLatestAssistantMessage(messages: PanelMessageLike[], index: number) {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const candidate = messages[i];
+    if (candidate?.role !== "assistant") continue;
+    if (!String(candidate.content || "").trim()) continue;
+    return i === index;
+  }
+  return false;
+}
+
+function findAssistantIndex(messages: PanelMessageLike[], entryId: string) {
+  return messages.findIndex((item) => item?.role === "assistant" && String(item?.entryId || "").trim() === entryId);
+}
+
+function findPreviousUserEntryId(messages: PanelMessageLike[], index: number) {
+  for (let i = index - 1; i >= 0; i -= 1) {
+    const candidate = messages[i];
+    if (candidate?.role !== "user") continue;
+    const entryId = String(candidate?.entryId || "").trim();
+    if (!entryId) continue;
+    if (!String(candidate?.content || "").trim()) continue;
+    return entryId;
+  }
+  return "";
 }
 
 async function writeToClipboard(text: string) {
@@ -57,20 +94,22 @@ export function useMessageActions(options: UseMessageActionsOptions) {
   const { messages, isRunning, regenerateFromAssistantEntry } = options;
 
   const copiedEntryId = ref("");
+  const retryingEntryId = ref("");
+  const forkingEntryId = ref("");
+  const pendingRegenerate = ref<PendingRegenerateState | null>(null);
   const actionNotice = ref<ActionNotice | null>(null);
+
+  // 重生成占位会跟随运行状态结束而清理。
+  watch(isRunning, (running) => {
+    if (!running) {
+      retryingEntryId.value = "";
+      forkingEntryId.value = "";
+      pendingRegenerate.value = null;
+    }
+  });
 
   let copiedTimer: ReturnType<typeof setTimeout> | null = null;
   let noticeTimer: ReturnType<typeof setTimeout> | null = null;
-
-  const latestRegenerableAssistantEntryId = computed(() => {
-    for (let i = messages.value.length - 1; i >= 0; i -= 1) {
-      const candidate = messages.value[i];
-      if (!isValidAssistantMessage(candidate)) continue;
-      if (!hasPreviousUserMessage(messages.value, i)) continue;
-      return String(candidate.entryId || "");
-    }
-    return "";
-  });
 
   function clearCopiedStateTimer() {
     if (!copiedTimer) return;
@@ -97,11 +136,17 @@ export function useMessageActions(options: UseMessageActionsOptions) {
     return isValidAssistantMessage(message);
   }
 
-  function canRegenerateMessage(message: PanelMessageLike, index: number) {
+  function canForkMessage(message: PanelMessageLike, index: number) {
     if (!isValidAssistantMessage(message)) return false;
     if (!message.entryId) return false;
-    if (message.entryId !== latestRegenerableAssistantEntryId.value) return false;
     return hasPreviousUserMessage(messages.value, index);
+  }
+
+  function canRetryMessage(message: PanelMessageLike, index: number) {
+    if (!isValidAssistantMessage(message)) return false;
+    if (!message.entryId) return false;
+    if (!hasPreviousUserMessage(messages.value, index)) return false;
+    return isLatestAssistantMessage(messages.value, index);
   }
 
   async function handleCopyMessage(payload: CopyPayload) {
@@ -123,13 +168,51 @@ export function useMessageActions(options: UseMessageActionsOptions) {
     }
   }
 
-  async function handleRegenerateMessage(payload: RegeneratePayload) {
+  async function handleForkMessage(payload: ForkPayload) {
     if (!payload?.entryId || isRunning.value) return;
 
+    const entryId = String(payload.entryId || "").trim();
+    const targetIndex = findAssistantIndex(messages.value, entryId);
+    const previousUserEntryId = targetIndex >= 0 ? findPreviousUserEntryId(messages.value, targetIndex) : "";
+    if (targetIndex < 0 || !previousUserEntryId) return;
+
     try {
-      await regenerateFromAssistantEntry(payload.entryId);
+      forkingEntryId.value = entryId;
+      pendingRegenerate.value = {
+        mode: "fork",
+        sourceEntryId: entryId,
+        insertAfterUserEntryId: previousUserEntryId
+      };
+      await regenerateFromAssistantEntry(entryId, { mode: "fork" });
+      showActionNotice("success", "已分叉到新对话");
+    } catch (err) {
+      forkingEntryId.value = "";
+      pendingRegenerate.value = null;
+      const message = err instanceof Error ? err.message : "分叉失败";
+      showActionNotice("error", message);
+    }
+  }
+
+  async function handleRetryMessage(payload: RetryPayload) {
+    if (!payload?.entryId || isRunning.value) return;
+
+    const entryId = String(payload.entryId || "").trim();
+    const targetIndex = findAssistantIndex(messages.value, entryId);
+    const previousUserEntryId = targetIndex >= 0 ? findPreviousUserEntryId(messages.value, targetIndex) : "";
+    if (targetIndex < 0 || !previousUserEntryId) return;
+
+    try {
+      retryingEntryId.value = entryId;
+      pendingRegenerate.value = {
+        mode: "retry",
+        sourceEntryId: entryId,
+        insertAfterUserEntryId: previousUserEntryId
+      };
+      await regenerateFromAssistantEntry(entryId, { mode: "retry" });
       showActionNotice("success", "已发起重新回答");
     } catch (err) {
+      retryingEntryId.value = "";
+      pendingRegenerate.value = null;
       const message = err instanceof Error ? err.message : "重新回答失败";
       showActionNotice("error", message);
     }
@@ -138,15 +221,23 @@ export function useMessageActions(options: UseMessageActionsOptions) {
   function cleanupMessageActions() {
     clearCopiedStateTimer();
     clearNoticeTimer();
+    retryingEntryId.value = "";
+    forkingEntryId.value = "";
+    pendingRegenerate.value = null;
   }
 
   return {
     copiedEntryId,
+    retryingEntryId,
+    forkingEntryId,
+    pendingRegenerate,
     actionNotice,
     canCopyMessage,
-    canRegenerateMessage,
+    canForkMessage,
+    canRetryMessage,
     handleCopyMessage,
-    handleRegenerateMessage,
+    handleForkMessage,
+    handleRetryMessage,
     cleanupMessageActions
   };
 }

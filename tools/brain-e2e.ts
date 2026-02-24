@@ -271,6 +271,11 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
 
       const lastUser = [...messages].reverse().find((item) => item?.role === "user");
       const userText = String(lastUser?.content || "");
+      const delayMatch = /#LLM_DELAY_(\d{2,5})/.exec(userText);
+      const delayMs = delayMatch ? Math.max(0, Math.min(10_000, Number(delayMatch[1]))) : 0;
+      if (delayMs > 0) {
+        await sleep(delayMs);
+      }
       const toolMessages = messages
         .filter((item) => item?.role === "tool")
         .map((item) => String(item?.content || ""));
@@ -1772,7 +1777,7 @@ async function main() {
         assert(out?.ok === true, `UI 发送 prompt 失败: ${out?.error || "unknown"}`);
       };
 
-      await sendPromptByUi(`请回复第一条结果 ${marker}-1`);
+      await sendPromptByUi(`请回复第一条结果 ${marker}-1 #LLM_DELAY_1800`);
 
       await waitFor(
         "panel first assistant action ready",
@@ -1796,7 +1801,152 @@ async function main() {
         250
       );
 
-      await sendPromptByUi(`请回复第二条结果 ${marker}-2`);
+      const userEditReady = await waitFor(
+        "panel user edit action ready",
+        async () => {
+          const out = await sidepanelClient!.evaluate(`(() => {
+            const editBtns = Array.from(document.querySelectorAll('button[aria-label="编辑并重跑"]'));
+            return {
+              editCount: editBtns.length
+            };
+          })()`);
+          if ((out?.editCount || 0) < 1) return null;
+          return out;
+        },
+        12_000,
+        200
+      );
+      assert((userEditReady?.editCount || 0) >= 1, "user 消息应显示编辑并重跑按钮");
+
+      const sessionsBeforeLatestUserEdit = await sendBgMessage(sidepanelClient!, { type: "brain.session.list" });
+      assert(sessionsBeforeLatestUserEdit.ok === true, "编辑最后一条 user 前读取会话列表失败");
+      const sourceSessionIdBeforeLatestEdit = String((sessionsBeforeLatestUserEdit.data?.sessions || [])[0]?.id || "");
+      assert(sourceSessionIdBeforeLatestEdit.length > 0, "编辑最后一条 user 前会话为空");
+      const sessionCountBeforeLatestEdit = Number((sessionsBeforeLatestUserEdit.data?.sessions || []).length || 0);
+
+      const sourceViewBeforeLatestEdit = await sendBgMessage(sidepanelClient!, {
+        type: "brain.session.view",
+        sessionId: sourceSessionIdBeforeLatestEdit
+      });
+      assert(sourceViewBeforeLatestEdit.ok === true, "编辑最后一条 user 前读取会话详情失败");
+      const sourceMessagesBeforeLatestEdit = Array.isArray(sourceViewBeforeLatestEdit.data?.conversationView?.messages)
+        ? sourceViewBeforeLatestEdit.data.conversationView.messages
+        : [];
+      const latestUserBeforeEdit = [...sourceMessagesBeforeLatestEdit]
+        .reverse()
+        .find((item: any) => String(item?.role || "") === "user" && String(item?.entryId || "").trim());
+      const latestUserEntryIdBeforeEdit = String(latestUserBeforeEdit?.entryId || "");
+      assert(latestUserEntryIdBeforeEdit.length > 0, "编辑最后一条 user 前未找到目标 user");
+      const dumpBeforeLatestEdit = await sendBgMessage(sidepanelClient!, {
+        type: "brain.debug.dump",
+        sessionId: sourceSessionIdBeforeLatestEdit
+      });
+      assert(dumpBeforeLatestEdit.ok === true, "编辑最后一条 user 前读取 trace 失败");
+      const streamBeforeLatestEdit = Array.isArray(dumpBeforeLatestEdit.data?.stepStream) ? dumpBeforeLatestEdit.data.stepStream : [];
+      const regenerateCountBeforeLatestEdit = streamBeforeLatestEdit.filter((item: any) => item?.type === "input.regenerate").length;
+      const loopDoneCountBeforeLatestEdit = streamBeforeLatestEdit.filter((item: any) => item?.type === "loop_done").length;
+
+      const editedLatestText = `请回复第一条结果 ${marker}-1(编辑版) #LLM_DELAY_1800`;
+      const userInlineEditSubmitted = await sidepanelClient!.evaluate(`(async () => {
+        const sourceEntryId = ${JSON.stringify(latestUserEntryIdBeforeEdit)};
+        const target = document.querySelector('button[aria-label="编辑并重跑"][data-entry-id="' + sourceEntryId + '"]');
+        if (!target) return { ok: false, error: "edit button missing for latest user" };
+        const item = target.closest('[role="listitem"]');
+        if (!item) return { ok: false, error: "message listitem missing" };
+        const composer = document.querySelector('textarea[aria-label="消息输入框"]');
+        const composerValueBefore = composer && typeof composer.value === "string" ? String(composer.value || "") : "";
+        target.click();
+        let inlineInput = null;
+        for (let i = 0; i < 12; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 40));
+          const node = item.querySelector('[data-testid="user-inline-editor-input"]') || document.querySelector('[data-testid="user-inline-editor-input"]');
+          if (node instanceof HTMLTextAreaElement) {
+            inlineInput = node;
+            break;
+          }
+        }
+        if (!(inlineInput instanceof HTMLTextAreaElement)) {
+          return { ok: false, error: "inline editor input missing" };
+        }
+        const focused = document.activeElement === inlineInput;
+        const inlineValueBefore = String(inlineInput.value || "");
+        inlineInput.value = ${JSON.stringify(editedLatestText)};
+        inlineInput.dispatchEvent(new Event("input", { bubbles: true }));
+        const submitBtn = item.querySelector('button[aria-label="提交编辑并重跑"]');
+        if (!(submitBtn instanceof HTMLButtonElement)) {
+          return { ok: false, error: "inline submit button missing" };
+        }
+        submitBtn.click();
+        const composerValueAfter = composer && typeof composer.value === "string" ? String(composer.value || "") : "";
+        return {
+          ok: true,
+          focused,
+          inlineValueBefore,
+          composerValueBefore,
+          composerValueAfter
+        };
+      })()`);
+      assert(userInlineEditSubmitted?.ok === true, `inline 编辑最后一条 user 失败: ${userInlineEditSubmitted?.error || "unknown"}`);
+      assert(
+        String(userInlineEditSubmitted?.inlineValueBefore || "").includes(`${marker}-1`),
+        "inline editor 初始值应为该 user 消息内容"
+      );
+      assert(userInlineEditSubmitted?.focused === true, "inline editor 打开后应自动聚焦");
+      assert(
+        String(userInlineEditSubmitted?.composerValueBefore || "") === String(userInlineEditSubmitted?.composerValueAfter || ""),
+        "底部输入框不应被 inline 编辑回填覆盖"
+      );
+
+      await waitFor(
+        "panel latest user edit rerun placeholder",
+        async () => {
+          const out = await sidepanelClient!.evaluate(`(() => {
+            const node = document.querySelector('[data-testid="regenerate-placeholder"]');
+            if (!node) return null;
+            const mode = String(node.getAttribute("data-mode") || "");
+            const busy = String(node.getAttribute("aria-busy") || "") === "true";
+            return busy ? { mode } : null;
+          })()`);
+          if (!out) return null;
+          if (String(out.mode || "") !== "retry") return null;
+          return out;
+        },
+        12_000,
+        200
+      );
+
+      await waitFor(
+        "panel latest user edit rerun trace visible",
+        async () => {
+          const dump = await sendBgMessage(sidepanelClient!, {
+            type: "brain.debug.dump",
+            sessionId: sourceSessionIdBeforeLatestEdit
+          });
+          if (!dump.ok) return null;
+          const stream = Array.isArray(dump.data?.stepStream) ? dump.data.stepStream : [];
+          const regenerateCount = stream.filter((item: any) => item?.type === "input.regenerate").length;
+          const loopDoneCount = stream.filter((item: any) => item?.type === "loop_done").length;
+          const hit = stream.slice(regenerateCountBeforeLatestEdit).some(
+            (item: any) => item?.type === "input.regenerate" && item?.payload?.reason === "edit_user_rerun" && item?.payload?.mode === "retry"
+          );
+          if (!hit) return null;
+          if (regenerateCount <= regenerateCountBeforeLatestEdit) return null;
+          if (loopDoneCount <= loopDoneCountBeforeLatestEdit) return null;
+          return true;
+        },
+        45_000,
+        250
+      );
+
+      const sessionsAfterLatestUserEdit = await sendBgMessage(sidepanelClient!, { type: "brain.session.list" });
+      assert(sessionsAfterLatestUserEdit.ok === true, "编辑最后一条 user 后读取会话列表失败");
+      const sessionCountAfterLatestEdit = Number((sessionsAfterLatestUserEdit.data?.sessions || []).length || 0);
+      assert(
+        sessionCountAfterLatestEdit === sessionCountBeforeLatestEdit,
+        `编辑最后一条 user 不应新建会话，期望 ${sessionCountBeforeLatestEdit}，实际 ${sessionCountAfterLatestEdit}`
+      );
+
+      await sendPromptByUi(`请回复第二条结果 ${marker}-2 #LLM_DELAY_1800`);
 
       const multiAssistantReady = await waitFor(
         "panel two assistant actions ready",
@@ -1858,7 +2008,8 @@ async function main() {
         first.click();
         return {
           ok: true,
-          clickedHistorical: first !== last
+          clickedHistorical: first !== last,
+          sourceEntryId: String(first.getAttribute("data-entry-id") || "")
         };
       })()`);
       assert(forkClicked?.ok === true, `点击历史分叉失败: ${forkClicked?.error || "unknown"}`);
@@ -1889,8 +2040,10 @@ async function main() {
       );
       assert(Array.isArray(listedAfterFork), "分叉后 session.list 返回异常");
       const newestFork = listedAfterFork[0] || {};
+      const forkSessionId = String(newestFork?.id || "");
       assert(String(newestFork?.title || "").includes("重答分支"), "分叉会话标题应包含“重答分支”");
       assert(String(newestFork?.forkedFrom?.sessionId || "").length > 0, "分叉会话应包含 fork 来源 sessionId");
+      assert(forkSessionId.length > 0, "分叉会话 sessionId 为空");
 
       await waitFor(
         "panel header shows fork source",
@@ -1902,7 +2055,51 @@ async function main() {
         200
       );
 
-      await sendPromptByUi(`请在分叉会话继续回答 ${marker}-3`);
+      const expectedForkSourceEntryId = String(forkClicked?.sourceEntryId || "");
+
+      await waitFor(
+        "panel fork auto regenerate placeholder visible",
+        async () => {
+          const out = await sidepanelClient!.evaluate(`(() => {
+            const node = document.querySelector('[data-testid="regenerate-placeholder"]');
+            if (!node) return null;
+            const text = String(node.textContent || "");
+            const busy = String(node.getAttribute("aria-busy") || "") === "true";
+            const mode = String(node.getAttribute("data-mode") || "");
+            const sourceEntryId = String(node.getAttribute("data-source-entry-id") || "");
+            const hasSpinner = Boolean(node.querySelector('[data-testid="regenerate-spinner"]'));
+            if (!text.includes("正在重新生成回复…")) return null;
+            if (!busy || !hasSpinner) return null;
+            return { mode, sourceEntryId };
+          })()`);
+          if (!out) return null;
+          if (String(out.mode || "") !== "fork") return null;
+          if (expectedForkSourceEntryId && String(out.sourceEntryId || "") !== expectedForkSourceEntryId) {
+            return null;
+          }
+          return out;
+        },
+        12_000,
+        200
+      );
+
+      await waitFor(
+        "panel fork auto regenerate trace visible",
+        async () => {
+          const dump = await sendBgMessage(sidepanelClient!, {
+            type: "brain.debug.dump",
+            sessionId: forkSessionId
+          });
+          if (!dump.ok) return null;
+          const stream = Array.isArray(dump.data?.stepStream) ? dump.data.stepStream : [];
+          const hasRegenerateInput = stream.some((item: any) => item?.type === "input.regenerate");
+          const hasLoopDone = stream.some((item: any) => item?.type === "loop_done");
+          if (!hasRegenerateInput || !hasLoopDone) return null;
+          return true;
+        },
+        35_000,
+        250
+      );
 
       await waitFor(
         "panel fork session has assistant for latest retry",
@@ -1926,6 +2123,27 @@ async function main() {
       const sessionCountBeforeRetry = Number(sessionsBeforeRetry.length || 0);
       const retrySessionId = String(sessionsBeforeRetry[0]?.id || "");
       assert(retrySessionId.length > 0, "重试前无法定位当前会话");
+      const viewBeforeRetry = await sendBgMessage(sidepanelClient!, {
+        type: "brain.session.view",
+        sessionId: retrySessionId
+      });
+      assert(viewBeforeRetry.ok === true, "重试前读取会话详情失败");
+      const messagesBeforeRetry = Array.isArray(viewBeforeRetry.data?.conversationView?.messages)
+        ? viewBeforeRetry.data.conversationView.messages
+        : [];
+      const lastAssistantBeforeRetry = [...messagesBeforeRetry]
+        .reverse()
+        .find((item: any) => String(item?.role || "") === "assistant" && String(item?.entryId || "").trim());
+      const assistantEntryIdBeforeRetry = String(lastAssistantBeforeRetry?.entryId || "");
+      assert(assistantEntryIdBeforeRetry.length > 0, "重试前未找到 assistant entryId");
+      const dumpBeforeRetryTrace = await sendBgMessage(sidepanelClient!, {
+        type: "brain.debug.dump",
+        sessionId: retrySessionId
+      });
+      assert(dumpBeforeRetryTrace.ok === true, "重试前读取 stepStream 失败");
+      const streamBeforeRetryTrace = Array.isArray(dumpBeforeRetryTrace.data?.stepStream) ? dumpBeforeRetryTrace.data.stepStream : [];
+      const regenerateCountBeforeRetry = streamBeforeRetryTrace.filter((item: any) => item?.type === "input.regenerate").length;
+      const loopDoneCountBeforeRetry = streamBeforeRetryTrace.filter((item: any) => item?.type === "loop_done").length;
 
       const retryClicked = await sidepanelClient!.evaluate(`(() => {
         const retryBtns = Array.from(document.querySelectorAll('button[aria-label="重新回答"]'));
@@ -1934,9 +2152,37 @@ async function main() {
         if (!last) return { ok: false, error: "retry button empty" };
         if (last.disabled) return { ok: false, error: "retry button disabled" };
         last.click();
-        return { ok: true };
+        return { ok: true, sourceEntryId: String(last.getAttribute("data-entry-id") || "") };
       })()`);
       assert(retryClicked?.ok === true, `点击最后一条重试失败: ${retryClicked?.error || "unknown"}`);
+      assert(
+        String(retryClicked?.sourceEntryId || "") === assistantEntryIdBeforeRetry,
+        "重试按钮 entryId 应与最后一条 assistant 一致"
+      );
+
+      await waitFor(
+        "panel retry placeholder visible",
+        async () => {
+          const out = await sidepanelClient!.evaluate(`(() => {
+            const node = document.querySelector('[data-testid="regenerate-placeholder"]');
+            if (!node) return null;
+            const text = String(node.textContent || "");
+            const busy = String(node.getAttribute("aria-busy") || "") === "true";
+            const mode = String(node.getAttribute("data-mode") || "");
+            const sourceEntryId = String(node.getAttribute("data-source-entry-id") || "");
+            const hasSpinner = Boolean(node.querySelector('[data-testid="regenerate-spinner"]'));
+            if (!text.includes("正在重新生成回复…")) return null;
+            if (!busy || !hasSpinner) return null;
+            return { mode, sourceEntryId };
+          })()`);
+          if (!out) return null;
+          if (String(out.mode || "") !== "retry") return null;
+          if (String(out.sourceEntryId || "") !== assistantEntryIdBeforeRetry) return null;
+          return out;
+        },
+        12_000,
+        200
+      );
 
       await waitFor(
         "panel retry notice",
@@ -1957,9 +2203,10 @@ async function main() {
           });
           if (!dump.ok) return null;
           const stream = Array.isArray(dump.data?.stepStream) ? dump.data.stepStream : [];
-          const hasRegenerateInput = stream.some((item: any) => item?.type === "input.regenerate");
-          const hasLoopDone = stream.some((item: any) => item?.type === "loop_done");
-          if (!hasRegenerateInput || !hasLoopDone) return null;
+          const regenerateCount = stream.filter((item: any) => item?.type === "input.regenerate").length;
+          const loopDoneCount = stream.filter((item: any) => item?.type === "loop_done").length;
+          if (regenerateCount <= regenerateCountBeforeRetry) return null;
+          if (loopDoneCount <= loopDoneCountBeforeRetry) return null;
           return true;
         },
         35_000,
@@ -1970,6 +2217,22 @@ async function main() {
       assert(
         sessionCountAfterRetry === sessionCountBeforeRetry,
         `最后一条重试不应新建会话，期望 ${sessionCountBeforeRetry}，实际 ${sessionCountAfterRetry}`
+      );
+      const viewAfterRetry = await sendBgMessage(sidepanelClient!, {
+        type: "brain.session.view",
+        sessionId: retrySessionId
+      });
+      assert(viewAfterRetry.ok === true, "重试后读取会话详情失败");
+      const messagesAfterRetry = Array.isArray(viewAfterRetry.data?.conversationView?.messages)
+        ? viewAfterRetry.data.conversationView.messages
+        : [];
+      const lastAssistantAfterRetry = [...messagesAfterRetry]
+        .reverse()
+        .find((item: any) => String(item?.role || "") === "assistant" && String(item?.entryId || "").trim());
+      const assistantEntryIdAfterRetry = String(lastAssistantAfterRetry?.entryId || "");
+      assert(
+        assistantEntryIdAfterRetry.length > 0 && assistantEntryIdAfterRetry !== assistantEntryIdBeforeRetry,
+        `最后一条重试应生成新的 assistant entry，重试前=${assistantEntryIdBeforeRetry}，重试后=${assistantEntryIdAfterRetry}`
       );
 
       await sidepanelClient!.evaluate(`(() => {
@@ -2012,6 +2275,273 @@ async function main() {
         delete globalThis.__BRAIN_E2E_CLIPBOARD_WRITE;
         return true;
       })()`);
+    });
+
+    await runCase("panel.vnext", "user inline 编辑：最后一条重跑，历史消息分叉重跑", async () => {
+      const marker = `panel-user-edit-${Date.now()}`;
+
+      const sendPromptByUi = async (text: string) => {
+        const out = await sidepanelClient!.evaluate(`(() => {
+          const textarea = document.querySelector('textarea[aria-label="消息输入框"]');
+          if (!(textarea instanceof HTMLTextAreaElement)) return { ok: false, error: "composer missing" };
+          textarea.focus();
+          textarea.value = ${JSON.stringify(text)};
+          textarea.dispatchEvent(new Event("input", { bubbles: true }));
+          textarea.dispatchEvent(
+            new KeyboardEvent("keydown", {
+              key: "Enter",
+              code: "Enter",
+              keyCode: 13,
+              which: 13,
+              bubbles: true,
+              cancelable: true
+            })
+          );
+          return { ok: true };
+        })()`);
+        assert(out?.ok === true, `UI 发送 prompt 失败: ${out?.error || "unknown"}`);
+      };
+
+      const created = await sidepanelClient!.evaluate(`(() => {
+        const btn = document.querySelector('button[aria-label="开始新对话"]');
+        if (!(btn instanceof HTMLButtonElement)) return { ok: false, error: "new session button missing" };
+        btn.click();
+        return { ok: true };
+      })()`);
+      assert(created?.ok === true, `点击新建对话失败: ${created?.error || "unknown"}`);
+
+      await sendPromptByUi(`请回答 ${marker}-q1 #LLM_DELAY_1800`);
+      await waitFor(
+        "panel first run ready for historical user edit scenario",
+        async () => {
+          const out = await sidepanelClient!.evaluate(`(() => {
+            const retryBtns = document.querySelectorAll('button[aria-label="重新回答"]');
+            const editBtns = document.querySelectorAll('button[aria-label="编辑并重跑"]');
+            return {
+              retryCount: retryBtns.length,
+              editCount: editBtns.length
+            };
+          })()`);
+          if (Number(out?.retryCount || 0) < 1) return null;
+          if (Number(out?.editCount || 0) < 1) return null;
+          return out;
+        },
+        45_000,
+        250
+      );
+
+      await waitFor(
+        "panel idle before sending second prompt",
+        async () => {
+          const out = await sidepanelClient!.evaluate(`(() => ({
+            running: !!document.querySelector('button[aria-label="停止生成"]')
+          }))()`);
+          return out?.running ? null : true;
+        },
+        20_000,
+        200
+      );
+
+      await sendPromptByUi(`请回答 ${marker}-q2 #LLM_DELAY_1800`);
+
+      await waitFor(
+        "panel second run ready for historical user edit scenario",
+        async () => {
+          const ui = await sidepanelClient!.evaluate(`(() => {
+            const editBtns = document.querySelectorAll('button[aria-label="编辑并重跑"]');
+            const retryBtns = document.querySelectorAll('button[aria-label="重新回答"]');
+            return {
+              editCount: editBtns.length,
+              retryCount: retryBtns.length
+            };
+          })()`);
+          if (Number(ui?.editCount || 0) < 2) return null;
+          if (Number(ui?.retryCount || 0) < 1) return null;
+
+          const listed = await sendBgMessage(sidepanelClient!, { type: "brain.session.list" });
+          if (!listed.ok) return null;
+          const currentSessionId = String((listed.data?.sessions || [])[0]?.id || "");
+          if (!currentSessionId) return null;
+          const viewed = await sendBgMessage(sidepanelClient!, {
+            type: "brain.session.view",
+            sessionId: currentSessionId
+          });
+          if (!viewed.ok) return null;
+          const msgs = Array.isArray(viewed.data?.conversationView?.messages) ? viewed.data.conversationView.messages : [];
+          const userCount = msgs.filter((item: any) => String(item?.role || "") === "user").length;
+          if (userCount < 2) return null;
+          return { ui, userCount };
+        },
+        45_000,
+        250
+      );
+
+      const listBeforeHistoricalEdit = await sendBgMessage(sidepanelClient!, { type: "brain.session.list" });
+      assert(listBeforeHistoricalEdit.ok === true, "历史 user 编辑前读取会话列表失败");
+      const sessionsBeforeHistoricalEdit = Array.isArray(listBeforeHistoricalEdit.data?.sessions) ? listBeforeHistoricalEdit.data.sessions : [];
+      const sessionCountBeforeHistoricalEdit = Number(sessionsBeforeHistoricalEdit.length || 0);
+      let sourceSessionId = "";
+      let sourceMessagesBeforeHistoricalEdit: any[] = [];
+      for (const session of sessionsBeforeHistoricalEdit) {
+        const candidateSessionId = String(session?.id || "");
+        if (!candidateSessionId) continue;
+        const viewed = await sendBgMessage(sidepanelClient!, {
+          type: "brain.session.view",
+          sessionId: candidateSessionId
+        });
+        if (!viewed.ok) continue;
+        const msgs = Array.isArray(viewed.data?.conversationView?.messages) ? viewed.data.conversationView.messages : [];
+        const matched = msgs.some(
+          (item: any) => String(item?.role || "") === "user" && String(item?.content || "").includes(`${marker}-q2`)
+        );
+        if (!matched) continue;
+        sourceSessionId = candidateSessionId;
+        sourceMessagesBeforeHistoricalEdit = msgs;
+        break;
+      }
+      assert(sourceSessionId.length > 0, "历史 user 编辑前未定位到目标会话");
+      const sourceUsers = sourceMessagesBeforeHistoricalEdit.filter(
+        (item: any) => String(item?.role || "") === "user" && String(item?.content || "").includes(`${marker}-q`)
+      );
+      assert(sourceUsers.length >= 2, "历史 user 编辑场景至少需要两条目标 user 消息");
+      const historicalUser = sourceUsers.find((item: any) => String(item?.content || "").includes(`${marker}-q1`));
+      assert(historicalUser, "未找到待编辑的历史 user(q1)");
+      const historicalUserEntryId = String(historicalUser?.entryId || "");
+      const historicalUserOriginalText = String(historicalUser?.content || "");
+      assert(historicalUserEntryId.length > 0, "未找到历史 user entryId");
+
+      const editedHistoricalText = `请回答 ${marker}-q1(编辑版) #LLM_DELAY_1800`;
+      await waitFor(
+        "panel idle before historical inline edit submit",
+        async () => {
+          const out = await sidepanelClient!.evaluate(`(() => ({
+            running: !!document.querySelector('button[aria-label="停止生成"]')
+          }))()`);
+          return out?.running ? null : true;
+        },
+        20_000,
+        200
+      );
+
+      await waitFor(
+        "panel historical edit button enabled",
+        async () => {
+          const out = await sidepanelClient!.evaluate(`(() => {
+            const sourceEntryId = ${JSON.stringify(historicalUserEntryId)};
+            const btn = document.querySelector('button[aria-label="编辑并重跑"][data-entry-id="' + sourceEntryId + '"]');
+            if (!(btn instanceof HTMLButtonElement)) return null;
+            return btn.disabled ? null : true;
+          })()`);
+          return out === true ? true : null;
+        },
+        20_000,
+        200
+      );
+
+      const historicalEditSubmitted = await sidepanelClient!.evaluate(`(async () => {
+        const sourceEntryId = ${JSON.stringify(historicalUserEntryId)};
+        const target = document.querySelector('button[aria-label="编辑并重跑"][data-entry-id="' + sourceEntryId + '"]');
+        if (!(target instanceof HTMLButtonElement)) return { ok: false, error: "historical edit button missing" };
+        if (target.disabled) return { ok: false, error: "historical edit button disabled" };
+        const item = target.closest('[role="listitem"]');
+        if (!item) return { ok: false, error: "historical listitem missing" };
+        target.click();
+        let inlineInput = null;
+        for (let i = 0; i < 12; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 40));
+          const node = item.querySelector('[data-testid="user-inline-editor-input"]') || document.querySelector('[data-testid="user-inline-editor-input"]');
+          if (node instanceof HTMLTextAreaElement) {
+            inlineInput = node;
+            break;
+          }
+        }
+        if (!(inlineInput instanceof HTMLTextAreaElement)) return { ok: false, error: "historical inline input missing" };
+        const focused = document.activeElement === inlineInput;
+        inlineInput.value = ${JSON.stringify(editedHistoricalText)};
+        inlineInput.dispatchEvent(new Event("input", { bubbles: true }));
+        const submitBtn = item.querySelector('button[aria-label="提交编辑并重跑"]');
+        if (!(submitBtn instanceof HTMLButtonElement)) return { ok: false, error: "historical inline submit missing" };
+        submitBtn.click();
+        return { ok: true, focused };
+      })()`);
+      assert(historicalEditSubmitted?.ok === true, `提交历史 user inline 编辑失败: ${historicalEditSubmitted?.error || "unknown"}`);
+      assert(historicalEditSubmitted?.focused === true, "历史 user inline editor 打开后应自动聚焦");
+
+      const sessionsAfterHistoricalEdit = await waitFor(
+        "panel historical user edit creates fork session",
+        async () => {
+          const listed = await sendBgMessage(sidepanelClient!, { type: "brain.session.list" });
+          if (!listed.ok) return null;
+          const sessionsNow = Array.isArray(listed.data?.sessions) ? listed.data.sessions : [];
+          if (Number(sessionsNow.length || 0) !== sessionCountBeforeHistoricalEdit + 1) return null;
+          return sessionsNow;
+        },
+        30_000,
+        250
+      );
+      const forkSession = sessionsAfterHistoricalEdit.find(
+        (item: any) =>
+          String(item?.id || "") !== sourceSessionId &&
+          String(item?.forkedFrom?.sessionId || "") === sourceSessionId &&
+          String(item?.forkedFrom?.leafId || "") === historicalUserEntryId
+      );
+      const forkSessionId = String(forkSession?.id || "");
+      assert(forkSessionId.length > 0, "历史 user 编辑后 fork sessionId 为空");
+      assert(forkSessionId !== sourceSessionId, "历史 user 编辑后应切到分叉会话");
+      assert(String(forkSession?.forkedFrom?.sessionId || "") === sourceSessionId, "分叉来源 sessionId 不正确");
+      assert(String(forkSession?.forkedFrom?.leafId || "").length > 0, "分叉来源 leafId 为空");
+
+      await waitFor(
+        "panel historical user edit trace visible",
+        async () => {
+          const dump = await sendBgMessage(sidepanelClient!, {
+            type: "brain.debug.dump",
+            sessionId: forkSessionId
+          });
+          if (!dump.ok) return null;
+          const stream = Array.isArray(dump.data?.stepStream) ? dump.data.stepStream : [];
+          const hit = stream.some(
+            (item: any) => item?.type === "input.regenerate" && item?.payload?.reason === "edit_user_rerun" && item?.payload?.mode === "fork"
+          );
+          const hasLoopDone = stream.some((item: any) => item?.type === "loop_done");
+          if (!hit || !hasLoopDone) return null;
+          return true;
+        },
+        45_000,
+        250
+      );
+
+      const forkView = await sendBgMessage(sidepanelClient!, {
+        type: "brain.session.view",
+        sessionId: forkSessionId
+      });
+      assert(forkView.ok === true, "读取分叉会话详情失败");
+      const forkMessages = Array.isArray(forkView.data?.conversationView?.messages) ? forkView.data.conversationView.messages : [];
+      const forkUsers = forkMessages.filter((item: any) => String(item?.role || "") === "user");
+      assert(
+        forkUsers.some((item: any) => String(item?.content || "") === editedHistoricalText),
+        `分叉会话应包含编辑后的 user 文本，期望=${editedHistoricalText}`
+      );
+      assert(
+        !forkUsers.some((item: any) => String(item?.content || "") === historicalUserOriginalText),
+        "分叉会话不应保留被编辑 user 的原文本"
+      );
+
+      const sourceViewAfterHistoricalEdit = await sendBgMessage(sidepanelClient!, {
+        type: "brain.session.view",
+        sessionId: sourceSessionId
+      });
+      assert(sourceViewAfterHistoricalEdit.ok === true, "读取原会话详情失败");
+      const sourceMessagesAfterHistoricalEdit = Array.isArray(sourceViewAfterHistoricalEdit.data?.conversationView?.messages)
+        ? sourceViewAfterHistoricalEdit.data.conversationView.messages
+        : [];
+      const firstSourceUserAfter = sourceMessagesAfterHistoricalEdit.find(
+        (item: any) => String(item?.role || "") === "user" && String(item?.entryId || "") === historicalUserEntryId
+      );
+      assert(
+        String(firstSourceUserAfter?.content || "") === historicalUserOriginalText,
+        "历史 user 分叉重跑不应改写原会话消息"
+      );
     });
 
     await runCase("debug.console", "Live Events 可显示 brain.event", async () => {

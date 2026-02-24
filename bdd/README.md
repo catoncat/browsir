@@ -2,16 +2,24 @@
 
 本目录是 Browser Brain Loop 的行为契约门禁中心，采用 `contract -> feature -> mapping -> evidence -> gate` 流程。
 
+配套文档：
+- 交接：`bdd/SESSION-HANDOFF.md`
+- 写作规范：`bdd/CONTRACT-WRITING-GUIDELINE.md`
+
 ## 目录与职责
 
 - `schemas/behavior-contract.schema.json`
   - 契约结构约束（`BHV-*`、proof layers、风险等级等）
 - `contracts/**/*.json`
   - Canonical 行为契约
+- `mappings/contract-categories.json`
+  - 契约分类清单：`ux | protocol | storage`
 - `features/**/*.feature`
   - Gherkin 视图，必须通过 `@contract(BHV-...)` 绑定契约
 - `mappings/contract-to-tests.json`
   - 契约到证明层映射（`unit|integration|browser-cdp|e2e`）
+  - `target` 支持多文件（同一条 proof 可包含多个 `path::anchor`）
+  - `e2e` 的 `target` 支持 `path::selector`，gate 会校验 evidence 中存在命中的 passed 用例
 - `evidence/*.json`
   - e2e 运行证据，`gate` 强制检查 `passed=true`
 
@@ -32,6 +40,9 @@
 bun run brain:e2e
 bun run bdd:validate
 bun run bdd:gate
+bun run bdd:gate:ux
+bun run bdd:gate:protocol
+bun run bdd:gate:storage
 ```
 
 真实 LLM 门禁（需要外网与 key）：
@@ -53,9 +64,12 @@ bun run bdd:gate:live
 ## 门禁语义
 
 - `bdd:validate`
-  - 校验契约结构、feature 引用、mapping 基本一致性。
+  - 校验契约结构、feature 引用、mapping 基本一致性、category 完整性。
 - `bdd:gate`（`BDD_GATE_PROFILE=default`）
   - 检查默认 profile 契约的 required layers、目标文件存在、evidence `passed=true`。
+  - 若 e2e `target` 带 selector（`file.json::token`），还会校验证据中有命中的 passed 测试项。
+- `bdd:gate:ux|protocol|storage`
+  - 仅检查对应分类契约，适合分层门禁与分责任维护。
 - `bdd:gate:live`（`BDD_GATE_PROFILE=live`）
   - 在默认契约基础上，额外检查 `gate_profile=live` 的契约。
 

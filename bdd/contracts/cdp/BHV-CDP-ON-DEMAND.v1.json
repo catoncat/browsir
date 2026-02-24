@@ -18,7 +18,7 @@
     "invoke_action_does_not_require_tab",
     "cdp_without_valid_tab_returns_explicit_error",
     "cdp_with_valid_tab_is_executable",
-    "snapshot_returns_a11y_nodes_with_ref_role_backendNodeId",
+    "snapshot_returns_referenceable_a11y_nodes_with_ref_and_role",
     "snapshot_supports_compact_and_truncated_flag",
     "verify_supports_urlChanged_and_textIncludes"
   ],
@@ -42,7 +42,7 @@
   },
   "rollback_or_compensation": [
     "release_tab_lease_if_held",
-    "record_failure_type:cdf_tab_missing"
+    "record_failure_type:cdp_tab_missing"
   ],
-  "version": "1.1.0"
+  "version": "1.2.0"
 }

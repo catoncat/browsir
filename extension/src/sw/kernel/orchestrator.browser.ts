@@ -29,6 +29,7 @@ export interface AgentEndDecision {
 
 export interface RuntimeView {
   sessionId: string;
+  running: boolean;
   paused: boolean;
   stopped: boolean;
   retry: RunState["retry"];
@@ -123,6 +124,7 @@ export class BrainOrchestrator {
     const meta = await this.sessions.createSession(input);
     this.runStateBySession.set(meta.header.id, {
       sessionId: meta.header.id,
+      running: false,
       paused: false,
       stopped: false,
       retry: {
@@ -146,15 +148,17 @@ export class BrainOrchestrator {
   getRunState(sessionId: string): RuntimeView {
     const current = this.runStateBySession.get(sessionId);
     if (current) {
-      return {
-        sessionId,
-        paused: current.paused,
-        stopped: current.stopped,
-        retry: { ...current.retry }
+        return {
+          sessionId,
+          running: current.running,
+          paused: current.paused,
+          stopped: current.stopped,
+          retry: { ...current.retry }
       };
     }
     return {
       sessionId,
+      running: false,
       paused: false,
       stopped: false,
       retry: {
@@ -181,6 +185,43 @@ export class BrainOrchestrator {
   stop(sessionId: string): RuntimeView {
     const state = this.ensureRunState(sessionId);
     state.stopped = true;
+    state.running = false;
+    return this.getRunState(sessionId);
+  }
+
+  restart(sessionId: string): RuntimeView {
+    const state = this.ensureRunState(sessionId);
+    state.stopped = false;
+    state.paused = false;
+    return this.getRunState(sessionId);
+  }
+
+  setRunning(sessionId: string, running: boolean): RuntimeView {
+    const state = this.ensureRunState(sessionId);
+    state.running = running;
+    return this.getRunState(sessionId);
+  }
+
+  updateRetryState(
+    sessionId: string,
+    patch: Partial<Pick<RunState["retry"], "active" | "attempt" | "delayMs" | "maxAttempts">>
+  ): RuntimeView {
+    const state = this.ensureRunState(sessionId);
+    state.retry = {
+      ...state.retry,
+      ...patch
+    };
+    return this.getRunState(sessionId);
+  }
+
+  resetRetryState(sessionId: string): RuntimeView {
+    const state = this.ensureRunState(sessionId);
+    state.retry = {
+      active: false,
+      attempt: 0,
+      maxAttempts: this.options.retryMaxAttempts,
+      delayMs: 0
+    };
     return this.getRunState(sessionId);
   }
 
@@ -189,6 +230,7 @@ export class BrainOrchestrator {
     if (cached) return cached;
     const created: RunState = {
       sessionId,
+      running: false,
       paused: false,
       stopped: false,
       retry: {

@@ -78,6 +78,22 @@ browser-brain-loop/
     └── bdd-lib.ts        # BDD 工具共享库
 ```
 
+## UI 与无障碍 (Accessibility First)
+
+所有 UI 开发必须遵循以下无障碍标准，确保产品对所有用户（包括辅助技术用户）友好：
+
+- **语义化 HTML**：优先使用 `<header>`, `<main>`, `<nav>`, `<article>`, `<button>`, `<ul>` 等语义标签，避免滥用 `div`。
+- **ARIA 属性**：
+  - 所有图标按钮必须具备明确的 `aria-label`。
+  - 复杂组件必须包含状态描述（`aria-expanded`, `aria-haspopup`, `aria-controls`）。
+  - 实时变化区域（如消息列表）必须标记 `role="log"` 和 `aria-live="polite"`。
+  - 列表项使用 `role="listitem"`，当前项使用 `aria-current="true"`。
+- **键盘导航**：
+  - 所有交互元素必须可通过 `Tab` 键聚焦。
+  - 核心列表（如会话列表）必须支持 `ArrowUp/ArrowDown` 方向键导航及 `Enter` 确认。
+  - 必须确保焦点可见性（使用 `focus-visible` 样式）。
+- **图标降噪**：纯装饰性图标必须标记 `aria-hidden="true"`。
+
 ## 关键协议
 
 Bridge WS 通信使用统一 `invoke` 帧格式：

@@ -225,7 +225,9 @@ export class BrowserSessionManager {
       messages.push({
         role: entry.role,
         content: entry.text,
-        entryId: entry.id
+        entryId: entry.id,
+        toolName: entry.toolName,
+        toolCallId: entry.toolCallId
       });
     }
 

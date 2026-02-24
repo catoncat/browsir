@@ -3,14 +3,14 @@ import { useIntervalFn } from "@vueuse/core";
 import { storeToRefs } from "pinia";
 import { computed, onMounted, onUnmounted, ref, nextTick, watch } from "vue";
 import { useRuntimeStore } from "./stores/runtime";
-import { useMessageActions, type PanelMessageLike } from "./utils/message-actions";
+import { useMessageActions, type PanelMessageLike, type PendingRegenerateState } from "./utils/message-actions";
 
 import SessionList from "./components/SessionList.vue";
 import ChatMessage from "./components/ChatMessage.vue";
 import ChatInput from "./components/ChatInput.vue";
 import SettingsView from "./components/SettingsView.vue";
 import DebugView from "./components/DebugView.vue";
-import { Loader2, Plus, Settings, Bug, Activity, History, MoreVertical, FileUp, Download, ExternalLink, Copy } from "lucide-vue-next";
+import { Loader2, Plus, Settings, Bug, Activity, History, MoreVertical, FileUp, Download, ExternalLink, Copy, GitBranch } from "lucide-vue-next";
 import { onClickOutside } from "@vueuse/core";
 
 const store = useRuntimeStore();
@@ -49,9 +49,28 @@ interface DisplayMessage extends PanelMessageLike {
   role: string;
   content: string;
   entryId: string;
+  toolName?: string;
+  toolCallId?: string;
+  toolPending?: boolean;
+  toolPendingAction?: string;
+  toolPendingDetail?: string;
   busyPlaceholder?: boolean;
   busyMode?: "retry" | "fork";
   busySourceEntryId?: string;
+}
+
+interface StepTraceRecord {
+  type?: string;
+  timestamp?: string;
+  ts?: string;
+  payload?: Record<string, unknown>;
+}
+
+interface ToolRunSnapshot {
+  step: number;
+  action: string;
+  arguments: string;
+  ts: string;
 }
 
 const {
@@ -73,42 +92,325 @@ const {
   regenerateFromAssistantEntry: store.regenerateFromAssistantEntry
 });
 
+const editingUserEntryId = ref("");
+const editingUserDraft = ref("");
+const editingUserSubmitting = ref(false);
+const userPendingRegenerate = ref<PendingRegenerateState | null>(null);
+const userForkingEntryId = ref("");
+const branchSwitching = ref(false);
+const forkSessionHighlight = ref(false);
+const activeToolRun = ref<ToolRunSnapshot | null>(null);
+let forkSessionHighlightTimer: ReturnType<typeof setTimeout> | null = null;
+
+const USER_FORK_MIN_VISIBLE_MS = 620;
+const USER_FORK_SWITCH_TRANSITION_MS = 160;
+const FORK_SWITCH_HIGHLIGHT_MS = 1800;
+const TOOL_STREAM_SYNC_INTERVAL_MS = 3200;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, Math.max(0, ms));
+  });
+}
+
+function setForkSessionHighlight(active: boolean) {
+  forkSessionHighlight.value = active;
+}
+
+function triggerForkSessionHighlight() {
+  if (forkSessionHighlightTimer) {
+    clearTimeout(forkSessionHighlightTimer);
+    forkSessionHighlightTimer = null;
+  }
+  setForkSessionHighlight(true);
+  forkSessionHighlightTimer = setTimeout(() => {
+    setForkSessionHighlight(false);
+    forkSessionHighlightTimer = null;
+  }, FORK_SWITCH_HIGHLIGHT_MS);
+}
+
+function resetEditingState() {
+  editingUserEntryId.value = "";
+  editingUserDraft.value = "";
+  editingUserSubmitting.value = false;
+  userForkingEntryId.value = "";
+}
+
+function findLatestUserEntryId(items: PanelMessageLike[]) {
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const candidate = items[i];
+    if (candidate?.role !== "user") continue;
+    const entryId = String(candidate?.entryId || "").trim();
+    if (!entryId) continue;
+    if (!String(candidate?.content || "").trim()) continue;
+    return entryId;
+  }
+  return "";
+}
+
+function toRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function normalizeStep(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+function normalizeEventTs(row: Record<string, unknown>): string {
+  return String(row.ts || row.timestamp || new Date().toISOString());
+}
+
+function prettyToolAction(action: string): string {
+  const normalized = String(action || "").trim().toLowerCase();
+  const map: Record<string, string> = {
+    snapshot: "读取页面快照",
+    list_tabs: "检索标签页",
+    open_tab: "打开标签页",
+    browser_action: "执行浏览器动作",
+    browser_verify: "执行页面验证",
+    read_file: "读取文件",
+    write_file: "写入文件",
+    edit_file: "编辑文件",
+    bash: "执行命令"
+  };
+  return map[normalized] || (normalized ? `执行 ${normalized}` : "执行工具");
+}
+
+function clipText(text: string, max = 96): string {
+  const value = String(text || "").trim();
+  if (!value) return "";
+  return value.length > max ? `${value.slice(0, max)}…` : value;
+}
+
+function toScalarText(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+}
+
+function tryParseArgs(raw: string): Record<string, unknown> | null {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatToolPendingDetail(action: string, argsRaw: string): string {
+  const normalized = String(action || "").trim().toLowerCase();
+  const raw = String(argsRaw || "").trim();
+  const args = tryParseArgs(raw);
+
+  if (normalized === "list_tabs") return "正在读取当前窗口标签页信息";
+  if (normalized === "bash") {
+    const command = toScalarText(args?.command) || raw;
+    return command ? `命令：${clipText(command, 100)}` : "";
+  }
+  if (["read_file", "write_file", "edit_file"].includes(normalized)) {
+    const path = toScalarText(args?.path);
+    return path ? `路径：${clipText(path, 100)}` : "";
+  }
+  if (normalized === "open_tab") {
+    const url = toScalarText(args?.url);
+    return url ? `目标：${clipText(url, 100)}` : "";
+  }
+  if (normalized === "snapshot") {
+    const mode = toScalarText(args?.mode) || "interactive";
+    const selector = toScalarText(args?.selector);
+    const detail = selector ? `模式：${mode} · 选择器：${clipText(selector, 64)}` : `模式：${mode}`;
+    return detail;
+  }
+  if (normalized === "browser_action") {
+    const kind = toScalarText(args?.kind);
+    const target = toScalarText(args?.url) || toScalarText(args?.ref) || toScalarText(args?.selector);
+    if (kind && target) return `${kind} · ${clipText(target, 88)}`;
+    if (kind) return `动作：${kind}`;
+  }
+  if (normalized === "browser_verify") {
+    return "正在校验页面状态";
+  }
+
+  if (raw) return `参数：${clipText(raw, 110)}`;
+  return "";
+}
+
+function clearActiveToolRun() {
+  activeToolRun.value = null;
+}
+
+function deriveActiveToolRunFromStream(stream: StepTraceRecord[]): ToolRunSnapshot | null {
+  const pendingByStep = new Map<number, ToolRunSnapshot>();
+  for (const row of stream || []) {
+    const type = String(row?.type || "");
+    const payload = toRecord(row?.payload);
+    const mode = String(payload.mode || "");
+    if (type === "step_planned" && mode === "tool_call") {
+      const step = normalizeStep(payload.step);
+      if (!step) continue;
+      pendingByStep.set(step, {
+        step,
+        action: String(payload.action || ""),
+        arguments: String(payload.arguments || ""),
+        ts: normalizeEventTs(toRecord(row))
+      });
+      continue;
+    }
+    if (type === "step_finished" && mode === "tool_call") {
+      const step = normalizeStep(payload.step);
+      if (!step) continue;
+      pendingByStep.delete(step);
+      continue;
+    }
+    if (["loop_done", "loop_error", "loop_skip_stopped", "loop_internal_error"].includes(type)) {
+      pendingByStep.clear();
+    }
+  }
+  let latest: ToolRunSnapshot | null = null;
+  for (const item of pendingByStep.values()) {
+    if (!latest || item.step >= latest.step) latest = item;
+  }
+  return latest;
+}
+
+function applyRuntimeEventToolRun(event: unknown) {
+  const envelope = toRecord(event);
+  const type = String(envelope.type || "");
+  const payload = toRecord(envelope.payload);
+  const mode = String(payload.mode || "");
+  if (type === "step_planned" && mode === "tool_call") {
+    const step = normalizeStep(payload.step);
+    if (!step) return;
+    activeToolRun.value = {
+      step,
+      action: String(payload.action || ""),
+      arguments: String(payload.arguments || ""),
+      ts: normalizeEventTs(envelope)
+    };
+    return;
+  }
+  if (type === "step_finished" && mode === "tool_call") {
+    const step = normalizeStep(payload.step);
+    if (!step) return;
+    if (activeToolRun.value && activeToolRun.value.step === step) {
+      activeToolRun.value = null;
+    }
+    return;
+  }
+  if (["loop_done", "loop_error", "loop_skip_stopped", "loop_internal_error", "loop_start"].includes(type)) {
+    activeToolRun.value = null;
+  }
+}
+
+async function syncActiveToolRun(sessionId: string) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) return;
+  const response = (await chrome.runtime.sendMessage({
+    type: "brain.step.stream",
+    sessionId: normalizedSessionId
+  })) as { ok?: boolean; data?: { stream?: StepTraceRecord[] }; error?: string };
+  if (!response?.ok) {
+    throw new Error(String(response?.error || "读取 step stream 失败"));
+  }
+  const stream = Array.isArray(response?.data?.stream) ? response.data?.stream || [] : [];
+  activeToolRun.value = deriveActiveToolRunFromStream(stream);
+}
+
 const displayMessages = computed<DisplayMessage[]>(() => {
-  const base = (messages.value || []).map((item) => ({
+  const rendered = (messages.value || []).map((item) => ({
     role: String(item?.role || ""),
     content: String(item?.content || ""),
-    entryId: String(item?.entryId || "")
+    entryId: String(item?.entryId || ""),
+    toolName: String(item?.toolName || ""),
+    toolCallId: String(item?.toolCallId || "")
   }));
-  const pending = pendingRegenerate.value;
-  if (!pending) return base;
+  const pending = pendingRegenerate.value || userPendingRegenerate.value;
+  if (pending) {
+    const placeholder: DisplayMessage = {
+      role: "assistant_placeholder",
+      content: "正在重新生成回复…",
+      entryId: `__regen_placeholder__${pending.mode}__${pending.sourceEntryId}`,
+      busyPlaceholder: true,
+      busyMode: pending.mode,
+      busySourceEntryId: pending.sourceEntryId
+    };
 
-  const placeholder: DisplayMessage = {
-    role: "assistant_placeholder",
-    content: "正在重新生成回复…",
-    entryId: `__regen_placeholder__${pending.mode}__${pending.sourceEntryId}`,
-    busyPlaceholder: true,
-    busyMode: pending.mode,
-    busySourceEntryId: pending.sourceEntryId
-  };
-
-  if (pending.mode === "retry") {
-    const targetIndex = base.findIndex(
-      (item) => item.role === "assistant" && item.entryId === pending.sourceEntryId
-    );
-    if (targetIndex >= 0) {
-      base.splice(targetIndex, 1, placeholder);
-      return base;
+    const replaceMode = pending.strategy ? pending.strategy === "replace" : pending.mode === "retry";
+    if (replaceMode) {
+      const targetIndex = rendered.findIndex(
+        (item) => item.role === "assistant" && item.entryId === pending.sourceEntryId
+      );
+      if (targetIndex >= 0) {
+        rendered.splice(targetIndex, 1, placeholder);
+      } else {
+        rendered.push(placeholder);
+      }
+    } else {
+      const anchorIndex = rendered.findIndex((item) => item.entryId === pending.insertAfterUserEntryId);
+      if (anchorIndex >= 0) {
+        rendered.splice(anchorIndex + 1, 0, placeholder);
+      } else {
+        rendered.push(placeholder);
+      }
     }
   }
 
-  const anchorIndex = base.findIndex((item) => item.entryId === pending.insertAfterUserEntryId);
-  if (anchorIndex >= 0) {
-    base.splice(anchorIndex + 1, 0, placeholder);
-    return base;
+  if (isRunning.value && activeToolRun.value) {
+    rendered.push({
+      role: "tool_pending",
+      content: "",
+      entryId: `__tool_pending__${activeToolRun.value.step}`,
+      toolName: activeToolRun.value.action,
+      toolPending: true,
+      toolPendingAction: prettyToolAction(activeToolRun.value.action),
+      toolPendingDetail: formatToolPendingDetail(activeToolRun.value.action, activeToolRun.value.arguments)
+    });
   }
-  base.push(placeholder);
-  return base;
+
+  return rendered;
 });
+
+watch(isRunning, (running) => {
+  if (running) {
+    if (activeSessionId.value) {
+      void runSafely(
+        () => syncActiveToolRun(activeSessionId.value),
+        "同步工具运行状态失败"
+      );
+    }
+    return;
+  }
+  userPendingRegenerate.value = null;
+  clearActiveToolRun();
+});
+
+watch(activeSessionId, () => {
+  branchSwitching.value = false;
+  clearActiveToolRun();
+  if (!activeSession.value?.forkedFrom?.sessionId) {
+    setForkSessionHighlight(false);
+  }
+  resetEditingState();
+  if (activeSessionId.value && isRunning.value) {
+    void runSafely(
+      () => syncActiveToolRun(activeSessionId.value),
+      "同步工具运行状态失败"
+    );
+  }
+});
+
+watch(
+  messages,
+  (list) => {
+    if (!editingUserEntryId.value) return;
+    const exists = list.some((item) => String(item?.entryId || "") === editingUserEntryId.value);
+    if (!exists) resetEditingState();
+  },
+  { deep: true }
+);
 
 watch(
   () => displayMessages.value.length,
@@ -124,6 +426,96 @@ watch(
 function setErrorMessage(err: unknown, fallback: string) {
   const message = err instanceof Error ? err.message : String(err || "");
   error.value = message || fallback;
+}
+
+function canEditUserMessage(message: PanelMessageLike) {
+  if (message?.role !== "user") return false;
+  return String(message?.content || "").trim().length > 0;
+}
+
+async function handleEditMessage(payload: { entryId: string; content: string; role: string }) {
+  if (payload?.role !== "user") return;
+  if (loading.value || editingUserSubmitting.value) return;
+  const content = String(payload?.content || "").trim();
+  if (!content) return;
+  editingUserEntryId.value = String(payload?.entryId || "").trim();
+  editingUserDraft.value = String(payload?.content || "");
+}
+
+function handleEditDraftChange(payload: { entryId: string; content: string }) {
+  if (editingUserSubmitting.value) return;
+  const entryId = String(payload?.entryId || "").trim();
+  if (!entryId || editingUserEntryId.value !== entryId) return;
+  editingUserDraft.value = String(payload?.content || "");
+}
+
+function handleEditCancel(payload: { entryId: string }) {
+  if (editingUserSubmitting.value) return;
+  const entryId = String(payload?.entryId || "").trim();
+  if (!entryId || editingUserEntryId.value !== entryId) return;
+  resetEditingState();
+}
+
+async function handleEditSubmit(payload: { entryId: string; content: string; role: string }) {
+  if (payload?.role !== "user") return;
+  if (loading.value || editingUserSubmitting.value) return;
+  const entryId = String(payload?.entryId || "").trim();
+  if (!entryId || editingUserEntryId.value !== entryId) return;
+  const content = String(payload?.content || "").trim();
+  if (!content) return;
+
+  const startedAt = Date.now();
+  editingUserSubmitting.value = true;
+  const latestUserEntryIdBeforeSubmit = findLatestUserEntryId(messages.value);
+  const predictedMode: "retry" | "fork" = latestUserEntryIdBeforeSubmit === entryId ? "retry" : "fork";
+  if (predictedMode === "fork") {
+    userForkingEntryId.value = entryId;
+  }
+  userPendingRegenerate.value = {
+    mode: predictedMode,
+    sourceEntryId: entryId,
+    insertAfterUserEntryId: entryId,
+    strategy: "insert"
+  };
+  try {
+    const result = await store.editUserMessageAndRerun(entryId, content, { setActive: false });
+    const latestUserEntryId = findLatestUserEntryId(messages.value);
+    const sourceEntryId = String(result.activeSourceEntryId || entryId || "").trim();
+    const anchorEntryId = latestUserEntryId || sourceEntryId;
+    userPendingRegenerate.value = anchorEntryId
+      ? {
+          mode: result.mode,
+          sourceEntryId,
+          insertAfterUserEntryId: anchorEntryId,
+          strategy: "insert"
+        }
+      : null;
+
+    if (result.mode === "fork") {
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < USER_FORK_MIN_VISIBLE_MS) {
+        await sleep(USER_FORK_MIN_VISIBLE_MS - elapsed);
+      }
+      branchSwitching.value = true;
+      await store.loadConversation(result.sessionId, { setActive: true });
+      triggerForkSessionHighlight();
+      await nextTick();
+      await sleep(USER_FORK_SWITCH_TRANSITION_MS);
+      branchSwitching.value = false;
+    }
+
+    resetEditingState();
+  } catch (err) {
+    userPendingRegenerate.value = null;
+    branchSwitching.value = false;
+    setErrorMessage(err, "编辑并重跑失败");
+    console.error(err);
+  } finally {
+    editingUserSubmitting.value = false;
+    if (!editingUserEntryId.value) {
+      userForkingEntryId.value = "";
+    }
+  }
 }
 
 async function runSafely(task: () => Promise<void>, fallback: string) {
@@ -142,6 +534,7 @@ const onRuntimeMessage = (message: unknown) => {
   if (!eventSessionId) return;
 
   if (eventSessionId === activeSessionId.value) {
+    applyRuntimeEventToolRun(payload.event);
     void runSafely(
       () => store.loadConversation(eventSessionId, { setActive: false }),
       "刷新会话失败"
@@ -154,16 +547,26 @@ const onRuntimeMessage = (message: unknown) => {
 
 onMounted(() => {
   chrome.runtime.onMessage.addListener(onRuntimeMessage);
-  void runSafely(() => store.bootstrap(), "初始化失败");
+  void runSafely(async () => {
+    await store.bootstrap();
+    if (activeSessionId.value && isRunning.value) {
+      await syncActiveToolRun(activeSessionId.value);
+    }
+  }, "初始化失败");
 });
 
 useIntervalFn(() => {
   if (!activeSessionId.value || !isRunning.value) return;
   void runSafely(
-    () => store.loadConversation(activeSessionId.value, { setActive: false }),
+    async () => {
+      await Promise.all([
+        store.loadConversation(activeSessionId.value, { setActive: false }),
+        syncActiveToolRun(activeSessionId.value)
+      ]);
+    },
     "轮询会话失败"
   );
-}, 3000);
+}, TOOL_STREAM_SYNC_INTERVAL_MS);
 
 async function handleCreateSession() {
   await runSafely(async () => {
@@ -263,6 +666,11 @@ function handleExport(mode: 'download' | 'open') {
 }
 
 onUnmounted(() => {
+  if (forkSessionHighlightTimer) {
+    clearTimeout(forkSessionHighlightTimer);
+    forkSessionHighlightTimer = null;
+  }
+  clearActiveToolRun();
   chrome.runtime.onMessage.removeListener(onRuntimeMessage);
   cleanupMessageActions();
 });
@@ -296,8 +704,16 @@ onUnmounted(() => {
           <h1 class="text-[15px] font-bold text-ui-text truncate tracking-tight ml-1">
             {{ activeSessionTitle }}
           </h1>
-          <span v-if="activeForkSourceText" class="text-[10px] font-semibold text-ui-text-muted uppercase tracking-wide">
-            {{ activeForkSourceText }}
+          <span
+            v-if="activeForkSourceText"
+            class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide transition-all duration-200"
+            :class="forkSessionHighlight
+              ? 'text-ui-accent border-ui-accent/40 bg-ui-accent/10 shadow-[0_0_0_1px_rgba(37,99,235,0.08)]'
+              : 'text-ui-text-muted border-ui-border/70 bg-ui-surface/60'"
+            data-testid="fork-session-indicator"
+          >
+            <GitBranch :size="10" :class="forkSessionHighlight ? 'animate-pulse' : ''" aria-hidden="true" />
+            <span>{{ activeForkSourceText }}</span>
           </span>
           <div v-if="hasBridge" class="w-2 h-2 bg-green-500 rounded-full shrink-0 shadow-[0_0_8px_rgba(34,197,94,0.4)]" :title="'Bridge Connected'" role="status" aria-label="Bridge Connected"></div>
         </div>
@@ -400,7 +816,8 @@ onUnmounted(() => {
 
       <div
         ref="scrollContainer"
-        class="flex-1 overflow-y-auto scroll-smooth w-full min-h-0"
+        class="flex-1 overflow-y-auto scroll-smooth w-full min-h-0 transition-opacity duration-150"
+        :class="branchSwitching ? 'opacity-75' : 'opacity-100'"
         role="log"
         aria-live="polite"
         aria-label="对话历史记录"
@@ -413,22 +830,36 @@ onUnmounted(() => {
               :role="msg.role"
               :content="msg.content"
               :entry-id="msg.entryId"
+              :tool-name="msg.toolName"
+              :tool-call-id="msg.toolCallId"
+              :tool-pending="msg.toolPending"
+              :tool-pending-action="msg.toolPendingAction"
+              :tool-pending-detail="msg.toolPendingDetail"
               :busy-placeholder="msg.busyPlaceholder"
-              :busy-mode="msg.busyMode"
-              :busy-source-entry-id="msg.busySourceEntryId"
-              :copied="copiedEntryId === msg.entryId"
-              :retrying="retryingEntryId === msg.entryId"
-              :forking="forkingEntryId === msg.entryId"
-              :copy-disabled="loading || !canCopyMessage(msg)"
-              :retry-disabled="loading || isRunning || !canRetryMessage(msg, index)"
-              :fork-disabled="loading || isRunning || !canForkMessage(msg, index)"
-              :show-copy-action="canCopyMessage(msg)"
-              :show-retry-action="canRetryMessage(msg, index)"
-              :show-fork-action="canForkMessage(msg, index)"
-              @copy="handleCopyMessage"
-              @retry="handleRetryMessage"
-              @fork="handleForkMessage"
-            />
+                :busy-mode="msg.busyMode"
+                :busy-source-entry-id="msg.busySourceEntryId"
+                :edit-disabled="loading || isRunning"
+                :copied="copiedEntryId === msg.entryId"
+                :retrying="retryingEntryId === msg.entryId"
+                :forking="forkingEntryId === msg.entryId || userForkingEntryId === msg.entryId"
+                :show-edit-action="canEditUserMessage(msg)"
+                :editing="editingUserEntryId === msg.entryId"
+                :edit-draft="editingUserEntryId === msg.entryId ? editingUserDraft : ''"
+                :edit-submitting="editingUserSubmitting && editingUserEntryId === msg.entryId"
+                :copy-disabled="loading || !canCopyMessage(msg)"
+                :retry-disabled="loading || isRunning || !canRetryMessage(msg, index)"
+                :fork-disabled="loading || isRunning || !canForkMessage(msg, index)"
+                :show-copy-action="canCopyMessage(msg)"
+                :show-retry-action="canRetryMessage(msg, index)"
+                :show-fork-action="canForkMessage(msg, index)"
+                @copy="handleCopyMessage"
+                @edit="handleEditMessage"
+                @edit-change="handleEditDraftChange"
+                @edit-cancel="handleEditCancel"
+                @edit-submit="handleEditSubmit"
+                @retry="handleRetryMessage"
+                @fork="handleForkMessage"
+              />
           </div>
 
           <div v-else class="flex flex-col items-start py-8 animate-in fade-in duration-500">

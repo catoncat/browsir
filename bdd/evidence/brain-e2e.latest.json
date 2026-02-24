@@ -1,12 +1,12 @@
 {
   "version": "1.0.0",
-  "ts": "2026-02-23T12:58:06.107Z",
+  "ts": "2026-02-24T05:19:25.278Z",
   "passed": true,
   "summary": {
-    "total": 19,
-    "passed": 19,
+    "total": 20,
+    "passed": 20,
     "failed": 0,
-    "durationMs": 11071
+    "durationMs": 24592
   },
   "env": {
     "chromeBin": "/Users/envvar/Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
@@ -23,19 +23,19 @@
       "group": "panel.vnext",
       "name": "dist sidepanel 路径可直接加载",
       "status": "passed",
-      "durationMs": 282
+      "durationMs": 290
     },
     {
       "group": "service-worker API",
       "name": "snapshot interactive 返回 ref/node handles",
       "status": "passed",
-      "durationMs": 20
+      "durationMs": 9
     },
     {
       "group": "service-worker API",
       "name": "lease + cdp_action + verify 闭环",
       "status": "passed",
-      "durationMs": 14
+      "durationMs": 7
     },
     {
       "group": "service-worker API",
@@ -47,7 +47,7 @@
       "group": "service-worker API",
       "name": "ref 不存在时按现状返回稳定错误",
       "status": "passed",
-      "durationMs": 1
+      "durationMs": 2
     },
     {
       "group": "service-worker API",
@@ -59,61 +59,67 @@
       "group": "service-worker API",
       "name": "lease 冲突 + release + 过期后可恢复",
       "status": "passed",
-      "durationMs": 2407
+      "durationMs": 2412
     },
     {
       "group": "service-worker API",
       "name": "snapshot 支持 compact/maxTokens/a11y 字段",
       "status": "passed",
-      "durationMs": 152
+      "durationMs": 162
     },
     {
       "group": "service-worker API",
       "name": "cdp.verify 支持 urlChanged 断言",
       "status": "passed",
-      "durationMs": 142
+      "durationMs": 152
     },
     {
       "group": "brain.runtime",
       "name": "brain.step.execute 可执行 cdp action + verify",
       "status": "passed",
-      "durationMs": 153
+      "durationMs": 152
     },
     {
       "group": "brain.runtime",
       "name": "brain.run.start 支持 tool_calls 闭环并写入 step stream",
       "status": "passed",
-      "durationMs": 270
+      "durationMs": 273
     },
     {
       "group": "brain.runtime",
       "name": "同一会话第二轮继续执行不应触发 LLM HTTP 400",
       "status": "passed",
-      "durationMs": 539
+      "durationMs": 549
     },
     {
       "group": "brain.runtime",
       "name": "brain.run.start 注入 shared tabs 上下文并每次覆盖",
       "status": "passed",
-      "durationMs": 809
+      "durationMs": 331
     },
     {
       "group": "brain.runtime",
       "name": "brain.debug.dump 可观测 llm 原始调用与工具步骤",
       "status": "passed",
-      "durationMs": 282
+      "durationMs": 299
     },
     {
       "group": "brain.runtime",
       "name": "LLM HTTP 失败时应产生 auto_retry 事件并失败收口",
       "status": "passed",
-      "durationMs": 1545
+      "durationMs": 1556
     },
     {
       "group": "panel.vnext",
       "name": "sidepanel 渲染并支持复制/历史分叉/最后一条重试",
       "status": "passed",
-      "durationMs": 1193
+      "durationMs": 10647
+    },
+    {
+      "group": "panel.vnext",
+      "name": "user inline 编辑：最后一条重跑，历史消息分叉重跑",
+      "status": "passed",
+      "durationMs": 4108
     },
     {
       "group": "debug.console",
@@ -125,28 +131,25 @@
       "group": "brain.runtime",
       "name": "brain.run.stop 状态通过 session.view 回显",
       "status": "passed",
-      "durationMs": 6
+      "durationMs": 9
     },
     {
       "group": "brain.session",
       "name": "session 标题自动生成 + 手动刷新 + 删除",
       "status": "passed",
-      "durationMs": 34
+      "durationMs": 35
     }
   ],
   "fatalError": null,
   "debug": {
     "bridgeLogsTail": [
       "$ bun src/index.ts",
-      "[bridge] ws://127.0.0.1:18787/ws  mode=god  maxConcurrency=6  bash.exec=enabled  audit=/Users/envvar/work/repos/browser-brain-loop/bridge/tmp/browser-bridge/audit-2026-02-23.jsonl",
+      "[bridge] ws://127.0.0.1:18787/ws  mode=god  maxConcurrency=6  bash.exec=enabled  audit=/Users/envvar/work/repos/browser-brain-loop/bridge/tmp/browser-bridge/audit-2026-02-24.jsonl",
       "error: script \"start\" was terminated by signal SIGTERM (Polite quit request)"
     ],
     "chromeLogsTail": [
-      "DevTools listening on ws://127.0.0.1:19333/devtools/browser/2a7d3de2-e0cd-4403-9ee8-8ac5c75a72c3",
-      "2026-02-23 20:57:56.673 Google Chrome for Testing[55250:8543735] error messaging the mach port for IMKCFRunLoopWakeUpReliable",
-      "[55286:8543987:0223/205757.920857:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:360] SharedImageManager::ProduceOverlay: Trying to Produce a Overlay representation from a non-existent mailbox.",
-      "[55286:8543987:0223/205757.921233:ERROR:components/viz/service/display_embedder/skia_output_device_buffer_queue.cc:262] Invalid mailbox.",
-      "[55250:8543976:0223/205802.106412:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT"
+      "DevTools listening on ws://127.0.0.1:19333/devtools/browser/e5bd855e-e563-48f2-a222-6b508b73db27",
+      "[24648:11466657:0224/131907.394040:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT"
     ]
   }
 }

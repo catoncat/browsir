@@ -13,6 +13,9 @@
     "brain:e2e:live": "BRAIN_E2E_ENABLE_LIVE_LLM=true BRAIN_E2E_EVIDENCE_PATH=bdd/evidence/brain-e2e-live.latest.json bun tools/brain-e2e.ts",
     "bdd:validate": "bun tools/bdd-validate.ts",
     "bdd:gate": "bun tools/bdd-gate.ts",
-    "bdd:gate:live": "BDD_GATE_PROFILE=live bun tools/bdd-gate.ts"
+    "bdd:gate:live": "BDD_GATE_PROFILE=live bun tools/bdd-gate.ts",
+    "bdd:gate:ux": "BDD_GATE_CATEGORY=ux bun tools/bdd-gate.ts",
+    "bdd:gate:protocol": "BDD_GATE_CATEGORY=protocol bun tools/bdd-gate.ts",
+    "bdd:gate:storage": "BDD_GATE_CATEGORY=storage bun tools/bdd-gate.ts"
   }
 }

@@ -12,6 +12,13 @@
 - **大脑永远在浏览器侧**（SidePanel + ServiceWorker + 浏览器内记忆）
 - **本地 WS 只做执行代理**（read/write/edit/bash），不做任务决策
 
+文档入口：
+
+- 总索引：`docs/README.md`
+- 非 UI 架构蓝图：`docs/non-ui-architecture-blueprint.md`
+- pi-mono runtime 对比：`docs/pi-mono-runtime-comparison.md`
+- BDD 总览：`bdd/README.md`
+
 ## 目录
 
 ```text
@@ -70,7 +77,7 @@ BRIDGE_TOKEN="replace-me" bun run brain:ext:watch
 
 ## BDD（Behavior Contract Engine）基础设施
 
-当前仓库已启用第一阶段 BDD 基础设施：契约先行 + 严格门禁（结构层）。
+当前仓库已启用 BDD 分层门禁：契约先行 + 证据校验（all/ux/protocol/storage）。
 
 会话中断续跑说明见：`bdd/SESSION-HANDOFF.md`
 BDD 索引说明见：`bdd/README.md`
@@ -81,6 +88,7 @@ BDD 索引说明见：`bdd/README.md`
 bdd/
 ├── schemas/behavior-contract.schema.json  # 契约 schema
 ├── contracts/                             # Canonical behavior contracts
+├── mappings/contract-categories.json      # 契约分类（ux/protocol/storage）
 ├── features/                              # Gherkin 视图（@contract(...)）
 └── mappings/contract-to-tests.json        # 契约到证明层映射
 ```
@@ -89,9 +97,10 @@ bdd/
 
 - 每个行为契约 ID 必须唯一，格式：`BHV-...`
 - 每个契约必须至少被一个 `.feature` 的 `@contract(...)` 引用
+- 每个契约必须在 `contract-categories.json` 有且仅有一个分类（`ux|protocol|storage`）
 - 每个契约必须在 `contract-to-tests.json` 有映射，且满足 `proof_requirements.required_layers/min_layers`
 - gate 采用严格失败策略：任何契约缺失/映射不完整/目标路径不存在都会失败
-- 对 `bdd/evidence/*.json` 的 `e2e` 证明层，gate 还会强制检查 `passed=true`
+- 对 `bdd/evidence/*.json` 的 `e2e` 证明层，gate 会检查 `passed=true`，并支持 `path::selector` 命中校验
 
 命令：
 
@@ -100,6 +109,9 @@ bun run brain:e2e
 bun run brain:e2e:live   # 真实 LLM 冒烟（需配置环境变量）
 bun run bdd:validate
 bun run bdd:gate
+bun run bdd:gate:ux
+bun run bdd:gate:protocol
+bun run bdd:gate:storage
 bun run bdd:gate:live    # 检查 live profile 契约
 ```
 
@@ -113,7 +125,7 @@ bun run bdd:gate:live    # 检查 live profile 契约
 
 关键断言：
 
-- `snapshot(mode=interactive|full)` 必须返回 A11y 主字段：`nodes[*].ref/role/name/depth/backendNodeId`
+- `snapshot(mode=interactive|full)` 必须返回可引用 A11y 节点：`nodes[*].ref/role/name/depth`（可兼容 `nodeId/backendNodeId` 句柄）
 - `snapshot(format=compact, maxTokens=...)` 必须返回低噪紧凑文本，并提供 `truncated` 状态
 - `cdp.action` 所有写动作都走 `lease.acquire(owner) -> cdp.action(owner) -> lease.release(owner)`
 - `cdp.verify` 支持 `urlChanged` / `urlContains` / `titleContains` / `textIncludes` / `selectorExists`
@@ -136,7 +148,7 @@ bun run bdd:gate:live    # 检查 live profile 契约
 bdd/evidence/brain-e2e.latest.json
 ```
 
-`bdd:gate` 会把该文件作为 `BHV-CDP-ON-DEMAND`、`BHV-LLM-CAPABILITY-GATE` 的 `e2e` 证明层并校验 `passed=true`。
+`bdd:gate` 会根据 `bdd/mappings/contract-to-tests.json` 对所有声明了 `e2e` 证明层的契约校验 `passed=true`（以及可选 selector 命中）。
 `bdd:gate:live` 还会额外检查 `BHV-LLM-LIVE-CAPABILITY`，读取 `bdd/evidence/brain-e2e-live.latest.json`。
 
 运行 live 套件示例：
@@ -157,11 +169,12 @@ bun run bdd:gate:live
 > CHROME_BIN="/path/to/chrome-for-testing" bun run brain:e2e
 > ```
 
-### 最近进展（2026-02-22）
+### 最近进展（2026-02-24）
 
 vNext 已切到 `sidepanel.html + service-worker.js` 主路径：
 
 - 旧入口已移除：`extension/harness.html`、`extension/sidepanel.js`
+- `extension/service-worker.js` 已收口为 shim，运行逻辑在 `extension/src/sw/kernel/*`（构建到 `extension/dist/service-worker.js`）
 - 运行链路已支持：`brain.run.start -> LLM(tool_calls) -> executeBrainToolCall -> tool result 回灌 -> 下一轮`
 - `brain.step.execute` 已从占位实现改为真实执行（`script/cdp/bridge` + verify）
 - 主 sidepanel 已重构为聊天产品界面（多会话、会话内连续发送、设置抽屉）
@@ -174,6 +187,7 @@ vNext 已切到 `sidepanel.html + service-worker.js` 主路径：
 - `bun run brain:ext:test`
 - `bun run brain:e2e`
 - `bun run bdd:validate && bun run bdd:gate`
+- `bun run bdd:gate:ux|protocol|storage`（按职责分层校验）
 
 ## 协议
 
@@ -227,8 +241,8 @@ vNext 已切到 `sidepanel.html + service-worker.js` 主路径：
    - `format`: `compact|json`
    - `diff`: 是否返回快照差异
    - `maxTokens` / `depth` / `selector` / `noAnimations`
-   - 返回：`snapshotId/ts/url/title/count/truncated/hash/diff/compact + nodes[*].ref/role/name/depth/backendNodeId`
-2. `cdp.action`：支持 `ref` 或 `selector` 的页面动作（click/type/fill/press/scroll/select/navigate），`ref` 优先走 `backendNodeId/nodeId`，selector 仅回退
+   - 返回：`snapshotId/ts/url/title/count/truncated/hash/diff/compact + nodes[*].ref/role/name/depth`（兼容 `nodeId/backendNodeId`）
+2. `cdp.action`：支持 `ref` 或 `selector` 的页面动作（click/type/fill/press/scroll/select/navigate），`ref` 优先，`selector` 回退
 3. `cdp.verify`：对 URL/title/text/selector 断言，支持 `urlChanged`（可传 `previousUrl`）
 4. `lease.acquire|heartbeat|release|status`：tab 写操作租约（owner + ttl）
 

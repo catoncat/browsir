@@ -119,6 +119,8 @@ export interface SessionContextMessage {
   role: SessionMessageRole;
   content: string;
   entryId: string;
+  toolName?: string;
+  toolCallId?: string;
 }
 
 export interface SessionContext {
@@ -148,6 +150,7 @@ export interface RetryState {
 
 export interface RunState {
   sessionId: string;
+  running: boolean;
   paused: boolean;
   stopped: boolean;
   retry: RetryState;

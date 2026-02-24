@@ -46,8 +46,7 @@ export default defineConfig({
       input: {
         sidepanel: fileURLToPath(new URL("./index.html", import.meta.url)),
         debug: fileURLToPath(new URL("./debug-index.html", import.meta.url)),
-        // 临时收口：dist 与根目录统一使用同一份可用 SW 实现，避免消息协议漂移。
-        "service-worker": fileURLToPath(new URL("./service-worker.js", import.meta.url))
+        "service-worker": fileURLToPath(new URL("./src/background/sw-main.ts", import.meta.url))
       },
       output: {
         entryFileNames: (chunkInfo) =>

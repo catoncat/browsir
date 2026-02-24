@@ -6,7 +6,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/service-worker.js::handleBrainRunMessage + runBrainAgentLoop + appendBrainEntry"
+          "target": "extension/src/sw/kernel/runtime-router.ts::handleBrainRun + extension/src/sw/kernel/runtime-loop.browser.ts::runAgentLoop + extension/src/sw/kernel/session-manager.browser.ts::appendMessage"
         },
         {
           "layer": "browser-cdp",
@@ -19,7 +19,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/service-worker.js::queryAllTabsForBrain + getActiveTabIdForBrain + executeBrainToolCall(list_tabs/open_tab)"
+          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::queryAllTabsForRuntime + getActiveTabIdForRuntime + executeToolCall(list_tabs/open_tab)"
         },
         {
           "layer": "browser-cdp",
@@ -32,7 +32,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/service-worker.js::buildLlmPayloadFromSessionView + runBrainAgentLoop + executeBrainToolCall"
+          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::buildLlmMessagesFromContext + runAgentLoop + executeToolCall"
         },
         {
           "layer": "browser-cdp",
@@ -40,7 +40,7 @@
         },
         {
           "layer": "e2e",
-          "target": "bdd/evidence/brain-e2e.latest.json"
+          "target": "bdd/evidence/brain-e2e.latest.json::sidepanel 渲染并支持复制/历史分叉/最后一条重试"
         }
       ]
     },
@@ -49,7 +49,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/service-worker.js::BRAIN_TOOL_DEFS + executeBrainToolCall + buildBrainToolMessageForLLM"
+          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::BRAIN_TOOL_DEFS + executeToolCall + safeStringify(tool envelope)"
         },
         {
           "layer": "browser-cdp",
@@ -57,7 +57,7 @@
         },
         {
           "layer": "e2e",
-          "target": "bdd/evidence/brain-e2e.latest.json"
+          "target": "bdd/evidence/brain-e2e.latest.json::sidepanel 渲染并支持复制/历史分叉/最后一条重试"
         }
       ]
     },
@@ -66,11 +66,11 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/service-worker.js::executeBrainStep + executeBrainToolCall + runBrainAgentLoop"
+          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::executeStep + executeToolCall + runAgentLoop"
         },
         {
           "layer": "integration",
-          "target": "extension/service-worker.js::cdp.observe|snapshot|execute|verify|detach message handlers"
+          "target": "extension/src/sw/kernel/runtime-infra.browser.ts::handleMessage(cdp.observe|snapshot|action|execute|verify|detach)"
         },
         {
           "layer": "browser-cdp",
@@ -87,7 +87,7 @@
       "proofs": [
         {
           "layer": "integration",
-          "target": "extension/service-worker.js::ensureSidePanelBehavior"
+          "target": "extension/src/background/sw-main.ts::chrome.action.onClicked + chrome.sidePanel.open"
         },
         {
           "layer": "browser-cdp",
@@ -113,7 +113,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/service-worker.js::appendBrainTraceEvent + extension/src/debug/App.vue::Live Events + Step Stream rendering"
+          "target": "extension/src/sw/kernel/orchestrator.browser.ts::persistEvent + extension/src/debug/App.vue::Live Events + Step Stream rendering"
         },
         {
           "layer": "browser-cdp",
@@ -126,7 +126,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/service-worker.js::requestBrainLlmWithRetry + runBrainAgentLoop + executeBrainToolCall"
+          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::requestLlmWithRetry + runAgentLoop + executeToolCall"
         },
         {
           "layer": "browser-cdp",
@@ -143,7 +143,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/service-worker.js::requestBrainLlmWithRetry + runBrainAgentLoop + executeBrainToolCall"
+          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::requestLlmWithRetry + runAgentLoop + executeToolCall"
         },
         {
           "layer": "browser-cdp",
@@ -164,7 +164,7 @@
         },
         {
           "layer": "integration",
-          "target": "extension/service-worker.js::appendBrainEntry + buildBrainSessionView + readBrainStepStream"
+          "target": "extension/src/sw/kernel/session-manager.browser.ts::appendEntry + extension/src/sw/kernel/runtime-router.ts::buildConversationView + extension/src/sw/kernel/orchestrator.browser.ts::getStepStream"
         },
         {
           "layer": "browser-cdp",
@@ -198,7 +198,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/service-worker.js::deriveBrainSessionTitle + refreshBrainSessionTitle + deleteBrainSession"
+          "target": "extension/src/sw/kernel/runtime-router.ts::deriveSessionTitle + handleSession(brain.session.title.refresh|brain.session.delete)"
         },
         {
           "layer": "browser-cdp",
@@ -236,7 +236,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/panel/utils/message-actions.ts::canForkMessage+canRetryMessage + extension/src/panel/stores/runtime.ts::forkFromAssistantEntry+retryLastAssistantEntry + extension/service-worker.js::handleBrainSessionMessage(brain.session.fork)+handleBrainRunMessage(brain.run.regenerate)"
+          "target": "extension/src/panel/utils/message-actions.ts::canForkMessage+canRetryMessage + extension/src/panel/App.vue::handleEditMessage + extension/src/panel/components/ChatMessage.vue::user/assistant action rendering + extension/src/panel/stores/runtime.ts::forkFromAssistantEntry+retryLastAssistantEntry + extension/src/sw/kernel/runtime-router.ts::handleSession(brain.session.fork)+handleBrainRun(brain.run.regenerate)"
         },
         {
           "layer": "browser-cdp",
@@ -257,7 +257,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/panel/stores/runtime.ts::sendPrompt + extension/service-worker.js::handleBrainRunMessage + buildLlmPayloadFromSessionView"
+          "target": "extension/src/panel/stores/runtime.ts::sendPrompt + extension/src/sw/kernel/runtime-loop.browser.ts::startFromPrompt + buildLlmMessagesFromContext"
         },
         {
           "layer": "browser-cdp",
@@ -265,7 +265,7 @@
         },
         {
           "layer": "e2e",
-          "target": "bdd/evidence/brain-e2e.latest.json"
+          "target": "bdd/evidence/brain-e2e.latest.json::brain.run.start 注入 shared tabs 上下文并每次覆盖"
         }
       ]
     }

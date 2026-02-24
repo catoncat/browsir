@@ -1,11 +1,32 @@
 import { nowIso } from "./types";
 
 export type BrainEventType =
+  | "input.user"
+  | "input.shared_tabs"
   | "auto_retry_start"
   | "auto_retry_end"
   | "auto_compaction_start"
   | "auto_compaction_end"
-  | "session_compact";
+  | "session_compact"
+  | "input.regenerate"
+  | "session_title_manual_refresh"
+  | "session_title_auto_updated"
+  | "session_title_auto_update_failed"
+  | "llm.skipped"
+  | "llm.request"
+  | "llm.response.raw"
+  | "llm.response.parsed"
+  | "loop_start"
+  | "loop_error"
+  | "loop_done"
+  | "loop_skip_stopped"
+  | "loop_internal_error"
+  | "loop_restart"
+  | "loop_enqueue_skipped"
+  | "step_planned"
+  | "step_finished"
+  | "step_execute"
+  | "step_execute_result";
 
 export interface BrainEventEnvelope<TType extends BrainEventType = BrainEventType> {
   type: TType;

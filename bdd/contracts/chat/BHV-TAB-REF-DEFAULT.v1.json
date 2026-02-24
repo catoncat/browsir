@@ -16,16 +16,15 @@
     "selected_tabs_reflected_in_chips"
   ],
   "observables": [
-    "new_conversation_has_active_tab_selected",
-    "tab_chips_render_selected_tabs",
+    "new_conversation_has_active_tab_referenced",
+    "tab_chips_render_referenced_tabs",
     "at_mention_popup_lists_available_tabs",
-    "dismissed_tab_removed_from_selectedTabIds",
+    "dismissed_tab_removed_from_referenced_tabs",
     "multiple_tabs_can_be_referenced"
   ],
   "risk": "low",
   "allowed_side_effects": [
-    "state.selectedTabIds updated",
-    "conversation.referencedTabIds updated",
+    "conversation_referenced_tabs_updated",
     "tab_chips UI re-rendered"
   ],
   "proof_requirements": {
@@ -40,8 +39,8 @@
     ]
   },
   "rollback_or_compensation": [
-    "revert to empty selectedTabIds",
+    "revert to empty referenced tabs",
     "tab picker remains functional via settings panel"
   ],
-  "version": "1.0.0"
+  "version": "1.1.0"
 }

@@ -11,6 +11,8 @@ interface ConversationMessage {
   role: string;
   content: string;
   entryId: string;
+  toolName?: string;
+  toolCallId?: string;
 }
 
 interface SessionForkSource {
@@ -56,6 +58,19 @@ interface RuntimeHealth {
   llmApiBase: string;
   llmModel: string;
   hasLlmApiKey: boolean;
+}
+
+interface EditUserRerunResult {
+  sessionId: string;
+  runtime: RuntimeStateView;
+  mode: "retry" | "fork";
+  sourceSessionId: string;
+  sourceEntryId: string;
+  activeSourceEntryId: string;
+}
+
+interface EditUserRerunOptions {
+  setActive?: boolean;
 }
 
 interface LoadConversationOptions {
@@ -224,9 +239,9 @@ export const useRuntimeStore = defineStore("runtime", () => {
     if (!previousUserEntryId) {
       throw new Error("未找到前序 user 消息，无法分叉");
     }
-    const forked = await sendMessage<{ sessionId: string }>("brain.session.fork", {
+    const forked = await sendMessage<{ sessionId: string; leafId?: string | null }>("brain.session.fork", {
       sessionId: currentSessionId,
-      leafId: previousUserEntryId,
+      leafId: entryId,
       sourceEntryId: entryId,
       reason: "branch_from_assistant"
     });
@@ -234,11 +249,17 @@ export const useRuntimeStore = defineStore("runtime", () => {
     if (!forkedSessionId) {
       throw new Error("创建分叉会话失败");
     }
+    const forkedSourceEntryId = String(forked.leafId || "").trim();
 
     if (options.autoRun === true) {
+      if (!forkedSourceEntryId) {
+        throw new Error("分叉后未找到可重生成的 sourceEntry");
+      }
       const result = await sendMessage<{ sessionId: string; runtime: RuntimeStateView }>("brain.run.regenerate", {
         sessionId: forkedSessionId,
-        sourceEntryId: entryId
+        sourceEntryId: forkedSourceEntryId,
+        requireSourceIsLeaf: true,
+        rebaseLeafToPreviousUser: true
       });
       runtime.value = result.runtime;
     }
@@ -246,7 +267,8 @@ export const useRuntimeStore = defineStore("runtime", () => {
     await refreshSessions();
     await loadConversation(forkedSessionId, { setActive: true });
     return {
-      sessionId: forkedSessionId
+      sessionId: forkedSessionId,
+      sourceEntryId: forkedSourceEntryId || entryId
     };
   }
 
@@ -284,7 +306,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
 
   async function regenerateFromAssistantEntry(entryId: string, options: { mode?: "fork" | "retry" } = {}) {
     if (options.mode === "fork") {
-      return forkFromAssistantEntry(entryId, { autoRun: false });
+      return forkFromAssistantEntry(entryId, { autoRun: true });
     }
     if (options.mode === "retry") {
       return retryLastAssistantEntry(entryId);
@@ -293,7 +315,45 @@ export const useRuntimeStore = defineStore("runtime", () => {
     if (latestAssistantEntryId && latestAssistantEntryId === entryId) {
       return retryLastAssistantEntry(entryId);
     }
-    return forkFromAssistantEntry(entryId, { autoRun: false });
+    return forkFromAssistantEntry(entryId, { autoRun: true });
+  }
+
+  async function editUserMessageAndRerun(entryId: string, prompt: string, options: EditUserRerunOptions = {}) {
+    if (!activeSessionId.value) {
+      throw new Error("无活跃会话，无法编辑并重跑");
+    }
+    const sourceEntryId = String(entryId || "").trim();
+    const editedText = String(prompt || "").trim();
+    if (!sourceEntryId) {
+      throw new Error("sourceEntryId 不能为空");
+    }
+    if (!editedText) {
+      throw new Error("编辑内容不能为空");
+    }
+
+    const sourceSessionId = activeSessionId.value;
+    const result = await sendMessage<EditUserRerunResult>("brain.run.edit_rerun", {
+      sessionId: sourceSessionId,
+      sourceEntryId,
+      prompt: editedText
+    });
+
+    runtime.value = result.runtime;
+    await refreshSessions();
+    if (options.setActive === false) {
+      if (result.sessionId === activeSessionId.value) {
+        await loadConversation(result.sessionId, { setActive: false });
+      }
+    } else {
+      await loadConversation(result.sessionId, { setActive: true });
+    }
+    return {
+      sessionId: result.sessionId,
+      mode: result.mode,
+      sourceSessionId: result.sourceSessionId,
+      sourceEntryId: result.sourceEntryId,
+      activeSourceEntryId: result.activeSourceEntryId
+    };
   }
 
   async function runAction(type: "brain.run.pause" | "brain.run.resume" | "brain.run.stop") {
@@ -388,6 +448,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
     forkFromAssistantEntry,
     retryLastAssistantEntry,
     regenerateFromAssistantEntry,
+    editUserMessageAndRerun,
     runAction,
     refreshSessionTitle,
     deleteSession,

@@ -4,13 +4,13 @@ Feature: Tab reference defaults to active tab with @ mention support
   Scenario: New conversation auto-selects active tab
     Given browser has at least one open tab
     When user creates a new conversation
-    Then the active tab should be auto-selected in selectedTabIds
+    Then the active tab should be auto-referenced for the conversation
     And tab chips should display above the composer input
 
   Scenario: User dismisses a referenced tab
     Given a conversation has an auto-selected tab
     When user clicks the dismiss button on a tab chip
-    Then that tab should be removed from selectedTabIds
+    Then that tab should be removed from referenced tabs
     And tab chips above the composer should update accordingly
 
   Scenario: @ mention triggers tab picker popup
@@ -22,7 +22,7 @@ Feature: Tab reference defaults to active tab with @ mention support
   Scenario: Multi-select tabs via @ mention
     Given the @ mention popup is visible
     When user selects multiple tabs from the popup
-    Then all selected tabs should be added to selectedTabIds
+    Then all selected tabs should be added to referenced tabs
     And tab chips above the composer should display all selected tabs
 
   Scenario: Closing @ mention popup

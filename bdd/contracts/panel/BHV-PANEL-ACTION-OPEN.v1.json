@@ -1,22 +1,24 @@
 {
   "id": "BHV-PANEL-ACTION-OPEN",
-  "intent": "点击插件 action 时应自动打开 side panel",
+  "intent": "点击扩展 action 时应打开 side panel，并保持运行时可继续响应",
   "context": {
-    "chromeVersion": ">=120",
-    "extensionPermissions": ["sidePanel"]
+    "surface": "extension.action",
+    "minimum_chrome_version": ">=120",
+    "permission": "sidePanel"
   },
   "steps": [
-    "initialize_side_panel_behavior",
+    "extension_action_is_available",
     "user_clicks_extension_action",
-    "verify_panel_opened"
+    "runtime_issues_side_panel_open_request",
+    "verify_panel_opened_for_current_tab"
   ],
   "observables": [
-    "openPanelOnActionClick=true",
-    "side_panel_visible_after_action_click"
+    "side_panel_visible_after_action_click",
+    "runtime_remains_responsive_after_action_click"
   ],
   "risk": "low",
   "allowed_side_effects": [
-    "chrome.sidePanel.setPanelBehavior"
+    "chrome.sidePanel.open"
   ],
   "proof_requirements": {
     "required_layers": ["integration", "browser-cdp"],
@@ -25,11 +27,12 @@
   "degrade_policy": {
     "max_consecutive_failures": 1,
     "on_trigger": [
-      "reapply_side_panel_behavior_on_startup"
+      "retry_side_panel_open_once",
+      "keep_action_click_safe_without_crash"
     ]
   },
   "rollback_or_compensation": [
-    "retry setPanelBehavior onInstalled/onStartup"
+    "action_click_failure_must_not_break_service_worker_loop"
   ],
-  "version": "1.0.0"
+  "version": "1.1.0"
 }

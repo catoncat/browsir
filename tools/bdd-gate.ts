@@ -1,9 +1,16 @@
 import path from "node:path";
 import { readFile } from "node:fs/promises";
-import { fileExistsInRepo, runStructuralValidation, targetPathFromProof } from "./bdd-lib";
+import {
+  ALLOWED_CONTRACT_CATEGORIES,
+  fileExistsInRepo,
+  loadContractCategories,
+  parseProofTargets,
+  runStructuralValidation,
+  type ContractCategory
+} from "./bdd-lib";
 
-async function validateEvidence(repoRoot: string, target: string): Promise<string | null> {
-  const normalized = path.normalize(target);
+async function validateEvidence(repoRoot: string, targetPath: string, selector: string): Promise<string | null> {
+  const normalized = path.normalize(targetPath);
   const evidencePrefix = path.normalize("bdd/evidence/");
 
   if (!normalized.startsWith(evidencePrefix) || path.extname(normalized) !== ".json") {
@@ -24,12 +31,45 @@ async function validateEvidence(repoRoot: string, target: string): Promise<strin
     return `evidence 未通过: ${normalized} (expected passed=true)`;
   }
 
+  const expected = String(selector || "")
+    .split("||")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (expected.length === 0) {
+    return null;
+  }
+
+  const tests = Array.isArray(parsed?.tests) ? parsed.tests : [];
+  if (tests.length === 0) {
+    return `evidence 缺少 tests，无法验证 selector: ${normalized}`;
+  }
+
+  const passedTexts = tests
+    .filter((item: any) => String(item?.status || "").toLowerCase() === "passed")
+    .map((item: any) => `${String(item?.group || "")} / ${String(item?.name || "")}`);
+
+  for (const token of expected) {
+    const hit = passedTexts.some((text: string) => text.includes(token));
+    if (!hit) {
+      return `evidence 未命中 selector "${token}": ${normalized}`;
+    }
+  }
+
   return null;
 }
 
 function normalizeProfile(value: unknown): string {
   const raw = String(value || "").trim().toLowerCase();
   return raw || "default";
+}
+
+function normalizeCategory(value: unknown): "all" | ContractCategory {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw || raw === "all") return "all";
+  if (ALLOWED_CONTRACT_CATEGORIES.has(raw)) {
+    return raw as ContractCategory;
+  }
+  throw new Error(`BDD_GATE_CATEGORY 非法: ${raw}（允许: all|ux|protocol|storage）`);
 }
 
 function shouldCheckContract(contract: any, gateProfile: string): boolean {
@@ -57,15 +97,35 @@ function shouldCheckContract(contract: any, gateProfile: string): boolean {
 async function main() {
   const repoRoot = process.cwd();
   const gateProfile = normalizeProfile(process.env.BDD_GATE_PROFILE);
+  const gateCategory = normalizeCategory(process.env.BDD_GATE_CATEGORY);
   const snapshot = await runStructuralValidation(repoRoot);
   const gateErrors = [...snapshot.errors];
+  const categories = await loadContractCategories(repoRoot, gateErrors);
   let checkedContracts = 0;
 
   const mappingByContractId = new Map(snapshot.mappings.map((item) => [item.contractId, item]));
 
   for (const loaded of snapshot.contracts) {
+    if (!categories.categories.has(loaded.contract.id)) {
+      gateErrors.push(`gate: contract ${loaded.contract.id} 缺少 category 映射`);
+    }
+  }
+  for (const contractId of categories.categories.keys()) {
+    if (!snapshot.contractsById.has(contractId)) {
+      gateErrors.push(`gate: category 映射指向不存在的 contract: ${contractId}`);
+    }
+  }
+
+  for (const loaded of snapshot.contracts) {
     const contract = loaded.contract;
     if (!shouldCheckContract(contract, gateProfile)) {
+      continue;
+    }
+    const contractCategory = categories.categories.get(contract.id);
+    if (!contractCategory) {
+      continue;
+    }
+    if (gateCategory !== "all" && contractCategory !== gateCategory) {
       continue;
     }
     checkedContracts += 1;
@@ -102,30 +162,33 @@ async function main() {
     }
 
     for (const proof of mapping.proofs) {
-      const target = targetPathFromProof(proof.target);
-      if (!target) {
+      const targets = parseProofTargets(proof.target);
+      if (targets.length === 0) {
         gateErrors.push(`gate: contract ${contract.id} layer=${proof.layer} target 为空`);
         continue;
       }
 
-      const exists = await fileExistsInRepo(repoRoot, target);
-      if (!exists) {
-        gateErrors.push(`gate: contract ${contract.id} layer=${proof.layer} target 不存在: ${target}`);
-        continue;
-      }
-
-      if (proof.layer === "e2e") {
-        const evidenceError = await validateEvidence(repoRoot, target);
-        if (evidenceError) {
-          gateErrors.push(`gate: contract ${contract.id} layer=${proof.layer} ${evidenceError}`);
+      for (const targetItem of targets) {
+        const target = targetItem.path;
+        const exists = await fileExistsInRepo(repoRoot, target);
+        if (!exists) {
+          gateErrors.push(`gate: contract ${contract.id} layer=${proof.layer} target 不存在: ${target}`);
+          continue;
         }
-      }
 
-      if (proof.layer === "browser-cdp" && path.extname(target) === ".feature") {
-        const refs = snapshot.featureRefs.get(contract.id) || [];
-        const normalized = refs.map((x) => path.normalize(path.relative(repoRoot, x)));
-        if (!normalized.includes(path.normalize(target))) {
-          gateErrors.push(`gate: contract ${contract.id} 的 feature 映射未包含 target: ${target}`);
+        if (proof.layer === "e2e") {
+          const evidenceError = await validateEvidence(repoRoot, target, targetItem.selector);
+          if (evidenceError) {
+            gateErrors.push(`gate: contract ${contract.id} layer=${proof.layer} ${evidenceError}`);
+          }
+        }
+
+        if (proof.layer === "browser-cdp" && path.extname(target) === ".feature") {
+          const refs = snapshot.featureRefs.get(contract.id) || [];
+          const normalized = refs.map((x) => path.normalize(path.relative(repoRoot, x)));
+          if (!normalized.includes(path.normalize(target))) {
+            gateErrors.push(`gate: contract ${contract.id} 的 feature 映射未包含 target: ${target}`);
+          }
         }
       }
     }
@@ -141,6 +204,7 @@ async function main() {
 
   console.log("[bdd:gate] ok");
   console.log(`  profile: ${gateProfile}`);
+  console.log(`  category: ${gateCategory}`);
   console.log(`  contracts: ${checkedContracts}/${snapshot.contracts.length}`);
   console.log(`  mappings: ${snapshot.mappings.length}`);
 }

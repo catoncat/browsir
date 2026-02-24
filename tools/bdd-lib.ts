@@ -2,6 +2,8 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 export const ALLOWED_LAYERS = new Set(["unit", "integration", "browser-cdp", "e2e"]);
+export const ALLOWED_CONTRACT_CATEGORIES = new Set(["ux", "protocol", "storage"]);
+export type ContractCategory = "ux" | "protocol" | "storage";
 
 export interface BehaviorContract {
   id: string;
@@ -30,9 +32,24 @@ export interface MappingProof {
   target: string;
 }
 
+export interface ParsedProofTarget {
+  path: string;
+  selector: string;
+}
+
 export interface ContractMapping {
   contractId: string;
   proofs: MappingProof[];
+}
+
+export interface ContractCategoryMapping {
+  contractId: string;
+  category: ContractCategory;
+}
+
+export interface ContractCategorySnapshot {
+  file: string;
+  categories: Map<string, ContractCategory>;
 }
 
 export interface ValidationSnapshot {
@@ -118,8 +135,48 @@ export function countScenarios(content: string): number {
   return matches?.length || 0;
 }
 
+export function parseProofTargets(target: string): ParsedProofTarget[] {
+  const raw = String(target || "").trim();
+  if (!raw) return [];
+
+  const out: ParsedProofTarget[] = [];
+  const seen = new Set<string>();
+  const pathRegex = /(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]+/g;
+  const matches = Array.from(raw.matchAll(pathRegex));
+
+  if (matches.length === 0) {
+    const [pathPart, ...selectorParts] = raw.split("::");
+    const path = String(pathPart || "").trim();
+    if (!path) return [];
+    const selector = selectorParts.join("::").trim();
+    const key = `${path}@@${selector}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push({ path, selector });
+    }
+    return out;
+  }
+
+  for (let i = 0; i < matches.length; i += 1) {
+    const current = matches[i];
+    const next = matches[i + 1];
+    const path = String(current[0] || "").trim();
+    if (!path) continue;
+    const start = Number(current.index || 0) + path.length;
+    const end = typeof next?.index === "number" ? next.index : raw.length;
+    const tail = raw.slice(start, end).trim();
+    const selector = tail.startsWith("::") ? tail.slice(2).trim().replace(/\+\s*$/, "").trim() : "";
+    const key = `${path}@@${selector}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ path, selector });
+  }
+
+  return out;
+}
+
 export function targetPathFromProof(target: string): string {
-  return String(target || "").split("::")[0].trim();
+  return parseProofTargets(target)[0]?.path || "";
 }
 
 function validateContractShape(contract: unknown, file: string, errors: string[]) {
@@ -410,6 +467,74 @@ export async function runStructuralValidation(repoRoot: string): Promise<Validat
     errors,
     warnings
   };
+}
+
+export async function loadContractCategories(repoRoot: string, errors: string[] = []): Promise<ContractCategorySnapshot> {
+  const file = path.join(repoRoot, "bdd", "mappings", "contract-categories.json");
+  const categories = new Map<string, ContractCategory>();
+
+  if (!(await exists(file))) {
+    errors.push("缺少 bdd/mappings/contract-categories.json");
+    return { file, categories };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = await readJson<unknown>(file);
+  } catch (err) {
+    errors.push(`bdd/mappings/contract-categories.json: JSON 解析失败: ${(err as Error).message}`);
+    return { file, categories };
+  }
+
+  if (!isPlainObject(parsed)) {
+    errors.push("bdd/mappings/contract-categories.json: 顶层必须是 object");
+    return { file, categories };
+  }
+
+  const version = typeof parsed.version === "string" ? parsed.version.trim() : "";
+  if (!isSemver(version)) {
+    errors.push("bdd/mappings/contract-categories.json: version 必须是 semver 字符串，如 1.0.0");
+  }
+
+  const mappings = Array.isArray(parsed.mappings) ? parsed.mappings : null;
+  if (!mappings) {
+    errors.push("bdd/mappings/contract-categories.json: 必须包含 mappings 数组");
+    return { file, categories };
+  }
+
+  for (const item of mappings) {
+    if (!isPlainObject(item)) {
+      errors.push("bdd/mappings/contract-categories.json: mappings 项必须是 object");
+      continue;
+    }
+
+    const contractId = typeof item.contractId === "string" ? item.contractId.trim() : "";
+    const categoryRaw = typeof item.category === "string" ? item.category.trim() : "";
+
+    if (!contractId) {
+      errors.push("bdd/mappings/contract-categories.json: contractId 不能为空");
+      continue;
+    }
+    if (!/^BHV-[A-Z0-9-]+$/.test(contractId)) {
+      errors.push(`bdd/mappings/contract-categories.json: contractId 非法: ${contractId}`);
+      continue;
+    }
+    if (!ALLOWED_CONTRACT_CATEGORIES.has(categoryRaw)) {
+      errors.push(
+        `bdd/mappings/contract-categories.json: contractId=${contractId} category 非法: ${categoryRaw || "<empty>"}`
+      );
+      continue;
+    }
+
+    if (categories.has(contractId)) {
+      errors.push(`bdd/mappings/contract-categories.json: contractId 重复: ${contractId}`);
+      continue;
+    }
+
+    categories.set(contractId, categoryRaw as ContractCategory);
+  }
+
+  return { file, categories };
 }
 
 export async function fileExistsInRepo(repoRoot: string, repoRelativePath: string): Promise<boolean> {

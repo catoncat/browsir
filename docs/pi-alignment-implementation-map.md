@@ -6,13 +6,13 @@
 
 | Pi 对照点 | 目标实现 | 当前用例 |
 | --- | --- | --- |
-| `session-manager.ts:307` `buildSessionContext` | `extension/src/sw/kernel/session-manager.browser.ts` `buildSessionContext()` | `extension/src/sw/kernel/__tests__/session-manager.browser.test.ts` |
+| `session-manager.ts` `buildSessionContext` | `extension/src/sw/kernel/session-manager.browser.ts` `buildSessionContext()` | `extension/src/sw/kernel/__tests__/session-manager.browser.test.ts` |
 | `session-manager.ts` `append* / getBranch / getLeaf / setLeaf` | `extension/src/sw/kernel/session-manager.browser.ts` 对应方法 | `extension/src/sw/kernel/__tests__/session-manager.browser.test.ts` |
-| `compaction/compaction.ts:597` `findCutPoint` | `extension/src/sw/kernel/compaction.browser.ts` `findCutPoint()` | `extension/src/sw/kernel/__tests__/compaction.browser.test.ts` |
+| `compaction/compaction.ts` `findCutPoint` | `extension/src/sw/kernel/compaction.browser.ts` `findCutPoint()` | `extension/src/sw/kernel/__tests__/compaction.browser.test.ts` |
 | `compaction/compaction.ts` `prepareCompaction/compact` | `extension/src/sw/kernel/compaction.browser.ts` `prepareCompaction()/compact()` | `extension/src/sw/kernel/__tests__/compaction.browser.test.ts` |
-| `agent-session.ts:1565` `_checkCompaction` | `extension/src/sw/kernel/orchestrator.browser.ts` `preSendCompactionCheck()/handleAgentEnd()` | `extension/src/sw/kernel/__tests__/orchestrator.browser.test.ts` |
-| `agent-session.ts:2083` retry 判定优先 | `extension/src/sw/kernel/orchestrator.browser.ts` `handleAgentEnd()` | `extension/src/sw/kernel/__tests__/orchestrator.browser.test.ts` |
-| `agent-session.ts:112/123` 事件集合 | `extension/src/sw/kernel/events.ts` + `orchestrator.browser.ts` emit | `extension/src/sw/kernel/__tests__/orchestrator.browser.test.ts` |
+| `agent-session.ts` `_checkCompaction` | `extension/src/sw/kernel/orchestrator.browser.ts` `preSendCompactionCheck()/handleAgentEnd()` | `extension/src/sw/kernel/__tests__/orchestrator.browser.test.ts` |
+| `agent-session.ts` retry 判定优先 | `extension/src/sw/kernel/orchestrator.browser.ts` `handleAgentEnd()` | `extension/src/sw/kernel/__tests__/orchestrator.browser.test.ts` |
+| `agent-session.ts` 事件集合 | `extension/src/sw/kernel/events.ts` + `orchestrator.browser.ts` emit | `extension/src/sw/kernel/__tests__/orchestrator.browser.test.ts` |
 
 ## 2) 接口冻结（1:1）
 
@@ -38,11 +38,15 @@
 
 对应实现：`extension/src/background/sw-main.ts` + `extension/src/sw/kernel/storage-reset.browser.ts`
 
-## 4) 待补 BDD 绑定（下一批）
+## 4) BDD 对齐状态（已完成）
 
-- `BHV-SESSION-COMPACTION-STATE-MACHINE.v1.json`
-- `BHV-SESSION-STORAGE-RESET-BOOTSTRAP.v1.json`
-- `bdd/features/session/compaction-state-machine.feature`
-- `bdd/features/storage/session-reset-bootstrap.feature`
-- `bdd/mappings/contract-to-tests.json` 增加上述合同映射到 `tools/brain-e2e.ts` 对应 case
-
+- 已完成契约与 feature 绑定：
+  - `BHV-SESSION-COMPACTION-STATE-MACHINE`
+  - `BHV-SESSION-STORAGE-RESET-BOOTSTRAP`
+  - `bdd/features/session/compaction-state-machine.feature`
+  - `bdd/features/storage/session-reset-bootstrap.feature`
+- 已完成映射：
+  - `bdd/mappings/contract-to-tests.json`
+- 已完成门禁分层：
+  - `bdd/mappings/contract-categories.json`（`ux|protocol|storage`）
+  - `bun run bdd:gate:storage` 可独立校验存储类契约
