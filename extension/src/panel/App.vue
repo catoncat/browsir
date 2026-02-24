@@ -3,7 +3,7 @@ import { useIntervalFn } from "@vueuse/core";
 import { storeToRefs } from "pinia";
 import { computed, onMounted, onUnmounted, ref, nextTick, watch } from "vue";
 import { useRuntimeStore } from "./stores/runtime";
-import { useMessageActions } from "./utils/message-actions";
+import { useMessageActions, type PanelMessageLike } from "./utils/message-actions";
 
 import SessionList from "./components/SessionList.vue";
 import ChatMessage from "./components/ChatMessage.vue";
@@ -45,10 +45,20 @@ const activeForkSourceText = computed(() => {
   return `分叉自 ${tail}`;
 });
 
+interface DisplayMessage extends PanelMessageLike {
+  role: string;
+  content: string;
+  entryId: string;
+  busyPlaceholder?: boolean;
+  busyMode?: "retry" | "fork";
+  busySourceEntryId?: string;
+}
+
 const {
   copiedEntryId,
   retryingEntryId,
   forkingEntryId,
+  pendingRegenerate,
   actionNotice,
   canCopyMessage,
   canRetryMessage,
@@ -63,8 +73,45 @@ const {
   regenerateFromAssistantEntry: store.regenerateFromAssistantEntry
 });
 
+const displayMessages = computed<DisplayMessage[]>(() => {
+  const base = (messages.value || []).map((item) => ({
+    role: String(item?.role || ""),
+    content: String(item?.content || ""),
+    entryId: String(item?.entryId || "")
+  }));
+  const pending = pendingRegenerate.value;
+  if (!pending) return base;
+
+  const placeholder: DisplayMessage = {
+    role: "assistant_placeholder",
+    content: "正在重新生成回复…",
+    entryId: `__regen_placeholder__${pending.mode}__${pending.sourceEntryId}`,
+    busyPlaceholder: true,
+    busyMode: pending.mode,
+    busySourceEntryId: pending.sourceEntryId
+  };
+
+  if (pending.mode === "retry") {
+    const targetIndex = base.findIndex(
+      (item) => item.role === "assistant" && item.entryId === pending.sourceEntryId
+    );
+    if (targetIndex >= 0) {
+      base.splice(targetIndex, 1, placeholder);
+      return base;
+    }
+  }
+
+  const anchorIndex = base.findIndex((item) => item.entryId === pending.insertAfterUserEntryId);
+  if (anchorIndex >= 0) {
+    base.splice(anchorIndex + 1, 0, placeholder);
+    return base;
+  }
+  base.push(placeholder);
+  return base;
+});
+
 watch(
-  () => messages.value.length,
+  () => displayMessages.value.length,
   async () => {
     await nextTick();
     if (scrollContainer.value) {
@@ -240,7 +287,7 @@ onUnmounted(() => {
     <DebugView v-if="showDebug" @close="showDebug = false" />
 
     <main class="relative flex-1 flex flex-col min-w-0 min-h-0 bg-ui-bg">
-      <div v-if="loading && !messages.length" class="absolute inset-0 z-40 flex items-center justify-center bg-white/80">
+      <div v-if="loading && !displayMessages.length" class="absolute inset-0 z-40 flex items-center justify-center bg-white/80">
         <Loader2 class="animate-spin text-ui-accent" :size="24" />
       </div>
 
@@ -354,15 +401,21 @@ onUnmounted(() => {
       <div
         ref="scrollContainer"
         class="flex-1 overflow-y-auto scroll-smooth w-full min-h-0"
+        role="log"
+        aria-live="polite"
+        aria-label="对话历史记录"
       >
         <div class="w-full px-5 pt-6 pb-8">
-          <div v-if="messages.length" class="space-y-8">
+          <div v-if="displayMessages.length" class="space-y-8" role="list">
             <ChatMessage
-              v-for="(msg, index) in messages"
+              v-for="(msg, index) in displayMessages"
               :key="msg.entryId"
               :role="msg.role"
               :content="msg.content"
               :entry-id="msg.entryId"
+              :busy-placeholder="msg.busyPlaceholder"
+              :busy-mode="msg.busyMode"
+              :busy-source-entry-id="msg.busySourceEntryId"
               :copied="copiedEntryId === msg.entryId"
               :retrying="retryingEntryId === msg.entryId"
               :forking="forkingEntryId === msg.entryId"
