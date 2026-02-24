@@ -362,6 +362,49 @@ describe("runtime-router.browser", () => {
     });
   });
 
+  it("supports brain.debug.plugins view", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.debug.view",
+        name: "debug-view",
+        version: "1.0.0",
+        permissions: {
+          hooks: ["tool.before_call"],
+          capabilities: ["fs.virtual.read"]
+        }
+      },
+      hooks: {
+        "tool.before_call": () => ({ action: "continue" })
+      },
+      providers: {
+        capabilities: {
+          "fs.virtual.read": {
+            id: "plugin.debug.view.read",
+            mode: "bridge",
+            invoke: async () => ({ ok: true })
+          }
+        }
+      }
+    });
+
+    const out = await invokeRuntime({
+      type: "brain.debug.plugins"
+    });
+    expect(out.ok).toBe(true);
+    const data = (out.data || {}) as Record<string, unknown>;
+    const plugins = Array.isArray(data.plugins) ? (data.plugins as Array<Record<string, unknown>>) : [];
+    const capabilities = Array.isArray(data.capabilityProviders)
+      ? (data.capabilityProviders as Array<Record<string, unknown>>)
+      : [];
+    const plugin = plugins.find((item) => String(item.id || "") === "plugin.debug.view");
+    expect(plugin).toBeDefined();
+    expect(Boolean(plugin?.enabled)).toBe(true);
+    expect(capabilities.some((item) => String(item.capability || "") === "fs.virtual.read")).toBe(true);
+  });
+
   it("supports title refresh + delete + debug config/dump", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);

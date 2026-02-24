@@ -4,14 +4,18 @@
   "context": {
     "surface": "service-worker.kernel.provider_registry",
     "executeModes": ["script", "cdp", "bridge"],
+    "capabilityExamples": ["browser.action", "fs.read", "process.exec"],
     "routingInvariants": [
       "legacy_adapters_are_wrapped_as_default_providers",
+      "capability_provider_is_preferred_when_registered",
+      "capability_missing_falls_back_to_explicit_mode_without_silent_switch",
       "script_failure_fallbacks_to_cdp_only",
       "cdp_or_bridge_failure_returns_ok_false_without_forced_fallback"
     ]
   },
   "steps": [
     "register_default_providers_from_legacy_execution_adapters",
+    "optionally_register_capability_provider_mapped_to_orchestrator_tools",
     "resolve_provider_by_mode_and_invoke_through_registry",
     "keep_script_to_cdp_fallback_semantics_unchanged",
     "throw_mode_adapter_missing_when_provider_absent",
@@ -20,6 +24,7 @@
   ],
   "observables": [
     "execute_step_mode_used_matches_provider_routing_result",
+    "execute_step_capability_used_reflects_provider_selection_when_present",
     "fallback_from_script_to_cdp_is_reported_in_result",
     "missing_provider_raises_exact_mode_adapter_missing_error",
     "verify_reason_stays_within_verified_verify_failed_verify_policy_off_verify_adapter_missing",

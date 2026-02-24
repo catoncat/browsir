@@ -1551,6 +1551,7 @@ async function main() {
       const routed = await sendBgMessage(sidepanelClient!, {
         type: "brain.step.execute",
         sessionId,
+        capability: "browser.action",
         mode: "script",
         action: "fill",
         args: {
@@ -1569,6 +1570,7 @@ async function main() {
       const cdpFail = await sendBgMessage(sidepanelClient!, {
         type: "brain.step.execute",
         sessionId,
+        capability: "browser.action",
         mode: "cdp",
         action: "click",
         args: {
@@ -1584,6 +1586,7 @@ async function main() {
       const fallbackFail = await sendBgMessage(sidepanelClient!, {
         type: "brain.step.execute",
         sessionId,
+        capability: "browser.action",
         mode: "script",
         action: "click",
         args: {},

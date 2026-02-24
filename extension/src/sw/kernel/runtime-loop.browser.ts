@@ -248,6 +248,16 @@ const BRAIN_TOOL_DEFS: JsonRecord[] = [
   }
 ];
 
+const TOOL_CAPABILITIES = {
+  bash: "process.exec",
+  read_file: "fs.read",
+  write_file: "fs.write",
+  edit_file: "fs.edit",
+  snapshot: "browser.snapshot",
+  browser_action: "browser.action",
+  browser_verify: "browser.verify"
+} as const;
+
 function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" ? (value as JsonRecord) : {};
 }
@@ -1485,6 +1495,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     sessionId: string,
     toolName: string,
     frame: JsonRecord,
+    capability: ExecuteCapability | undefined,
     autoRetryMax = TOOL_AUTO_RETRY_MAX
   ): Promise<JsonRecord> {
     const invokeId = String(frame.id || `invoke-${crypto.randomUUID()}`);
@@ -1498,6 +1509,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
       const invoke = await executeStep({
         sessionId,
+        capability,
         mode: "bridge",
         action: "invoke",
         args: {
@@ -1506,6 +1518,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       });
       if (invoke.ok) {
         return buildToolResponseEnvelope("invoke", invoke.data, {
+          capabilityUsed: invoke.capabilityUsed || capability,
+          modeUsed: invoke.modeUsed,
           attempt,
           autoRetried: attempt > 1
         });
@@ -1551,6 +1565,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       case "bash": {
         const command = String(args.command || "").trim();
         if (!command) return { error: "bash 需要 command" };
+        const capability = TOOL_CAPABILITIES.bash;
         const timeoutMs =
           args.timeoutMs == null
             ? undefined
@@ -1562,22 +1577,24 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             args: [command],
             ...(timeoutMs == null ? {} : { timeoutMs })
           }
-        });
+        }, capability);
       }
       case "read_file": {
         const path = String(args.path || "").trim();
         if (!path) return { error: "read_file 需要 path" };
+        const capability = TOOL_CAPABILITIES.read_file;
         const invokeArgs: JsonRecord = { path };
         if (args.offset != null) invokeArgs.offset = args.offset;
         if (args.limit != null) invokeArgs.limit = args.limit;
         return await invokeBridgeFrameWithRetry(sessionId, "read_file", {
           tool: "read",
           args: invokeArgs
-        });
+        }, capability);
       }
       case "write_file": {
         const path = String(args.path || "").trim();
         if (!path) return { error: "write_file 需要 path" };
+        const capability = TOOL_CAPABILITIES.write_file;
         return await invokeBridgeFrameWithRetry(sessionId, "write_file", {
           tool: "write",
           args: {
@@ -1585,18 +1602,19 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             content: String(args.content || ""),
             mode: String(args.mode || "overwrite")
           }
-        });
+        }, capability);
       }
       case "edit_file": {
         const path = String(args.path || "").trim();
         if (!path) return { error: "edit_file 需要 path" };
+        const capability = TOOL_CAPABILITIES.edit_file;
         return await invokeBridgeFrameWithRetry(sessionId, "edit_file", {
           tool: "edit",
           args: {
             path,
             edits: Array.isArray(args.edits) ? args.edits : []
           }
-        });
+        }, capability);
       }
       case "list_tabs": {
         const tabs = await queryAllTabsForRuntime();
@@ -1636,8 +1654,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             retryHint: "Call list_tabs and then retry snapshot with a valid tabId."
           };
         }
+        const capability = TOOL_CAPABILITIES.snapshot;
         const out = await executeStep({
           sessionId,
+          capability,
           mode: "cdp",
           action: "snapshot",
           args: {
@@ -1663,7 +1683,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             { defaultRetryable: true }
           );
         }
-        return buildToolResponseEnvelope("snapshot", out.data);
+        return buildToolResponseEnvelope("snapshot", out.data, {
+          capabilityUsed: out.capabilityUsed || capability,
+          modeUsed: out.modeUsed
+        });
       }
       case "browser_action": {
         const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
@@ -1676,9 +1699,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             retryHint: "Call list_tabs and retry browser_action with a valid tabId."
           };
         }
+        const capability = TOOL_CAPABILITIES.browser_action;
         const kind = String(args.kind || "");
         const out = await executeStep({
           sessionId,
+          capability,
           mode: "cdp",
           action: "action",
           args: {
@@ -1720,6 +1745,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           };
         }
         return buildToolResponseEnvelope("cdp_action", out.data, {
+          capabilityUsed: out.capabilityUsed || capability,
+          modeUsed: out.modeUsed,
           verifyReason: out.verifyReason,
           verified: out.verified
         });
@@ -1735,8 +1762,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             retryHint: "Call list_tabs and retry browser_verify with a valid tabId."
           };
         }
+        const capability = TOOL_CAPABILITIES.browser_verify;
         const out = await executeStep({
           sessionId,
+          capability,
           mode: "cdp",
           action: "verify",
           args: {
@@ -1766,7 +1795,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             details: out.data
           };
         }
-        return buildToolResponseEnvelope("cdp", out.data);
+        return buildToolResponseEnvelope("cdp", out.data, {
+          capabilityUsed: out.capabilityUsed || capability,
+          modeUsed: out.modeUsed
+        });
       }
       default:
         return { error: `未知工具: ${name}` };
