@@ -3,10 +3,8 @@
 ## 结论
 
 - `main` 已完成 Hook/Plugin/Provider 主体集成并通过当前默认门禁。
-- 当前是“新机制主路径 + 兼容层并存”，不是 100% 旧路径下线。
-- 本轮讨论已确认两点（待实现）：
-  - `browser_action/snapshot` 这类路径应走能力路由，而不是保留 `runtime-loop` 内联执行分支：`extension/src/sw/kernel/runtime-loop.browser.ts:1450`。
-  - `capability` 未命中 provider 时不应静默 fallback，应显式报 `runtime not ready` 类错误，避免掩盖注册时序问题：`extension/src/sw/kernel/runtime-loop.browser.ts:1123`。
+- 当前仍有少量旧执行分支，但核心路由已切到 capability/provider（含多 provider 并存与 fail-fast）。
+- 仍待收口：`browser_action/snapshot` 的执行仍保留 `runtime-loop` 内联分支，尚未完全下沉到 provider。
 
 ## 已完成
 
@@ -21,15 +19,17 @@
 7. LLM Hook 已接入主链路：`llm.before_request` / `llm.after_response` 已在 `extension/src/sw/kernel/runtime-loop.browser.ts::requestLlmWithRetry` 生效。
 8. LLM 工具定义已改为 Tool Contract Registry 驱动：`extension/src/sw/kernel/tool-contract-registry.ts` + `extension/src/sw/kernel/runtime-loop.browser.ts`。
 9. Bridge 侧已接入工具 registry 路由（含 alias -> canonical）：`bridge/src/tool-registry.ts`、`bridge/src/protocol.ts`、`bridge/src/dispatcher.ts`。
+10. Provider 已支持同 capability 多实例并存路由（`priority + canHandle`）：`extension/src/sw/kernel/tool-provider-registry.ts`。
+11. Orchestrator 已移除 legacy constructor adapter 注入（`wireLegacyAdapters` 下线），测试改为显式 `registerToolProvider`。
+12. `bash/read/write/edit` 已改为 capability-first 调度（不再强绑 `mode=bridge`），并补内置低优先级 bridge capability provider：`extension/src/sw/kernel/runtime-loop.browser.ts`。
+13. `runtime-loop` 已去掉 `script -> cdp` 自动 fallback，执行失败直接返回错误，避免隐式降级掩盖问题。
 
 ## 部分完成（仍有兼容层）
 
-1. Legacy adapter 仍在注入：`extension/src/sw/kernel/orchestrator.browser.ts` 的 `wireLegacyAdapters(...)`。
-2. `runtime-loop` 仍是双轨：
-   - 命中 capability provider -> 新路径
-   - 未命中 -> mode fallback（bridge/cdp/script）兼容路径
+1. `runtime-loop.executeToolCall` 仍保留较大内联 handler（尤其 `snapshot/browser_action/browser_verify`），尚未完全 provider 化。
+2. `runtime-loop.executeStep` 仍保留显式 mode 分支（`bridge/cdp/script`），还不是纯 provider-only 主干。
 3. Bridge 已支持动态 handler 注册，但默认仍以内置四工具 handler 为主：`bridge/src/dispatcher.ts`。
-4. Provider 仍是“单槽位”模型（同一 capability 只允许 1 个 provider），不满足“浏览器文件系统 + 本机环境并存”目标：`extension/src/sw/kernel/tool-provider-registry.ts`。
+4. `targetUri` 级对象路由（`workspace://` / `local://` / `plugin://`）尚未在 tool contract 层统一化。
 
 ## 本轮补充
 
@@ -72,17 +72,17 @@
 1. Hook/Plugin 主干：已完成。
 2. Tool Contract + Bridge canonical：已完成。
 3. 去 fallback（开发期）：进行中。
-4. Provider 多路并存（非二选一）：进行中（registry 核心与单测已落地）。
+4. Provider 多路并存（非二选一）：已完成（含 `priority + canHandle` 与回滚语义）。
 5. `workspace/local/plugin` 对象路由与契约测试：待开始。
 
 ## 验证状态
 
 1. `bun run bdd:validate` 通过。
 2. `bun run bdd:gate` 通过（default）。
-3. `cd extension && bun run test` 通过（54 tests）。
+3. `cd extension && bun run test` 通过（63 tests）。
 
 ## 下一阶段建议
 
 1. 先完成去 fallback 收口（fail-fast）。
-2. 将 provider 从“单槽位”改为“多路由并存”（priority + matcher + `canHandle`）。
-3. 为工具调用补 `targetUri` 路由语义，明确 `workspace/local/plugin` 三类对象边界。
+2. 完成 `snapshot/browser_action/browser_verify` 从内联执行到 provider 管线的下沉。
+3. 为工具调用补 `targetUri` 路由语义，明确 `workspace/local/plugin` 三类对象边界与测试矩阵。

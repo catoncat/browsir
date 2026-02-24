@@ -615,6 +615,128 @@ describe("runtime-router.browser", () => {
     expect(((local.data || {}) as Record<string, unknown>).data).toEqual({ provider: "local" });
   });
 
+  it("tool_call 的 fs.read 优先走 capability provider（不强绑 bridge mode）", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.fs.read.script-mode",
+        name: "fs-read-script-mode",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["fs.read"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "fs.read": {
+            id: "plugin.fs.read.script-mode.provider",
+            mode: "script",
+            priority: 50,
+            canHandle: (input) => String((input.args?.frame as Record<string, unknown> | undefined)?.tool || "") === "read",
+            invoke: async (input) => ({
+              provider: "plugin-script-fs",
+              mode: input.mode,
+              receivedFrame: input.args?.frame || null
+            })
+          }
+        }
+      }
+    });
+
+    let llmCall = 0;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
+      if (llmCall === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_read_1",
+                      type: "function",
+                      function: {
+                        name: "read_file",
+                        arguments: JSON.stringify({
+                          path: "/tmp/demo.txt"
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "done"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test",
+        autoTitleInterval: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "读取 /tmp/demo.txt"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    expect(fetchSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    const viewed = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(viewed.ok).toBe(true);
+    const messages = readConversationMessages(viewed);
+    const toolMessage = [...messages]
+      .reverse()
+      .find((entry) => String(entry.role || "") === "tool" && String(entry.toolName || "") === "read_file");
+    expect(toolMessage).toBeDefined();
+    const payload = JSON.parse(String(toolMessage?.content || "{}")) as Record<string, unknown>;
+    expect(payload.provider).toBe("plugin-script-fs");
+    expect(payload.mode).toBe("script");
+    expect(((payload.receivedFrame || {}) as Record<string, unknown>).tool).toBe("read");
+  });
+
   it("returns runtime-not-ready when capability provider is missing", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);

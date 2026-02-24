@@ -100,6 +100,25 @@ const TOOL_CAPABILITIES = {
   browser_verify: "browser.verify"
 } as const;
 
+const BUILTIN_BRIDGE_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [
+  {
+    capability: TOOL_CAPABILITIES.bash,
+    providerId: "runtime.builtin.capability.process.exec.bridge"
+  },
+  {
+    capability: TOOL_CAPABILITIES.read_file,
+    providerId: "runtime.builtin.capability.fs.read.bridge"
+  },
+  {
+    capability: TOOL_CAPABILITIES.write_file,
+    providerId: "runtime.builtin.capability.fs.write.bridge"
+  },
+  {
+    capability: TOOL_CAPABILITIES.edit_file,
+    providerId: "runtime.builtin.capability.fs.edit.bridge"
+  }
+];
+
 const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
   "bash",
   "read_file",
@@ -1052,6 +1071,56 @@ async function refreshSessionTitleAuto(
 }
 
 export function createRuntimeLoopController(orchestrator: BrainOrchestrator, infra: RuntimeInfraHandler): RuntimeLoopController {
+  const bridgeCapabilityInvoker = async (input: {
+    sessionId: string;
+    capability: ExecuteCapability;
+    args: JsonRecord;
+  }): Promise<JsonRecord> => {
+    const frame = (() => {
+      const rawFrame = toRecord(input.args.frame);
+      if (Object.keys(rawFrame).length === 0) {
+        throw new Error(`bridge capability provider 需要 args.frame: ${input.capability}`);
+      }
+      return { ...rawFrame };
+    })();
+    if (!String(frame.tool || "").trim()) {
+      throw new Error(`bridge capability provider 缺少 frame.tool: ${input.capability}`);
+    }
+    if (!frame.sessionId) frame.sessionId = input.sessionId;
+    const response = await callInfra(infra, {
+      type: "bridge.invoke",
+      payload: frame
+    });
+    return {
+      type: "invoke",
+      response
+    };
+  };
+
+  const ensureBuiltinBridgeCapabilityProviders = (): void => {
+    for (const item of BUILTIN_BRIDGE_CAPABILITY_PROVIDERS) {
+      const existed = orchestrator.getCapabilityProviders(item.capability).some((provider) => provider.id === item.providerId);
+      if (existed) continue;
+      orchestrator.registerCapabilityProvider(item.capability, {
+        id: item.providerId,
+        mode: "bridge",
+        priority: -100,
+        canHandle: (stepInput) => {
+          const frame = toRecord(stepInput.args?.frame);
+          return String(frame.tool || "").trim().length > 0;
+        },
+        invoke: async (stepInput) =>
+          bridgeCapabilityInvoker({
+            sessionId: stepInput.sessionId,
+            capability: item.capability,
+            args: toRecord(stepInput.args)
+          })
+      });
+    }
+  };
+
+  ensureBuiltinBridgeCapabilityProviders();
+
   async function withTabLease<T>(tabId: number, sessionId: string, run: () => Promise<T>): Promise<T> {
     const acquired = await callInfra(infra, {
       type: "lease.acquire",
@@ -1441,7 +1510,6 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       const invoke = await executeStep({
         sessionId,
         capability,
-        mode: "bridge",
         action: "invoke",
         args: {
           frame: frameWithInvokeId
