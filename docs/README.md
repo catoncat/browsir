@@ -14,6 +14,12 @@
    - 再看 kernel 迁移背景、兼容入口（shim）与发布决策
 6. `docs/pi-alignment-implementation-map.md`
    - 最后看与 pi 语义对齐的实现映射与 BDD 落地状态
+7. `docs/browser-agent-reliability-playbook.md`
+   - Browser Agent 失败根因、业界最佳实践对照与分阶段落地建议
+8. `docs/adr-0001-browser-agent-reliability.md`
+   - Browser Agent 可靠性改造的决策记录（ADR）
+9. `docs/browser-agent-reliability-checklist.md`
+   - Browser Agent 改造执行清单（按 P0/P1/P2）
 
 ## 核心文档
 
@@ -31,6 +37,12 @@
   - 与 pi 对齐的实现映射与 BDD 对齐状态
 - `docs/pi-mono-runtime-comparison.md`
   - Browser Brain Loop 与 pi-mono 三模块的 runtime 维度对比与迁移建议
+- `docs/browser-agent-reliability-playbook.md`
+  - Browser Agent 可靠性改进手册（根因复盘、官方实践、门禁建议）
+- `docs/adr-0001-browser-agent-reliability.md`
+  - Browser Agent 可靠性改造 ADR（背景、决策、回滚、验收）
+- `docs/browser-agent-reliability-checklist.md`
+  - Browser Agent 落地实施清单（任务分解与门禁执行）
 
 ## BDD 文档（在 `bdd/`）
 
