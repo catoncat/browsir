@@ -85,6 +85,17 @@ export function startBridgeServer(): void {
 
   let activeInvocations = 0;
   let devVersion = `${Date.now()}`;
+  const inflightInvocations = new Map<string, Promise<InvokeSuccess | InvokeFailure>>();
+  const completedInvocationCache = new Map<string, { out: InvokeSuccess | InvokeFailure; expiresAt: number }>();
+  const INVOKE_CACHE_TTL_MS = 30_000;
+
+  const buildInvokeCacheKey = (sessionId: string, invokeId: string): string => `${sessionId}:${invokeId}`;
+  const pruneCompletedInvocationCache = (): void => {
+    const now = Date.now();
+    for (const [key, value] of completedInvocationCache.entries()) {
+      if (value.expiresAt <= now) completedInvocationCache.delete(key);
+    }
+  };
 
   const server = Bun.serve<SocketData>({
     hostname: config.host,
@@ -207,6 +218,73 @@ export function startBridgeServer(): void {
             return;
           }
 
+          const logicalSessionId = frame.sessionId ?? ws.data.sessionId;
+          const invokeCacheKey = buildInvokeCacheKey(logicalSessionId, frame.id);
+          pruneCompletedInvocationCache();
+
+          const cached = completedInvocationCache.get(invokeCacheKey);
+          if (cached && cached.expiresAt > Date.now()) {
+            sendJson(ws, cached.out);
+            sendJson(
+              ws,
+              eventFrame(
+                "invoke.finished",
+                { ok: cached.out.ok, deduped: true, cacheHit: true },
+                {
+                  id: frame.id,
+                  sessionId: logicalSessionId,
+                  parentSessionId: frame.parentSessionId,
+                  agentId: frame.agentId,
+                },
+              ),
+            );
+            await audit.log({
+              ts: nowIso(),
+              level: "info",
+              event: "invoke.dedup_cached",
+              id: frame.id,
+              sessionId: logicalSessionId,
+              parentSessionId: frame.parentSessionId,
+              agentId: frame.agentId,
+              data: {
+                tool: frame.tool,
+              },
+            });
+            return;
+          }
+
+          const inflight = inflightInvocations.get(invokeCacheKey);
+          if (inflight) {
+            const out = await inflight;
+            sendJson(ws, out);
+            sendJson(
+              ws,
+              eventFrame(
+                "invoke.finished",
+                { ok: out.ok, deduped: true, cacheHit: false },
+                {
+                  id: frame.id,
+                  sessionId: logicalSessionId,
+                  parentSessionId: frame.parentSessionId,
+                  agentId: frame.agentId,
+                },
+              ),
+            );
+            await audit.log({
+              ts: nowIso(),
+              level: "info",
+              event: "invoke.dedup_joined",
+              id: frame.id,
+              sessionId: logicalSessionId,
+              parentSessionId: frame.parentSessionId,
+              agentId: frame.agentId,
+              data: {
+                tool: frame.tool,
+              },
+            });
+            return;
+          }
+
           if (activeInvocations >= config.maxConcurrency) {
             const out: InvokeFailure = {
               id: frame.id,
@@ -224,8 +302,6 @@ export function startBridgeServer(): void {
             sendJson(ws, out);
             return;
           }
-
-          const logicalSessionId = frame.sessionId ?? ws.data.sessionId;
 
           activeInvocations += 1;
           const startedAt = Date.now();
@@ -258,103 +334,118 @@ export function startBridgeServer(): void {
             },
           });
 
-          try {
-            const data = await dispatchInvoke(frame, { config, fsGuard }, (stream, chunk) => {
+          const invokePromise: Promise<InvokeSuccess | InvokeFailure> = (async () => {
+            try {
+              const data = await dispatchInvoke(frame, { config, fsGuard }, (stream, chunk) => {
+                sendJson(
+                  ws,
+                  eventFrame(stream === "stdout" ? "invoke.stdout" : "invoke.stderr", { chunk }, {
+                    id: frame.id,
+                    sessionId: logicalSessionId,
+                    parentSessionId: frame.parentSessionId,
+                    agentId: frame.agentId,
+                  }),
+                );
+              });
+
+              const out: InvokeSuccess = {
+                id: frame.id,
+                ok: true,
+                data,
+                sessionId: logicalSessionId,
+                agentId: frame.agentId,
+              };
+
+              const durationMs = Date.now() - startedAt;
+              const metrics = summarizeInvokeMetrics(frame.tool, data, durationMs);
               sendJson(
                 ws,
-                eventFrame(stream === "stdout" ? "invoke.stdout" : "invoke.stderr", { chunk }, {
-                  id: frame.id,
-                  sessionId: logicalSessionId,
-                  parentSessionId: frame.parentSessionId,
-                  agentId: frame.agentId,
-                }),
+                eventFrame(
+                  "invoke.finished",
+                  { ok: true, durationMs, metrics },
+                  {
+                    id: frame.id,
+                    sessionId: logicalSessionId,
+                    parentSessionId: frame.parentSessionId,
+                    agentId: frame.agentId,
+                  },
+                ),
               );
-            });
 
-            const out: InvokeSuccess = {
-              id: frame.id,
-              ok: true,
-              data,
-              sessionId: logicalSessionId,
-              agentId: frame.agentId,
-            };
-            sendJson(ws, out);
-
-            const durationMs = Date.now() - startedAt;
-            const metrics = summarizeInvokeMetrics(frame.tool, data, durationMs);
-            sendJson(
-              ws,
-              eventFrame(
-                "invoke.finished",
-                { ok: true, durationMs, metrics },
-                {
-                  id: frame.id,
-                  sessionId: logicalSessionId,
-                  parentSessionId: frame.parentSessionId,
-                  agentId: frame.agentId,
+              await audit.log({
+                ts: nowIso(),
+                level: "info",
+                event: "invoke.finished",
+                id: frame.id,
+                sessionId: logicalSessionId,
+                parentSessionId: frame.parentSessionId,
+                agentId: frame.agentId,
+                data: {
+                  ok: true,
+                  durationMs,
+                  tool: frame.tool,
+                  metrics,
+                  result: data,
                 },
-              ),
-            );
+              });
 
-            await audit.log({
-              ts: nowIso(),
-              level: "info",
-              event: "invoke.finished",
-              id: frame.id,
-              sessionId: logicalSessionId,
-              parentSessionId: frame.parentSessionId,
-              agentId: frame.agentId,
-              data: {
-                ok: true,
-                durationMs,
-                tool: frame.tool,
-                metrics,
-                result: data,
-              },
-            });
-          } catch (err) {
-            const error = errorToPayload(err);
-            const out: InvokeFailure = {
-              id: frame.id,
-              ok: false,
-              error,
-              sessionId: logicalSessionId,
-              agentId: frame.agentId,
-            };
-            sendJson(ws, out);
-
-            const durationMs = Date.now() - startedAt;
-            const metrics = summarizeInvokeMetrics(frame.tool, null, durationMs);
-            sendJson(
-              ws,
-              eventFrame(
-                "invoke.finished",
-                { ok: false, durationMs, error, metrics },
-                {
-                  id: frame.id,
-                  sessionId: logicalSessionId,
-                  parentSessionId: frame.parentSessionId,
-                  agentId: frame.agentId,
-                },
-              ),
-            );
-
-            await audit.log({
-              ts: nowIso(),
-              level: "error",
-              event: "invoke.failed",
-              id: frame.id,
-              sessionId: logicalSessionId,
-              parentSessionId: frame.parentSessionId,
-              agentId: frame.agentId,
-              data: {
-                durationMs,
-                tool: frame.tool,
-                metrics,
+              return out;
+            } catch (err) {
+              const error = errorToPayload(err);
+              const out: InvokeFailure = {
+                id: frame.id,
+                ok: false,
                 error,
-              },
+                sessionId: logicalSessionId,
+                agentId: frame.agentId,
+              };
+
+              const durationMs = Date.now() - startedAt;
+              const metrics = summarizeInvokeMetrics(frame.tool, null, durationMs);
+              sendJson(
+                ws,
+                eventFrame(
+                  "invoke.finished",
+                  { ok: false, durationMs, error, metrics },
+                  {
+                    id: frame.id,
+                    sessionId: logicalSessionId,
+                    parentSessionId: frame.parentSessionId,
+                    agentId: frame.agentId,
+                  },
+                ),
+              );
+
+              await audit.log({
+                ts: nowIso(),
+                level: "error",
+                event: "invoke.failed",
+                id: frame.id,
+                sessionId: logicalSessionId,
+                parentSessionId: frame.parentSessionId,
+                agentId: frame.agentId,
+                data: {
+                  durationMs,
+                  tool: frame.tool,
+                  metrics,
+                  error,
+                },
+              });
+
+              return out;
+            }
+          })();
+
+          inflightInvocations.set(invokeCacheKey, invokePromise);
+          try {
+            const out = await invokePromise;
+            sendJson(ws, out);
+            completedInvocationCache.set(invokeCacheKey, {
+              out,
+              expiresAt: Date.now() + INVOKE_CACHE_TTL_MS,
             });
           } finally {
+            inflightInvocations.delete(invokeCacheKey);
             activeInvocations -= 1;
           }
         })();
