@@ -19,6 +19,13 @@ import {
 import { renderMarkdown } from "../utils/markdown";
 import { resolveToolRender } from "../utils/tool-renderers";
 
+interface ToolPendingStepData {
+  step: number;
+  status: "running" | "done" | "failed";
+  line: string;
+  logs?: string[];
+}
+
 const props = defineProps<{
   role: string;
   content: string;
@@ -26,10 +33,12 @@ const props = defineProps<{
   toolName?: string;
   toolCallId?: string;
   toolPending?: boolean;
+  toolPendingStatus?: "running" | "done" | "failed";
+  toolPendingHeadline?: string;
   toolPendingAction?: string;
   toolPendingDetail?: string;
   toolPendingSteps?: string[];
-  toolPendingLogs?: string[];
+  toolPendingStepsData?: ToolPendingStepData[];
   busyPlaceholder?: boolean;
   busyMode?: "retry" | "fork";
   busySourceEntryId?: string;
@@ -69,9 +78,10 @@ const isToolPending = computed(() => props.role === "tool_pending" || props.tool
 
 const showThinking = ref(false);
 const inlineTextarea = ref<HTMLTextAreaElement | null>(null);
-const pendingLogViewport = ref<HTMLElement | null>(null);
-const pendingLogExpanded = ref(false);
-const pendingLogStickToBottom = ref(true);
+const pendingActivityViewport = ref<HTMLElement | null>(null);
+const pendingCardExpanded = ref(false);
+const pendingCardStickToBottom = ref(true);
+const STEP_LOG_PREVIEW_LINES = 4;
 
 const htmlContent = computed(() => renderMarkdown(props.content));
 const toolRender = computed(() =>
@@ -112,20 +122,50 @@ const toolIcon = computed(() => {
   if (toolRender.value.kind === "browser") return Activity;
   return Database;
 });
-const pendingLogs = computed(() =>
-  Array.isArray(props.toolPendingLogs) ? props.toolPendingLogs.filter((item) => String(item || "").trim().length > 0) : []
+const pendingStepItems = computed(() => {
+  if (Array.isArray(props.toolPendingStepsData) && props.toolPendingStepsData.length) {
+    return props.toolPendingStepsData.map((item) => ({
+      step: Number(item?.step || 0),
+      status: item?.status === "failed" ? "failed" : item?.status === "done" ? "done" : "running",
+      line: String(item?.line || "").trim(),
+      logs: Array.isArray(item?.logs)
+        ? item.logs.map((log) => String(log || "").trim()).filter((log) => log.length > 0)
+        : []
+    })).filter((item) => item.step > 0 && item.line.length > 0);
+  }
+  const fallbackSteps = Array.isArray(props.toolPendingSteps)
+    ? props.toolPendingSteps.map((text) => String(text || "").trim()).filter((text) => text.length > 0)
+    : [];
+  return fallbackSteps.map((line, index) => ({
+    step: index + 1,
+    status: "running" as const,
+    line,
+    logs: []
+  }));
+});
+const pendingTotalLogLines = computed(() =>
+  pendingStepItems.value.reduce((total, item) => total + item.logs.length, 0)
 );
-const pendingSteps = computed(() =>
-  Array.isArray(props.toolPendingSteps) ? props.toolPendingSteps.filter((item) => String(item || "").trim().length > 0) : []
+const pendingLineCount = computed(() =>
+  pendingStepItems.value.reduce((total, item) => total + 1 + item.logs.length, 0)
 );
-const pendingLogExpandable = computed(() => pendingLogs.value.length > 6);
+const pendingCardExpandable = computed(() => pendingLineCount.value > 10);
+const streamingIndicatorText = computed(() =>
+  String(props.content || "").trim() ? "输出中" : "思考中"
+);
+
+function visibleLogsForStep(logs: string[]) {
+  if (pendingCardExpanded.value) return logs;
+  if (logs.length <= STEP_LOG_PREVIEW_LINES) return logs;
+  return logs.slice(-STEP_LOG_PREVIEW_LINES);
+}
 
 function toggleThinking() {
   showThinking.value = !showThinking.value;
 }
 
-function togglePendingLogExpand() {
-  pendingLogExpanded.value = !pendingLogExpanded.value;
+function togglePendingCardExpand() {
+  pendingCardExpanded.value = !pendingCardExpanded.value;
 }
 
 function handleCopy() {
@@ -172,18 +212,18 @@ function handleFork() {
   emit("fork", { entryId: props.entryId });
 }
 
-function syncPendingLogScroll(forceBottom = false) {
-  const el = pendingLogViewport.value;
+function syncPendingActivityScroll(forceBottom = false) {
+  const el = pendingActivityViewport.value;
   if (!el) return;
-  if (!forceBottom && !pendingLogStickToBottom.value) return;
+  if (!forceBottom && !pendingCardStickToBottom.value) return;
   el.scrollTop = el.scrollHeight;
 }
 
-function handlePendingLogScroll() {
-  const el = pendingLogViewport.value;
+function handlePendingActivityScroll() {
+  const el = pendingActivityViewport.value;
   if (!el) return;
   const remain = el.scrollHeight - el.scrollTop - el.clientHeight;
-  pendingLogStickToBottom.value = remain <= 14;
+  pendingCardStickToBottom.value = remain <= 14;
 }
 
 watch(
@@ -202,24 +242,24 @@ watch(
 watch(
   () => props.entryId,
   () => {
-    pendingLogExpanded.value = false;
-    pendingLogStickToBottom.value = true;
+    pendingCardExpanded.value = false;
+    pendingCardStickToBottom.value = true;
   }
 );
 
 watch(
-  () => pendingLogs.value.length,
+  () => pendingLineCount.value,
   async () => {
     await nextTick();
-    syncPendingLogScroll();
+    syncPendingActivityScroll();
   }
 );
 
 watch(
-  () => pendingLogExpanded.value,
+  () => pendingCardExpanded.value,
   async () => {
     await nextTick();
-    syncPendingLogScroll(true);
+    syncPendingActivityScroll(true);
   }
 );
 </script>
@@ -319,9 +359,16 @@ watch(
       :class="(props.retrying || props.forking) ? 'opacity-40 select-none' : ''"
       role="group"
       :aria-label="isAssistantStreaming ? '助手正在生成回复' : '助手回复的内容'"
+      :data-testid="isAssistantStreaming ? 'assistant-streaming-message' : undefined"
     >
       <!-- AI Content -->
       <div
+        v-if="isAssistantStreaming"
+        class="max-w-none whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ui-text font-normal focus:outline-none"
+        tabindex="0"
+      >{{ props.content }}</div>
+      <div
+        v-else
         class="prose max-w-none text-[14px] text-ui-text font-normal focus:outline-none"
         v-html="htmlContent"
         tabindex="0"
@@ -329,11 +376,15 @@ watch(
 
       <div
         v-if="isAssistantStreaming"
-        class="inline-flex items-center gap-1.5 text-[11px] font-semibold text-ui-accent"
+        class="inline-flex items-center gap-1.5 text-[11px] font-medium text-ui-text-muted"
         role="status"
         aria-live="polite"
+        data-testid="assistant-streaming-spinner"
       >
-        <Loader2 :size="12" class="animate-spin" aria-hidden="true" />
+        <span>{{ streamingIndicatorText }}</span>
+        <span class="thinking-dots" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </span>
       </div>
 
       <!-- Action Bar: Copy + Retry + Fork -->
@@ -415,9 +466,18 @@ watch(
     >
       <div class="tool-running-pill rounded-lg border border-ui-accent/25 px-3 py-2.5">
         <div class="flex items-center gap-2">
-          <Loader2 :size="13" class="animate-spin text-ui-accent" aria-hidden="true" />
-          <span class="text-[12px] font-semibold text-ui-accent">
-            正在执行：{{ props.toolPendingAction || props.toolName || "工具调用" }}
+          <Loader2 v-if="props.toolPendingStatus !== 'done' && props.toolPendingStatus !== 'failed'" :size="13" class="animate-spin text-ui-accent" aria-hidden="true" />
+          <Check v-else-if="props.toolPendingStatus === 'done'" :size="13" class="text-emerald-600" aria-hidden="true" />
+          <X v-else :size="13" class="text-rose-600" aria-hidden="true" />
+          <span
+            class="text-[12px] font-semibold"
+            :class="props.toolPendingStatus === 'failed'
+              ? 'text-rose-700'
+              : props.toolPendingStatus === 'done'
+                ? 'text-emerald-700'
+                : 'text-ui-accent'"
+          >
+            {{ props.toolPendingHeadline || `正在执行：${props.toolPendingAction || props.toolName || "工具调用"}` }}
           </span>
         </div>
         <p
@@ -426,47 +486,53 @@ watch(
         >
           {{ props.toolPendingDetail }}
         </p>
-        <div v-if="pendingSteps.length" class="mt-2.5 rounded-md border border-ui-accent/20 bg-white/55 px-2.5 py-2">
-          <p class="text-[10px] font-semibold text-ui-accent/90">执行步骤</p>
-          <ol class="mt-1.5 space-y-1">
-            <li
-              v-for="(line, idx) in pendingSteps"
-              :key="`${idx}-${line}`"
-              class="text-[11px] leading-snug text-ui-text break-all"
-            >
-              {{ line }}
-            </li>
-          </ol>
-        </div>
-        <div v-if="pendingLogs.length" class="mt-2.5 rounded-md border border-ui-accent/20 bg-white/50">
+        <div
+          v-if="pendingStepItems.length"
+          ref="pendingActivityViewport"
+          class="tool-activity-viewport mt-2.5 overflow-y-auto border-t border-ui-accent/20 pt-2 font-mono text-[11px] leading-snug"
+          :class="pendingCardExpanded ? 'max-h-72' : 'max-h-44'"
+          @scroll="handlePendingActivityScroll"
+        >
           <div
-            ref="pendingLogViewport"
-            class="tool-log-viewport overflow-y-auto px-2.5 py-2 font-mono text-[11px] leading-snug text-ui-text"
-            :class="pendingLogExpanded ? 'max-h-56' : 'max-h-24'"
-            @scroll="handlePendingLogScroll"
+            v-for="(item, idx) in pendingStepItems"
+            :key="item.step"
+            class="py-1.5"
+            :class="idx > 0 ? 'border-t border-ui-accent/10' : ''"
           >
-            <div class="space-y-1">
+            <p
+              class="break-all whitespace-pre-wrap"
+              :class="item.status === 'failed' ? 'text-rose-700' : item.status === 'done' ? 'text-ui-text' : 'text-ui-text'"
+            >
+              {{ item.line }}
+            </p>
+            <div v-if="item.logs.length" class="mt-1 pl-3">
               <p
-                v-for="(line, idx) in pendingLogs"
-                :key="`${idx}-${line}`"
-                class="break-all whitespace-pre-wrap"
+                v-for="(log, logIdx) in visibleLogsForStep(item.logs)"
+                :key="`${item.step}-log-${logIdx}-${log}`"
+                class="break-all whitespace-pre-wrap text-ui-text-muted"
               >
-                {{ line }}
+                <span class="text-ui-accent/80">› </span>{{ log }}
+              </p>
+              <p
+                v-if="!pendingCardExpanded && item.logs.length > STEP_LOG_PREVIEW_LINES"
+                class="text-[10px] text-ui-text-muted/90"
+              >
+                … 还有 {{ item.logs.length - STEP_LOG_PREVIEW_LINES }} 行输出
               </p>
             </div>
           </div>
-          <div class="flex items-center justify-between border-t border-ui-accent/15 px-2.5 py-1.5 text-[10px] text-ui-text-muted">
-            <span>工具输出 {{ pendingLogs.length }} 行</span>
-            <button
-              v-if="pendingLogExpandable"
-              type="button"
-              class="rounded px-1.5 py-0.5 font-semibold text-ui-accent hover:bg-ui-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-              :aria-label="pendingLogExpanded ? '收起输出区域' : '展开输出区域'"
-              @click="togglePendingLogExpand"
-            >
-              {{ pendingLogExpanded ? "收起" : "展开" }}
-            </button>
-          </div>
+        </div>
+        <div class="mt-2 flex items-center justify-between text-[10px] text-ui-text-muted">
+          <span>{{ pendingStepItems.length }} 步 · 输出 {{ pendingTotalLogLines }} 行</span>
+          <button
+            v-if="pendingCardExpandable"
+            type="button"
+            class="rounded px-1.5 py-0.5 font-semibold text-ui-accent hover:bg-ui-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+            :aria-label="pendingCardExpanded ? '收起执行卡片' : '展开执行卡片'"
+            @click="togglePendingCardExpand"
+          >
+            {{ pendingCardExpanded ? "收起" : "展开" }}
+          </button>
         </div>
       </div>
     </div>
@@ -521,33 +587,58 @@ watch(
 .tool-running-pill {
   position: relative;
   overflow: hidden;
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  background: linear-gradient(110deg, rgba(37, 99, 235, 0.12) 0%, rgba(37, 99, 235, 0.05) 35%, rgba(37, 99, 235, 0.18) 50%, rgba(37, 99, 235, 0.05) 65%, rgba(37, 99, 235, 0.12) 100%);
-  background-size: 220% 100%;
-  animation: tool-shimmer 1.45s linear infinite;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  background: linear-gradient(155deg, rgba(30, 41, 59, 0.08) 0%, rgba(37, 99, 235, 0.08) 100%);
+  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.12);
 }
 
-.tool-log-viewport {
+.tool-activity-viewport {
   scrollbar-gutter: stable both-edges;
 }
 
-@keyframes tool-shimmer {
-  0% {
-    background-position: 200% 0;
+.thinking-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.thinking-dots > span {
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.3;
+  animation: thinking-dot 1.2s ease-in-out infinite;
+}
+
+.thinking-dots > span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.thinking-dots > span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes thinking-dot {
+  0%, 80%, 100% {
+    opacity: 0.3;
+    transform: translateY(0);
   }
-  100% {
-    background-position: -20% 0;
+  40% {
+    opacity: 1;
+    transform: translateY(-1px);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tool-running-pill {
-    animation: none;
-  }
-
   .animate-spin {
     animation: none !important;
+  }
+
+  .thinking-dots > span {
+    animation: none;
+    opacity: 0.8;
   }
 }
 </style>

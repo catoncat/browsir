@@ -52,10 +52,17 @@ interface DisplayMessage extends PanelMessageLike {
   toolName?: string;
   toolCallId?: string;
   toolPending?: boolean;
+  toolPendingStatus?: "running" | "done" | "failed";
+  toolPendingHeadline?: string;
   toolPendingAction?: string;
   toolPendingDetail?: string;
   toolPendingSteps?: string[];
-  toolPendingLogs?: string[];
+  toolPendingStepsData?: Array<{
+    step: number;
+    status: "running" | "done" | "failed";
+    line: string;
+    logs: string[];
+  }>;
   busyPlaceholder?: boolean;
   busyMode?: "retry" | "fork";
   busySourceEntryId?: string;
@@ -82,6 +89,30 @@ interface RuntimeProgressHint {
   ts: string;
 }
 
+interface ToolPendingStepState {
+  step: number;
+  action: string;
+  detail: string;
+  status: "running" | "done" | "failed";
+  error?: string;
+  logs: string[];
+}
+
+async function regenerateFromAssistantWithScene(
+  entryId: string,
+  options: { mode?: "fork" | "retry"; setActive?: boolean } = {}
+) {
+  const startedAt = Date.now();
+  const result = await store.regenerateFromAssistantEntry(entryId, {
+    mode: options.mode,
+    setActive: false
+  });
+  if (result.mode === "fork") {
+    await switchForkSessionWithScene(result.sessionId, { startedAt });
+  }
+  return result;
+}
+
 const {
   copiedEntryId,
   retryingEntryId,
@@ -98,7 +129,7 @@ const {
 } = useMessageActions({
   messages,
   isRunning,
-  regenerateFromAssistantEntry: store.regenerateFromAssistantEntry
+  regenerateFromAssistantEntry: regenerateFromAssistantWithScene
 });
 
 const editingUserEntryId = ref("");
@@ -113,12 +144,12 @@ const forkSceneTargetSessionId = ref("");
 const forkSessionHighlight = ref(false);
 const activeToolRun = ref<ToolRunSnapshot | null>(null);
 const activeRunHint = ref<RuntimeProgressHint | null>(null);
-const toolPendingSteps = ref<string[]>([]);
-const toolPendingLogs = ref<string[]>([]);
+const toolPendingStepStates = ref<ToolPendingStepState[]>([]);
 const activeRunToken = ref(0);
 const llmStreamingText = ref("");
 const llmStreamingSessionId = ref("");
 const llmStreamingActive = ref(false);
+const llmStreamingReplaceOnNextDelta = ref(false);
 let forkSessionHighlightTimer: ReturnType<typeof setTimeout> | null = null;
 
 const USER_FORK_MIN_VISIBLE_MS = 620;
@@ -128,7 +159,7 @@ const USER_FORK_SCENE_ENTER_MS = 240;
 const FORK_SWITCH_HIGHLIGHT_MS = 1800;
 const TOOL_STREAM_SYNC_INTERVAL_MS = 3200;
 const TOOL_STEP_MAX_LINES = 24;
-const TOOL_LOG_MAX_LINES = 120;
+const TOOL_STEP_LOG_MAX_LINES = 24;
 const MAIN_SCROLL_BOTTOM_THRESHOLD_PX = 120;
 
 const isForkSceneActive = computed(() => forkScenePhase.value !== "idle");
@@ -217,6 +248,21 @@ async function playForkSceneSwitch(targetSessionId: string) {
       resetForkSceneState();
     }
   }
+}
+
+async function switchForkSessionWithScene(
+  targetSessionId: string,
+  options: { startedAt?: number } = {}
+) {
+  const normalizedTargetSessionId = String(targetSessionId || "").trim();
+  if (!normalizedTargetSessionId) return;
+
+  const startedAt = Number.isFinite(Number(options.startedAt)) ? Number(options.startedAt) : Date.now();
+  const elapsed = Date.now() - startedAt;
+  if (elapsed < USER_FORK_MIN_VISIBLE_MS) {
+    await sleep(USER_FORK_MIN_VISIBLE_MS - elapsed);
+  }
+  await playForkSceneSwitch(normalizedTargetSessionId);
 }
 
 function resetEditingState() {
@@ -328,21 +374,90 @@ function formatToolPendingDetail(action: string, argsRaw: string): string {
   return "";
 }
 
+function extractBashCommandFromDetail(detail: string): string {
+  const text = String(detail || "").trim();
+  if (!text) return "";
+  if (text.startsWith("命令：")) return text.slice(3).trim();
+  return text;
+}
+
+function extractPathHintFromCommand(command: string): string {
+  const raw = String(command || "").trim();
+  if (!raw) return "";
+  const quoted = raw.match(/["'](\/[^"']+)["']/);
+  if (quoted?.[1]) return quoted[1];
+  const plain = raw.match(/(\/[^\s|;&]+)/);
+  return plain?.[1] || "";
+}
+
+function inferBashIntent(command: string): string {
+  const text = String(command || "").toLowerCase();
+  if (!text) return "执行命令";
+  if (/^\s*uname\b/.test(text)) return "识别系统";
+  if (/\becho\s+\$home\b/.test(text)) return "读取主目录";
+  if (/^\s*pwd\b/.test(text)) return "查看当前目录";
+  if (/\btest\s+-d\b/.test(text)) return "校验目录";
+  if (/\bls\b/.test(text)) return "查看目录";
+  if (/\bcat\b/.test(text)) return "读取文件";
+  if (/\bfind\b|\brg\b|\bgrep\b/.test(text)) return "搜索文件";
+  if (/\bmkdir\b/.test(text)) return "创建目录";
+  if (/\bcp\b|\bmv\b/.test(text)) return "整理文件";
+  if (/\bpnpm\b|\bnpm\b|\bbun\b|\byarn\b/.test(text)) return "执行脚本";
+  return "执行命令";
+}
+
+function summarizeToolPendingStep(item: ToolPendingStepState): { label: string; detail: string } {
+  const normalizedAction = String(item.action || "").trim().toLowerCase();
+  const compactDetail = String(item.detail || "")
+    .replace(/^命令：/u, "")
+    .replace(/^路径：/u, "")
+    .replace(/^目标：/u, "")
+    .trim();
+
+  if (normalizedAction !== "bash") {
+    return {
+      label: prettyToolAction(item.action),
+      detail: compactDetail
+    };
+  }
+
+  const command = extractBashCommandFromDetail(item.detail);
+  const intent = inferBashIntent(command);
+  const pathHint = extractPathHintFromCommand(command);
+  if (pathHint && ["查看目录", "读取文件", "校验目录", "搜索文件"].includes(intent)) {
+    return {
+      label: intent,
+      detail: clipText(pathHint, 64)
+    };
+  }
+  if (["识别系统", "读取主目录", "查看当前目录"].includes(intent)) {
+    return {
+      label: intent,
+      detail: ""
+    };
+  }
+  return {
+    label: intent,
+    detail: command ? clipText(command, 72) : compactDetail
+  };
+}
+
 function clearActiveToolRun() {
   activeToolRun.value = null;
 }
 
-function clearToolPendingLogs() {
-  toolPendingLogs.value = [];
-}
-
 function clearToolPendingSteps() {
-  toolPendingSteps.value = [];
+  toolPendingStepStates.value = [];
 }
 
 function resetLlmStreamingState() {
   llmStreamingText.value = "";
   llmStreamingSessionId.value = "";
+  llmStreamingActive.value = false;
+  llmStreamingReplaceOnNextDelta.value = false;
+}
+
+function pauseLlmStreamingState() {
   llmStreamingActive.value = false;
 }
 
@@ -357,23 +472,78 @@ function appendToolPendingLogs(stream: "stdout" | "stderr", chunk: string) {
   if (!parts.length) return;
 
   const normalized = parts.map((line) => (stream === "stderr" ? `stderr | ${line}` : line));
-  const merged = [...toolPendingLogs.value, ...normalized];
-  if (merged.length > TOOL_LOG_MAX_LINES) {
-    merged.splice(0, merged.length - TOOL_LOG_MAX_LINES);
+  const list = [...toolPendingStepStates.value];
+  if (!list.length) return;
+
+  let index = -1;
+  const activeStep = Number(activeToolRun.value?.step || 0);
+  if (activeStep > 0) {
+    index = list.findIndex((item) => item.step === activeStep);
   }
-  toolPendingLogs.value = merged;
+  if (index < 0) {
+    index = list.findLastIndex((item) => item.status === "running");
+  }
+  if (index < 0) {
+    index = list.length - 1;
+  }
+  if (index < 0 || !list[index]) return;
+
+  const merged = [...(Array.isArray(list[index].logs) ? list[index].logs : []), ...normalized];
+  if (merged.length > TOOL_STEP_LOG_MAX_LINES) {
+    merged.splice(0, merged.length - TOOL_STEP_LOG_MAX_LINES);
+  }
+  list[index] = {
+    ...list[index],
+    logs: merged
+  };
+  toolPendingStepStates.value = list;
 }
 
-function appendToolPendingStep(text: string) {
-  const line = String(text || "").trim();
-  if (!line) return;
-  const list = toolPendingSteps.value;
-  if (list.length > 0 && list[list.length - 1] === line) return;
-  const merged = [...list, line];
-  if (merged.length > TOOL_STEP_MAX_LINES) {
-    merged.splice(0, merged.length - TOOL_STEP_MAX_LINES);
+function upsertToolPendingStepState(input: ToolPendingStepState) {
+  const step = normalizeStep(input.step);
+  if (!step) return;
+  const action = String(input.action || "").trim();
+  if (!action) return;
+  const detail = String(input.detail || "").trim();
+  const error = String(input.error || "").trim();
+
+  const list = [...toolPendingStepStates.value];
+  const index = list.findIndex((item) => item.step === step);
+  const next: ToolPendingStepState = {
+    step,
+    action,
+    detail,
+    status: input.status,
+    error,
+    logs: index >= 0 && Array.isArray(list[index]?.logs) ? list[index].logs : []
+  };
+  if (index >= 0) {
+    list[index] = next;
+  } else {
+    list.push(next);
   }
-  toolPendingSteps.value = merged;
+  if (list.length > TOOL_STEP_MAX_LINES) {
+    list.splice(0, list.length - TOOL_STEP_MAX_LINES);
+  }
+  toolPendingStepStates.value = list;
+}
+
+function formatToolPendingStepLine(item: ToolPendingStepState): string {
+  const icon = item.status === "running" ? "…" : item.status === "done" ? "✓" : "✗";
+  const summary = summarizeToolPendingStep(item);
+  const base = `${icon} #${item.step} ${summary.label}${summary.detail ? ` · ${summary.detail}` : ""}`;
+  if (item.status !== "failed") return base;
+  const errorText = String(item.error || "").trim();
+  return errorText ? `${base} · ${clipText(errorText, 96)}` : base;
+}
+
+function formatToolPendingHeadline(item: ToolPendingStepState): string {
+  const summary = summarizeToolPendingStep(item);
+  const statusText = item.status === "running" ? "进行中" : item.status === "done" ? "已完成" : "失败";
+  const base = `${statusText} · #${item.step} ${summary.label}`;
+  if (item.status !== "failed") return base;
+  const errorText = String(item.error || "").trim();
+  return errorText ? `${base} · ${clipText(errorText, 64)}` : base;
 }
 
 function setLlmRunHint(label: string, detail = "") {
@@ -439,19 +609,21 @@ function applyRuntimeEventToolRun(event: unknown) {
     activeToolRun.value = null;
     resetLlmStreamingState();
     clearToolPendingSteps();
-    clearToolPendingLogs();
-    appendToolPendingStep("开始执行");
     setLlmRunHint("分析任务", "正在规划下一步动作");
     return;
   }
   if (type === "llm.request") {
-    appendToolPendingStep("思考：调用模型生成下一步计划");
     setLlmRunHint("调用模型", "正在生成下一步计划");
     return;
   }
   if (type === "llm.stream.start") {
     llmStreamingSessionId.value = eventSessionId || String(activeSessionId.value || "");
-    llmStreamingText.value = "";
+    if (String(llmStreamingText.value || "").trim()) {
+      llmStreamingReplaceOnNextDelta.value = true;
+    } else {
+      llmStreamingText.value = "";
+      llmStreamingReplaceOnNextDelta.value = false;
+    }
     llmStreamingActive.value = true;
     setLlmRunHint("回答中", "正在生成回复");
     return;
@@ -463,6 +635,10 @@ function applyRuntimeEventToolRun(event: unknown) {
     const sourceId = llmStreamingSessionId.value || eventSessionId;
     if (sourceId && activeId && sourceId !== activeId) return;
     llmStreamingSessionId.value = sourceId || activeId;
+    if (llmStreamingReplaceOnNextDelta.value) {
+      llmStreamingText.value = "";
+      llmStreamingReplaceOnNextDelta.value = false;
+    }
     llmStreamingText.value = `${llmStreamingText.value}${chunk}`;
     llmStreamingActive.value = true;
     return;
@@ -481,10 +657,15 @@ function applyRuntimeEventToolRun(event: unknown) {
   if (type === "step_planned" && mode === "tool_call") {
     const step = normalizeStep(payload.step);
     if (!step) return;
-    resetLlmStreamingState();
+    pauseLlmStreamingState();
     const action = String(payload.action || "");
     const detail = formatToolPendingDetail(action, String(payload.arguments || ""));
-    appendToolPendingStep(`步骤 ${step}：${prettyToolAction(action)}${detail ? ` · ${detail}` : ""}`);
+    upsertToolPendingStepState({
+      step,
+      action,
+      detail,
+      status: "running"
+    });
     activeToolRun.value = {
       step,
       action,
@@ -497,14 +678,18 @@ function applyRuntimeEventToolRun(event: unknown) {
   if (type === "step_finished" && mode === "tool_call") {
     const step = normalizeStep(payload.step);
     if (!step) return;
-    const action = String(payload.action || "");
+    const existing = toolPendingStepStates.value.find((item) => item.step === step) || null;
+    const action = String(payload.action || existing?.action || "");
+    const detail = existing?.detail || formatToolPendingDetail(action, String(payload.arguments || ""));
     const ok = payload.ok === true;
     const errorText = String(payload.error || "").trim();
-    appendToolPendingStep(
-      ok
-        ? `步骤 ${step} 完成：${prettyToolAction(action)}`
-        : `步骤 ${step} 失败：${prettyToolAction(action)}${errorText ? ` · ${clipText(errorText, 160)}` : ""}`
-    );
+    upsertToolPendingStepState({
+      step,
+      action,
+      detail,
+      status: ok ? "done" : "failed",
+      error: errorText
+    });
     if (activeToolRun.value && activeToolRun.value.step === step) {
       activeToolRun.value = null;
     }
@@ -519,7 +704,6 @@ function applyRuntimeEventToolRun(event: unknown) {
     activeToolRun.value = null;
     resetLlmStreamingState();
     clearToolPendingSteps();
-    clearToolPendingLogs();
     activeRunHint.value = null;
   }
 }
@@ -532,10 +716,6 @@ function applyBridgeEventToolOutput(rawEvent: unknown) {
   const eventName = String(envelope.event || "").trim();
   const data = toRecord(envelope.data);
 
-  if (eventName === "invoke.started") {
-    appendToolPendingStep("工具开始执行");
-    return;
-  }
   if (eventName === "invoke.stdout") {
     appendToolPendingLogs("stdout", String(data.chunk || ""));
     return;
@@ -544,11 +724,7 @@ function applyBridgeEventToolOutput(rawEvent: unknown) {
     appendToolPendingLogs("stderr", String(data.chunk || ""));
     return;
   }
-  if (eventName === "invoke.finished") {
-    const ok = data.ok === true;
-    const durationMs = Number(data.durationMs || 0);
-    appendToolPendingStep(ok ? `工具完成${durationMs > 0 ? `（${durationMs}ms）` : ""}` : "工具失败");
-  }
+  if (eventName === "invoke.finished") return;
 }
 
 async function syncActiveToolRun(sessionId: string) {
@@ -579,23 +755,64 @@ const runningStatus = computed(() => {
       detail: formatToolPendingDetail(activeToolRun.value.action, activeToolRun.value.arguments)
     };
   }
-  return {
-    action: activeRunHint.value?.label || "思考中",
-    detail: activeRunHint.value?.detail || "正在分析你的请求"
-  };
+  return null;
 });
+
+const toolPendingStepLines = computed(() =>
+  toolPendingStepStates.value.map((item) => formatToolPendingStepLine(item))
+);
+
+const latestToolPendingStepState = computed(() => {
+  const list = toolPendingStepStates.value;
+  return list.length > 0 ? list[list.length - 1] : null;
+});
+
+const toolPendingCardStatus = computed<"running" | "done" | "failed">(() => {
+  if (latestToolPendingStepState.value) return latestToolPendingStepState.value.status;
+  if (activeToolRun.value) return "running";
+  return "running";
+});
+
+const toolPendingCardHeadline = computed(() => {
+  if (latestToolPendingStepState.value) {
+    return formatToolPendingHeadline(latestToolPendingStepState.value);
+  }
+  if (activeToolRun.value) {
+    const pending = {
+      step: activeToolRun.value.step,
+      action: activeToolRun.value.action,
+      detail: formatToolPendingDetail(activeToolRun.value.action, activeToolRun.value.arguments),
+      status: "running" as const,
+      error: "",
+      logs: []
+    };
+    return formatToolPendingHeadline(pending);
+  }
+  return "等待工具步骤";
+});
+
+const hasToolPendingActivity = computed(() =>
+  Boolean(activeToolRun.value) || toolPendingStepStates.value.length > 0
+);
 
 const shouldShowStreamingAssistant = computed(() => {
   if (!isRunning.value) return false;
-  const text = String(llmStreamingText.value || "");
-  const normalizedText = text.trim();
-  if (!llmStreamingActive.value && !normalizedText) return false;
-  if (!normalizedText) return false;
 
   const sourceSessionId = String(llmStreamingSessionId.value || "").trim();
   const currentSessionId = String(activeSessionId.value || "").trim();
   if (sourceSessionId && currentSessionId && sourceSessionId !== currentSessionId) {
     return false;
+  }
+
+  if (llmStreamingActive.value) {
+    return true;
+  }
+
+  const text = String(llmStreamingText.value || "");
+  const normalizedText = text.trim();
+  if (!normalizedText) {
+    // 避免刚开始执行时出现整段空白：在工具步骤尚未出现前先展示统一流式占位。
+    return !hasToolPendingActivity.value;
   }
 
   for (let i = messages.value.length - 1; i >= 0; i -= 1) {
@@ -609,6 +826,16 @@ const shouldShowStreamingAssistant = computed(() => {
 
   return true;
 });
+
+const shouldShowToolPendingCard = computed(() => isRunning.value && hasToolPendingActivity.value);
+
+const toolPendingCardAction = computed(() =>
+  activeToolRun.value ? prettyToolAction(activeToolRun.value.action) : "工具调用步骤"
+);
+
+const toolPendingCardDetail = computed(() =>
+  activeToolRun.value ? formatToolPendingDetail(activeToolRun.value.action, activeToolRun.value.arguments) : ""
+);
 
 const displayMessages = computed<DisplayMessage[]>(() => {
   const rendered = (messages.value || [])
@@ -659,17 +886,24 @@ const displayMessages = computed<DisplayMessage[]>(() => {
     });
   }
 
-  if (isRunning.value && runningStatus.value) {
+  if (shouldShowToolPendingCard.value) {
     rendered.push({
       role: "tool_pending",
       content: "",
       entryId: `__tool_pending__${String(activeSessionId.value || "__global__")}__${activeRunToken.value}`,
       toolName: activeToolRun.value?.action || "llm",
       toolPending: true,
-      toolPendingAction: runningStatus.value.action,
-      toolPendingDetail: runningStatus.value.detail,
-      toolPendingSteps: toolPendingSteps.value,
-      toolPendingLogs: toolPendingLogs.value
+      toolPendingStatus: toolPendingCardStatus.value,
+      toolPendingHeadline: toolPendingCardHeadline.value,
+      toolPendingAction: toolPendingCardAction.value,
+      toolPendingDetail: toolPendingCardDetail.value,
+      toolPendingSteps: toolPendingStepLines.value,
+      toolPendingStepsData: toolPendingStepStates.value.map((item) => ({
+        step: item.step,
+        status: item.status,
+        line: formatToolPendingStepLine(item),
+        logs: Array.isArray(item.logs) ? [...item.logs] : []
+      }))
     });
   }
 
@@ -681,7 +915,6 @@ watch(isRunning, (running, wasRunning) => {
     if (!wasRunning) {
       activeRunToken.value += 1;
       clearToolPendingSteps();
-      clearToolPendingLogs();
     }
     if (!activeRunHint.value) {
       setLlmRunHint("思考中", "正在分析你的请求");
@@ -697,7 +930,6 @@ watch(isRunning, (running, wasRunning) => {
   userPendingRegenerate.value = null;
   clearActiveToolRun();
   clearToolPendingSteps();
-  clearToolPendingLogs();
   resetLlmStreamingState();
   activeRunHint.value = null;
 });
@@ -714,7 +946,6 @@ watch(activeSessionId, () => {
   }
   clearActiveToolRun();
   clearToolPendingSteps();
-  clearToolPendingLogs();
   resetLlmStreamingState();
   activeRunHint.value = null;
   if (!activeSession.value?.forkedFrom?.sessionId) {
@@ -836,11 +1067,7 @@ async function handleEditSubmit(payload: { entryId: string; content: string; rol
       : null;
 
     if (result.mode === "fork") {
-      const elapsed = Date.now() - startedAt;
-      if (elapsed < USER_FORK_MIN_VISIBLE_MS) {
-        await sleep(USER_FORK_MIN_VISIBLE_MS - elapsed);
-      }
-      await playForkSceneSwitch(result.sessionId);
+      await switchForkSessionWithScene(result.sessionId, { startedAt });
     }
 
     resetEditingState();
@@ -1023,7 +1250,7 @@ onUnmounted(() => {
   bumpForkSceneToken();
   resetForkSceneState();
   clearActiveToolRun();
-  clearToolPendingLogs();
+  clearToolPendingSteps();
   chrome.runtime.onMessage.removeListener(onRuntimeMessage);
   cleanupMessageActions();
 });
@@ -1194,10 +1421,12 @@ onUnmounted(() => {
               :tool-name="msg.toolName"
               :tool-call-id="msg.toolCallId"
               :tool-pending="msg.toolPending"
+              :tool-pending-status="msg.toolPendingStatus"
+              :tool-pending-headline="msg.toolPendingHeadline"
               :tool-pending-action="msg.toolPendingAction"
               :tool-pending-detail="msg.toolPendingDetail"
               :tool-pending-steps="msg.toolPendingSteps"
-              :tool-pending-logs="msg.toolPendingLogs"
+              :tool-pending-steps-data="msg.toolPendingStepsData"
               :busy-placeholder="msg.busyPlaceholder"
                 :busy-mode="msg.busyMode"
                 :busy-source-entry-id="msg.busySourceEntryId"

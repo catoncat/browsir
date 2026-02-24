@@ -1481,17 +1481,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           tool_calls: toolCalls
         });
 
-        if (assistantText || toolCalls.length === 0) {
+        // 仅在最终回答阶段（无工具调用）写入 assistant 文本。
+        // 含 tool_calls 的中间思考阶段只通过流式态和工具步骤卡展示，避免正文被切碎成多段。
+        if (toolCalls.length === 0) {
           await orchestrator.sessions.appendMessage({
             sessionId,
             role: "assistant",
             text: assistantText || "LLM 返回空内容。"
-          });
-        } else {
-          await orchestrator.sessions.appendMessage({
-            sessionId,
-            role: "assistant",
-            text: `调用工具: ${toolCalls.map((tc) => tc.function.name).join(", ")}`
           });
         }
 

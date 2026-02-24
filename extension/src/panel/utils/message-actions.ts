@@ -35,7 +35,10 @@ export interface PendingRegenerateState {
 interface UseMessageActionsOptions {
   messages: Ref<PanelMessageLike[]>;
   isRunning: Ref<boolean>;
-  regenerateFromAssistantEntry: (entryId: string, options?: { mode?: "fork" | "retry" }) => Promise<{ sessionId: string }>;
+  regenerateFromAssistantEntry: (
+    entryId: string,
+    options?: { mode?: "fork" | "retry"; setActive?: boolean }
+  ) => Promise<{ sessionId: string; mode: "fork" | "retry"; sourceEntryId?: string }>;
 }
 
 function isValidAssistantMessage(message: PanelMessageLike) {

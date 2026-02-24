@@ -77,6 +77,17 @@ interface LoadConversationOptions {
   setActive?: boolean;
 }
 
+interface RegenerateFromAssistantOptions {
+  mode?: "fork" | "retry";
+  setActive?: boolean;
+}
+
+interface RegenerateFromAssistantResult {
+  sessionId: string;
+  mode: "fork" | "retry";
+  sourceEntryId?: string;
+}
+
 async function sendMessage<T = any>(type: string, payload: Record<string, unknown> = {}): Promise<T> {
   const response = (await chrome.runtime.sendMessage({ type, ...payload })) as RuntimeResponse<T>;
   if (!response?.ok) {
@@ -226,7 +237,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
     return "";
   }
 
-  async function forkFromAssistantEntry(entryId: string, options: { autoRun?: boolean } = {}) {
+  async function forkFromAssistantEntry(entryId: string, options: { autoRun?: boolean; setActive?: boolean } = {}) {
     if (!activeSessionId.value) {
       throw new Error("无活跃会话，无法分叉");
     }
@@ -265,14 +276,19 @@ export const useRuntimeStore = defineStore("runtime", () => {
     }
 
     await refreshSessions();
-    await loadConversation(forkedSessionId, { setActive: true });
+    if (options.setActive === false) {
+      // 由上层决定何时切会话（例如播放 fork 场景动画）。
+    } else {
+      await loadConversation(forkedSessionId, { setActive: true });
+    }
     return {
       sessionId: forkedSessionId,
-      sourceEntryId: forkedSourceEntryId || entryId
+      sourceEntryId: forkedSourceEntryId || entryId,
+      mode: "fork" as const
     };
   }
 
-  async function retryLastAssistantEntry(entryId: string) {
+  async function retryLastAssistantEntry(entryId: string, options: { setActive?: boolean } = {}) {
     if (!activeSessionId.value) {
       throw new Error("无活跃会话，无法重试");
     }
@@ -298,24 +314,28 @@ export const useRuntimeStore = defineStore("runtime", () => {
     });
     runtime.value = result.runtime;
     await refreshSessions();
-    await loadConversation(currentSessionId, { setActive: false });
+    await loadConversation(currentSessionId, { setActive: options.setActive === true });
     return {
-      sessionId: currentSessionId
+      sessionId: currentSessionId,
+      mode: "retry" as const
     };
   }
 
-  async function regenerateFromAssistantEntry(entryId: string, options: { mode?: "fork" | "retry" } = {}) {
+  async function regenerateFromAssistantEntry(
+    entryId: string,
+    options: RegenerateFromAssistantOptions = {}
+  ): Promise<RegenerateFromAssistantResult> {
     if (options.mode === "fork") {
-      return forkFromAssistantEntry(entryId, { autoRun: true });
+      return forkFromAssistantEntry(entryId, { autoRun: true, setActive: options.setActive });
     }
     if (options.mode === "retry") {
-      return retryLastAssistantEntry(entryId);
+      return retryLastAssistantEntry(entryId, { setActive: options.setActive });
     }
     const latestAssistantEntryId = findLatestAssistantEntryId();
     if (latestAssistantEntryId && latestAssistantEntryId === entryId) {
-      return retryLastAssistantEntry(entryId);
+      return retryLastAssistantEntry(entryId, { setActive: options.setActive });
     }
-    return forkFromAssistantEntry(entryId, { autoRun: true });
+    return forkFromAssistantEntry(entryId, { autoRun: true, setActive: options.setActive });
   }
 
   async function editUserMessageAndRerun(entryId: string, prompt: string, options: EditUserRerunOptions = {}) {
