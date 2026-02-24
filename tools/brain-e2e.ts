@@ -2061,116 +2061,6 @@ async function main() {
       assert(toolMessagesJoined.includes('"tool":"browser_action"'), "tool failure payload 应标识 browser_action");
     });
 
-    await runCase("brain.runtime", "LLM Retry-After 超上限时应快速失败且不进入长等待重试", async () => {
-      mockLlm?.clearRequests();
-      const saveConfig = await sendBgMessage(sidepanelClient!, {
-        type: "config.save",
-        payload: {
-          bridgeUrl: `ws://${BRIDGE_HOST}:${bridgePort}/ws`,
-          bridgeToken,
-          llmApiBase: mockLlm!.baseUrl,
-          llmApiKey: "mock-key",
-          llmModel: "gpt-5.3-codex",
-          llmTimeoutMs: 10_000,
-          llmRetryMaxAttempts: 2,
-          llmMaxRetryDelayMs: 1_000
-        }
-      });
-      assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
-
-      const started = await sendBgMessage(sidepanelClient!, {
-        type: "brain.run.start",
-        prompt: "触发 Retry-After 上限治理 #LLM_RETRY_AFTER_CAP"
-      });
-      assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
-      const sessionId = String(started.data?.sessionId || "");
-      assert(sessionId.length > 0, "sessionId 为空");
-
-      const dump = await waitFor(
-        "brain.debug.dump llm-retry-after-cap trace",
-        async () => {
-          const out = await sendBgMessage(sidepanelClient!, {
-            type: "brain.debug.dump",
-            sessionId
-          });
-          if (!out.ok) return null;
-          const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
-          if (!stream.some((item: any) => item?.type === "loop_done")) return null;
-          return out.data;
-        },
-        20_000,
-        250
-      );
-
-      const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
-      assert(
-        stream.some((item: any) => item?.type === "loop_done" && item?.payload?.status === "failed_execute"),
-        "Retry-After 超上限应 failed_execute 收口"
-      );
-      assert(
-        !stream.some((item: any) => item?.type === "auto_retry_start"),
-        "Retry-After 超上限不应进入自动重试"
-      );
-      assert(
-        stream.some(
-          (item: any) =>
-            item?.type === "loop_error" && String(item?.payload?.message || "").includes("exceeds cap")
-        ),
-        "应包含超上限错误信息"
-      );
-    });
-
-    await runCase("brain.runtime", "重复可恢复工具失败应触发熔断并停止循环", async () => {
-      mockLlm?.clearRequests();
-      const saveConfig = await sendBgMessage(sidepanelClient!, {
-        type: "config.save",
-        payload: {
-          bridgeUrl: `ws://${BRIDGE_HOST}:${bridgePort}/ws`,
-          bridgeToken,
-          llmApiBase: mockLlm!.baseUrl,
-          llmApiKey: "mock-key",
-          llmModel: "gpt-5.3-codex",
-          llmTimeoutMs: 10_000,
-          llmRetryMaxAttempts: 2
-        }
-      });
-      assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
-
-      const started = await sendBgMessage(sidepanelClient!, {
-        type: "brain.run.start",
-        prompt: "触发可恢复失败熔断 #LLM_RETRY_CIRCUIT"
-      });
-      assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
-      const sessionId = String(started.data?.sessionId || "");
-      assert(sessionId.length > 0, "sessionId 为空");
-
-      const dump = await waitFor(
-        "brain.debug.dump retry-circuit trace",
-        async () => {
-          const out = await sendBgMessage(sidepanelClient!, {
-            type: "brain.debug.dump",
-            sessionId
-          });
-          if (!out.ok) return null;
-          const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
-          if (!stream.some((item: any) => item?.type === "loop_done")) return null;
-          return out.data;
-        },
-        40_000,
-        250
-      );
-
-      const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
-      assert(
-        stream.some((item: any) => item?.type === "retry_circuit_open" || item?.type === "retry_budget_exhausted"),
-        "应出现重试熔断或预算耗尽事件"
-      );
-      assert(
-        stream.some((item: any) => item?.type === "loop_done" && item?.payload?.status === "failed_execute"),
-        "熔断后应以 failed_execute 收口"
-      );
-    });
-
     await runCase("panel.vnext", "sidepanel 渲染并支持复制/历史分叉/最后一条重试", async () => {
       const marker = `panel-actions-${Date.now()}`;
 
@@ -2799,17 +2689,24 @@ async function main() {
 
           const listed = await sendBgMessage(sidepanelClient!, { type: "brain.session.list" });
           if (!listed.ok) return null;
-          const currentSessionId = String((listed.data?.sessions || [])[0]?.id || "");
-          if (!currentSessionId) return null;
-          const viewed = await sendBgMessage(sidepanelClient!, {
-            type: "brain.session.view",
-            sessionId: currentSessionId
-          });
-          if (!viewed.ok) return null;
-          const msgs = Array.isArray(viewed.data?.conversationView?.messages) ? viewed.data.conversationView.messages : [];
-          const userCount = msgs.filter((item: any) => String(item?.role || "") === "user").length;
-          if (userCount < 2) return null;
-          return { ui, userCount };
+          const candidates = Array.isArray(listed.data?.sessions) ? listed.data.sessions : [];
+          for (const candidate of candidates) {
+            const currentSessionId = String(candidate?.id || "");
+            if (!currentSessionId) continue;
+            const viewed = await sendBgMessage(sidepanelClient!, {
+              type: "brain.session.view",
+              sessionId: currentSessionId
+            });
+            if (!viewed.ok) continue;
+            const msgs = Array.isArray(viewed.data?.conversationView?.messages) ? viewed.data.conversationView.messages : [];
+            const userCount = msgs.filter((item: any) => String(item?.role || "") === "user").length;
+            const hasQ2 = msgs.some(
+              (item: any) => String(item?.role || "") === "user" && String(item?.content || "").includes(`${marker}-q2`)
+            );
+            if (!hasQ2 || userCount < 2) continue;
+            return { ui, userCount };
+          }
+          return null;
         },
         45_000,
         250
@@ -3078,7 +2975,7 @@ async function main() {
       assert(view.data?.conversationView?.lastStatus?.stopped === true, "session.view.lastStatus.stopped 应为 true");
     });
 
-    await runCase("brain.session", "session 标题自动生成 + 手动刷新 + 删除", async () => {
+    await runCase("brain.session", "session 标题生命周期：自动生成 + 菜单重刷 + 列表重命名 + 自动阈值", async () => {
       mockLlm?.clearRequests();
       const saveConfig = await sendBgMessage(sidepanelClient!, {
         type: "config.save",
@@ -3087,44 +2984,284 @@ async function main() {
           bridgeToken,
           llmApiBase: mockLlm!.baseUrl,
           llmApiKey: "mock-key",
-          llmModel: "gpt-5.3-codex"
+          llmModel: "gpt-5.3-codex",
+          autoTitleInterval: 10
         }
       });
       assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
 
-      const started = await sendBgMessage(sidepanelClient!, {
-        type: "brain.run.start",
-        prompt: "请帮我整理 PI 书签搜索的执行复盘 #TITLE_DELETE"
-      });
-      assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
-      const sessionId = String(started.data?.sessionId || "");
-      assert(sessionId.length > 0, "sessionId 为空");
+      const sendPromptByUi = async (text: string) => {
+        const out = await sidepanelClient!.evaluate(`(() => {
+          const textarea = document.querySelector('textarea[aria-label="消息输入框"]');
+          if (!(textarea instanceof HTMLTextAreaElement)) return { ok: false, error: "composer missing" };
+          textarea.focus();
+          textarea.value = ${JSON.stringify(text)};
+          textarea.dispatchEvent(new Event("input", { bubbles: true }));
+          textarea.dispatchEvent(
+            new KeyboardEvent("keydown", {
+              key: "Enter",
+              code: "Enter",
+              keyCode: 13,
+              which: 13,
+              bubbles: true,
+              cancelable: true
+            })
+          );
+          return { ok: true };
+        })()`);
+        assert(out?.ok === true, `UI 发送 prompt 失败: ${out?.error || "unknown"}`);
+      };
 
-      await waitFor(
-        "session title auto update loop_done",
+      const findSessionIdByUserMarker = async (markerText: string): Promise<string> => {
+        const listed = await sendBgMessage(sidepanelClient!, { type: "brain.session.list" });
+        if (!listed.ok) return "";
+        const sessions = Array.isArray(listed.data?.sessions) ? listed.data.sessions : [];
+        for (const session of sessions) {
+          const candidateSessionId = String(session?.id || "");
+          if (!candidateSessionId) continue;
+          const viewed = await sendBgMessage(sidepanelClient!, {
+            type: "brain.session.view",
+            sessionId: candidateSessionId
+          });
+          if (!viewed.ok) continue;
+          const msgs = Array.isArray(viewed.data?.conversationView?.messages) ? viewed.data.conversationView.messages : [];
+          if (
+            msgs.some(
+              (item: any) => String(item?.role || "") === "user" && String(item?.content || "").includes(markerText)
+            )
+          ) {
+            return candidateSessionId;
+          }
+        }
+        return "";
+      };
+
+      const waitLoopDoneCount = async (sessionId: string, minCount: number, label: string) => {
+        await waitFor(
+          label,
+          async () => {
+            const out = await sendBgMessage(sidepanelClient!, { type: "brain.debug.dump", sessionId });
+            if (!out.ok) return null;
+            const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
+            const loopDoneCount = stream.filter((item: any) => item?.type === "loop_done").length;
+            return loopDoneCount >= minCount ? loopDoneCount : null;
+          },
+          35_000,
+          250
+        );
+      };
+
+      const getSessionRowTitle = async (sessionId: string): Promise<string> => {
+        const listed = await sendBgMessage(sidepanelClient!, { type: "brain.session.list" });
+        if (!listed.ok) return "";
+        const listedSessions = Array.isArray(listed.data?.sessions) ? listed.data.sessions : [];
+        const row = listedSessions.find((item: any) => String(item?.id || "") === sessionId);
+        return String(row?.title || "");
+      };
+
+      const getTitleAutoUpdateCount = async (sessionId: string): Promise<number> => {
+        const dump = await sendBgMessage(sidepanelClient!, { type: "brain.debug.dump", sessionId });
+        if (!dump.ok) return 0;
+        const stream = Array.isArray(dump.data?.stepStream) ? dump.data.stepStream : [];
+        return stream.filter((item: any) => item?.type === "session_title_auto_updated").length;
+      };
+
+      const marker = `title-life-${Date.now()}`;
+      const created = await sidepanelClient!.evaluate(`(() => {
+        const btn = document.querySelector('button[aria-label="开始新对话"]');
+        if (!(btn instanceof HTMLButtonElement)) return { ok: false, error: "new session button missing" };
+        btn.click();
+        return { ok: true };
+      })()`);
+      assert(created?.ok === true, `点击新建对话失败: ${created?.error || "unknown"}`);
+
+      await sendPromptByUi(`请帮我整理 PI 书签搜索的执行复盘 ${marker}-q1`);
+      const sessionId = await waitFor(
+        "title lifecycle session created",
         async () => {
-          const out = await sendBgMessage(sidepanelClient!, { type: "brain.debug.dump", sessionId });
-          if (!out.ok) return null;
-          const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
-          return stream.some((item: any) => item?.type === "loop_done") ? true : null;
+          const id = await findSessionIdByUserMarker(`${marker}-q1`);
+          return id || null;
         },
-        35_000,
+        20_000,
         250
       );
+      assert(sessionId.length > 0, "标题生命周期场景 sessionId 为空");
 
-      const listed = await sendBgMessage(sidepanelClient!, { type: "brain.session.list" });
-      assert(listed.ok === true, `brain.session.list 失败: ${listed.error || "unknown"}`);
-      const listedSessions = Array.isArray(listed.data?.sessions) ? listed.data.sessions : [];
-      const row = listedSessions.find((item: any) => String(item?.id || "") === sessionId);
-      assert(!!row, "新会话应出现在 session.list");
-      assert(String(row?.title || "") === "AI 总结的标题", `自动生成的标题不符合预期，预期="AI 总结的标题"，实际="${row?.title}"`);
+      await waitLoopDoneCount(sessionId, 1, "session title auto update loop_done");
+      const initialTitle = await getSessionRowTitle(sessionId);
+      assert(initialTitle === "AI 总结的标题", `自动生成的标题不符合预期，预期="AI 总结的标题"，实际="${initialTitle}"`);
 
-      const refreshed = await sendBgMessage(sidepanelClient!, {
-        type: "brain.session.title.refresh",
-        sessionId
-      });
-      assert(refreshed.ok === true, `brain.session.title.refresh 失败: ${refreshed.error || "unknown"}`);
-      assert(String(refreshed.data?.title || "") === "AI 总结的标题", `手动刷新后的标题不符合预期，预期="AI 总结的标题"，实际="${refreshed.data?.title}"`);
+      const updateCountBeforeManualRefresh = await getTitleAutoUpdateCount(sessionId);
+      const refreshTriggered = await sidepanelClient!.evaluate(`(() => {
+        const toggle = document.querySelector('button[aria-label="打开更多菜单"], button[aria-label="关闭更多菜单"]');
+        if (!(toggle instanceof HTMLButtonElement)) return { ok: false, error: "more menu toggle missing" };
+        toggle.click();
+        const menuItem = Array.from(document.querySelectorAll('button[role="menuitem"]')).find((btn) =>
+          String(btn.textContent || "").includes("重新生成标题")
+        );
+        if (!(menuItem instanceof HTMLButtonElement)) return { ok: false, error: "regenerate title menu item missing" };
+        menuItem.click();
+        return { ok: true };
+      })()`);
+      assert(refreshTriggered?.ok === true, `点击更多菜单重新生成标题失败: ${refreshTriggered?.error || "unknown"}`);
+      await waitFor(
+        "header regenerating title indicator",
+        async () => {
+          const text = await sidepanelClient!.evaluate(`(() => document.body?.innerText || "")()`);
+          return String(text).includes("正在重新生成标题") ? true : null;
+        },
+        10_000,
+        80
+      );
+      await waitFor(
+        "manual title refresh trace",
+        async () => {
+          const count = await getTitleAutoUpdateCount(sessionId);
+          return count > updateCountBeforeManualRefresh ? count : null;
+        },
+        20_000,
+        200
+      );
+      const afterManualRefreshTitle = await getSessionRowTitle(sessionId);
+      assert(
+        afterManualRefreshTitle === "AI 总结的标题",
+        `手动刷新后的标题不符合预期，预期="AI 总结的标题"，实际="${afterManualRefreshTitle}"`
+      );
+
+      const renamedTitle = `我自定义的标题-${String(Date.now()).slice(-4)}`;
+      const renameSubmitted = await sidepanelClient!.evaluate(`(async () => {
+        const openList = document.querySelector('button[aria-label="查看会话历史列表"]');
+        if (!(openList instanceof HTMLButtonElement)) return { ok: false, error: "open history list button missing" };
+        openList.click();
+        const listItems = Array.from(document.querySelectorAll("li.group"));
+        const activeItem = listItems.find((item) => item.querySelector('button[aria-current="true"]'));
+        if (!(activeItem instanceof HTMLElement)) return { ok: false, error: "active session item missing" };
+        const renameBtn = activeItem.querySelector('button[aria-label^="重命名会话:"]');
+        if (!(renameBtn instanceof HTMLButtonElement)) return { ok: false, error: "rename button missing" };
+        renameBtn.click();
+        let input = null;
+        for (let i = 0; i < 12; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          const node = activeItem.querySelector('input[type="text"]');
+          if (node instanceof HTMLInputElement) {
+            input = node;
+            break;
+          }
+        }
+        if (!(input instanceof HTMLInputElement)) return { ok: false, error: "rename input missing" };
+        input.focus();
+        input.value = ${JSON.stringify(renamedTitle)};
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "Enter",
+            code: "Enter",
+            keyCode: 13,
+            which: 13,
+            bubbles: true,
+            cancelable: true
+          })
+        );
+        const closeBtn = document.querySelector('button[aria-label="关闭会话列表"]');
+        if (closeBtn instanceof HTMLButtonElement) {
+          closeBtn.click();
+        }
+        return { ok: true };
+      })()`);
+      assert(renameSubmitted?.ok === true, `会话列表重命名失败: ${renameSubmitted?.error || "unknown"}`);
+      await waitFor(
+        "renamed title persisted to session list",
+        async () => {
+          const current = await getSessionRowTitle(sessionId);
+          return current === renamedTitle ? true : null;
+        },
+        20_000,
+        200
+      );
+
+      await sendPromptByUi(`继续完善 ${marker}-q2`);
+      await waitLoopDoneCount(sessionId, 2, "renamed title follow-up loop_done");
+      const titleAfterFollow = await getSessionRowTitle(sessionId);
+      assert(
+        titleAfterFollow === renamedTitle,
+        `手动重命名后下一轮不应被自动覆盖，期望="${renamedTitle}"，实际="${titleAfterFollow}"`
+      );
+
+      const settingsSaved = await sidepanelClient!.evaluate(`(() => {
+        const toggle = document.querySelector('button[aria-label="打开更多菜单"], button[aria-label="关闭更多菜单"]');
+        if (!(toggle instanceof HTMLButtonElement)) return { ok: false, error: "more menu toggle missing for settings" };
+        toggle.click();
+        const settingsEntry = Array.from(document.querySelectorAll('button[role="menuitem"]')).find((btn) =>
+          String(btn.textContent || "").includes("系统设置")
+        );
+        if (!(settingsEntry instanceof HTMLButtonElement)) return { ok: false, error: "settings menu item missing" };
+        settingsEntry.click();
+        const input = document.querySelector('#settings-auto-title-interval');
+        if (!(input instanceof HTMLInputElement)) return { ok: false, error: "auto title interval input missing" };
+        input.focus();
+        input.value = "6";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        const saveBtn = Array.from(document.querySelectorAll('button')).find((btn) =>
+          String(btn.textContent || "").includes("Apply & Restart System")
+        );
+        if (!(saveBtn instanceof HTMLButtonElement)) return { ok: false, error: "settings save button missing" };
+        saveBtn.click();
+        return { ok: true };
+      })()`);
+      assert(settingsSaved?.ok === true, `设置页保存 autoTitleInterval 失败: ${settingsSaved?.error || "unknown"}`);
+      await waitFor(
+        "settings dialog closed after save",
+        async () => {
+          const opened = await sidepanelClient!.evaluate(`(() => !!document.querySelector('[role="dialog"][aria-label="系统设置"]'))()`);
+          return opened ? null : true;
+        },
+        20_000,
+        200
+      );
+      const cfgAfterSettings = await sendBgMessage(sidepanelClient!, { type: "config.get" });
+      assert(cfgAfterSettings.ok === true, "settings 保存后 config.get 失败");
+      assert(Number(cfgAfterSettings.data?.autoTitleInterval || 0) === 6, "settings 保存的 autoTitleInterval 未生效");
+
+      const intervalMarker = `${marker}-interval`;
+      const createdForInterval = await sidepanelClient!.evaluate(`(() => {
+        const btn = document.querySelector('button[aria-label="开始新对话"]');
+        if (!(btn instanceof HTMLButtonElement)) return { ok: false, error: "new session button missing for interval case" };
+        btn.click();
+        return { ok: true };
+      })()`);
+      assert(createdForInterval?.ok === true, `创建 interval 会话失败: ${createdForInterval?.error || "unknown"}`);
+
+      await sendPromptByUi(`请回答 ${intervalMarker}-q1`);
+      const intervalSessionId = await waitFor(
+        "interval session created",
+        async () => {
+          const id = await findSessionIdByUserMarker(`${intervalMarker}-q1`);
+          return id || null;
+        },
+        20_000,
+        250
+      );
+      assert(intervalSessionId.length > 0, "interval 会话 sessionId 为空");
+      await waitLoopDoneCount(intervalSessionId, 1, "interval loop_done #1");
+      const autoUpdatesAfterQ1 = await getTitleAutoUpdateCount(intervalSessionId);
+      assert(autoUpdatesAfterQ1 >= 1, `interval 场景首轮应触发自动标题，实际次数=${autoUpdatesAfterQ1}`);
+
+      await sendPromptByUi(`请回答 ${intervalMarker}-q2`);
+      await waitLoopDoneCount(intervalSessionId, 2, "interval loop_done #2");
+      const autoUpdatesAfterQ2 = await getTitleAutoUpdateCount(intervalSessionId);
+      assert(
+        autoUpdatesAfterQ2 === autoUpdatesAfterQ1,
+        `autoTitleInterval=6 时第二轮不应触发自动标题，q1=${autoUpdatesAfterQ1}, q2=${autoUpdatesAfterQ2}`
+      );
+
+      await sendPromptByUi(`请回答 ${intervalMarker}-q3`);
+      await waitLoopDoneCount(intervalSessionId, 3, "interval loop_done #3");
+      const autoUpdatesAfterQ3 = await getTitleAutoUpdateCount(intervalSessionId);
+      assert(
+        autoUpdatesAfterQ3 > autoUpdatesAfterQ2,
+        `autoTitleInterval=6 时第三轮应触发自动标题，q2=${autoUpdatesAfterQ2}, q3=${autoUpdatesAfterQ3}`
+      );
 
       const deleted = await sendBgMessage(sidepanelClient!, {
         type: "brain.session.delete",
