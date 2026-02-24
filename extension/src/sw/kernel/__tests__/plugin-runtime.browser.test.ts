@@ -323,4 +323,232 @@ describe("plugin-runtime.browser", () => {
     expect(afterDisable.ok).toBe(true);
     expect(afterDisable.data).toEqual({ source: "B" });
   });
+
+  it("replaceProviders 支持 A->B->C 链式覆盖并按禁用顺序回滚", async () => {
+    const orchestrator = new BrainOrchestrator();
+    const { sessionId } = await orchestrator.createSession({ title: "plugin-chain-rollback" });
+
+    orchestrator.registerToolProvider(
+      "script",
+      {
+        id: "base.script.chain",
+        invoke: async () => ({ source: "base" })
+      },
+      { replace: true }
+    );
+    orchestrator.registerCapabilityPolicy(
+      "browser.action",
+      {
+        defaultVerifyPolicy: "always",
+        leasePolicy: "required"
+      },
+      { replace: true, id: "base.policy.chain" }
+    );
+
+    const registerReplacePlugin = (id: string, source: string, verify: "off" | "on_critical" | "always") => {
+      orchestrator.registerPlugin({
+        manifest: {
+          id,
+          name: id,
+          version: "1.0.0",
+          permissions: {
+            modes: ["script"],
+            capabilities: ["browser.action"],
+            replaceProviders: true
+          }
+        },
+        providers: {
+          modes: {
+            script: {
+              id: `${id}.script`,
+              invoke: async () => ({ source })
+            }
+          }
+        },
+        policies: {
+          capabilities: {
+            "browser.action": {
+              defaultVerifyPolicy: verify
+            }
+          }
+        }
+      });
+    };
+
+    registerReplacePlugin("plugin.chain.a", "A", "off");
+    registerReplacePlugin("plugin.chain.b", "B", "on_critical");
+    registerReplacePlugin("plugin.chain.c", "C", "always");
+
+    const withC = await orchestrator.executeStep({
+      sessionId,
+      mode: "script",
+      action: "click",
+      verifyPolicy: "off"
+    });
+    expect(withC.ok).toBe(true);
+    expect(withC.data).toEqual({ source: "C" });
+    expect(orchestrator.resolveCapabilityPolicy("browser.action").defaultVerifyPolicy).toBe("always");
+
+    orchestrator.disablePlugin("plugin.chain.c");
+    const withB = await orchestrator.executeStep({
+      sessionId,
+      mode: "script",
+      action: "click",
+      verifyPolicy: "off"
+    });
+    expect(withB.ok).toBe(true);
+    expect(withB.data).toEqual({ source: "B" });
+    expect(orchestrator.resolveCapabilityPolicy("browser.action").defaultVerifyPolicy).toBe("on_critical");
+
+    orchestrator.disablePlugin("plugin.chain.b");
+    const withA = await orchestrator.executeStep({
+      sessionId,
+      mode: "script",
+      action: "click",
+      verifyPolicy: "off"
+    });
+    expect(withA.ok).toBe(true);
+    expect(withA.data).toEqual({ source: "A" });
+    expect(orchestrator.resolveCapabilityPolicy("browser.action").defaultVerifyPolicy).toBe("off");
+
+    orchestrator.disablePlugin("plugin.chain.a");
+    const restored = await orchestrator.executeStep({
+      sessionId,
+      mode: "script",
+      action: "click",
+      verifyPolicy: "off"
+    });
+    expect(restored.ok).toBe(true);
+    expect(restored.data).toEqual({ source: "base" });
+    expect(orchestrator.resolveCapabilityPolicy("browser.action").defaultVerifyPolicy).toBe("always");
+  });
+
+  it("tool.after_result 多 handler 可以链式 patch", async () => {
+    const orchestrator = new BrainOrchestrator(
+      {},
+      {
+        script: async () => ({ chain: ["base"] })
+      }
+    );
+    const { sessionId } = await orchestrator.createSession({ title: "plugin-chain-patch" });
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.patch.chain.1",
+        name: "patch-chain-1",
+        version: "1.0.0",
+        permissions: { hooks: ["tool.after_result"] }
+      },
+      hooks: {
+        "tool.after_result": (event) => {
+          const prev = (event.result || {}) as { chain?: string[] };
+          return {
+            action: "patch",
+            patch: {
+              result: {
+                ...prev,
+                chain: [...(prev.chain || []), "p1"]
+              }
+            }
+          };
+        }
+      }
+    });
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.patch.chain.2",
+        name: "patch-chain-2",
+        version: "1.0.0",
+        permissions: { hooks: ["tool.after_result"] }
+      },
+      hooks: {
+        "tool.after_result": (event) => {
+          const prev = (event.result || {}) as { chain?: string[] };
+          return {
+            action: "patch",
+            patch: {
+              result: {
+                ...prev,
+                chain: [...(prev.chain || []), "p2"]
+              }
+            }
+          };
+        }
+      }
+    });
+
+    const result = await orchestrator.executeStep({
+      sessionId,
+      mode: "script",
+      action: "click"
+    });
+    expect(result.ok).toBe(true);
+    expect(result.data).toEqual({ chain: ["base", "p1", "p2"] });
+  });
+
+  it("hook 异常/超时 fail-open，但 block 仍能阻断执行", async () => {
+    let invoked = 0;
+    const orchestrator = new BrainOrchestrator(
+      {},
+      {
+        script: async () => {
+          invoked += 1;
+          return { source: "script" };
+        }
+      }
+    );
+    const { sessionId } = await orchestrator.createSession({ title: "plugin-fail-open-block" });
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.before.throw",
+        name: "before-throw",
+        version: "1.0.0",
+        permissions: { hooks: ["tool.before_call"] }
+      },
+      hooks: {
+        "tool.before_call": () => {
+          throw new Error("before throw");
+        }
+      }
+    });
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.before.timeout",
+        name: "before-timeout",
+        version: "1.0.0",
+        timeoutMs: 5,
+        permissions: { hooks: ["tool.before_call"] }
+      },
+      hooks: {
+        "tool.before_call": async () => {
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          return {
+            action: "patch",
+            patch: {}
+          };
+        }
+      }
+    });
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.before.block",
+        name: "before-block",
+        version: "1.0.0",
+        permissions: { hooks: ["tool.before_call"] }
+      },
+      hooks: {
+        "tool.before_call": () => ({ action: "block", reason: "blocked-by-test" })
+      }
+    });
+
+    const result = await orchestrator.executeStep({
+      sessionId,
+      mode: "script",
+      action: "click"
+    });
+    expect(result.ok).toBe(false);
+    expect(String(result.error || "")).toContain("tool.before_call blocked");
+    expect(invoked).toBe(0);
+  });
 });

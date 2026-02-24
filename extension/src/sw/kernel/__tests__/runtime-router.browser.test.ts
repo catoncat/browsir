@@ -333,6 +333,46 @@ describe("runtime-router.browser", () => {
     expect(String(edited.error || "")).toContain("sourceEntry 必须是 user 消息");
   });
 
+  it("rejects edit_rerun when sourceEntry belongs to another session", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const first = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "session-a"
+    });
+    const second = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "session-b"
+    });
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+
+    const sessionA = String(((first.data as Record<string, unknown>) || {}).sessionId || "");
+    const sessionB = String(((second.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionA).not.toBe("");
+    expect(sessionB).not.toBe("");
+    expect(sessionA).not.toBe(sessionB);
+
+    const viewA = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId: sessionA
+    });
+    expect(viewA.ok).toBe(true);
+    const sourceFromA = readConversationMessages(viewA).find((entry) => String(entry.role || "") === "user");
+    const sourceEntryId = String(sourceFromA?.entryId || "");
+    expect(sourceEntryId).not.toBe("");
+
+    const edited = await invokeRuntime({
+      type: "brain.run.edit_rerun",
+      sessionId: sessionB,
+      sourceEntryId,
+      prompt: "cross-session-edit"
+    });
+    expect(edited.ok).toBe(false);
+    expect(String(edited.error || "")).toContain("sourceEntry 不存在");
+  });
+
   it("supports capability provider in brain.step.execute", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -388,6 +428,81 @@ describe("runtime-router.browser", () => {
       provider: "virtual-fs-router",
       path: "mem://docs.txt"
     });
+  });
+
+  it("brain.step.execute 事件顺序严格为 step_execute -> step_execute_result（单次）", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.event-order",
+        name: "event-order",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["fs.virtual.read"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "fs.virtual.read": {
+            id: "plugin.event-order.read",
+            mode: "bridge",
+            invoke: async () => ({ ok: true, source: "event-order" })
+          }
+        }
+      }
+    });
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "event-order-seed",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const beforeStream = await invokeRuntime({
+      type: "brain.step.stream",
+      sessionId
+    });
+    expect(beforeStream.ok).toBe(true);
+    const baseline = Array.isArray((beforeStream.data as Record<string, unknown>)?.stream)
+      ? (((beforeStream.data as Record<string, unknown>).stream as unknown[]) as Array<Record<string, unknown>>)
+      : [];
+
+    const executed = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.virtual.read",
+      action: "read_file",
+      args: {
+        path: "mem://ordered.txt"
+      },
+      verifyPolicy: "off"
+    });
+    expect(executed.ok).toBe(true);
+
+    const afterStream = await invokeRuntime({
+      type: "brain.step.stream",
+      sessionId
+    });
+    expect(afterStream.ok).toBe(true);
+    const fullStream = Array.isArray((afterStream.data as Record<string, unknown>)?.stream)
+      ? (((afterStream.data as Record<string, unknown>).stream as unknown[]) as Array<Record<string, unknown>>)
+      : [];
+    const delta = fullStream.slice(baseline.length);
+    const stepDelta = delta.filter((entry) => {
+      const type = String(entry.type || "");
+      return type === "step_execute" || type === "step_execute_result";
+    });
+
+    expect(stepDelta).toHaveLength(2);
+    expect(String(stepDelta[0].type || "")).toBe("step_execute");
+    expect(String(stepDelta[1].type || "")).toBe("step_execute_result");
+    expect(String((stepDelta[0].payload as Record<string, unknown> | undefined)?.capability || "")).toBe("fs.virtual.read");
+    expect(String((stepDelta[1].payload as Record<string, unknown> | undefined)?.capabilityUsed || "")).toBe("fs.virtual.read");
   });
 
   it("supports brain.debug.plugins view", async () => {
