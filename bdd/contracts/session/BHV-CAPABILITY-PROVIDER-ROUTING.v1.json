@@ -1,0 +1,59 @@
+{
+  "id": "BHV-CAPABILITY-PROVIDER-ROUTING",
+  "intent": "工具调用必须通过 Provider Registry 路由，保持能力契约与执行对象解耦，并兼容 legacy adapters 行为",
+  "context": {
+    "surface": "service-worker.kernel.provider_registry",
+    "executeModes": ["script", "cdp", "bridge"],
+    "capabilityExamples": ["browser.action", "fs.read", "process.exec"],
+    "routingInvariants": [
+      "legacy_adapters_are_wrapped_as_default_providers",
+      "capability_provider_is_preferred_when_registered",
+      "capability_only_request_uses_policy_mode_fallback_when_provider_missing",
+      "capability_missing_falls_back_to_explicit_mode_without_silent_switch",
+      "script_failure_fallbacks_to_cdp_only",
+      "cdp_or_bridge_failure_returns_ok_false_without_forced_fallback"
+    ]
+  },
+  "steps": [
+    "register_default_providers_from_legacy_execution_adapters",
+    "optionally_register_capability_provider_mapped_to_orchestrator_tools",
+    "resolve_provider_by_mode_and_invoke_through_registry",
+    "keep_script_to_cdp_fallback_semantics_unchanged",
+    "throw_mode_adapter_missing_when_provider_absent",
+    "allow_runtime_provider_override_with_replace_option",
+    "preserve_verify_policy_reason_outputs"
+  ],
+  "observables": [
+    "execute_step_mode_used_matches_provider_routing_result",
+    "execute_step_capability_used_reflects_provider_selection_when_present",
+    "fallback_from_script_to_cdp_is_reported_in_result",
+    "missing_provider_raises_exact_mode_adapter_missing_error",
+    "verify_reason_stays_within_verified_verify_failed_verify_policy_off_verify_adapter_missing",
+    "tool_after_result_hook_can_patch_provider_output_without_breaking_contract"
+  ],
+  "risk": "high",
+  "allowed_side_effects": [
+    "provider_registry_register_unregister_in_memory",
+    "execute_step_result_mode_and_data_update",
+    "legacy_adapter_invocation_through_provider_wrapper"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "integration", "browser-cdp"],
+    "min_layers": 3
+  },
+  "degrade_policy": {
+    "on_provider_resolution_failure": [
+      "return_or_throw_mode_adapter_missing_with_stable_error_message",
+      "avoid_silent_mode_switch"
+    ],
+    "on_override_conflict": [
+      "reject_duplicate_registration_without_replace",
+      "keep_existing_provider_binding"
+    ]
+  },
+  "rollback_or_compensation": [
+    "fallback_to_legacy_adapter_wrapping_only",
+    "disable_custom_provider_registration_api_if_needed"
+  ],
+  "version": "1.0.0"
+}

@@ -164,6 +164,32 @@ export interface StepTraceRecord {
   payload: Record<string, unknown>;
 }
 
+export type ExecuteMode = "script" | "cdp" | "bridge";
+export type ExecuteCapability = string;
+
+export interface ExecuteStepInput {
+  sessionId: string;
+  mode?: ExecuteMode;
+  capability?: ExecuteCapability;
+  action: string;
+  args?: Record<string, unknown>;
+  verifyPolicy?: "off" | "on_critical" | "always";
+}
+
+export interface ExecuteStepResult {
+  ok: boolean;
+  modeUsed: ExecuteMode;
+  capabilityUsed?: ExecuteCapability;
+  fallbackFrom?: ExecuteMode;
+  verified: boolean;
+  verifyReason?: string;
+  data?: unknown;
+  error?: string;
+  errorCode?: string;
+  errorDetails?: unknown;
+  retryable?: boolean;
+}
+
 export function randomId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
 }

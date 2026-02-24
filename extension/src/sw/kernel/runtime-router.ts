@@ -1,6 +1,6 @@
 import { archiveLegacyState, initSessionIndex, resetSessionStore } from "./storage-reset.browser";
 import { BrainOrchestrator } from "./orchestrator.browser";
-import { createRuntimeInfraHandler, type RuntimeInfraHandler } from "./runtime-infra.browser";
+import { createRuntimeInfraHandler, type RuntimeInfraHandler, type RuntimeInfraResult } from "./runtime-infra.browser";
 import { createRuntimeLoopController } from "./runtime-loop.browser";
 import {
   listSessionEntryChunkKeys,
@@ -35,6 +35,13 @@ function ok<T>(data: T): RuntimeResult<T> {
 function fail(error: unknown): RuntimeResult {
   if (error instanceof Error) return { ok: false, error: error.message };
   return { ok: false, error: String(error) };
+}
+
+function fromInfraResult(result: RuntimeInfraResult): RuntimeResult {
+  if (result.ok) {
+    return { ok: true, data: result.data };
+  }
+  return { ok: false, error: String(result.error || "runtime infra failed") };
 }
 
 function requireSessionId(message: unknown): string {
@@ -563,14 +570,18 @@ async function handleStep(
 
   if (type === "brain.step.execute") {
     const sessionId = requireSessionId(payload);
-    const mode = String(payload.mode || "").trim() as "script" | "cdp" | "bridge";
+    const modeRaw = String(payload.mode || "").trim();
+    const mode = ["script", "cdp", "bridge"].includes(modeRaw) ? (modeRaw as "script" | "cdp" | "bridge") : undefined;
+    const capability = String(payload.capability || "").trim() || undefined;
     const action = String(payload.action || "").trim();
-    if (!mode || !["script", "cdp", "bridge"].includes(mode)) return fail("mode 必须是 script/cdp/bridge");
+    if (modeRaw && !mode) return fail("mode 必须是 script/cdp/bridge");
+    if (!mode && !capability) return fail("mode 或 capability 至少需要一个");
     if (!action) return fail("action 不能为空");
     return ok(
       await runtimeLoop.executeStep({
         sessionId,
         mode,
+        capability,
         action,
         args: toRecord(payload.args),
         verifyPolicy: payload.verifyPolicy as "off" | "on_critical" | "always" | undefined
@@ -647,6 +658,15 @@ async function handleBrainDebug(orchestrator: BrainOrchestrator, infra: RuntimeI
     });
   }
 
+  if (action === "brain.debug.plugins") {
+    return ok({
+      plugins: orchestrator.listPlugins(),
+      modeProviders: orchestrator.listToolProviders(),
+      capabilityProviders: orchestrator.listCapabilityProviders(),
+      capabilityPolicies: orchestrator.listCapabilityPolicies()
+    });
+  }
+
   return fail(`unsupported brain.debug action: ${action}`);
 }
 
@@ -654,39 +674,56 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
   const infra = createRuntimeInfraHandler();
   const runtimeLoop = createRuntimeLoopController(orchestrator, infra);
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    const type = String(toRecord(message).type || "");
-
     const run = async () => {
+      const routeBefore = await orchestrator.runHook("runtime.route.before", {
+        type: String(message?.type || ""),
+        message
+      });
+      if (routeBefore.blocked) {
+        return fail(`runtime.route.before blocked: ${routeBefore.reason || "blocked"}`);
+      }
+      const routeInput = routeBefore.value;
+      const type = String(routeInput.type || "");
+      const routeMessage = routeInput.message as unknown;
+      const applyAfter = async (result: RuntimeResult): Promise<RuntimeResult> => {
+        const afterHook = await orchestrator.runHook("runtime.route.after", {
+          type,
+          message: routeMessage,
+          result
+        });
+        return afterHook.blocked ? result : (afterHook.value.result as RuntimeResult);
+      };
+
       try {
         if (type === "ping") {
-          return ok({ source: "service-worker", version: "vnext" });
+          return await applyAfter(ok({ source: "service-worker", version: "vnext" }));
         }
 
-        const infraResult = await infra.handleMessage(message);
-        if (infraResult) return infraResult;
+        const infraResult = await infra.handleMessage(routeMessage);
+        if (infraResult) return await applyAfter(fromInfraResult(infraResult));
 
         if (type.startsWith("brain.run.")) {
-          return await handleBrainRun(orchestrator, runtimeLoop, message);
+          return await applyAfter(await handleBrainRun(orchestrator, runtimeLoop, routeMessage));
         }
 
         if (type.startsWith("brain.session.")) {
-          return await handleSession(orchestrator, runtimeLoop, message);
+          return await applyAfter(await handleSession(orchestrator, runtimeLoop, routeMessage));
         }
 
         if (type.startsWith("brain.step.")) {
-          return await handleStep(orchestrator, runtimeLoop, message);
+          return await applyAfter(await handleStep(orchestrator, runtimeLoop, routeMessage));
         }
 
         if (type.startsWith("brain.storage.")) {
-          return await handleStorage(message);
+          return await applyAfter(await handleStorage(routeMessage));
         }
 
         if (type.startsWith("brain.debug.")) {
-          return await handleBrainDebug(orchestrator, infra, message);
+          return await applyAfter(await handleBrainDebug(orchestrator, infra, routeMessage));
         }
 
         if (type === "brain.agent.end") {
-          const payload = toRecord(toRecord(message).payload);
+          const payload = toRecord(toRecord(routeMessage).payload);
           const sessionId = String(payload.sessionId || "").trim();
           if (!sessionId) return fail("brain.agent.end 需要 payload.sessionId");
 
@@ -701,18 +738,25 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
                   status: Number.isFinite(statusNumber) ? statusNumber : undefined
                 };
 
-          return ok(
-            await orchestrator.handleAgentEnd({
-              sessionId,
-              error,
-              overflow: payload.overflow === true
-            })
+          return await applyAfter(
+            ok(
+              await orchestrator.handleAgentEnd({
+                sessionId,
+                error,
+                overflow: payload.overflow === true
+              })
+            )
           );
         }
 
-        return fail(`unsupported runtime message: ${type}`);
+        return await applyAfter(fail(`Unknown message type: ${type}`));
       } catch (error) {
-        return fail(error);
+        await orchestrator.runHook("runtime.route.error", {
+          type,
+          message: routeMessage,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        return await applyAfter(fail(error));
       }
     };
 

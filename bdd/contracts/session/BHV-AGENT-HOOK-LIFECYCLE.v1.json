@@ -1,0 +1,65 @@
+{
+  "id": "BHV-AGENT-HOOK-LIFECYCLE",
+  "intent": "Kernel 必须提供可预测且可隔离的 Hook 生命周期，覆盖 runtime route、step execute、agent end 与 compaction 关键阶段",
+  "context": {
+    "surface": "service-worker.kernel.hooks",
+    "hookPhases": [
+      "runtime.route.before",
+      "runtime.route.after",
+      "runtime.route.error",
+      "step.before_execute",
+      "step.after_execute",
+      "tool.before_call",
+      "tool.after_result",
+      "compaction.check.before",
+      "compaction.check.after",
+      "compaction.before",
+      "compaction.after",
+      "compaction.error",
+      "agent_end.before",
+      "agent_end.after"
+    ],
+    "hookActions": ["continue", "patch", "block"]
+  },
+  "steps": [
+    "register_hook_handlers_with_stable_order_and_priority",
+    "execute_step_pipeline_runs_before_and_after_hooks",
+    "tool_hooks_can_block_or_patch_without_crashing_kernel",
+    "runtime_router_emits_route_before_after_and_error_hooks",
+    "agent_end_and_compaction_paths_emit_corresponding_hooks",
+    "hook_handler_exception_isolated_from_main_flow"
+  ],
+  "observables": [
+    "hook_block_returns_controlled_error_or_done_decision_instead_of_process_crash",
+    "hook_patch_can_modify_execute_input_or_result_within_schema",
+    "runtime_route_after_can_observe_and_adjust_runtime_result",
+    "compaction_hooks_emit_before_after_or_error_consistently",
+    "existing_retry_and_verify_semantics_remain_compatible"
+  ],
+  "risk": "high",
+  "allowed_side_effects": [
+    "hook_runner_register_unregister_in_memory",
+    "runtime_result_patch_in_hook_pipeline",
+    "event_bus_emit(existing_events_only)",
+    "session_store_write_via_existing_compaction_paths"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "integration", "browser-cdp"],
+    "min_layers": 3
+  },
+  "degrade_policy": {
+    "on_hook_error": [
+      "record_hook_execution_error_for_observability",
+      "continue_main_execution_flow"
+    ],
+    "on_hook_block": [
+      "return_controlled_failure_or_done_decision",
+      "avoid_unhandled_exception_propagation"
+    ]
+  },
+  "rollback_or_compensation": [
+    "disable_new_hook_registration_and_keep_noop_behavior",
+    "retain_legacy_execution_path_for_script_to_cdp_fallback"
+  ],
+  "version": "1.0.0"
+}

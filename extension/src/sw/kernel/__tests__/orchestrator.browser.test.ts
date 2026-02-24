@@ -43,4 +43,185 @@ describe("orchestrator.browser", () => {
     expect(events).toContain("session_compact");
     expect(events).toContain("auto_compaction_end");
   });
+
+  it("script 成功时不走 fallback", async () => {
+    const orchestrator = new BrainOrchestrator(
+      {},
+      {
+        script: async () => ({ ok: true, source: "script" })
+      }
+    );
+    const created = await orchestrator.createSession({ title: "script-success" });
+
+    const result = await orchestrator.executeStep({
+      sessionId: created.sessionId,
+      mode: "script",
+      action: "click",
+      args: { ref: "a1" }
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.modeUsed).toBe("script");
+    expect(result.fallbackFrom).toBeUndefined();
+    expect(result.data).toEqual({ ok: true, source: "script" });
+  });
+
+  it("script 失败后降级到 cdp", async () => {
+    const orchestrator = new BrainOrchestrator(
+      {},
+      {
+        script: async () => {
+          throw new Error("script-failed");
+        },
+        cdp: async () => ({ ok: true, source: "cdp" })
+      }
+    );
+    const created = await orchestrator.createSession({ title: "script-fallback" });
+
+    const result = await orchestrator.executeStep({
+      sessionId: created.sessionId,
+      mode: "script",
+      action: "click",
+      args: { ref: "a1" }
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.modeUsed).toBe("cdp");
+    expect(result.fallbackFrom).toBe("script");
+    expect(result.data).toEqual({ ok: true, source: "cdp" });
+  });
+
+  it("cdp 失败时直接返回失败", async () => {
+    const orchestrator = new BrainOrchestrator(
+      {},
+      {
+        cdp: async () => {
+          throw new Error("cdp-failed");
+        }
+      }
+    );
+    const created = await orchestrator.createSession({ title: "cdp-failed" });
+
+    const result = await orchestrator.executeStep({
+      sessionId: created.sessionId,
+      mode: "cdp",
+      action: "click",
+      args: { ref: "a1" }
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.modeUsed).toBe("cdp");
+    expect(result.verified).toBe(false);
+    expect(result.error).toContain("cdp-failed");
+  });
+
+  it("script 失败且无 cdp provider 时保持抛错语义", async () => {
+    const orchestrator = new BrainOrchestrator(
+      {},
+      {
+        script: async () => {
+          throw new Error("script-failed");
+        }
+      }
+    );
+    const created = await orchestrator.createSession({ title: "missing-cdp-provider" });
+
+    await expect(
+      orchestrator.executeStep({
+        sessionId: created.sessionId,
+        mode: "script",
+        action: "click",
+        args: { ref: "a1" }
+      })
+    ).rejects.toThrow("cdp adapter 未配置");
+  });
+
+  it("tool.before_call hook 可阻断执行", async () => {
+    let called = false;
+    const orchestrator = new BrainOrchestrator(
+      {},
+      {
+        script: async () => {
+          called = true;
+          return { ok: true };
+        }
+      }
+    );
+    const created = await orchestrator.createSession({ title: "hook-block" });
+    orchestrator.onHook("tool.before_call", () => ({ action: "block", reason: "policy-deny" }));
+
+    const result = await orchestrator.executeStep({
+      sessionId: created.sessionId,
+      mode: "script",
+      action: "click"
+    });
+
+    expect(called).toBe(false);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("policy-deny");
+  });
+
+  it("tool.after_result hook 可改写结果", async () => {
+    const orchestrator = new BrainOrchestrator(
+      {},
+      {
+        script: async () => ({ value: 1 })
+      }
+    );
+    const created = await orchestrator.createSession({ title: "hook-patch" });
+    orchestrator.onHook("tool.after_result", () => ({
+      action: "patch",
+      patch: { result: { value: 2, patched: true } }
+    }));
+
+    const result = await orchestrator.executeStep({
+      sessionId: created.sessionId,
+      mode: "script",
+      action: "click"
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toEqual({ value: 2, patched: true });
+  });
+
+  it("compaction.check.before 可阻断 preSendCompactionCheck", async () => {
+    const orchestrator = new BrainOrchestrator({ thresholdTokens: 1 });
+    const created = await orchestrator.createSession({ title: "compaction-check-block" });
+    await orchestrator.appendUserMessage(created.sessionId, "hello");
+    orchestrator.onHook("compaction.check.before", (payload) => {
+      if (payload.source === "pre_send") {
+        return { action: "block", reason: "manual-stop" };
+      }
+      return { action: "continue" };
+    });
+
+    const compacted = await orchestrator.preSendCompactionCheck(created.sessionId);
+
+    expect(compacted).toBe(false);
+  });
+
+  it("agent_end.after 可改写最终决策", async () => {
+    const orchestrator = new BrainOrchestrator({ thresholdTokens: 1 });
+    const created = await orchestrator.createSession({ title: "agent-end-after-patch" });
+    await orchestrator.appendUserMessage(created.sessionId, "hello");
+    orchestrator.onHook("agent_end.after", () => ({
+      action: "patch",
+      patch: {
+        decision: {
+          action: "done" as const,
+          reason: "patched_by_hook",
+          sessionId: created.sessionId
+        }
+      }
+    }));
+
+    const decision = await orchestrator.handleAgentEnd({
+      sessionId: created.sessionId,
+      error: null,
+      overflow: true
+    });
+
+    expect(decision.action).toBe("done");
+    expect(decision.reason).toBe("patched_by_hook");
+  });
 });

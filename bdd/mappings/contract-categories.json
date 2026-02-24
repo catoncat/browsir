@@ -2,6 +2,14 @@
   "version": "1.0.0",
   "mappings": [
     {
+      "contractId": "BHV-AGENT-HOOK-LIFECYCLE",
+      "category": "protocol"
+    },
+    {
+      "contractId": "BHV-CAPABILITY-PROVIDER-ROUTING",
+      "category": "protocol"
+    },
+    {
       "contractId": "BHV-CDP-ON-DEMAND",
       "category": "protocol"
     },

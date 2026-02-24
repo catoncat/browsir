@@ -224,6 +224,48 @@
       ]
     },
     {
+      "contractId": "BHV-AGENT-HOOK-LIFECYCLE",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/__tests__/orchestrator.browser.test.ts::tool.before_call block + tool.after_result patch + compaction.check + agent_end.after"
+        },
+        {
+          "layer": "integration",
+          "target": "extension/src/sw/kernel/orchestrator.browser.ts::runHook + executeStep + preSendCompactionCheck + handleAgentEnd + runCompaction"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/session/agent-hook-lifecycle.feature"
+        },
+        {
+          "layer": "e2e",
+          "target": "bdd/evidence/brain-e2e.latest.json"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-CAPABILITY-PROVIDER-ROUTING",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/__tests__/orchestrator.browser.test.ts::script success/fallback/cdp fail/missing cdp adapter"
+        },
+        {
+          "layer": "integration",
+          "target": "extension/src/sw/kernel/orchestrator.browser.ts::wireLegacyAdapters + registerToolProvider + invokeProviderWithHooks + executeStep"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/session/capability-provider-routing.feature"
+        },
+        {
+          "layer": "e2e",
+          "target": "bdd/evidence/brain-e2e.latest.json"
+        }
+      ]
+    },
+    {
       "contractId": "BHV-SESSION-LIST-TITLE-DELETE",
       "proofs": [
         {

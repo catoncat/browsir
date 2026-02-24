@@ -1,6 +1,13 @@
-import { BrainOrchestrator, type ExecuteMode, type ExecuteStepResult, type RuntimeView } from "./orchestrator.browser";
+import {
+  BrainOrchestrator,
+  type ExecuteCapability,
+  type ExecuteMode,
+  type ExecuteStepResult,
+  type RuntimeView
+} from "./orchestrator.browser";
 import { writeSessionMeta } from "./session-store.browser";
 import { type BridgeConfig, type RuntimeInfraHandler } from "./runtime-infra.browser";
+import { type CapabilityExecutionPolicy, type StepVerifyPolicy } from "./capability-policy";
 import { nowIso, type SessionEntry, type SessionMeta } from "./types";
 
 type JsonRecord = Record<string, unknown>;
@@ -74,7 +81,8 @@ export interface RuntimeLoopController {
   startFromRegenerate(input: RegenerateRunInput): Promise<{ sessionId: string; runtime: RuntimeView }>;
   executeStep(input: {
     sessionId: string;
-    mode: ExecuteMode;
+    mode?: ExecuteMode;
+    capability?: ExecuteCapability;
     action: string;
     args?: JsonRecord;
     verifyPolicy?: "off" | "on_critical" | "always";
@@ -240,6 +248,16 @@ const BRAIN_TOOL_DEFS: JsonRecord[] = [
     }
   }
 ];
+
+const TOOL_CAPABILITIES = {
+  bash: "process.exec",
+  read_file: "fs.read",
+  write_file: "fs.write",
+  edit_file: "fs.edit",
+  snapshot: "browser.snapshot",
+  browser_action: "browser.action",
+  browser_verify: "browser.verify"
+} as const;
 
 function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" ? (value as JsonRecord) : {};
@@ -844,6 +862,13 @@ function actionRequiresLease(kind: string): boolean {
   return ["click", "type", "fill", "press", "scroll", "select", "navigate"].includes(kind);
 }
 
+function shouldAcquireLease(kind: string, policy: CapabilityExecutionPolicy): boolean {
+  const leasePolicy = policy.leasePolicy || "auto";
+  if (leasePolicy === "none") return false;
+  if (leasePolicy === "required") return true;
+  return actionRequiresLease(kind);
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1162,29 +1187,77 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
   async function executeStep(input: {
     sessionId: string;
-    mode: ExecuteMode;
+    mode?: ExecuteMode;
+    capability?: ExecuteCapability;
     action: string;
     args?: JsonRecord;
-    verifyPolicy?: "off" | "on_critical" | "always";
+    verifyPolicy?: StepVerifyPolicy;
   }): Promise<ExecuteStepResult> {
     const sessionId = String(input.sessionId || "").trim();
     const normalizedMode = ["script", "cdp", "bridge"].includes(String(input.mode || "").trim())
       ? (String(input.mode || "").trim() as ExecuteMode)
-      : ("" as ExecuteMode);
+      : undefined;
+    const normalizedCapability = String(input.capability || "").trim() || undefined;
+    const capabilityPolicy = orchestrator.resolveCapabilityPolicy(normalizedCapability);
+    const effectiveVerifyPolicy: StepVerifyPolicy = input.verifyPolicy || capabilityPolicy.defaultVerifyPolicy || "on_critical";
     const normalizedAction = String(input.action || "").trim();
     const payload = toRecord(input.args);
     const actionPayload = toRecord(payload.action) && Object.keys(toRecord(payload.action)).length > 0 ? toRecord(payload.action) : payload;
     const tabId = parsePositiveInt(payload.tabId || actionPayload.tabId);
 
-    if (!normalizedMode) {
-      return { ok: false, modeUsed: "cdp", verified: false, error: "mode 必须是 script/cdp/bridge" };
+    if (!normalizedMode && !normalizedCapability) {
+      return { ok: false, modeUsed: "bridge", verified: false, error: "mode 或 capability 至少需要一个" };
     }
     if (!normalizedAction) {
-      return { ok: false, modeUsed: normalizedMode, verified: false, error: "action 不能为空" };
+      return { ok: false, modeUsed: normalizedMode || "bridge", verified: false, error: "action 不能为空" };
+    }
+
+    if (normalizedCapability && orchestrator.hasCapabilityProvider(normalizedCapability)) {
+      const capabilityMode =
+        normalizedMode || orchestrator.resolveModeForCapability(normalizedCapability) || capabilityPolicy.fallbackMode || "bridge";
+      orchestrator.events.emit("step_execute", sessionId, {
+        mode: capabilityMode,
+        capability: normalizedCapability,
+        action: normalizedAction
+      });
+      const result = await orchestrator.executeStep({
+        sessionId,
+        mode: capabilityMode,
+        capability: normalizedCapability,
+        action: normalizedAction,
+        args: payload,
+        verifyPolicy: effectiveVerifyPolicy
+      });
+      orchestrator.events.emit("step_execute_result", sessionId, {
+        ok: result.ok,
+        modeUsed: result.modeUsed,
+        capabilityUsed: result.capabilityUsed || normalizedCapability,
+        fallbackFrom: result.fallbackFrom,
+        verified: result.verified,
+        verifyReason: result.verifyReason,
+        error: result.error
+      });
+      return {
+        ...result,
+        capabilityUsed: result.capabilityUsed || normalizedCapability
+      };
+    }
+
+    const executionMode = normalizedMode || capabilityPolicy.fallbackMode;
+    if (!executionMode) {
+      return {
+        ok: false,
+        modeUsed: "bridge",
+        verified: false,
+        error: normalizedCapability
+          ? `capability provider 未注册且缺少 mode fallback: ${normalizedCapability}`
+          : "mode 必须是 script/cdp/bridge"
+      };
     }
 
     orchestrator.events.emit("step_execute", sessionId, {
-      mode: normalizedMode,
+      mode: executionMode,
+      capability: normalizedCapability,
       action: normalizedAction
     });
 
@@ -1260,7 +1333,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       const kind = String(cdpAction.kind || "").trim();
       if (!kind) throw new Error("cdp.action 缺少 kind");
 
-      if (actionRequiresLease(kind)) {
+      if (shouldAcquireLease(kind, capabilityPolicy)) {
         return await withTabLease(tabId, sessionId, async () => {
           return await callInfra(infra, {
             type: "cdp.action",
@@ -1279,13 +1352,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       });
     };
 
-    let modeUsed: ExecuteMode = normalizedMode;
+    let modeUsed: ExecuteMode = executionMode;
     let fallbackFrom: ExecuteMode | undefined;
     let data: unknown;
     let preObserve: unknown = null;
-    const verifyEnabled = shouldVerifyStep(String(actionPayload.kind || normalizedAction), input.verifyPolicy);
+    const verifyEnabled = shouldVerifyStep(String(actionPayload.kind || normalizedAction), effectiveVerifyPolicy);
 
-    if (verifyEnabled && tabId && normalizedMode !== "bridge" && normalizedAction !== "verify" && normalizedAction !== "cdp.verify") {
+    if (verifyEnabled && tabId && executionMode !== "bridge" && normalizedAction !== "verify" && normalizedAction !== "cdp.verify") {
       preObserve = await callInfra(infra, {
         type: "cdp.observe",
         tabId
@@ -1293,13 +1366,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
 
     try {
-      data = await runMode(normalizedMode);
+      data = await runMode(executionMode);
     } catch (error) {
       const runtimeError = asRuntimeErrorWithMeta(error);
-      if (normalizedMode !== "script") {
+      if (executionMode !== "script" || capabilityPolicy.allowScriptFallback === false) {
         const result: ExecuteStepResult = {
           ok: false,
           modeUsed,
+          capabilityUsed: normalizedCapability,
           verified: false,
           error: runtimeError.message,
           errorCode: normalizeErrorCode(runtimeError.code),
@@ -1309,6 +1383,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         orchestrator.events.emit("step_execute_result", sessionId, {
           ok: result.ok,
           modeUsed: result.modeUsed,
+          capabilityUsed: result.capabilityUsed || "",
           verifyReason: result.verifyReason || "",
           verified: result.verified,
           error: result.error || "",
@@ -1327,6 +1402,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const result: ExecuteStepResult = {
           ok: false,
           modeUsed,
+          capabilityUsed: normalizedCapability,
           fallbackFrom,
           verified: false,
           error: runtimeFallbackError.message,
@@ -1337,6 +1413,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         orchestrator.events.emit("step_execute_result", sessionId, {
           ok: result.ok,
           modeUsed: result.modeUsed,
+          capabilityUsed: result.capabilityUsed || "",
           fallbackFrom: result.fallbackFrom || "",
           verifyReason: result.verifyReason || "",
           verified: result.verified,
@@ -1418,6 +1495,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const result: ExecuteStepResult = {
       ok: true,
       modeUsed,
+      capabilityUsed: normalizedCapability,
       fallbackFrom,
       verified,
       verifyReason,
@@ -1426,6 +1504,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     orchestrator.events.emit("step_execute_result", sessionId, {
       ok: result.ok,
       modeUsed: result.modeUsed,
+      capabilityUsed: result.capabilityUsed || "",
       fallbackFrom: result.fallbackFrom || "",
       verifyReason: result.verifyReason || "",
       verified: result.verified
@@ -1437,6 +1516,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     sessionId: string,
     toolName: string,
     frame: JsonRecord,
+    capability: ExecuteCapability | undefined,
     autoRetryMax = TOOL_AUTO_RETRY_MAX
   ): Promise<JsonRecord> {
     const invokeId = String(frame.id || `invoke-${crypto.randomUUID()}`);
@@ -1450,6 +1530,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
       const invoke = await executeStep({
         sessionId,
+        capability,
         mode: "bridge",
         action: "invoke",
         args: {
@@ -1458,6 +1539,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       });
       if (invoke.ok) {
         return buildToolResponseEnvelope("invoke", invoke.data, {
+          capabilityUsed: invoke.capabilityUsed || capability,
+          modeUsed: invoke.modeUsed,
           attempt,
           autoRetried: attempt > 1
         });
@@ -1503,6 +1586,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       case "bash": {
         const command = String(args.command || "").trim();
         if (!command) return { error: "bash 需要 command" };
+        const capability = TOOL_CAPABILITIES.bash;
         const timeoutMs =
           args.timeoutMs == null
             ? undefined
@@ -1514,22 +1598,24 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             args: [command],
             ...(timeoutMs == null ? {} : { timeoutMs })
           }
-        });
+        }, capability);
       }
       case "read_file": {
         const path = String(args.path || "").trim();
         if (!path) return { error: "read_file 需要 path" };
+        const capability = TOOL_CAPABILITIES.read_file;
         const invokeArgs: JsonRecord = { path };
         if (args.offset != null) invokeArgs.offset = args.offset;
         if (args.limit != null) invokeArgs.limit = args.limit;
         return await invokeBridgeFrameWithRetry(sessionId, "read_file", {
           tool: "read",
           args: invokeArgs
-        });
+        }, capability);
       }
       case "write_file": {
         const path = String(args.path || "").trim();
         if (!path) return { error: "write_file 需要 path" };
+        const capability = TOOL_CAPABILITIES.write_file;
         return await invokeBridgeFrameWithRetry(sessionId, "write_file", {
           tool: "write",
           args: {
@@ -1537,18 +1623,19 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             content: String(args.content || ""),
             mode: String(args.mode || "overwrite")
           }
-        });
+        }, capability);
       }
       case "edit_file": {
         const path = String(args.path || "").trim();
         if (!path) return { error: "edit_file 需要 path" };
+        const capability = TOOL_CAPABILITIES.edit_file;
         return await invokeBridgeFrameWithRetry(sessionId, "edit_file", {
           tool: "edit",
           args: {
             path,
             edits: Array.isArray(args.edits) ? args.edits : []
           }
-        });
+        }, capability);
       }
       case "list_tabs": {
         const tabs = await queryAllTabsForRuntime();
@@ -1588,8 +1675,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             retryHint: "Call list_tabs and then retry snapshot with a valid tabId."
           };
         }
+        const capability = TOOL_CAPABILITIES.snapshot;
         const out = await executeStep({
           sessionId,
+          capability,
           mode: "cdp",
           action: "snapshot",
           args: {
@@ -1615,7 +1704,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             { defaultRetryable: true }
           );
         }
-        return buildToolResponseEnvelope("snapshot", out.data);
+        return buildToolResponseEnvelope("snapshot", out.data, {
+          capabilityUsed: out.capabilityUsed || capability,
+          modeUsed: out.modeUsed
+        });
       }
       case "browser_action": {
         const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
@@ -1628,9 +1720,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             retryHint: "Call list_tabs and retry browser_action with a valid tabId."
           };
         }
-        const kind = String(args.kind || "");
+        const capability = TOOL_CAPABILITIES.browser_action;
+        const kind = String(args.kind || "")
+          .trim()
+          .toLowerCase();
         const out = await executeStep({
           sessionId,
+          capability,
           mode: "cdp",
           action: "action",
           args: {
@@ -1672,6 +1768,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           };
         }
         return buildToolResponseEnvelope("cdp_action", out.data, {
+          capabilityUsed: out.capabilityUsed || capability,
+          modeUsed: out.modeUsed,
           verifyReason: out.verifyReason,
           verified: out.verified
         });
@@ -1687,8 +1785,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             retryHint: "Call list_tabs and retry browser_verify with a valid tabId."
           };
         }
+        const capability = TOOL_CAPABILITIES.browser_verify;
         const out = await executeStep({
           sessionId,
+          capability,
           mode: "cdp",
           action: "verify",
           args: {
@@ -1718,7 +1818,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             details: out.data
           };
         }
-        return buildToolResponseEnvelope("cdp", out.data);
+        return buildToolResponseEnvelope("cdp", out.data, {
+          capabilityUsed: out.capabilityUsed || capability,
+          modeUsed: out.modeUsed
+        });
       }
       default:
         return { error: `未知工具: ${name}` };
@@ -1728,7 +1831,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
   async function requestLlmWithRetry(input: LlmRequestInput): Promise<JsonRecord> {
     const { sessionId, llmBase, llmKey, llmModel, llmTimeoutMs, llmMaxRetryDelayMs, step, messages } = input;
     let lastError: unknown = null;
-    const maxAttempts = Math.max(0, Number(orchestrator.getRunState(sessionId).retry.maxAttempts || MAX_LLM_RETRIES));
+    const configuredMaxAttempts = Number(orchestrator.getRunState(sessionId).retry.maxAttempts ?? MAX_LLM_RETRIES);
+    const maxAttempts = Number.isFinite(configuredMaxAttempts)
+      ? Math.max(0, configuredMaxAttempts)
+      : MAX_LLM_RETRIES;
     const totalAttempts = maxAttempts + 1;
 
     for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
@@ -1850,11 +1956,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       } catch (error) {
         lastError = error;
         const err = error as RuntimeErrorWithMeta;
+        const errText = error instanceof Error ? error.message : String(error);
         const statusCode = Number(err?.status || status || 0);
+        const signalReason = String(ctrl.signal.reason || "");
         const retryable =
           typeof err.retryable === "boolean"
             ? err.retryable
-            : isRetryableLlmStatus(statusCode) || /timeout|network|temporar|unavailable|rate limit/i.test(String(err?.message || ""));
+            : isRetryableLlmStatus(statusCode) || /timeout|network|temporar|unavailable|rate limit/i.test(`${errText} ${signalReason}`);
         const canRetry = retryable && attempt <= maxAttempts;
         if (!canRetry) {
           const state = orchestrator.getRunState(sessionId);
@@ -1863,7 +1971,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               success: false,
               attempt: state.retry.attempt,
               maxAttempts: state.retry.maxAttempts,
-              finalError: err instanceof Error ? err.message : String(err)
+              finalError: errText
             });
           }
           orchestrator.resetRetryState(sessionId);
@@ -1881,7 +1989,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           maxAttempts: next.retry.maxAttempts,
           delayMs,
           status: statusCode || null,
-          reason: err instanceof Error ? err.message : String(err)
+          reason: errText
         });
         await delay(delayMs);
       } finally {

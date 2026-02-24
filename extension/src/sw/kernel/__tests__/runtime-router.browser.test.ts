@@ -305,6 +305,259 @@ describe("runtime-router.browser", () => {
     expect(String(firstUserSource?.content || "")).toBe("问题一");
   });
 
+  it("rejects edit_rerun when sourceEntry is not user message", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "原始问题"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const assistantEntry = await orchestrator.sessions.appendMessage({
+      sessionId,
+      role: "assistant",
+      text: "这是一条 assistant 消息"
+    });
+
+    const edited = await invokeRuntime({
+      type: "brain.run.edit_rerun",
+      sessionId,
+      sourceEntryId: assistantEntry.id,
+      prompt: "编辑后的问题"
+    });
+    expect(edited.ok).toBe(false);
+    expect(String(edited.error || "")).toContain("sourceEntry 必须是 user 消息");
+  });
+
+  it("rejects edit_rerun when sourceEntry belongs to another session", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const first = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "session-a"
+    });
+    const second = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "session-b"
+    });
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+
+    const sessionA = String(((first.data as Record<string, unknown>) || {}).sessionId || "");
+    const sessionB = String(((second.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionA).not.toBe("");
+    expect(sessionB).not.toBe("");
+    expect(sessionA).not.toBe(sessionB);
+
+    const viewA = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId: sessionA
+    });
+    expect(viewA.ok).toBe(true);
+    const sourceFromA = readConversationMessages(viewA).find((entry) => String(entry.role || "") === "user");
+    const sourceEntryId = String(sourceFromA?.entryId || "");
+    expect(sourceEntryId).not.toBe("");
+
+    const edited = await invokeRuntime({
+      type: "brain.run.edit_rerun",
+      sessionId: sessionB,
+      sourceEntryId,
+      prompt: "cross-session-edit"
+    });
+    expect(edited.ok).toBe(false);
+    expect(String(edited.error || "")).toContain("sourceEntry 不存在");
+  });
+
+  it("supports capability provider in brain.step.execute", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.virtual-fs.router",
+        name: "virtual-fs-router",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["fs.virtual.read"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "fs.virtual.read": {
+            id: "plugin.virtual-fs.router.read",
+            mode: "bridge",
+            invoke: async (input) => ({
+              provider: "virtual-fs-router",
+              path: String(input.args?.path || "")
+            })
+          }
+        }
+      }
+    });
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "capability provider test",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const executed = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.virtual.read",
+      action: "read_file",
+      args: {
+        path: "mem://docs.txt"
+      },
+      verifyPolicy: "off"
+    });
+    expect(executed.ok).toBe(true);
+    const result = (executed.data || {}) as Record<string, unknown>;
+    expect(result.ok).toBe(true);
+    expect(result.modeUsed).toBe("bridge");
+    expect(result.capabilityUsed).toBe("fs.virtual.read");
+    expect(result.data).toEqual({
+      provider: "virtual-fs-router",
+      path: "mem://docs.txt"
+    });
+  });
+
+  it("brain.step.execute 事件顺序严格为 step_execute -> step_execute_result（单次）", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.event-order",
+        name: "event-order",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["fs.virtual.read"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "fs.virtual.read": {
+            id: "plugin.event-order.read",
+            mode: "bridge",
+            invoke: async () => ({ ok: true, source: "event-order" })
+          }
+        }
+      }
+    });
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "event-order-seed",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const beforeStream = await invokeRuntime({
+      type: "brain.step.stream",
+      sessionId
+    });
+    expect(beforeStream.ok).toBe(true);
+    const baseline = Array.isArray((beforeStream.data as Record<string, unknown>)?.stream)
+      ? (((beforeStream.data as Record<string, unknown>).stream as unknown[]) as Array<Record<string, unknown>>)
+      : [];
+
+    const executed = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.virtual.read",
+      action: "read_file",
+      args: {
+        path: "mem://ordered.txt"
+      },
+      verifyPolicy: "off"
+    });
+    expect(executed.ok).toBe(true);
+
+    const afterStream = await invokeRuntime({
+      type: "brain.step.stream",
+      sessionId
+    });
+    expect(afterStream.ok).toBe(true);
+    const fullStream = Array.isArray((afterStream.data as Record<string, unknown>)?.stream)
+      ? (((afterStream.data as Record<string, unknown>).stream as unknown[]) as Array<Record<string, unknown>>)
+      : [];
+    const delta = fullStream.slice(baseline.length);
+    const stepDelta = delta.filter((entry) => {
+      const type = String(entry.type || "");
+      return type === "step_execute" || type === "step_execute_result";
+    });
+
+    expect(stepDelta).toHaveLength(2);
+    expect(String(stepDelta[0].type || "")).toBe("step_execute");
+    expect(String(stepDelta[1].type || "")).toBe("step_execute_result");
+    expect(String((stepDelta[0].payload as Record<string, unknown> | undefined)?.capability || "")).toBe("fs.virtual.read");
+    expect(String((stepDelta[1].payload as Record<string, unknown> | undefined)?.capabilityUsed || "")).toBe("fs.virtual.read");
+  });
+
+  it("supports brain.debug.plugins view", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.debug.view",
+        name: "debug-view",
+        version: "1.0.0",
+        permissions: {
+          hooks: ["tool.before_call"],
+          capabilities: ["fs.virtual.read", "browser.action"]
+        }
+      },
+      hooks: {
+        "tool.before_call": () => ({ action: "continue" })
+      },
+      providers: {
+        capabilities: {
+          "fs.virtual.read": {
+            id: "plugin.debug.view.read",
+            mode: "bridge",
+            invoke: async () => ({ ok: true })
+          }
+        }
+      },
+      policies: {
+        capabilities: {
+          "browser.action": {
+            defaultVerifyPolicy: "always",
+            leasePolicy: "required"
+          }
+        }
+      }
+    });
+
+    const out = await invokeRuntime({
+      type: "brain.debug.plugins"
+    });
+    expect(out.ok).toBe(true);
+    const data = (out.data || {}) as Record<string, unknown>;
+    const plugins = Array.isArray(data.plugins) ? (data.plugins as Array<Record<string, unknown>>) : [];
+    const capabilities = Array.isArray(data.capabilityProviders)
+      ? (data.capabilityProviders as Array<Record<string, unknown>>)
+      : [];
+    const policies = Array.isArray(data.capabilityPolicies) ? (data.capabilityPolicies as Array<Record<string, unknown>>) : [];
+    const plugin = plugins.find((item) => String(item.id || "") === "plugin.debug.view");
+    expect(plugin).toBeDefined();
+    expect(Boolean(plugin?.enabled)).toBe(true);
+    expect(capabilities.some((item) => String(item.capability || "") === "fs.virtual.read")).toBe(true);
+    expect(policies.some((item) => String(item.capability || "") === "browser.action")).toBe(true);
+  });
+
   it("supports title refresh + delete + debug config/dump", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -376,6 +629,7 @@ describe("runtime-router.browser", () => {
     expect(debugCfgData.llmTimeoutMs).toBe(160000);
     expect(debugCfgData.llmRetryMaxAttempts).toBe(3);
     expect(debugCfgData.llmMaxRetryDelayMs).toBe(45000);
+    expect(debugCfgData.llmApiKey).toBeUndefined();
 
     const dumped = await invokeRuntime({
       type: "brain.debug.dump",
