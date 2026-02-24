@@ -100,6 +100,18 @@ const TOOL_CAPABILITIES = {
   browser_verify: "browser.verify"
 } as const;
 
+const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
+  "bash",
+  "read_file",
+  "write_file",
+  "edit_file",
+  "list_tabs",
+  "open_tab",
+  "snapshot",
+  "browser_action",
+  "browser_verify"
+]);
+
 function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" ? (value as JsonRecord) : {};
 }
@@ -1488,6 +1500,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
     const contract = orchestrator.resolveToolContract(requestedTool);
     const resolvedTool = String(contract?.name || requestedTool).trim();
+    const executionTool = RUNTIME_EXECUTABLE_TOOL_NAMES.has(resolvedTool) ? resolvedTool : "";
 
     const handlers: Record<string, () => Promise<JsonRecord>> = {
       bash: async () => {
@@ -1732,16 +1745,19 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       },
     };
 
-    const resolvedHandler = handlers[resolvedTool];
+    const resolvedHandler = executionTool ? handlers[executionTool] : undefined;
     if (resolvedHandler) {
       return await resolvedHandler();
     }
+    const unsupported = Boolean(contract) && !executionTool;
     return {
-      error: `未知工具: ${requestedTool}`,
-      errorCode: "E_TOOL",
+      error: unsupported ? `工具已注册但当前 runtime 不支持执行: ${requestedTool}` : `未知工具: ${requestedTool}`,
+      errorCode: unsupported ? "E_TOOL_UNSUPPORTED" : "E_TOOL",
       details: {
         requestedTool,
-        resolvedTool
+        resolvedTool,
+        canonicalTool: resolvedTool || null,
+        supportedTools: Array.from(RUNTIME_EXECUTABLE_TOOL_NAMES)
       }
     };
   }
@@ -1763,7 +1779,15 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       let rawBody = "";
       let contentType = "";
       try {
-        const llmToolDefs = orchestrator.listLlmToolDefinitions({ includeAliases: true });
+        const llmToolDefs = orchestrator
+          .listLlmToolDefinitions({ includeAliases: true })
+          .filter((definition) => {
+            const toolName = String(definition.function?.name || "").trim();
+            if (!toolName) return false;
+            const contract = orchestrator.resolveToolContract(toolName);
+            const canonical = String(contract?.name || toolName).trim();
+            return RUNTIME_EXECUTABLE_TOOL_NAMES.has(canonical);
+          });
         const basePayload: JsonRecord = {
           model: llmModel,
           messages,

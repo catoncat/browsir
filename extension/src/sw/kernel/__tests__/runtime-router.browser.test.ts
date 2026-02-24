@@ -973,6 +973,7 @@ describe("runtime-router.browser", () => {
       .map((name) => String(name || ""));
     expect(toolNames).toContain("read_file");
     expect(toolNames).toContain("bash");
+    expect(toolNames).not.toContain("workspace_ls");
   });
 
   it("supports brain.debug.plugins view", async () => {
