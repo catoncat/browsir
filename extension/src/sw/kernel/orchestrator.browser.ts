@@ -117,6 +117,7 @@ export class BrainOrchestrator {
     unregisterCapabilityProvider: (capability, expectedProviderId) =>
       this.unregisterCapabilityProvider(capability, expectedProviderId),
     getCapabilityProvider: (capability) => this.getCapabilityProvider(capability),
+    getCapabilityProviders: (capability) => this.getCapabilityProviders(capability),
     registerCapabilityPolicy: (capability, policy, options) =>
       this.registerCapabilityPolicy(capability, policy, options),
     unregisterCapabilityPolicy: (capability, expectedPolicyId) =>
@@ -199,6 +200,10 @@ export class BrainOrchestrator {
 
   getCapabilityProvider(capability: ExecuteCapability): StepToolProvider | undefined {
     return this.toolProviders.getCapability(capability);
+  }
+
+  getCapabilityProviders(capability: ExecuteCapability): StepToolProvider[] {
+    return this.toolProviders.getCapabilities(capability);
   }
 
   registerCapabilityPolicy(

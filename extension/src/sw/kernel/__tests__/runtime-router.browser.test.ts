@@ -531,6 +531,90 @@ describe("runtime-router.browser", () => {
     });
   });
 
+  it("routes capability providers by canHandle in brain.step.execute", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.virtual-fs.multi-route",
+        name: "virtual-fs-multi-route",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["fs.virtual.read"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "fs.virtual.read": {
+            id: "plugin.virtual-fs.multi-route.workspace",
+            mode: "bridge",
+            priority: 20,
+            canHandle: (input) => String(input.args?.targetUri || "").startsWith("workspace://"),
+            invoke: async () => ({ provider: "workspace" })
+          }
+        }
+      }
+    });
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.virtual-fs.multi-route.local",
+        name: "virtual-fs-multi-route-local",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["fs.virtual.read"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "fs.virtual.read": {
+            id: "plugin.virtual-fs.multi-route.local",
+            mode: "bridge",
+            priority: 10,
+            canHandle: (input) => String(input.args?.targetUri || "").startsWith("local://"),
+            invoke: async () => ({ provider: "local" })
+          }
+        }
+      }
+    });
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "capability provider canHandle route test",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const workspace = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.virtual.read",
+      action: "read_file",
+      args: {
+        targetUri: "workspace://docs/a.md"
+      },
+      verifyPolicy: "off"
+    });
+    expect(workspace.ok).toBe(true);
+    expect(((workspace.data || {}) as Record<string, unknown>).data).toEqual({ provider: "workspace" });
+
+    const local = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.virtual.read",
+      action: "read_file",
+      args: {
+        targetUri: "local:///tmp/a.md"
+      },
+      verifyPolicy: "off"
+    });
+    expect(local.ok).toBe(true);
+    expect(((local.data || {}) as Record<string, unknown>).data).toEqual({ provider: "local" });
+  });
+
   it("returns runtime-not-ready when capability provider is missing", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);

@@ -66,6 +66,7 @@ interface RuntimeHost {
   registerCapabilityProvider(capability: ExecuteCapability, provider: StepToolProvider, options?: RegisterProviderOptions): void;
   unregisterCapabilityProvider(capability: ExecuteCapability, expectedProviderId?: string): boolean;
   getCapabilityProvider(capability: ExecuteCapability): StepToolProvider | undefined;
+  getCapabilityProviders(capability: ExecuteCapability): StepToolProvider[];
   registerCapabilityPolicy(
     capability: ExecuteCapability,
     policy: CapabilityExecutionPolicy,
@@ -87,7 +88,7 @@ interface ReplacedModeProvider {
 
 interface ReplacedCapabilityProvider {
   capability: ExecuteCapability;
-  provider: StepToolProvider;
+  providers: StepToolProvider[];
 }
 
 interface ReplacedCapabilityPolicy {
@@ -251,9 +252,9 @@ export class PluginRuntime {
         }
         const nextProviderId = provider.id || `${id}:capability:${capability}`;
         if (allowReplace) {
-          const previous = this.host.getCapabilityProvider(capability);
-          if (previous) {
-            state.replacedCapabilityProviders.push({ capability, provider: previous });
+          const previous = this.host.getCapabilityProviders(capability);
+          if (previous.length > 0) {
+            state.replacedCapabilityProviders.push({ capability, providers: previous });
           }
         }
         this.host.registerCapabilityProvider(
@@ -333,8 +334,10 @@ export class PluginRuntime {
       if (!removed) continue;
       const replaced = state.replacedCapabilityProviders.find((entry) => entry.capability === item.capability);
       if (!replaced) continue;
-      if (this.host.getCapabilityProvider(item.capability)) continue;
-      this.host.registerCapabilityProvider(item.capability, replaced.provider, { replace: false });
+      if (this.host.getCapabilityProviders(item.capability).length > 0) continue;
+      for (const provider of replaced.providers) {
+        this.host.registerCapabilityProvider(item.capability, provider, { replace: false });
+      }
     }
     for (const item of state.ownedCapabilityPolicies.splice(0)) {
       const removed = this.host.unregisterCapabilityPolicy(item.capability, item.policyId);

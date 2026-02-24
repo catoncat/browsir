@@ -72,7 +72,7 @@
 1. Hook/Plugin 主干：已完成。
 2. Tool Contract + Bridge canonical：已完成。
 3. 去 fallback（开发期）：进行中。
-4. Provider 多路并存（非二选一）：待开始。
+4. Provider 多路并存（非二选一）：进行中（registry 核心与单测已落地）。
 5. `workspace/local/plugin` 对象路由与契约测试：待开始。
 
 ## 验证状态
