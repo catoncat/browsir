@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { isSupportedToolName, listToolContracts, resolveToolName } from "../src/tool-registry";
+import {
+  isSupportedToolName,
+  listToolContracts,
+  registerToolContract,
+  resolveToolName,
+  unregisterToolContract
+} from "../src/tool-registry";
 
 describe("tool-registry", () => {
   test("resolves builtin tool aliases", () => {
@@ -22,5 +28,20 @@ describe("tool-registry", () => {
     expect(names).toContain("edit");
     expect(names).toContain("bash");
   });
-});
 
+  test("supports dynamic register/unregister for custom contract", () => {
+    registerToolContract({
+      name: "memory.read",
+      aliases: ["memory_read"]
+    });
+
+    expect(resolveToolName("memory.read")).toBe("memory.read");
+    expect(resolveToolName("memory_read")).toBe("memory.read");
+    const listed = listToolContracts().find((item) => item.name === "memory.read");
+    expect(listed?.source).toBe("override");
+
+    expect(unregisterToolContract("memory.read")).toBe(true);
+    expect(resolveToolName("memory.read")).toBeNull();
+    expect(resolveToolName("memory_read")).toBeNull();
+  });
+});

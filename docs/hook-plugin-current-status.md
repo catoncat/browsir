@@ -25,7 +25,7 @@
 2. `runtime-loop` 仍是双轨：
    - 命中 capability provider -> 新路径
    - 未命中 -> mode fallback（bridge/cdp/script）兼容路径
-3. Bridge 仍以内置四工具 handler 为主（已由 registry 路由，不再硬编码 `switch`）：`bridge/src/dispatcher.ts`。
+3. Bridge 已支持动态 handler 注册，但默认仍以内置四工具 handler 为主：`bridge/src/dispatcher.ts`。
 
 ## 本轮补充
 
@@ -47,6 +47,9 @@
 7. Bridge 新增 registry/路由测试：
    - `bridge/test/tool-registry.test.ts`
    - `bridge/test/dispatcher.test.ts`
+8. Bridge 新增动态注册能力：
+   - `registerToolContract/unregisterToolContract`（`bridge/src/tool-registry.ts`）
+   - `registerInvokeToolHandler/unregisterInvokeToolHandler`（`bridge/src/dispatcher.ts`）
 
 ## 验证状态
 
@@ -57,5 +60,5 @@
 ## 下一阶段建议
 
 1. 将 `executeToolCall` 的 legacy `switch` 收敛为 `ToolContractRegistry + Provider` 路由主路径。
-2. 推进 bridge provider 可动态注册（当前仍是内置 handler + registry 映射）。
+2. 让 Bridge 的动态 provider 注册与 `parseInvokeFrame` 完全联动（当前仍依赖进程内 API 注入）。
 3. 将 `llm` 相关 Hook 继续扩展到 `title refresh` 路径，统一语义与审计字段。

@@ -23,7 +23,7 @@
 
 1. 已完成：extension 侧已落 `ToolProviderRegistry + CapabilityPolicyRegistry + PluginRuntime`，`executeStep` 支持 capability/provider 路由与策略覆盖。
 2. 部分完成：`runtime-loop` 已按 capability 路由调用 orchestrator，且 LLM tools 已由 registry 驱动；`executeToolCall` 仍保留 legacy `switch`。
-3. 部分完成：Bridge `protocol + dispatcher` 已接入 registry 路由与 alias 解析，但 provider 动态注册与非内置 provider 尚未落地。
+3. 部分完成：Bridge `protocol + dispatcher` 已接入 registry 路由与 alias 解析，且支持进程内动态 contract/handler 注册；非内置 provider 的外部装载入口尚未落地。
 4. 未完成：canonical 工具名（`fs.read_text/fs.write_text/fs.patch_text/command.run`）全量迁移、`workspace-opfs/workspace-command` 默认 provider 尚未落地。
 
 ## 2. 术语与命名
