@@ -736,7 +736,7 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
           );
         }
 
-        return await applyAfter(fail(`unsupported runtime message: ${type}`));
+        return await applyAfter(fail(`Unknown message type: ${type}`));
       } catch (error) {
         await orchestrator.runHook("runtime.route.error", {
           type,
