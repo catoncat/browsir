@@ -7,16 +7,14 @@ const md = new MarkdownIt({
   linkify: true,
   typographer: true,
   highlight: (str: string, lang: string): string => {
-    const code = (lang && hljs.getLanguage(lang))
-      ? hljs.highlight(str, { language: lang, ignoreIllegals: true }).value
-      : md.utils.escapeHtml(str);
-
-    return `<div class="code-block-wrapper group/code relative">
-      <button class="copy-code-button" title="复制代码" type="button" aria-label="复制代码">
-        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
-      </button>
-      <pre class="hljs"><code>${code}</code></pre>
-    </div>`;
+    if (lang && hljs.getLanguage(lang)) {
+      try {
+        return hljs.highlight(str, { language: lang, ignoreIllegals: true }).value;
+      } catch {
+        // Fall through
+      }
+    }
+    return md.utils.escapeHtml(str);
   },
 });
 

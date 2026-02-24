@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, h } from "vue";
+import { ref, computed, watch, nextTick, h, defineComponent } from "vue";
 import {
   Sparkles,
   ChevronDown,
@@ -87,8 +87,45 @@ const IncremarkLink = (props: any, { slots }: any) => {
   }, slots.default?.());
 };
 
+// Custom Pre component to add a copy button
+const IncremarkPre = defineComponent({
+  props: ["class"],
+  setup(props, { slots }) {
+    const isCopied = ref(false);
+    const handleCopy = async (e: MouseEvent) => {
+      const btn = e.currentTarget as HTMLElement;
+      const wrapper = btn.closest('.code-block-wrapper');
+      const code = wrapper?.querySelector('code')?.innerText || wrapper?.querySelector('pre')?.innerText || "";
+      try {
+        await navigator.clipboard.writeText(code);
+        isCopied.value = true;
+        setTimeout(() => { isCopied.value = false; }, 2000);
+      } catch (err) {
+        console.error("Failed to copy:", err);
+      }
+    };
+    return () => h('div', { class: 'code-block-wrapper group/code relative' }, [
+      h('button', {
+        class: ['copy-code-button', isCopied.value ? 'copy-success' : ''],
+        title: '复制代码',
+        type: 'button',
+        onClick: handleCopy
+      }, [
+        isCopied.value 
+          ? h('svg', { xmlns: "http://www.w3.org/2000/svg", width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "#16a34a", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round" }, [h('path', { d: "M20 6 9 17l-5-5" })])
+          : h('svg', { xmlns: "http://www.w3.org/2000/svg", width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round" }, [
+              h('rect', { width: "14", height: "14", x: "8", y: "8", rx: "2", ry: "2" }),
+              h('path', { d: "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" })
+            ])
+      ]),
+      h('pre', { ...props }, slots.default?.())
+    ]);
+  }
+});
+
 const incremarkComponents = {
-  a: IncremarkLink
+  a: IncremarkLink,
+  pre: IncremarkPre
 };
 
 const isFinished = computed(() => props.role !== "assistant_streaming");
@@ -223,33 +260,6 @@ function handleRegenerate() {
 
 function handleFork() {
   emit("fork", { entryId: props.entryId });
-}
-
-async function handleMarkdownClick(event: MouseEvent) {
-  const target = event.target as HTMLElement;
-  const button = target.closest(".copy-code-button") as HTMLButtonElement | null;
-  if (!button) return;
-
-  const wrapper = button.closest(".code-block-wrapper");
-  const codeElement = wrapper?.querySelector("code");
-  if (!codeElement) return;
-
-  const code = codeElement.innerText;
-  try {
-    await navigator.clipboard.writeText(code);
-    
-    // Visual feedback
-    const originalHTML = button.innerHTML;
-    button.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`;
-    button.classList.add("copy-success");
-    
-    setTimeout(() => {
-      button.innerHTML = originalHTML;
-      button.classList.remove("copy-success");
-    }, 2000);
-  } catch (err) {
-    console.error("Failed to copy code:", err);
-  }
 }
 
 function syncPendingActivityScroll(forceBottom = false) {
