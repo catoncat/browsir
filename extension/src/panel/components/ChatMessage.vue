@@ -91,6 +91,15 @@ const incremarkComponents = {
   a: IncremarkLink
 };
 
+const incremarkOptions = {
+  shiki: {
+    themes: {
+      light: 'github-light',
+      dark: 'github-dark'
+    }
+  }
+};
+
 const isFinished = computed(() => props.role !== "assistant_streaming");
 
 const showThinking = ref(false);
@@ -297,7 +306,7 @@ watch(
         :class="props.forking ? 'border-ui-accent/45 scale-[0.99] -translate-y-0.5 shadow-[0_0_0_1px_rgba(37,99,235,0.06)]' : ''"
         data-testid="user-message-bubble"
       >
-        <IncremarkContent :content="props.content" :is-finished="true" :components="incremarkComponents" />
+        <IncremarkContent :content="props.content" :is-finished="true" :components="incremarkComponents" :options="incremarkOptions" />
       </div>
       <div
         v-else
@@ -380,7 +389,7 @@ watch(
         class="prose max-w-none text-[14px] text-ui-text font-normal focus:outline-none"
         tabindex="0"
       >
-        <IncremarkContent :content="props.content" :is-finished="isFinished" :components="incremarkComponents" />
+        <IncremarkContent :content="props.content" :is-finished="isFinished" :components="incremarkComponents" :options="incremarkOptions" />
       </div>
 
       <div

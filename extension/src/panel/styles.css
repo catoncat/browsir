@@ -21,6 +21,13 @@
   --surface: #f1f3f4; /* 明确的背景层 */
   --accent: #1a73e8;
   color-scheme: light;
+
+  /* Incremark Claude Code Customization */
+  --incremark-typography-font-family-base: "Inter", system-ui, -apple-system, sans-serif;
+  --incremark-typography-line-height-normal: 1.6;
+  --incremark-color-interactive-link: #1a73e8;
+  --incremark-color-interactive-link-hover: #1557b0;
+  --incremark-border-radius-lg: 10px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -32,6 +39,12 @@
     --surface: #2b2d2f;
     --accent: #8ab4f8;
     color-scheme: dark;
+
+    --incremark-color-text-primary: #ffffff !important;
+    --incremark-color-text-secondary: #bdc1c6 !important;
+    --incremark-color-background-base: transparent !important;
+    --incremark-color-interactive-link: #8ab4f8;
+    --incremark-color-interactive-link-hover: #aecbfa;
   }
 }
 
@@ -59,21 +72,29 @@
 }
 
 @layer components {
-  .prose {
-    @apply leading-relaxed text-[14px] text-ui-text font-normal;
-  }
-  .prose a {
-    @apply text-ui-accent underline-offset-4 hover:underline transition-all;
-  }
-  /* 确保 Markdown 中的粗体足够显眼 */
-  .prose strong {
-    @apply font-bold text-black dark:text-white;
+  /* Incremark 深度适配 Claude Code */
+  .incremark {
+    @apply leading-relaxed text-[14px] font-normal;
+    color: var(--incremark-color-text-primary) !important;
+    background-color: transparent !important; 
   }
 
-  /* 隐藏 Markdown 渲染器内置的复制按钮和头部装饰，避免冲突 */
-  .prose button,
-  .prose [class*="copy"],
-  .prose [class*="header"] {
-    display: none !important;
+  /* 代码块装饰微调 */
+  .incremark-code {
+    @apply shadow-sm transition-all;
+  }
+
+  /* 链接微调 */
+  .incremark a {
+    @apply transition-all underline-offset-4;
+  }
+
+  .incremark a:hover {
+    @apply underline;
+  }
+
+  /* 粗体强调 */
+  .incremark strong {
+    @apply font-bold text-black dark:text-white;
   }
 }

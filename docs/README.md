@@ -20,6 +20,8 @@
    - Browser Agent 可靠性改造的决策记录（ADR）
 9. `docs/browser-agent-reliability-checklist.md`
    - Browser Agent 改造执行清单（按 P0/P1/P2）
+10. `docs/llm-provider-subagent-design.md`
+   - 多 Provider 与 Sub-Agent 设计沉淀（本产品口径、分阶段落地）
 
 ## 核心文档
 
@@ -43,6 +45,8 @@
   - Browser Agent 可靠性改造 ADR（背景、决策、回滚、验收）
 - `docs/browser-agent-reliability-checklist.md`
   - Browser Agent 落地实施清单（任务分解与门禁执行）
+- `docs/llm-provider-subagent-design.md`
+  - 多 Provider 与 Sub-Agent 设计沉淀（避免黑盒降级，面向角色选模）
 
 ## BDD 文档（在 `bdd/`）
 
