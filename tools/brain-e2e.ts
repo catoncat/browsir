@@ -91,9 +91,14 @@ function buildTestPageFixtureScript(): string {
       '<main id="app">',
       '  <label for="name">Name</label>',
       '  <input id="name" type="text" value="" />',
+      '  <label>Plain Text</label>',
+      '  <textarea placeholder="Write plain text here"></textarea>',
       '  <button id="act" type="button">Act</button>',
+      '  <button id="share" type="button">Share</button>',
       '  <button id="rerender" type="button">Rerender</button>',
       '  <div id="out">idle</div>',
+      '  <div id="share-out">share:idle</div>',
+      '  <section id="dyn-vue-root">loading-dynamic...</section>',
       '</main>'
     ].join('');
 
@@ -108,6 +113,16 @@ function buildTestPageFixtureScript(): string {
     const act = document.querySelector("#act");
     if (act) wireAct(act);
 
+    const share = document.querySelector("#share");
+    if (share) {
+      share.addEventListener("click", () => {
+        const textarea = document.querySelector("textarea[placeholder='Write plain text here']");
+        const text = textarea && "value" in textarea ? String(textarea.value || "") : "";
+        const out = document.querySelector("#share-out");
+        if (out) out.textContent = "shared:" + text;
+      });
+    }
+
     const rerender = document.querySelector("#rerender");
     if (rerender) {
       rerender.addEventListener("click", () => {
@@ -121,6 +136,45 @@ function buildTestPageFixtureScript(): string {
         if (out) out.setAttribute("data-rerendered", "1");
       });
     }
+
+    const dynState = { text: "" };
+    const mountDynamicVueLike = () => {
+      const root = document.querySelector("#dyn-vue-root");
+      if (!root) return;
+      root.innerHTML = [
+        '<label for="dyn-vue-input">Dynamic Vue-like Input</label>',
+        '<textarea id="dyn-vue-input" data-testid="dyn-vue-input" placeholder="Dynamic plain text"></textarea>',
+        '<button id="dyn-vue-share" data-testid="dyn-vue-share" type="button">Dynamic Share</button>',
+        '<div id="dyn-vue-out">dyn:idle</div>',
+        '<a id="dyn-vue-link" data-testid="dyn-vue-link" href="" rel="noopener">dyn:link:idle</a>'
+      ].join("");
+      const input = root.querySelector("#dyn-vue-input");
+      if (input && "value" in input) input.value = dynState.text;
+      if (input) {
+        input.addEventListener("input", () => {
+          dynState.text = "value" in input ? String(input.value || "") : "";
+          const out = root.querySelector("#dyn-vue-out");
+          if (out) out.textContent = dynState.text ? "dyn:typing:" + dynState.text : "dyn:idle";
+        });
+      }
+      const shareBtn = root.querySelector("#dyn-vue-share");
+      if (shareBtn) {
+        shareBtn.addEventListener("click", () => {
+          const encoded = encodeURIComponent(String(dynState.text || ""));
+          const shareUrl = "https://plain.example/share#dyn-share=" + encoded;
+          const out = root.querySelector("#dyn-vue-out");
+          if (out) out.textContent = "dyn:shared:" + dynState.text;
+          const link = root.querySelector("#dyn-vue-link");
+          if (link) {
+            link.setAttribute("href", shareUrl);
+            link.textContent = "dyn:link:" + shareUrl;
+          }
+          const shareOut = document.querySelector("#share-out");
+          if (shareOut) shareOut.textContent = "share-link:" + shareUrl;
+        });
+      }
+    };
+    setTimeout(mountDynamicVueLike, 320);
     return { ok: true, title: document.title };
   })()`;
 }
@@ -1380,6 +1434,104 @@ async function main() {
         });
         assert(verifyResp.ok === true, `verify 调用失败: ${verifyResp.error || "unknown"}`);
         assert(verifyResp.data?.ok === true, `verify 断言失败: ${JSON.stringify(verifyResp.data)}`);
+      });
+    });
+
+    await runCase("service-worker API", "fill 支持无 id 文本框（placeholder/path fallback）", async () => {
+      await acquireAndUseLease("owner-plain-text-fill", async (owner) => {
+        const marker = `plain-${Date.now()}`;
+        const snap = await sendBgMessage(sidepanelClient!, {
+          type: "cdp.snapshot",
+          tabId: testTabId,
+          options: { mode: "interactive", diff: false, format: "json" }
+        });
+        assert(snap.ok === true, "snapshot 失败");
+
+        const nodes = Array.isArray(snap.data?.nodes) ? snap.data.nodes : [];
+        const plainTextarea = nodes.find(
+          (node: any) =>
+            String(node?.placeholder || "").includes("Write plain text here") ||
+            String(node?.selector || "").includes('[placeholder="Write plain text here"]')
+        );
+        assert(plainTextarea?.ref, "缺少 plain text textarea ref");
+
+        const fillResp = await sendBgMessage(sidepanelClient!, {
+          type: "cdp.action",
+          tabId: testTabId,
+          owner,
+          sessionId: "session-owner-plain-text-fill",
+          agentId: "owner-plain-text-fill",
+          action: { kind: "fill", ref: plainTextarea.ref, value: marker }
+        });
+        assert(fillResp.ok === true, `plain text fill 失败: ${fillResp.error || "unknown"}`);
+
+        const clickShare = await sendBgMessage(sidepanelClient!, {
+          type: "cdp.action",
+          tabId: testTabId,
+          owner,
+          sessionId: "session-owner-plain-text-fill",
+          agentId: "owner-plain-text-fill",
+          action: { kind: "click", selector: "#share" }
+        });
+        assert(clickShare.ok === true, `share click 失败: ${clickShare.error || "unknown"}`);
+
+        const verifyResp = await sendBgMessage(sidepanelClient!, {
+          type: "cdp.verify",
+          tabId: testTabId,
+          action: { textIncludes: `shared:${marker}` }
+        });
+        assert(verifyResp.ok === true && verifyResp.data?.ok === true, "plain text 输入后验证失败");
+      });
+    });
+
+    await runCase("service-worker API", "fill 支持动态加载的 vue-like 受控输入", async () => {
+      await acquireAndUseLease("owner-dyn-vue-fill", async (owner) => {
+        const marker = `dyn-${Date.now()}`;
+        await waitFor(
+          "dynamic vue-like input mounted",
+          async () => {
+            const verify = await sendBgMessage(sidepanelClient!, {
+              type: "cdp.verify",
+              tabId: testTabId,
+              action: { selectorExists: 'textarea[data-testid="dyn-vue-input"]' }
+            });
+            if (!verify.ok) return null;
+            return verify.data?.ok === true ? true : null;
+          },
+          8_000,
+          120
+        );
+
+        const fillResp = await sendBgMessage(sidepanelClient!, {
+          type: "cdp.action",
+          tabId: testTabId,
+          owner,
+          sessionId: "session-owner-dyn-vue-fill",
+          agentId: "owner-dyn-vue-fill",
+          action: {
+            kind: "fill",
+            selector: 'textarea[data-testid="dyn-vue-input"]',
+            value: marker
+          }
+        });
+        assert(fillResp.ok === true, `dynamic vue-like fill 失败: ${fillResp.error || "unknown"}`);
+
+        const clickShare = await sendBgMessage(sidepanelClient!, {
+          type: "cdp.action",
+          tabId: testTabId,
+          owner,
+          sessionId: "session-owner-dyn-vue-fill",
+          agentId: "owner-dyn-vue-fill",
+          action: { kind: "click", selector: 'button[data-testid="dyn-vue-share"]' }
+        });
+        assert(clickShare.ok === true, `dynamic vue-like share click 失败: ${clickShare.error || "unknown"}`);
+
+        const verifyResp = await sendBgMessage(sidepanelClient!, {
+          type: "cdp.verify",
+          tabId: testTabId,
+          action: { textIncludes: `dyn:shared:${marker}` }
+        });
+        assert(verifyResp.ok === true && verifyResp.data?.ok === true, "dynamic vue-like 输入后验证失败");
       });
     });
 
@@ -4273,14 +4425,120 @@ async function main() {
         const defaultMinPass = Math.ceil(attempts * 0.67);
         const minPassRaw = Number(process.env.BRAIN_E2E_LIVE_MIN_PASS || defaultMinPass);
         const minPass = Math.max(1, Math.min(attempts, Number.isInteger(minPassRaw) ? minPassRaw : defaultMinPass));
+        const liveMaxSteps = 16;
+        const liveLlmTimeoutMs = 20_000;
+        const normalizeBase = (value: string) => value.replace(/\/+$/, "");
+        const summarizeAttemptTrace = (dump: any) => {
+          const stream = Array.isArray(dump?.stepStream) ? dump.stepStream : [];
+          const toolPlanRows = stream.filter(
+            (item: any) => item?.type === "step_planned" && String(item?.payload?.mode || "") === "tool_call"
+          );
+          const toolFinishRows = stream.filter(
+            (item: any) => item?.type === "step_finished" && String(item?.payload?.mode || "") === "tool_call"
+          );
+          const toolTrail = toolPlanRows
+            .map((item: any) => String(item?.payload?.action || "").trim())
+            .filter(Boolean);
+          const lastToolFailure = [...toolFinishRows].reverse().find((item: any) => item?.payload?.ok === false);
+          const llmReq = stream.find((item: any) => item?.type === "llm.request");
+          const conversation = Array.isArray(dump?.conversationView?.messages) ? dump.conversationView.messages : [];
+          const lastAssistant = [...conversation].reverse().find((item: any) => String(item?.role || "") === "assistant");
+          const lastAssistantSnippet = String(lastAssistant?.content || "").replace(/\s+/g, " ").slice(0, 220);
+          const lastEventType = String(stream[stream.length - 1]?.type || "");
+          return {
+            llmUrl: String(llmReq?.payload?.url || ""),
+            streamEvents: stream.length,
+            lastEventType,
+            toolCallsPlanned: toolTrail.length,
+            toolTrail: toolTrail.slice(0, 8),
+            toolFailures: toolFinishRows.filter((item: any) => item?.payload?.ok === false).length,
+            lastToolError: String(lastToolFailure?.payload?.error || ""),
+            lastAssistantSnippet
+          };
+        };
+        const waitForLiveLoopDone = async (sessionId: string, timeoutMs = 90_000) => {
+          const startedAt = Date.now();
+          let latestDump: any = { stepStream: [], conversationView: { messages: [] } };
+          let waitError = "";
+          while (Date.now() - startedAt < timeoutMs) {
+            try {
+              const out = await sendBgMessage(sidepanelClient!, { type: "brain.debug.dump", sessionId });
+              if (out.ok) {
+                latestDump = out.data;
+                const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
+                if (stream.some((item: any) => item?.type === "loop_done")) {
+                  return { dump: out.data, waitError: "" };
+                }
+              } else {
+                waitError = String(out.error || "brain.debug.dump failed");
+                if (/websocket 已关闭/i.test(waitError)) {
+                  break;
+                }
+              }
+            } catch (err) {
+              waitError = err instanceof Error ? err.message : String(err);
+              if (/websocket 已关闭/i.test(waitError)) {
+                break;
+              }
+            }
+            // eslint-disable-next-line no-await-in-loop
+            await sleep(300);
+          }
+          if (!waitError) {
+            waitError = `wait timeout: brain live loop_done (${timeoutMs}ms)`;
+          }
+          return { dump: latestDump, waitError };
+        };
         const outcomes: Array<Record<string, unknown>> = [];
         let passedAttempts = 0;
+        const saveLiveConfig = await sendBgMessage(sidepanelClient!, {
+          type: "config.save",
+          payload: {
+            bridgeUrl: `ws://${BRIDGE_HOST}:${bridgePort}/ws`,
+            bridgeToken,
+            llmApiBase: liveLlmBase,
+            llmApiKey: liveLlmKey,
+            llmModel: liveLlmModel,
+            maxSteps: liveMaxSteps,
+            llmTimeoutMs: liveLlmTimeoutMs,
+            llmRetryMaxAttempts: 0,
+            llmMaxRetryDelayMs: 1_000
+          }
+        });
+        assert(saveLiveConfig.ok === true, `live config.save 失败: ${saveLiveConfig.error || "unknown"}`);
+        const connect = await sendBgMessage(sidepanelClient!, { type: "bridge.connect" });
+        assert(connect.ok === true, `live bridge.connect 失败: ${connect.error || "unknown"}`);
+        const currentConfig = await sendBgMessage(sidepanelClient!, { type: "config.get" });
+        assert(currentConfig.ok === true, `live config.get 失败: ${currentConfig.error || "unknown"}`);
+        assert(
+          normalizeBase(String(currentConfig.data?.llmApiBase || "")) === normalizeBase(liveLlmBase),
+          `live llmApiBase 未生效: actual=${String(currentConfig.data?.llmApiBase || "")}, expected=${liveLlmBase}`
+        );
+        assert(String(currentConfig.data?.llmModel || "") === liveLlmModel, "live llmModel 未生效");
+        assert(
+          Number(currentConfig.data?.maxSteps || 0) === liveMaxSteps,
+          `live maxSteps 未生效: ${String(currentConfig.data?.maxSteps || "")}`
+        );
+        assert(
+          Number(currentConfig.data?.llmTimeoutMs || 0) === liveLlmTimeoutMs,
+          `live llmTimeoutMs 未生效: ${String(currentConfig.data?.llmTimeoutMs || "")}`
+        );
+        assert(Number(currentConfig.data?.llmRetryMaxAttempts || 0) === 0, "live llmRetryMaxAttempts 未生效");
 
         for (let i = 1; i <= attempts; i += 1) {
           // eslint-disable-next-line no-await-in-loop
           await resetTestPageFixture();
           const marker = `live-${Date.now()}-${i}`;
-          const prompt = `在 tabId=${testTabId} 上完成任务：1) 将 #name 填为 \"${marker}\"；2) 点击 #act；3) 验证页面出现 clicked:${marker}；完成后回复 ok。`;
+          const encodedMarker = encodeURIComponent(marker);
+          const prompt = [
+            `在 tabId=${testTabId} 上完成“Vue 动态输入+分享”任务：`,
+            `1) 等待 textarea[data-testid="dyn-vue-input"] 出现；`,
+            `2) 在该输入框中填写 "${marker}"；`,
+            `3) 点击 button[data-testid="dyn-vue-share"]；`,
+            `4) 用 browser_verify 验证页面文本包含 dyn:shared:${marker}；`,
+            `5) 再验证 a[data-testid="dyn-vue-link"] 的 href 包含 dyn-share=${encodedMarker}；`,
+            "仅当验证都通过时回复 ok。"
+          ].join("\n");
           const started =
             // eslint-disable-next-line no-await-in-loop
             await sendBgMessage(sidepanelClient!, {
@@ -4292,26 +4550,32 @@ async function main() {
           assert(sessionId.length > 0, "sessionId 为空");
 
           // eslint-disable-next-line no-await-in-loop
-          const dump = await waitFor(
-            "brain live loop_done",
-            async () => {
-              const out = await sendBgMessage(sidepanelClient!, { type: "brain.debug.dump", sessionId });
-              if (!out.ok) return null;
-              const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
-              return stream.some((item: any) => item?.type === "loop_done") ? out.data : null;
-            },
-            90_000,
-            300
-          );
-          const status = Array.isArray(dump.stepStream)
-            ? dump.stepStream.find((item: any) => item?.type === "loop_done")?.payload?.status || null
-            : null;
+          const waited = await waitForLiveLoopDone(sessionId, 90_000);
+          const dump = waited.dump;
+          const waitError = waited.waitError;
+          const status = Array.isArray(dump?.stepStream)
+            ? dump.stepStream.find((item: any) => item?.type === "loop_done")?.payload?.status || (waitError ? "timeout_no_loop_done" : null)
+            : waitError
+              ? "timeout_no_loop_done"
+              : null;
+          const trace = summarizeAttemptTrace(dump);
+          let verifyResp: RuntimeMessageResponse = { ok: false, error: "verify not started" };
+          let verifyError = "";
           // eslint-disable-next-line no-await-in-loop
-          const verifyResp = await sendBgMessage(sidepanelClient!, {
-            type: "cdp.verify",
-            tabId: testTabId,
-            action: { expect: { textIncludes: `clicked:${marker}` } }
-          });
+          try {
+            verifyResp = await sendBgMessage(sidepanelClient!, {
+              type: "cdp.verify",
+              tabId: testTabId,
+              action: {
+                expect: {
+                  textIncludes: `dyn:shared:${marker}`,
+                  selectorExists: `a[data-testid="dyn-vue-link"][href*="dyn-share=${encodedMarker}"]`
+                }
+              }
+            });
+          } catch (err) {
+            verifyError = err instanceof Error ? err.message : String(err);
+          }
           const verified = verifyResp.ok === true && verifyResp.data?.ok === true;
           const pass = status === "done" && verified;
           if (pass) passedAttempts += 1;
@@ -4320,13 +4584,21 @@ async function main() {
             attempt: i,
             status,
             pass,
-            verified
+            verified,
+            waitError: waitError || undefined,
+            verifyError: verifyError || undefined,
+            verifyResponseError: verifyResp.ok === false ? String(verifyResp.error || "") : undefined,
+            ...trace
           });
+
+          if (/websocket 已关闭/i.test(`${waitError} ${verifyError}`)) {
+            break;
+          }
         }
 
         assert(
           passedAttempts >= minPass,
-          `真实 LLM 冒烟未达标: passed=${passedAttempts}/${attempts}, min=${minPass}, outcomes=${JSON.stringify(outcomes).slice(0, 1200)}`
+          `真实 LLM 冒烟未达标: passed=${passedAttempts}/${attempts}, min=${minPass}, outcomes=${JSON.stringify(outcomes).slice(0, 2200)}`
         );
       });
     }
