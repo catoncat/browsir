@@ -115,4 +115,90 @@ describe("tool-provider-registry.browser", () => {
 
     expect(registry.getCapabilities("fs.virtual.read").map((item) => item.id)).toEqual(["provider.c"]);
   });
+
+  it("falls back to capability default provider when strict mode hint has no match", async () => {
+    const registry = new ToolProviderRegistry();
+    registry.registerCapability("browser.action", {
+      id: "provider.script",
+      mode: "script",
+      priority: 20,
+      canHandle: async (input) => String(input.args?.target || "").includes("script"),
+      invoke: async () => ({ source: "script" })
+    });
+    registry.registerCapability("browser.action", {
+      id: "provider.cdp",
+      mode: "cdp",
+      priority: 10,
+      canHandle: async () => true,
+      invoke: async () => ({ source: "cdp" })
+    });
+
+    const routed = await registry.invoke("script", {
+      sessionId: "s-route",
+      capability: "browser.action",
+      action: "click",
+      args: { target: "button#submit" }
+    });
+
+    expect(routed.providerId).toBe("provider.cdp");
+    expect(routed.modeUsed).toBe("cdp");
+    expect(routed.data).toEqual({ source: "cdp" });
+  });
+
+  it("resolveMode keeps explicit mode when mode and capability are both provided", () => {
+    const registry = new ToolProviderRegistry();
+    registry.registerCapability("browser.action", {
+      id: "provider.browser",
+      mode: "cdp",
+      invoke: async () => ({ ok: true })
+    });
+
+    expect(
+      registry.resolveMode({
+        sessionId: "s-explicit",
+        mode: "script",
+        capability: "browser.action",
+        action: "click",
+        args: {}
+      })
+    ).toBe("script");
+
+    expect(
+      registry.resolveMode({
+        sessionId: "s-capability-only",
+        capability: "browser.action",
+        action: "click",
+        args: {}
+      })
+    ).toBe("cdp");
+  });
+
+  it("attaches mode and capability metadata when capability provider throws", async () => {
+    const registry = new ToolProviderRegistry();
+    registry.registerCapability("browser.verify", {
+      id: "provider.verify",
+      mode: "cdp",
+      invoke: async () => {
+        throw new Error("verify failed");
+      }
+    });
+
+    let thrown: unknown;
+    try {
+      await registry.invoke("cdp", {
+        sessionId: "s-error-meta",
+        capability: "browser.verify",
+        action: "assert_text",
+        args: { expected: "Done" }
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    const runtimeError = thrown as Error & { modeUsed?: string; capabilityUsed?: string };
+    expect(runtimeError).toBeInstanceOf(Error);
+    expect(runtimeError.message).toContain("verify failed");
+    expect(runtimeError.modeUsed).toBe("cdp");
+    expect(runtimeError.capabilityUsed).toBe("browser.verify");
+  });
 });

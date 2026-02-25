@@ -780,6 +780,15 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         returnByValue: true,
         awaitPromise: true
       })) as JsonRecord;
+      const textEvalException = asRecord(evalResult.exceptionDetails);
+      if (Object.keys(textEvalException).length > 0) {
+        const exceptionObj = asRecord(textEvalException.exception);
+        throw new Error(
+          `cdp.snapshot text eval exception: ${String(
+            textEvalException.text || exceptionObj.description || exceptionObj.value || "unknown"
+          )}`
+        );
+      }
       const value = asRecord(asRecord(evalResult.result).value);
       if (value.ok !== true) {
         throw new Error(`cdp.snapshot failed: ${String(value.error || "text evaluate failed")}`);
@@ -802,23 +811,65 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           const maxNodes = ${Number(options.maxNodes || 120)};
           const scope = selector ? document.querySelector(selector) : document;
           if (!scope) return { ok: false, error: "selector not found" };
-          const interactive = "a,button,input,textarea,select,[role='button'],[role='link'],[contenteditable='true'],[tabindex]";
+          const interactive = "a,button,input,textarea,select,[role='button'],[role='link'],[role='textbox'],[contenteditable='true'],[tabindex]";
           const all = Array.from((scope === document ? document : scope).querySelectorAll("*"));
           const list = filter === "all" ? all : all.filter((el) => el.matches(interactive));
+          const safeAttr = (v) => String(v || "").split("\\\\").join("\\\\\\\\").replace(/"/g, '\\"');
+          const isValidIdent = (v) => /^[A-Za-z_][A-Za-z0-9_:\\-\\.]*$/.test(v || "");
+          const fallbackPath = (el) => {
+            const parts = [];
+            let cur = el;
+            let depth = 0;
+            while (cur && cur.nodeType === 1 && depth < 5) {
+              const tag = (cur.tagName || "div").toLowerCase();
+              if (cur.id && isValidIdent(cur.id)) {
+                parts.unshift("#" + cur.id);
+                break;
+              }
+              let part = tag;
+              const cls = String(cur.className || "")
+                .split(/\\s+/)
+                .map((x) => x.trim())
+                .filter(Boolean)
+                .find((x) => isValidIdent(x));
+              if (cls) part += "." + cls;
+              const parent = cur.parentElement;
+              if (parent) {
+                const sameTag = Array.from(parent.children).filter((child) => child.tagName === cur.tagName);
+                if (sameTag.length > 1) {
+                  part += ":nth-of-type(" + (sameTag.indexOf(cur) + 1) + ")";
+                }
+              }
+              parts.unshift(part);
+              cur = cur.parentElement;
+              depth += 1;
+            }
+            return parts.join(" > ");
+          };
           const makeSelector = (el) => {
-            if (el.id && /^[A-Za-z_][A-Za-z0-9_:\\-\\.]*$/.test(el.id)) return "#" + el.id;
+            if (el.id && isValidIdent(el.id)) return "#" + el.id;
             const name = (el.getAttribute("name") || "").trim();
-            if (name && /^[A-Za-z_][A-Za-z0-9_:\\-\\.]*$/.test(name)) return el.tagName.toLowerCase() + '[name="' + name + '"]';
-            return "";
+            if (name) return el.tagName.toLowerCase() + '[name="' + safeAttr(name) + '"]';
+            const testId = (el.getAttribute("data-testid") || el.getAttribute("data-test") || "").trim();
+            if (testId) return el.tagName.toLowerCase() + '[data-testid="' + safeAttr(testId) + '"]';
+            const ariaLabel = (el.getAttribute("aria-label") || "").trim();
+            if (ariaLabel) return el.tagName.toLowerCase() + '[aria-label="' + safeAttr(ariaLabel) + '"]';
+            const placeholder = (el.getAttribute("placeholder") || "").trim();
+            if (placeholder) return el.tagName.toLowerCase() + '[placeholder="' + safeAttr(placeholder) + '"]';
+            return fallbackPath(el);
           };
           const nodes = list.slice(0, maxNodes).map((el) => {
             const role = (el.getAttribute("role") || el.tagName || "node").toLowerCase();
             const text = String(el.textContent || "").replace(/\\s+/g, " ").trim();
             const value = "value" in el ? String(el.value || "") : "";
+            const placeholder = String(el.getAttribute("placeholder") || "");
+            const ariaLabel = String(el.getAttribute("aria-label") || "");
             return {
               role,
               name: text.slice(0, 180),
               value: value.slice(0, 180),
+              placeholder: placeholder.slice(0, 180),
+              ariaLabel: ariaLabel.slice(0, 180),
               selector: makeSelector(el),
               disabled: !!el.disabled,
               focused: document.activeElement === el,
@@ -835,6 +886,15 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         returnByValue: true,
         awaitPromise: true
       })) as JsonRecord;
+      const interactiveEvalException = asRecord(evalResult.exceptionDetails);
+      if (Object.keys(interactiveEvalException).length > 0) {
+        const exceptionObj = asRecord(interactiveEvalException.exception);
+        throw new Error(
+          `cdp.snapshot interactive eval exception: ${String(
+            interactiveEvalException.text || exceptionObj.description || exceptionObj.value || "unknown"
+          )}`
+        );
+      }
       const value = asRecord(asRecord(evalResult.result).value);
       if (value.ok !== true) {
         throw new Error(`cdp.snapshot failed: ${String(value.error || "interactive evaluate failed")}`);
@@ -933,14 +993,112 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     const explicitSelector = typeof rawAction.selector === "string" ? rawAction.selector.trim() : "";
     const fromRef = ref ? resolveRefEntry(tabId, ref) : {};
     const selector = String(explicitSelector || fromRef.selector || "").trim();
+    const waitForMsRaw = Number(rawAction.waitForMs);
+    const waitForMs = Number.isFinite(waitForMsRaw)
+      ? Math.max(0, Math.min(10_000, Math.floor(waitForMsRaw)))
+      : kind === "click" || kind === "type" || kind === "fill" || kind === "select"
+        ? 1_500
+        : 0;
 
     if (!selector) throw new Error("action target not found by ref/selector");
 
-    const expression = `(() => {
+    const expression = `(async () => {
       const selector = ${JSON.stringify(selector)};
       const kind = ${JSON.stringify(kind)};
       const value = ${JSON.stringify(value)};
-      const el = document.querySelector(selector);
+      const waitForMs = ${waitForMs};
+      const hint = ${JSON.stringify({
+        tag: String(fromRef.tag || ""),
+        role: String(fromRef.role || ""),
+        name: String(fromRef.name || ""),
+        placeholder: String(fromRef.placeholder || ""),
+        ariaLabel: String(fromRef.ariaLabel || "")
+      })};
+      const allTypables = () => Array.from(
+        document.querySelectorAll("input,textarea,[contenteditable='true'],[role='textbox']")
+      );
+      const pickByHint = () => {
+        const nameNeedle = String(hint.name || "").trim().toLowerCase();
+        const placeholderNeedle = String(hint.placeholder || "").trim().toLowerCase();
+        const ariaNeedle = String(hint.ariaLabel || "").trim().toLowerCase();
+        const tagNeedle = String(hint.tag || "").trim().toLowerCase();
+        for (const cand of allTypables()) {
+          if (tagNeedle && String(cand.tagName || "").toLowerCase() !== tagNeedle) continue;
+          const cText = String(cand.textContent || "").replace(/\\s+/g, " ").trim().toLowerCase();
+          const cPlaceholder = String(cand.getAttribute?.("placeholder") || "").trim().toLowerCase();
+          const cAria = String(cand.getAttribute?.("aria-label") || "").trim().toLowerCase();
+          if (placeholderNeedle && cPlaceholder && cPlaceholder === placeholderNeedle) return cand;
+          if (ariaNeedle && cAria && cAria === ariaNeedle) return cand;
+          if (nameNeedle && cText && cText.includes(nameNeedle)) return cand;
+        }
+        return null;
+      };
+      const applyTextToElement = (el, text, mode) => {
+        if (!el) return { ok: false, error: "element missing" };
+        if ("disabled" in el && !!el.disabled) return { ok: false, error: "element is disabled" };
+        if ("readOnly" in el && !!el.readOnly) return { ok: false, error: "element is readonly" };
+        if ("focus" in el) {
+          try { el.focus({ preventScroll: true }); } catch { el.focus(); }
+        }
+        if ("value" in el) {
+          let setter = null;
+          try {
+            const proto = Object.getPrototypeOf(el);
+            setter = Object.getOwnPropertyDescriptor(proto, "value")?.set
+              || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set
+              || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set
+              || null;
+          } catch {}
+          if (setter) {
+            setter.call(el, text);
+          } else {
+            el.value = text;
+          }
+          try {
+            el.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
+          } catch {
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+          if (mode === "fill") el.dispatchEvent(new Event("change", { bubbles: true }));
+          return { ok: true, typed: text.length, mode, via: "value-setter", url: location.href, title: document.title };
+        }
+        if (el.isContentEditable) {
+          try {
+            if (typeof document.execCommand === "function") {
+              document.execCommand("selectAll", false);
+              document.execCommand("insertText", false, text);
+            } else {
+              el.textContent = text;
+            }
+          } catch {
+            el.textContent = text;
+          }
+          try {
+            el.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
+          } catch {
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+          if (mode === "fill") el.dispatchEvent(new Event("change", { bubbles: true }));
+          return { ok: true, typed: text.length, mode, via: "contenteditable", url: location.href, title: document.title };
+        }
+        return { ok: false, error: "element is not typable", mode };
+      };
+      const resolveElement = () => {
+        const fromSelector = selector ? document.querySelector(selector) : null;
+        if (fromSelector) return fromSelector;
+        if (kind === "type" || kind === "fill") return pickByHint();
+        return null;
+      };
+      const waitForElement = async () => {
+        const started = Date.now();
+        while (true) {
+          const found = resolveElement();
+          if (found) return found;
+          if (Date.now() - started >= waitForMs) return null;
+          await new Promise((resolve) => setTimeout(resolve, 80));
+        }
+      };
+      let el = await waitForElement();
       if (!el) return { ok: false, error: "selector not found", selector };
       el.scrollIntoView?.({ block: "center", inline: "nearest" });
       if (kind === "click") {
@@ -948,19 +1106,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         return { ok: true, clicked: true, url: location.href, title: document.title };
       }
       if (kind === "type" || kind === "fill") {
-        if ("focus" in el) el.focus();
-        if ("value" in el) {
-          el.value = value;
-          el.dispatchEvent(new Event("input", { bubbles: true }));
-          if (kind === "fill") el.dispatchEvent(new Event("change", { bubbles: true }));
-          return { ok: true, typed: value.length, mode: kind, url: location.href, title: document.title };
-        }
-        if (el.isContentEditable) {
-          el.textContent = value;
-          el.dispatchEvent(new Event("input", { bubbles: true }));
-          return { ok: true, typed: value.length, mode: kind, contentEditable: true, url: location.href, title: document.title };
-        }
-        return { ok: false, error: "element is not typable", mode: kind };
+        return applyTextToElement(el, value, kind);
       }
       if (kind === "select") {
         if (!("value" in el)) return { ok: false, error: "element is not selectable" };

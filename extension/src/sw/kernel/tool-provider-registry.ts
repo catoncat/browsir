@@ -43,13 +43,23 @@ export class ToolProviderRegistry {
   ): Promise<StepToolProvider | null> {
     const candidates = this.getCapabilityProviderList(capability);
     if (!candidates.length) return null;
-    for (const provider of candidates) {
-      if (modeHint && provider.mode && provider.mode !== modeHint) continue;
-      if (!provider.canHandle) return provider;
-      const accepted = await provider.canHandle({ ...input, mode: provider.mode || modeHint || input.mode });
-      if (accepted) return provider;
+    const pickFromCandidates = async (strictModeHint: boolean): Promise<StepToolProvider | null> => {
+      for (const provider of candidates) {
+        if (strictModeHint && modeHint && provider.mode && provider.mode !== modeHint) continue;
+        if (!provider.canHandle) return provider;
+        const accepted = await provider.canHandle({ ...input, mode: provider.mode || modeHint || input.mode });
+        if (accepted) return provider;
+      }
+      return null;
+    };
+
+    // 第一轮尊重 mode hint；若无 provider 命中，则回退到 capability 默认 provider。
+    const strictMatched = await pickFromCandidates(true);
+    if (strictMatched) return strictMatched;
+    if (modeHint) {
+      return await pickFromCandidates(false);
     }
-    return null;
+    return strictMatched;
   }
 
   register(mode: ExecuteMode, provider: StepToolProvider, options: RegisterProviderOptions = {}): void {
@@ -170,12 +180,22 @@ export class ToolProviderRegistry {
       const capabilityProvider = await this.resolveCapabilityProvider(capability, input, mode);
       if (!capabilityProvider) throw new Error(`未找到 capability provider: ${capability}`);
       const modeUsed = capabilityProvider.mode || mode;
-      return {
-        data: await capabilityProvider.invoke({ ...input, mode: modeUsed }),
-        modeUsed,
-        providerId: capabilityProvider.id,
-        capabilityUsed: capability
-      };
+      const invokeInput = { ...input, mode: modeUsed };
+      try {
+        const data = await capabilityProvider.invoke(invokeInput);
+        return {
+          data,
+          modeUsed,
+          providerId: capabilityProvider.id,
+          capabilityUsed: capability
+        };
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        const withMeta = err as Error & { modeUsed?: ExecuteMode; capabilityUsed?: ExecuteCapability };
+        withMeta.modeUsed = modeUsed;
+        withMeta.capabilityUsed = capability;
+        throw withMeta;
+      }
     }
 
     const provider = this.modeProviders.get(mode);
