@@ -1,6 +1,6 @@
 # Browser Brain Loop 与 pi-mono Runtime 深度对比（非 UI）
 
-更新时间：2026-02-24  
+更新时间：2026-02-25  
 对比输入：
 - 架构蓝图：`docs/non-ui-architecture-blueprint.md:5`、`docs/non-ui-architecture-blueprint.md:16`、`docs/non-ui-architecture-blueprint.md:65`
 - 本仓实现：`extension/src/sw/kernel/*` + `bridge/src/*`
@@ -12,7 +12,7 @@
 2. pi-mono 是“可组合 agent 技术栈”：`agent` 负责循环与工具语义，`ai` 负责 provider 抽象，`coding-agent` 负责宿主化与会话产品层。证据：`/Users/envvar/work/repos/_research/pi-mono/packages/agent/src/agent-loop.ts:104`、`/Users/envvar/work/repos/_research/pi-mono/packages/ai/src/api-registry.ts:23`、`/Users/envvar/work/repos/_research/pi-mono/packages/coding-agent/src/core/sdk.ts:165`。  
 3. 两者不是同类替换关系，而是“内核型 runtime（BBL）” vs “通用 SDK + CLI runtime（pi-mono）”。  
 4. BBL 的核心优势是浏览器写操作隔离（lease）与协议门禁；pi-mono 的核心优势是 provider 抽象深度与 runtime 可扩展性。  
-5. 当前 BBL 存在文档-实现偏差：`no_progress/auto-repair` 在 README/AGENTS 有规范，但 kernel 代码未落地对应事件与分支（见第 9 节）。
+5. 当前 BBL 的主要偏差已收敛到 `no_progress/auto-repair` 一组语义；Provider 路由与 strict done 语义（含 `progress_uncertain`）已落地（见第 6、9 节）。
 
 ## 2. 蓝图分层逐维对比
 
@@ -33,7 +33,7 @@
 3. `runAgentLoop` 拉起主循环：`extension/src/sw/kernel/runtime-loop.browser.ts:1172`。  
 4. LLM 请求内置 retry：`extension/src/sw/kernel/runtime-loop.browser.ts:1058`、`extension/src/sw/kernel/runtime-loop.browser.ts:1134`。  
 5. 工具执行统一走 `executeStep(mode=bridge/cdp)`：`extension/src/sw/kernel/runtime-loop.browser.ts:610`、`extension/src/sw/kernel/runtime-loop.browser.ts:651`、`extension/src/sw/kernel/runtime-loop.browser.ts:722`。  
-6. 错误收口为 `failed_verify/failed_execute/max_steps/stopped`：`extension/src/sw/kernel/runtime-loop.browser.ts:1329`、`extension/src/sw/kernel/runtime-loop.browser.ts:1358`。  
+6. 错误收口为 `failed_verify/failed_execute/progress_uncertain/max_steps/stopped`：`extension/src/sw/kernel/runtime-loop.browser.ts`。  
 7. `loop_done` 输出终态：`extension/src/sw/kernel/runtime-loop.browser.ts:1387`。
 
 ### 3.2 pi-mono（agent/host 双层主导）
@@ -78,7 +78,7 @@
 - pi-coding-agent 更像“宿主全能力 + 以操作者隔离为主”。  
 - 因此把 pi-coding-agent 权限模型直接迁到扩展侧不合适。
 
-## 6. Provider 抽象能力对比（BBL 当前短板）
+## 6. Provider 抽象能力对比（BBL 剩余差距）
 
 ### 6.1 pi-ai 的抽象深度
 
@@ -91,9 +91,9 @@
 
 ### 6.2 BBL 当前形态
 
-1. `runtime-loop` 直接拼 `chat/completions` 并 fetch：`extension/src/sw/kernel/runtime-loop.browser.ts:1080`、`extension/src/sw/kernel/runtime-loop.browser.ts:1090`。  
-2. retry 与解析逻辑都在单文件 loop 内：`extension/src/sw/kernel/runtime-loop.browser.ts:1058`、`extension/src/sw/kernel/runtime-loop.browser.ts:1118`。  
-3. 结果：模型兼容层和编排层耦合偏高，扩 provider 成本上升。
+1. 已完成 provider 化主链路：`runtime-loop` 先 `resolveLlmRoute(...)`，再通过 `LlmProviderRegistry` 查找 provider 并调用 adapter 发送请求：`extension/src/sw/kernel/runtime-loop.browser.ts`、`extension/src/sw/kernel/llm-provider.ts`、`extension/src/sw/kernel/llm-provider-registry.ts`。  
+2. 已具备 profile 路由与升级事件：`llm.route.selected / llm.route.escalated / llm.route.blocked`：`extension/src/sw/kernel/runtime-loop.browser.ts`、`extension/src/sw/kernel/llm-profile-resolver.ts`、`extension/src/sw/kernel/llm-profile-policy.ts`。  
+3. 剩余差距不在“有没有 provider”，而在“provider 抽象深度”：当前仅内置 `openai_compatible`；请求 payload 组装、tool 过滤、流解析与部分重试策略仍在 `runtime-loop`，尚未完全下沉到 provider 层：`extension/src/sw/kernel/llm-openai-compatible-provider.ts`、`extension/src/sw/kernel/runtime-loop.browser.ts`。
 
 ## 7. 持久化与上下文恢复对比
 
@@ -120,19 +120,19 @@ BBL runtime(`extension/src/sw/kernel + bridge/src`)≈6288 行；pi-agent≈1518
 
 ### 9.2 当前实现
 
-1. kernel 事件类型中没有 `no_progress`/`execute_error`：`extension/src/sw/kernel/events.ts:3`。  
-2. loop 里可见 `failed_verify/failed_execute/max_steps/stopped` 收口：`extension/src/sw/kernel/runtime-loop.browser.ts:1329`、`extension/src/sw/kernel/runtime-loop.browser.ts:1358`。  
-3. 代码检索 `extension/src/sw/kernel` 下 `no_progress` 无命中（本次审计）。
+1. kernel 已落地 `loop_no_progress` 事件（重复签名 / ping-pong / 浏览器证据连续缺失），但尚未形成独立的 `no_progress` 终态枚举：`extension/src/sw/kernel/events.ts`、`extension/src/sw/kernel/runtime-loop.browser.ts`。  
+2. strict done 语义已补齐 `progress_uncertain` 收口（验证不可判定或无进展时不会误报 done）：`extension/src/sw/kernel/runtime-loop.browser.ts`、`extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts`。  
+3. 文档仍有差距点：README/AGENTS 里写的 `execute_error/no_progress` 触发条件，与当前内核终态枚举（`failed_execute/failed_verify/progress_uncertain/max_steps/stopped`）尚未完全同构。
 
 ### 9.3 结论
 
-当前是“文档语义先行、实现未完全跟进”。这会影响对外承诺一致性，也会影响 BDD 预期设计。
+当前是“主链路已对齐，边缘语义待收口”：Provider/路由/strict done 与 `loop_no_progress` 已实现，但 auto-repair 触发口径和终态命名仍需统一。
 
 ## 10. 迁移建议（按收益/风险）
 
-1. 高收益低风险：把 LLM 传输层抽成 provider adapter（借鉴 `pi-ai` 注册中心），保留 BBL 现有 orchestrator 与 lease 安全边界。  
-2. 中收益中风险：在 BBL 落地 `no_progress` 检测与事件类型，补齐 README/AGENTS 与实现一致性。  
-3. 中收益中风险：把 retry/compaction 可配置化（类似 `pi-coding-agent` settings），但默认值保持保守。  
+1. 高收益低风险：补齐 provider 深度，新增第二个 provider 适配器并下沉消息转换/流解析，继续保持 Bridge 非决策边界。  
+2. 高收益中风险：在已落地 `loop_no_progress` 的基础上，继续把 auto-repair 触发条件与 README/AGENTS 对齐（并明确终态映射）。  
+3. 中收益中风险：把 retry/compaction 参数化（保持保守默认值），并与 profile 升级策略协同。  
 4. 低收益低风险：提供 JSONL 导出适配层，方便与 pi 生态工具互通，不替换 BBL 的分块存储。  
 5. 明确不建议：直接迁移 pi-coding-agent 的“full system access + no permission popups”模型到扩展侧。
 
