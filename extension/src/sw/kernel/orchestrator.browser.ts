@@ -382,7 +382,6 @@ export class BrainOrchestrator {
   stop(sessionId: string): RuntimeView {
     const state = this.ensureRunState(sessionId);
     state.stopped = true;
-    state.running = false;
     return this.getRunState(sessionId);
   }
 

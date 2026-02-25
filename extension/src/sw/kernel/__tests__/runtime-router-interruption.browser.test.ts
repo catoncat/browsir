@@ -100,4 +100,42 @@ describe("runtime-router interruption boundary", () => {
     const autoRuntime = ((autoRun.data as Record<string, unknown>)?.runtime || {}) as Record<string, unknown>;
     expect(Boolean(autoRuntime.stopped)).toBe(false);
   });
+
+  it("stop 后若仍在收尾中，不应被新的 start 提前重启", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "seed",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    // 模拟「仍在执行中的 run」：此时 stop 应仅标记 stopped，不应立即把 running 置 false。
+    orchestrator.setRunning(sessionId, true);
+
+    const stopped = await invokeRuntime({
+      type: "brain.run.stop",
+      sessionId
+    });
+    expect(stopped.ok).toBe(true);
+    const stopRuntime = (stopped.data || {}) as Record<string, unknown>;
+    expect(Boolean(stopRuntime.stopped)).toBe(true);
+    expect(Boolean(stopRuntime.running)).toBe(true);
+
+    const restartDuringStopping = await invokeRuntime({
+      type: "brain.run.start",
+      sessionId,
+      prompt: "start-while-stopping",
+      autoRun: true
+    });
+    expect(restartDuringStopping.ok).toBe(true);
+    const restartRuntime = ((restartDuringStopping.data as Record<string, unknown>)?.runtime || {}) as Record<string, unknown>;
+    expect(Boolean(restartRuntime.running)).toBe(true);
+    expect(Boolean(restartRuntime.stopped)).toBe(true);
+
+  });
 });
