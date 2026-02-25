@@ -16,6 +16,10 @@ describe("tool-contract-registry", () => {
     expect(names).toContain("search_elements");
     expect(names).toContain("click");
     expect(names).toContain("fill_element_by_uid");
+    expect(names).toContain("select_option_by_uid");
+    expect(names).toContain("press_key");
+    expect(names).toContain("scroll_page");
+    expect(names).toContain("navigate_tab");
     expect(names).toContain("fill_form");
     expect(names).toContain("browser_verify");
     expect(names).toContain("get_all_tabs");
@@ -23,12 +27,56 @@ describe("tool-contract-registry", () => {
     expect(names).toContain("create_new_tab");
   });
 
+  it("enforces uid/ref/backendNodeId targeting schema for element actions", () => {
+    const registry = new ToolContractRegistry();
+    const defs = registry.listLlmToolDefinitions();
+    const clickDef = defs.find((item) => item.function.name === "click")?.function;
+    const fillDef = defs.find((item) => item.function.name === "fill_element_by_uid")?.function;
+    const selectDef = defs.find((item) => item.function.name === "select_option_by_uid")?.function;
+
+    const clickParams = (clickDef?.parameters as Record<string, unknown>) || {};
+    const fillParams = (fillDef?.parameters as Record<string, unknown>) || {};
+    const selectParams = (selectDef?.parameters as Record<string, unknown>) || {};
+
+    expect(Array.isArray(clickParams.anyOf)).toBe(true);
+    expect(Array.isArray(fillParams.anyOf)).toBe(true);
+    expect(Array.isArray(selectParams.anyOf)).toBe(true);
+  });
+
+  it("exposes runtime hint schema for fs/process tools", () => {
+    const registry = new ToolContractRegistry();
+    const defs = registry.listLlmToolDefinitions();
+
+    const readDef = defs.find((item) => item.function.name === "read_file")?.function;
+    const writeDef = defs.find((item) => item.function.name === "write_file")?.function;
+    const editDef = defs.find((item) => item.function.name === "edit_file")?.function;
+    const bashDef = defs.find((item) => item.function.name === "bash")?.function;
+
+    const readRuntime = ((readDef?.parameters as Record<string, unknown>)?.properties as Record<string, unknown>)?.runtime as
+      | Record<string, unknown>
+      | undefined;
+    const writeRuntime = ((writeDef?.parameters as Record<string, unknown>)?.properties as Record<string, unknown>)?.runtime as
+      | Record<string, unknown>
+      | undefined;
+    const editRuntime = ((editDef?.parameters as Record<string, unknown>)?.properties as Record<string, unknown>)?.runtime as
+      | Record<string, unknown>
+      | undefined;
+    const bashRuntime = ((bashDef?.parameters as Record<string, unknown>)?.properties as Record<string, unknown>)?.runtime as
+      | Record<string, unknown>
+      | undefined;
+
+    expect(readRuntime?.enum).toEqual(["browser", "local"]);
+    expect(writeRuntime?.enum).toEqual(["browser", "local"]);
+    expect(editRuntime?.enum).toEqual(["browser", "local"]);
+    expect(bashRuntime?.enum).toEqual(["browser", "local"]);
+  });
+
   it("supports override register/unregister for existing contract", () => {
     const registry = new ToolContractRegistry();
     const original = registry
       .listLlmToolDefinitions()
       .find((item) => item.function.name === "bash")?.function.description;
-    expect(original).toBe("Execute a shell command via bash.exec.");
+    expect(String(original || "")).toContain("Execute a shell command via bash.exec.");
 
     registry.register(
       {
@@ -55,7 +103,7 @@ describe("tool-contract-registry", () => {
     const restored = registry
       .listLlmToolDefinitions()
       .find((item) => item.function.name === "bash")?.function.description;
-    expect(restored).toBe("Execute a shell command via bash.exec.");
+    expect(String(restored || "")).toContain("Execute a shell command via bash.exec.");
     expect(registry.listContracts().find((item) => item.name === "bash")?.source).toBe("builtin");
   });
 

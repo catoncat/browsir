@@ -490,6 +490,10 @@ function isBrowserToolName(toolName: string): boolean {
     "search_elements",
     "click",
     "fill_element_by_uid",
+    "select_option_by_uid",
+    "press_key",
+    "scroll_page",
+    "navigate_tab",
     "fill_form",
     "browser_verify"
   ].includes(
@@ -519,6 +523,10 @@ function inferModeEscalationDirective(input: {
     [
       "click",
       "fill_element_by_uid",
+      "select_option_by_uid",
+      "press_key",
+      "scroll_page",
+      "navigate_tab",
       "fill_form",
       "browser_verify"
     ].includes(String(input.toolName || "").trim().toLowerCase()) &&
@@ -1407,53 +1415,11 @@ const EXTENSION_AGENT_PROMPT_BASE_GUIDELINES = [
   "Be concise. Show key file paths, tab context, and blockers clearly."
 ];
 
-const EXTENSION_AGENT_PROMPT_PROFILES = {
-  balanced: {
-    label: "平衡",
-    guidelines: ["Balance coding and browser operations based on the user's current task context."]
-  },
-  coding: {
-    label: "编码优先",
-    guidelines: [
-      "Prefer local file and shell workflows first; use browser tools only when the task explicitly depends on web interaction.",
-      "When touching code, report concrete file paths and exact changes succinctly."
-    ]
-  },
-  browser: {
-    label: "浏览器操作优先",
-    guidelines: [
-      "For web tasks, prioritize browser observation and in-page actions over speculative planning.",
-      "Prefer small verified browser steps and keep tab context explicit in progress updates."
-    ]
-  },
-  strict_verify: {
-    label: "严格验证优先",
-    guidelines: [
-      "Do not claim task completion until browser_verify (or equivalent evidence) confirms target progress.",
-      "If verification is uncertain or fails, state the blocker clearly and continue with evidence-driven recovery."
-    ]
-  }
-} as const;
-
-type ExtensionPromptProfileId = keyof typeof EXTENSION_AGENT_PROMPT_PROFILES;
-
-function normalizeExtensionPromptProfile(raw: unknown): ExtensionPromptProfileId {
-  const value = String(raw || "balanced").trim().toLowerCase();
-  if (value in EXTENSION_AGENT_PROMPT_PROFILES) {
-    return value as ExtensionPromptProfileId;
-  }
-  return "balanced";
-}
-
 function buildBrowserAgentSystemPrompt(config: BridgeConfig): string {
   const tools = EXTENSION_AGENT_PROMPT_TOOL_ORDER
     .map((name) => `- ${name}: ${EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS[name] || "Use when needed."}`)
     .join("\n");
-  const profileId = normalizeExtensionPromptProfile(config.llmSystemPromptProfile);
-  const profile = EXTENSION_AGENT_PROMPT_PROFILES[profileId];
-  const guidelines = [...EXTENSION_AGENT_PROMPT_BASE_GUIDELINES, ...profile.guidelines]
-    .map((line) => `- ${line}`)
-    .join("\n");
+  const guidelines = EXTENSION_AGENT_PROMPT_BASE_GUIDELINES.map((line) => `- ${line}`).join("\n");
   const customPrompt = String(config.llmSystemPromptCustom || "");
   const customPromptSection = customPrompt.trim()
     ? ["", "Custom system instructions (user-defined):", customPrompt]
@@ -1466,7 +1432,6 @@ function buildBrowserAgentSystemPrompt(config: BridgeConfig): string {
     "- Planner + loop engine run in Chrome extension sidepanel/service worker.",
     "- Local WebSocket bridge is execution-only (file/shell proxy), not task planner.",
     "- You can operate live browser tabs via browser tools.",
-    `- Prompt profile: ${profileId} (${profile.label}).`,
     "",
     "Available tools:",
     tools,
@@ -1775,7 +1740,6 @@ function extractLlmConfig(raw: JsonRecord): BridgeConfig {
     llmProfiles: raw.llmProfiles,
     llmProfileChains: raw.llmProfileChains,
     llmEscalationPolicy: String(raw.llmEscalationPolicy || "upgrade_only"),
-    llmSystemPromptProfile: String(raw.llmSystemPromptProfile || "balanced"),
     llmSystemPromptCustom: String(raw.llmSystemPromptCustom || ""),
     maxSteps: normalizeIntInRange(raw.maxSteps, 100, 1, 500),
     autoTitleInterval: normalizeIntInRange(raw.autoTitleInterval, 10, 0, 100),
@@ -3929,6 +3893,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           "search_elements",
           "click",
           "fill_element_by_uid",
+          "select_option_by_uid",
+          "press_key",
+          "scroll_page",
+          "navigate_tab",
           "fill_form",
           "browser_verify"
         ]);
@@ -4520,7 +4488,15 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             const modeEscalation = toRecord(result.modeEscalation);
             const focusEscalationKey = `${String(tc.id || "")}|${String(tc.function.name || "").trim().toLowerCase()}`;
             const canAutoEscalateToFocus =
-              ["click", "fill_element_by_uid", "fill_form"].includes(canonicalToolName) &&
+              [
+                "click",
+                "fill_element_by_uid",
+                "select_option_by_uid",
+                "press_key",
+                "scroll_page",
+                "navigate_tab",
+                "fill_form"
+              ].includes(canonicalToolName) &&
               result.retryable === true &&
               normalizeFailureReason(result.errorReason) === "failed_execute" &&
               modeEscalation.suggested === true &&

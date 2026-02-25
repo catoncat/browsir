@@ -1417,6 +1417,140 @@ describe("runtime-router.browser", () => {
     expect(String(actionPayload?.errorCode || "")).not.toBe("E_VERIFY_FAILED");
   });
 
+  it("tool_call 的 press_key 可走 browser.action provider 并传递按键语义", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    let providerInvoked = 0;
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.browser.action.press-key",
+        name: "browser-action-press-key",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["browser.action"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "browser.action": {
+            id: "plugin.browser.action.press-key.provider",
+            mode: "script",
+            priority: 50,
+            invoke: async (input) => {
+              providerInvoked += 1;
+              return {
+                data: {
+                  provider: "plugin-script-browser-action-press-key",
+                  action: input.args?.action || null
+                },
+                verified: true,
+                verifyReason: "verified"
+              };
+            }
+          }
+        }
+      }
+    });
+
+    let llmCall = 0;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
+      if (llmCall === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_press_key_1",
+                      type: "function",
+                      function: {
+                        name: "press_key",
+                        arguments: JSON.stringify({
+                          tabId: 1,
+                          key: "Enter",
+                          expect: {
+                            selectorExists: "#results"
+                          }
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "done"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test",
+        autoTitleInterval: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "按下回车触发搜索"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    expect(fetchSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(providerInvoked).toBe(1);
+
+    const viewed = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(viewed.ok).toBe(true);
+    const messages = readConversationMessages(viewed);
+    const toolPayloads = messages
+      .filter((entry) => String(entry.role || "") === "tool")
+      .map((entry) => JSON.parse(String(entry.content || "{}")) as Record<string, unknown>);
+    const actionPayload = toolPayloads.find((entry) => String(entry.tool || "") === "press_key");
+    expect(actionPayload).toBeDefined();
+    const action = ((actionPayload?.action || {}) as Record<string, unknown>) || {};
+    expect(String(action.kind || "")).toBe("press");
+    expect(String(action.key || "")).toBe("Enter");
+    expect(String(actionPayload?.errorCode || "")).not.toBe("E_VERIFY_FAILED");
+  });
+
   it("tool_call 支持 search_elements + fill_form 的 UID 链路", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -3446,6 +3580,11 @@ describe("runtime-router.browser", () => {
       .map((item) => String(item.content || ""))
       .join("\n");
     expect(systemText).toContain("You are an expert coding assistant operating inside Browser Brain Loop");
+    expect(systemText).toContain("select_option_by_uid");
+    expect(systemText).toContain("press_key");
+    expect(systemText).toContain("scroll_page");
+    expect(systemText).toContain("navigate_tab");
+    expect(systemText).toContain("For click/fill/select, prefer uid/ref/backendNodeId");
     expect(systemText).toContain("<available_skills>");
     expect(systemText).toContain('name="Visible Skill"');
     expect(systemText).toContain('location="mem://skills/visible/SKILL.md"');
@@ -3453,7 +3592,7 @@ describe("runtime-router.browser", () => {
     expect(systemText).not.toContain("mem://skills/hidden/SKILL.md");
   });
 
-  it("brain.run.start 会根据配置注入 prompt profile 与自定义 system prompt", async () => {
+  it("brain.run.start 会注入自定义 system prompt", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
 
@@ -3487,7 +3626,6 @@ describe("runtime-router.browser", () => {
         llmApiBase: "https://example.ai/v1",
         llmApiKey: "sk-demo",
         llmModel: "gpt-test",
-        llmSystemPromptProfile: "coding",
         llmSystemPromptCustom: "Always report changed file paths in the final response."
       }
     });
@@ -3510,8 +3648,7 @@ describe("runtime-router.browser", () => {
       .map((item) => String(item.content || ""))
       .join("\n");
 
-    expect(systemText).toContain("Prompt profile: coding");
-    expect(systemText).toContain("Prefer local file and shell workflows first");
+    expect(systemText).toContain("Custom system instructions (user-defined):");
     expect(systemText).toContain("Always report changed file paths in the final response.");
   });
 
@@ -3794,13 +3931,13 @@ describe("runtime-router.browser", () => {
     const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
     expect(sessionId).not.toBe("");
 
-    const root = "/repo/.agents/skills";
+    const root = "mem://skills";
     const scanStdout = [
-      `0\tproject\t${root}\t${root}/write-doc.md`,
-      `0\tproject\t${root}\t${root}/browser-flow/SKILL.md`,
-      `0\tproject\t${root}\t${root}/browser-flow/README.md`,
-      `0\tproject\t${root}\t${root}/.hidden/SKILL.md`,
-      `0\tproject\t${root}\t${root}/vendor/node_modules/pkg/SKILL.md`
+      `${root}/write-doc.md`,
+      `${root}/browser-flow/SKILL.md`,
+      `${root}/browser-flow/README.md`,
+      `${root}/.hidden/SKILL.md`,
+      `${root}/vendor/node_modules/pkg/SKILL.md`
     ].join("\n");
 
     orchestrator.registerCapabilityProvider(
@@ -3894,7 +4031,7 @@ Do browser-flow`
     const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
     expect(sessionId).not.toBe("");
 
-    const root = "/repo/.agents/skills";
+    const root = "mem://skills";
     orchestrator.registerCapabilityProvider(
       "process.exec",
       {
@@ -3902,7 +4039,7 @@ Do browser-flow`
         mode: "script",
         priority: 100,
         invoke: async () => ({
-          stdout: `0\tproject\t${root}\t${root}/missing-description.md`,
+          stdout: `${root}/missing-description.md`,
           stderr: "",
           exitCode: 0
         })
@@ -3953,6 +4090,17 @@ description missing`
     expect(installMissingLocation.ok).toBe(false);
     expect(String(installMissingLocation.error || "")).toContain("brain.skill.install 需要 location");
 
+    const installLocalLocation = await invokeRuntime({
+      type: "brain.skill.install",
+      skill: {
+        id: "skill.local.invalid",
+        name: "Local Invalid",
+        location: "/repo/.agents/skills/local/SKILL.md"
+      }
+    });
+    expect(installLocalLocation.ok).toBe(false);
+    expect(String(installLocalLocation.error || "")).toContain("仅支持 mem:// 或 vfs://");
+
     const enableMissingSkillId = await invokeRuntime({
       type: "brain.skill.enable"
     });
@@ -3978,6 +4126,14 @@ description missing`
     });
     expect(discoverMissingSessionId.ok).toBe(false);
     expect(String(discoverMissingSessionId.error || "")).toContain("brain.skill.discover 需要 sessionId");
+
+    const discoverLocalRoot = await invokeRuntime({
+      type: "brain.skill.discover",
+      sessionId: "session-demo",
+      roots: [{ root: "/repo/.agents/skills", source: "project" }]
+    });
+    expect(discoverLocalRoot.ok).toBe(false);
+    expect(String(discoverLocalRoot.error || "")).toContain("仅支持 mem:// 或 vfs://");
 
     const uninstallMissingSkill = await invokeRuntime({
       type: "brain.skill.uninstall",
