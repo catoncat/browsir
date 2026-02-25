@@ -267,15 +267,23 @@ function summarizeLlmRequestPayload(payload: JsonRecord): JsonRecord {
     const message = toRecord(item);
     return String(message.role || "") === "tool" ? count + 1 : count;
   }, 0);
+  const fallbackMessageChars = messages.reduce((count, item) => {
+    const message = toRecord(item);
+    return count + String(message.content || "").length;
+  }, 0);
   return {
     model: String(payload.model || ""),
     step: toPositiveInt(payload.step),
-    messageCount: toPositiveInt(payload.messageCount),
+    messageCount: toPositiveInt(payload.messageCount) ?? messages.length,
+    messageChars: toPositiveInt(payload.messageChars) ?? fallbackMessageChars,
+    maxMessageChars: toPositiveInt(payload.maxMessageChars),
     url: String(payload.url || ""),
-    requestMessageCount: messages.length,
-    toolResultCount,
-    hasToolsDefinition: Array.isArray(req.tools) && req.tools.length > 0,
-    lastUserSnippet: lastUser
+    requestBytes: toPositiveInt(payload.requestBytes),
+    requestMessageCount: messages.length || toPositiveInt(payload.messageCount) || 0,
+    toolResultCount: toPositiveInt(payload.toolMessageCount) ?? toolResultCount,
+    hasToolsDefinition:
+      (toPositiveInt(payload.toolDefinitionCount) ?? 0) > 0 || (Array.isArray(req.tools) && req.tools.length > 0),
+    lastUserSnippet: String(payload.lastUserSnippet || "") || lastUser
   };
 }
 
@@ -305,12 +313,15 @@ function buildLlmTrace(events: NormalizedStepEvent[], limit = 80): LlmEventPoint
     if (event.type === "llm.request") {
       point.data = summarizeLlmRequestPayload(payload);
     } else if (event.type === "llm.response.raw") {
+      const rawBody = String(payload.body || payload.bodyPreview || "");
       point.data = {
         step: toPositiveInt(payload.step),
         attempt: toPositiveInt(payload.attempt),
         status: Number(payload.status || 0),
         ok: payload.ok === true,
-        body: clipText(payload.body, 1200)
+        bodyLength: toPositiveInt(payload.bodyLength) ?? rawBody.length,
+        bodyTruncated: payload.bodyTruncated === true,
+        body: clipText(rawBody, 1200)
       };
     } else if (event.type === "llm.response.parsed") {
       point.data = {

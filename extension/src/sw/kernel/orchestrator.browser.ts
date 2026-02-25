@@ -1,4 +1,4 @@
-import { compact, shouldCompact } from "./compaction.browser";
+import { compact, prepareCompaction, shouldCompact } from "./compaction.browser";
 import { BrainEventBus, type BrainEventEnvelope } from "./events";
 import { HookRunner, type HookHandler, type HookHandlerOptions } from "./hook-runner";
 import type { OrchestratorHookMap } from "./orchestrator-hooks";
@@ -83,6 +83,14 @@ function isRetryableError(error: AgentEndInput["error"]): boolean {
 
 function backoffDelay(attempt: number, base: number, cap: number): number {
   return Math.min(cap, base * 2 ** Math.max(0, attempt - 1));
+}
+
+function toExecuteModeOrNull(value: unknown): ExecuteMode | null {
+  const mode = String(value || "").trim();
+  if (mode === "script" || mode === "cdp" || mode === "bridge") {
+    return mode as ExecuteMode;
+  }
+  return null;
 }
 
 class HookBlockError extends Error {
@@ -523,11 +531,15 @@ export class BrainOrchestrator {
     let modeUsed: ExecuteMode = initialMode;
     let verifyInput: ExecuteStepInput = nextInput;
     let capabilityUsed: ExecuteCapability | undefined;
+    let fallbackFrom: ExecuteMode | undefined;
     let data: unknown;
 
     try {
       const invoked = await this.invokeProviderWithHooks(initialMode, nextInput);
       modeUsed = invoked.modeUsed;
+      if (modeUsed !== initialMode) {
+        fallbackFrom = initialMode;
+      }
       verifyInput = invoked.inputUsed;
       capabilityUsed = invoked.capabilityUsed;
       data = invoked.data;
@@ -536,15 +548,40 @@ export class BrainOrchestrator {
         return this.applyAfterExecuteHook(nextInput, {
           ok: false,
           modeUsed,
+          fallbackFrom,
           error: error.message,
           verified: false
         });
       }
 
+      const err = error as Error & {
+        code?: unknown;
+        details?: unknown;
+        retryable?: unknown;
+        modeUsed?: unknown;
+        capabilityUsed?: unknown;
+      };
+      const modeFromError = toExecuteModeOrNull(err.modeUsed);
+      if (modeFromError) {
+        modeUsed = modeFromError;
+      }
+      if (!fallbackFrom && modeUsed !== initialMode) {
+        fallbackFrom = initialMode;
+      }
+      const capabilityFromError = typeof err.capabilityUsed === "string" ? err.capabilityUsed.trim() : "";
+      if (capabilityFromError) {
+        capabilityUsed = capabilityFromError;
+      }
+
       return this.applyAfterExecuteHook(nextInput, {
         ok: false,
         modeUsed,
+        capabilityUsed,
+        fallbackFrom,
         error: error instanceof Error ? error.message : String(error),
+        errorCode: typeof err.code === "string" && err.code.trim() ? err.code.trim() : undefined,
+        errorDetails: err.details,
+        retryable: typeof err.retryable === "boolean" ? err.retryable : undefined,
         verified: false
       });
     }
@@ -565,6 +602,7 @@ export class BrainOrchestrator {
       ok: true,
       modeUsed,
       capabilityUsed,
+      fallbackFrom,
       verified,
       verifyReason,
       data
@@ -759,12 +797,30 @@ export class BrainOrchestrator {
 
     try {
       const context = await this.sessions.buildSessionContext(sessionId);
-      const draft = compact({
+      const preparation = prepareCompaction({
         reason: nextReason,
         entries: context.entries,
         previousSummary: context.previousSummary,
         keepTail: this.options.keepTail,
         splitTurn: this.options.splitTurn
+      });
+      const draft = await compact(preparation, async (summaryRequest) => {
+        const summaryHook = await this.hooks.run("compaction.summary", {
+          sessionId,
+          reason: nextReason,
+          mode: summaryRequest.mode,
+          promptText: summaryRequest.promptText,
+          maxTokens: summaryRequest.maxTokens,
+          summary: ""
+        });
+        if (summaryHook.blocked) {
+          throw new Error(`compaction.summary blocked: ${summaryHook.reason || "blocked"}`);
+        }
+        const summary = String(summaryHook.value.summary || "").trim();
+        if (!summary) {
+          throw new Error("compaction.summary 返回为空");
+        }
+        return summary;
       });
       const compactionEntry = await this.sessions.appendCompaction(sessionId, nextReason, draft, {
         source: "browser-orchestrator",

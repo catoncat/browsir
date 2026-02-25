@@ -1081,6 +1081,44 @@ describe("runtime-router.browser", () => {
     const eventTypes = stream.map((item) => String(item.type || ""));
     expect(eventTypes).toContain("llm.request");
     expect(eventTypes).toContain("llm.response.parsed");
+    const llmReq = stream.find((item) => String(item.type || "") === "llm.request") || {};
+    const llmReqPayload = ((llmReq as Record<string, unknown>).payload || {}) as Record<string, unknown>;
+    expect("payload" in llmReqPayload).toBe(false);
+    expect(Number(llmReqPayload.messageCount || 0)).toBeGreaterThan(0);
+    expect(Number(llmReqPayload.messageChars || 0)).toBeGreaterThan(0);
+    expect(typeof llmReqPayload.lastUserSnippet).toBe("string");
+  });
+
+  it("缺少 LLM 配置时应以 failed_execute 结束而非 done", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "",
+        llmModel: "gpt-test"
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "缺少 llm key 的场景"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId);
+    const done = stream.find((item) => String(item.type || "") === "loop_done") as Record<string, unknown> | undefined;
+    const donePayload = (done?.payload || {}) as Record<string, unknown>;
+    expect(String(donePayload.status || "")).toBe("failed_execute");
+
+    const skipped = stream.find((item) => String(item.type || "") === "llm.skipped") as Record<string, unknown> | undefined;
+    const skippedPayload = (skipped?.payload || {}) as Record<string, unknown>;
+    expect(String(skippedPayload.reason || "")).toBe("missing_llm_config");
   });
 
   it("llm.before_request patch 会改写真实请求 body", async () => {

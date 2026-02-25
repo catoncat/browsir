@@ -5,6 +5,7 @@ import {
   type ExecuteStepResult,
   type RuntimeView
 } from "./orchestrator.browser";
+import { SUMMARIZATION_SYSTEM_PROMPT } from "./compaction.browser";
 import { writeSessionMeta } from "./session-store.browser";
 import { type BridgeConfig, type RuntimeInfraHandler } from "./runtime-infra.browser";
 import { type CapabilityExecutionPolicy, type StepVerifyPolicy } from "./capability-policy";
@@ -30,6 +31,8 @@ const TOOL_AUTO_RETRY_CAP_DELAY_MS = 2_000;
 const DEFAULT_LLM_MAX_RETRY_DELAY_MS = 60_000;
 const MIN_LLM_MAX_RETRY_DELAY_MS = 0;
 const MAX_LLM_MAX_RETRY_DELAY_MS = 300_000;
+const LLM_TRACE_BODY_MAX_CHARS = 4_000;
+const LLM_TRACE_USER_SNIPPET_MAX_CHARS = 420;
 const TOOL_RETRYABLE_FAILURE_MAX_TOTAL = 8;
 const TOOL_RETRYABLE_FAILURE_MAX_PER_SIGNATURE = 3;
 
@@ -67,6 +70,8 @@ interface LlmRequestInput {
   llmMaxRetryDelayMs: number;
   step: number;
   messages: JsonRecord[];
+  toolChoice?: "auto" | "required";
+  toolScope?: "all" | "browser_only";
 }
 
 type RuntimeErrorWithMeta = Error & {
@@ -172,6 +177,100 @@ function safeJsonParse(raw: unknown): unknown {
   } catch {
     return null;
   }
+}
+
+function estimateJsonBytes(value: unknown): number {
+  try {
+    const text = JSON.stringify(value);
+    return new TextEncoder().encode(text).length;
+  } catch {
+    return 0;
+  }
+}
+
+function extractContentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return String(content || "");
+  const parts: string[] = [];
+  for (const item of content) {
+    if (typeof item === "string") {
+      parts.push(item);
+      continue;
+    }
+    const block = toRecord(item);
+    if (typeof block.text === "string") {
+      parts.push(block.text);
+      continue;
+    }
+    if (typeof block.input_text === "string") {
+      parts.push(block.input_text);
+      continue;
+    }
+    if (typeof block.content === "string") {
+      parts.push(block.content);
+    }
+  }
+  return parts.join("");
+}
+
+function summarizeLlmRequestPayload(payload: JsonRecord): JsonRecord {
+  const messages = Array.isArray(payload.messages) ? payload.messages : [];
+  let messageChars = 0;
+  let maxMessageChars = 0;
+  let toolMessageCount = 0;
+  let lastUserSnippet = "";
+
+  for (const item of messages) {
+    const message = toRecord(item);
+    const role = String(message.role || "").trim();
+    if (role === "tool") toolMessageCount += 1;
+    const text = extractContentText(message.content);
+    const chars = text.length;
+    messageChars += chars;
+    if (chars > maxMessageChars) maxMessageChars = chars;
+  }
+
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = toRecord(messages[i]);
+    if (String(message.role || "") !== "user") continue;
+    const text = extractContentText(message.content).trim();
+    if (!text) continue;
+    lastUserSnippet = clipText(text, LLM_TRACE_USER_SNIPPET_MAX_CHARS);
+    break;
+  }
+
+  return {
+    messageCount: messages.length,
+    messageChars,
+    maxMessageChars,
+    toolMessageCount,
+    toolDefinitionCount: Array.isArray(payload.tools) ? payload.tools.length : 0,
+    requestBytes: estimateJsonBytes(payload),
+    stream: payload.stream === true,
+    temperature: typeof payload.temperature === "number" ? payload.temperature : undefined,
+    lastUserSnippet
+  };
+}
+
+function buildLlmRawTracePayload(input: {
+  step: number;
+  attempt: number;
+  status: number;
+  ok: boolean;
+  body: string;
+  retryDelayHintMs?: number | null;
+}): JsonRecord {
+  const body = String(input.body || "");
+  return {
+    step: input.step,
+    attempt: input.attempt,
+    status: input.status,
+    ok: input.ok,
+    retryDelayHintMs: input.retryDelayHintMs,
+    body: clipText(body, LLM_TRACE_BODY_MAX_CHARS),
+    bodyLength: body.length,
+    bodyTruncated: body.length > LLM_TRACE_BODY_MAX_CHARS
+  };
 }
 
 function parsePositiveInt(raw: unknown): number | null {
@@ -312,6 +411,27 @@ function normalizeTabIds(input: unknown[]): number[] {
     out.push(id);
   }
   return out;
+}
+
+function extractTabIdsFromPrompt(prompt: string): number[] {
+  const text = String(prompt || "");
+  const ids: number[] = [];
+  const seen = new Set<number>();
+  const regex = /tabid\s*[:=]\s*(\d+)/gi;
+  let match: RegExpExecArray | null = null;
+  while ((match = regex.exec(text)) !== null) {
+    const tabId = parsePositiveInt(match[1]);
+    if (!tabId || seen.has(tabId)) continue;
+    seen.add(tabId);
+    ids.push(tabId);
+  }
+  return ids;
+}
+
+function shouldRequireBrowserProof(prompt: string): boolean {
+  const text = String(prompt || "");
+  if (!/tabid\s*[:=]\s*\d+/i.test(text)) return false;
+  return /(fill|click|type|navigate|verify|selector|browser_action|browser_verify|页面|填写|点击|输入|验证)/i.test(text);
 }
 
 function normalizeSessionTitle(value: unknown, fallback = ""): string {
@@ -707,7 +827,12 @@ function buildSharedTabsContextMessage(sharedTabs: unknown): string {
     const tabIdPart = Number.isInteger(id) ? ` [id=${id}]` : "";
     lines.push(`${i + 1}. ${title}${tabIdPart}${url ? `\n   URL: ${url}` : ""}`);
   }
-  return ["Shared tabs context (user-selected):", ...lines, "Use this context directly before deciding whether to call list_tabs/open_tab."].join("\n");
+  return [
+    "Shared tabs context (user-selected):",
+    ...lines,
+    "Use this context directly before deciding whether to call list_tabs/open_tab.",
+    "For browser tasks, do not claim done until browser actions are verified."
+  ].join("\n");
 }
 
 function buildTaskProgressSystemMessage(input: {
@@ -920,6 +1045,19 @@ async function getActiveTabIdForRuntime(): Promise<number | null> {
   return first?.id || null;
 }
 
+function readSharedTabIds(sharedTabs: unknown): number[] {
+  if (!Array.isArray(sharedTabs)) return [];
+  const out: number[] = [];
+  const seen = new Set<number>();
+  for (const item of sharedTabs) {
+    const id = parsePositiveInt(toRecord(item).id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
 async function callInfra(infra: RuntimeInfraHandler, message: JsonRecord): Promise<JsonRecord> {
   const result = await infra.handleMessage(message);
   if (!result) {
@@ -1030,6 +1168,126 @@ async function requestSessionTitleFromLlm(input: {
   }
 }
 
+async function requestCompactionSummaryFromLlm(input: {
+  orchestrator: BrainOrchestrator;
+  infra: RuntimeInfraHandler;
+  sessionId: string;
+  mode: "history" | "turn_prefix";
+  promptText: string;
+  maxTokens: number;
+}): Promise<string> {
+  const cfgRaw = await callInfra(input.infra, { type: "config.get" });
+  const config = extractLlmConfig(cfgRaw);
+  const llmBase = String(config.llmApiBase || "").trim();
+  const llmKey = String(config.llmApiKey || "").trim();
+  const llmModel = String(config.llmModel || "gpt-5.3-codex").trim();
+  const llmTimeoutMs = normalizeIntInRange(config.llmTimeoutMs, DEFAULT_LLM_TIMEOUT_MS, MIN_LLM_TIMEOUT_MS, MAX_LLM_TIMEOUT_MS);
+  if (!llmBase || !llmKey) {
+    throw new Error("compaction summary 需要可用 LLM（llmApiBase/llmApiKey）");
+  }
+
+  const baseUrl = `${llmBase.replace(/\/$/, "")}/chat/completions`;
+  const payload: JsonRecord = {
+    model: llmModel,
+    messages: [
+      { role: "system", content: SUMMARIZATION_SYSTEM_PROMPT },
+      { role: "user", content: String(input.promptText || "") }
+    ],
+    max_tokens: normalizeIntInRange(input.maxTokens, 2048, 128, 32768),
+    temperature: 0.2,
+    stream: false,
+    reasoning: "high"
+  };
+
+  const beforeRequest = await input.orchestrator.runHook("llm.before_request", {
+    request: {
+      sessionId: input.sessionId,
+      step: 0,
+      attempt: 1,
+      mode: input.mode,
+      source: "compaction",
+      url: baseUrl,
+      payload
+    }
+  });
+  if (beforeRequest.blocked) {
+    throw new Error(`llm.before_request blocked: ${beforeRequest.reason || "blocked"}`);
+  }
+  const patchedRequest = toRecord(beforeRequest.value.request);
+  const requestUrl = String(patchedRequest.url || baseUrl).trim() || baseUrl;
+  const requestPayload = toRecord(patchedRequest.payload);
+
+  input.orchestrator.events.emit("llm.request", input.sessionId, {
+    step: 0,
+    mode: "compaction",
+    summaryMode: input.mode,
+    url: requestUrl,
+    model: llmModel,
+    ...summarizeLlmRequestPayload(requestPayload)
+  });
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort("compaction-summary-timeout"), llmTimeoutMs);
+  try {
+    const response = await fetch(requestUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${llmKey}`
+      },
+      body: JSON.stringify(requestPayload),
+      signal: ctrl.signal
+    });
+
+    const status = response.status;
+    const ok = response.ok;
+    const contentType = String(response.headers.get("content-type") || "");
+    const rawBody = await response.text();
+    input.orchestrator.events.emit(
+      "llm.response.raw",
+      input.sessionId,
+      buildLlmRawTracePayload({
+        step: 0,
+        attempt: 1,
+        status,
+        ok,
+        body: rawBody
+      })
+    );
+
+    if (!ok) {
+      throw new Error(`Compaction summary HTTP ${status}`);
+    }
+
+    const message = parseLlmMessageFromBody(rawBody, contentType);
+    const afterResponse = await input.orchestrator.runHook("llm.after_response", {
+      request: {
+        sessionId: input.sessionId,
+        step: 0,
+        attempt: 1,
+        mode: input.mode,
+        source: "compaction",
+        url: requestUrl,
+        payload: requestPayload,
+        status,
+        ok
+      },
+      response: message
+    });
+    if (afterResponse.blocked) {
+      throw new Error(`llm.after_response blocked: ${afterResponse.reason || "blocked"}`);
+    }
+    const patchedResponse = toRecord(afterResponse.value.response);
+    const summary = parseLlmContent(patchedResponse).trim();
+    if (!summary) {
+      throw new Error("Compaction summary 为空");
+    }
+    return summary;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function refreshSessionTitleAuto(
   orchestrator: BrainOrchestrator,
   sessionId: string,
@@ -1086,6 +1344,38 @@ async function refreshSessionTitleAuto(
 }
 
 export function createRuntimeLoopController(orchestrator: BrainOrchestrator, infra: RuntimeInfraHandler): RuntimeLoopController {
+  orchestrator.onHook(
+    "compaction.summary",
+    async (payload) => {
+      const promptText = String(payload.promptText || "").trim();
+      if (!promptText) {
+        return { action: "block", reason: "compaction.summary prompt 为空" };
+      }
+      try {
+        const summary = await requestCompactionSummaryFromLlm({
+          orchestrator,
+          infra,
+          sessionId: String(payload.sessionId || ""),
+          mode: payload.mode === "turn_prefix" ? "turn_prefix" : "history",
+          promptText,
+          maxTokens: Number(payload.maxTokens || 0)
+        });
+        return {
+          action: "patch",
+          patch: {
+            summary
+          }
+        };
+      } catch (error) {
+        return {
+          action: "block",
+          reason: error instanceof Error ? error.message : String(error)
+        };
+      }
+    },
+    { id: "runtime-loop.compaction.summary", priority: 100 }
+  );
+
   const bridgeCapabilityInvoker = async (input: {
     sessionId: string;
     capability: ExecuteCapability;
@@ -1156,6 +1446,36 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
   }
 
+  async function resolveRunScopeTabId(sessionId: string, explicitTabIdRaw: unknown): Promise<number | null> {
+    const explicitTabId = parsePositiveInt(explicitTabIdRaw);
+    const meta = await orchestrator.sessions.getMeta(sessionId);
+    const metadata = toRecord(toRecord(meta?.header).metadata);
+    const currentPrimary = parsePositiveInt(metadata.primaryTabId);
+    const sharedTabIds = readSharedTabIds(metadata.sharedTabs);
+
+    let resolved = explicitTabId || currentPrimary;
+    if (!resolved && sharedTabIds.length > 0) {
+      resolved = sharedTabIds[0];
+    }
+    if (!resolved) {
+      resolved = await getActiveTabIdForRuntime();
+    }
+
+    if (meta && resolved && currentPrimary !== resolved) {
+      await writeSessionMeta(sessionId, {
+        ...meta,
+        header: {
+          ...meta.header,
+          metadata: {
+            ...metadata,
+            primaryTabId: resolved
+          }
+        }
+      });
+    }
+    return resolved;
+  }
+
   function createRuntimeError(message: string, meta: { code?: string; retryable?: boolean; details?: unknown } = {}): RuntimeErrorWithMeta {
     const error = new Error(message) as RuntimeErrorWithMeta;
     if (meta.code) error.code = meta.code;
@@ -1196,7 +1516,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const actionPayload = toRecord(payload.action) && Object.keys(toRecord(payload.action)).length > 0 ? toRecord(payload.action) : payload;
     const tabId = parsePositiveInt(payload.tabId || actionPayload.tabId);
     if (!tabId) {
-      throw createRuntimeError("browser_action 需要有效 tabId", {
+      throw createRuntimeError("cdp 执行需要有效 tabId", {
         code: "E_NO_TAB",
         retryable: true
       });
@@ -1862,7 +2182,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     };
   }
 
-  async function buildToolPlan(context: ResolvedToolCallContext): Promise<{ ok: true; plan: ToolPlan } | { ok: false; error: JsonRecord }> {
+  async function buildToolPlan(
+    sessionId: string,
+    context: ResolvedToolCallContext
+  ): Promise<{ ok: true; plan: ToolPlan } | { ok: false; error: JsonRecord }> {
     const args = context.args;
     switch (context.executionTool) {
       case "bash": {
@@ -1964,7 +2287,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         };
       }
       case "snapshot": {
-        const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
+        const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
         if (!tabId) {
           return {
             ok: false,
@@ -1997,7 +2320,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         };
       }
       case "browser_action": {
-        const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
+        const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
         if (!tabId) {
           return {
             ok: false,
@@ -2032,7 +2355,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         };
       }
       case "browser_verify": {
-        const tabId = parsePositiveInt(args.tabId) || (await getActiveTabIdForRuntime());
+        const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
         if (!tabId) {
           return {
             ok: false,
@@ -2217,13 +2540,15 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
   async function executeToolCall(sessionId: string, toolCall: ToolCallItem): Promise<JsonRecord> {
     const resolved = resolveToolCallContext(toolCall);
     if (!resolved.ok) return resolved.error;
-    const planResult = await buildToolPlan(resolved.value);
+    const planResult = await buildToolPlan(sessionId, resolved.value);
     if (!planResult.ok) return planResult.error;
     return await dispatchToolPlan(sessionId, planResult.plan);
   }
 
   async function requestLlmWithRetry(input: LlmRequestInput): Promise<JsonRecord> {
     const { sessionId, llmBase, llmKey, llmModel, llmTimeoutMs, llmMaxRetryDelayMs, step, messages } = input;
+    const toolChoice = input.toolChoice === "required" ? "required" : "auto";
+    const toolScope = input.toolScope === "browser_only" ? "browser_only" : "all";
     let lastError: unknown = null;
     const configuredMaxAttempts = Number(orchestrator.getRunState(sessionId).retry.maxAttempts ?? MAX_LLM_RETRIES);
     const maxAttempts = Number.isFinite(configuredMaxAttempts)
@@ -2239,6 +2564,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       let rawBody = "";
       let contentType = "";
       try {
+        const browserOnlyTools = new Set(["list_tabs", "open_tab", "snapshot", "browser_action", "browser_verify"]);
         const llmToolDefs = orchestrator
           .listLlmToolDefinitions({ includeAliases: true })
           .filter((definition) => {
@@ -2247,12 +2573,19 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             const contract = orchestrator.resolveToolContract(toolName);
             const canonical = String(contract?.name || toolName).trim();
             return RUNTIME_EXECUTABLE_TOOL_NAMES.has(canonical);
+          })
+          .filter((definition) => {
+            if (toolScope !== "browser_only") return true;
+            const toolName = String(definition.function?.name || "").trim();
+            const contract = orchestrator.resolveToolContract(toolName);
+            const canonical = String(contract?.name || toolName).trim();
+            return browserOnlyTools.has(canonical);
           });
         const basePayload: JsonRecord = {
           model: llmModel,
           messages,
           tools: llmToolDefs,
-          tool_choice: "auto",
+          tool_choice: toolChoice,
           temperature: 0.2,
           stream: true
         };
@@ -2286,7 +2619,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!Array.isArray(requestPayload.messages)) requestPayload.messages = messages;
         if (!Array.isArray(requestPayload.tools)) requestPayload.tools = llmToolDefs;
         if (!String(requestPayload.model || "").trim()) requestPayload.model = llmModel;
-        if (!requestPayload.tool_choice) requestPayload.tool_choice = "auto";
+        if (!requestPayload.tool_choice) requestPayload.tool_choice = toolChoice;
         if (typeof requestPayload.temperature !== "number" || !Number.isFinite(requestPayload.temperature)) {
           requestPayload.temperature = 0.2;
         }
@@ -2296,8 +2629,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           step,
           url: requestUrl,
           model: llmModel,
-          messageCount: requestPayload.messages && Array.isArray(requestPayload.messages) ? requestPayload.messages.length : 0,
-          payload: requestPayload
+          ...summarizeLlmRequestPayload(requestPayload)
         });
 
         const resp = await fetch(requestUrl, {
@@ -2316,14 +2648,18 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!ok) {
           rawBody = await resp.text();
           const retryDelayHintMs = extractRetryDelayHintMs(rawBody, resp);
-          orchestrator.events.emit("llm.response.raw", sessionId, {
-            step,
-            attempt,
-            status,
-            ok,
-            retryDelayHintMs,
-            body: clipText(rawBody)
-          });
+          orchestrator.events.emit(
+            "llm.response.raw",
+            sessionId,
+            buildLlmRawTracePayload({
+              step,
+              attempt,
+              status,
+              ok,
+              retryDelayHintMs,
+              body: rawBody
+            })
+          );
           if (retryDelayHintMs != null && llmMaxRetryDelayMs > 0 && retryDelayHintMs > llmMaxRetryDelayMs) {
             const exceeded = new Error(
               `LLM retry delay ${Math.ceil(retryDelayHintMs / 1000)}s exceeds cap ${Math.ceil(llmMaxRetryDelayMs / 1000)}s`
@@ -2371,13 +2707,17 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           message = parseLlmMessageFromBody(rawBody, contentType);
         }
 
-        orchestrator.events.emit("llm.response.raw", sessionId, {
-          step,
-          attempt,
-          status,
-          ok,
-          body: clipText(rawBody)
-        });
+        orchestrator.events.emit(
+          "llm.response.raw",
+          sessionId,
+          buildLlmRawTracePayload({
+            step,
+            attempt,
+            status,
+            ok,
+            body: rawBody
+          })
+        );
         const afterResponse = await orchestrator.runHook("llm.after_response", {
           request: {
             sessionId,
@@ -2488,7 +2828,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     });
 
     if (!llmBase || !llmKey) {
-      const text = "当前未配置可用 LLM（llmApiBase/llmApiKey），已记录你的输入。";
+      const text = "执行失败：当前未配置可用 LLM（llmApiBase/llmApiKey）。";
       orchestrator.events.emit("llm.skipped", sessionId, {
         reason: "missing_llm_config",
         hasBase: !!llmBase,
@@ -2501,7 +2841,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       });
       orchestrator.setRunning(sessionId, false);
       orchestrator.events.emit("loop_done", sessionId, {
-        status: "done",
+        status: "failed_execute",
         llmSteps: 0,
         toolSteps: 0
       });
@@ -2518,6 +2858,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     let llmStep = 0;
     let toolStep = 0;
     let finalStatus = "done";
+    const requireBrowserProof = shouldRequireBrowserProof(prompt);
+    let browserProofSatisfied = false;
     const retryableFailureBySignature = new Map<string, number>();
     let retryableFailureTotal = 0;
 
@@ -2559,7 +2901,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           llmTimeoutMs,
           llmMaxRetryDelayMs,
           step: llmStep,
-          messages: requestMessages
+          messages: requestMessages,
+          toolChoice: requireBrowserProof && !browserProofSatisfied ? "required" : "auto",
+          toolScope: requireBrowserProof ? "browser_only" : "all"
         });
 
         const assistantText = parseLlmContent(message).trim();
@@ -2587,6 +2931,17 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         }
 
         if (toolCalls.length === 0) {
+          if (requireBrowserProof && !browserProofSatisfied) {
+            messages.push({
+              role: "system",
+              content:
+                "尚未完成可验证页面操作。请调用 browser_action/browser_verify 完成目标并验证后，再给出完成结论。"
+            });
+            orchestrator.events.emit("loop_guard_browser_progress_missing", sessionId, {
+              step: llmStep
+            });
+            continue;
+          }
           orchestrator.events.emit("step_finished", sessionId, {
             step: llmStep,
             ok: true,
@@ -2690,6 +3045,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
           const responsePayload = toRecord(result.response);
           const rawToolData = responsePayload.data ?? result;
+          const toolName = String(tc.function.name || "").trim().toLowerCase();
+          if (toolName === "browser_action" || toolName === "browser_verify") {
+            const verified = result.verified === true || String(result.verifyReason || "").trim() === "verified";
+            if (verified || toolName === "browser_verify") {
+              browserProofSatisfied = true;
+            }
+          }
           const llmToolContent = safeStringify(rawToolData, 12_000);
           const uiToolPayload = buildToolSuccessPayload(tc, rawToolData);
           messages.push({
@@ -2775,8 +3137,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       const metadata = toRecord(header.metadata);
       if (sharedTabs.length > 0) {
         metadata.sharedTabs = sharedTabs;
+        const currentPrimary = parsePositiveInt(metadata.primaryTabId);
+        const sharedTabIds = sharedTabs.map((tab) => Number(tab.id)).filter((id) => Number.isInteger(id) && id > 0);
+        metadata.primaryTabId =
+          currentPrimary && sharedTabIds.includes(currentPrimary) ? currentPrimary : Number(sharedTabs[0].id);
       } else {
         delete metadata.sharedTabs;
+        delete metadata.primaryTabId;
       }
       await writeSessionMeta(sessionId, {
         ...meta,
@@ -2789,7 +3156,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
     orchestrator.events.emit("input.shared_tabs", sessionId, {
       providedTabIds: tabIds,
-      resolvedCount: sharedTabs.length
+      resolvedCount: sharedTabs.length,
+      primaryTabId: sharedTabs.length > 0 ? Number(sharedTabs[0].id) : null
     });
   }
 
@@ -2837,8 +3205,17 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       }
     }
 
-    if (Array.isArray(input.tabIds)) {
-      await applySharedTabs(sessionId, input.tabIds);
+    const hasExplicitTabIds = Array.isArray(input.tabIds);
+    if (hasExplicitTabIds) {
+      await applySharedTabs(sessionId, normalizeTabIds(input.tabIds || []));
+    } else {
+      const inferredTabIds = extractTabIdsFromPrompt(String(input.prompt || ""));
+      if (inferredTabIds.length > 0) {
+        await applySharedTabs(sessionId, inferredTabIds);
+        orchestrator.events.emit("input.tab_ids_inferred", sessionId, {
+          tabIds: inferredTabIds
+        });
+      }
     }
 
     const prompt = String(input.prompt || "").trim();

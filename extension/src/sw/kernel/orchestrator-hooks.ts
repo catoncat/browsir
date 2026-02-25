@@ -64,6 +64,14 @@ export interface OrchestratorHookMap {
     reason: "overflow" | "threshold";
     willRetry: boolean;
   };
+  "compaction.summary": {
+    sessionId: string;
+    reason: "overflow" | "threshold";
+    mode: "history" | "turn_prefix";
+    promptText: string;
+    maxTokens: number;
+    summary: string;
+  };
   "compaction.after": {
     sessionId: string;
     reason: "overflow" | "threshold";

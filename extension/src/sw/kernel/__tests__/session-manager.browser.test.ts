@@ -1,7 +1,7 @@
 import "./test-setup";
 
 import { describe, expect, it } from "vitest";
-import { prepareCompaction } from "../compaction.browser";
+import { compact, prepareCompaction } from "../compaction.browser";
 import { BrowserSessionManager } from "../session-manager.browser";
 
 describe("session-manager.browser", () => {
@@ -36,13 +36,14 @@ describe("session-manager.browser", () => {
     await manager.appendMessage({ sessionId: meta.header.id, role: "assistant", text: "A2" });
 
     const before = await manager.buildSessionContext(meta.header.id);
-    const draft = prepareCompaction({
+    const preparation = prepareCompaction({
       reason: "threshold",
       entries: before.entries,
       previousSummary: before.previousSummary,
       keepTail: 2,
       splitTurn: true
     });
+    const draft = await compact(preparation, async () => "mock-compaction-summary");
 
     await manager.appendCompaction(meta.header.id, "threshold", draft);
     const after = await manager.buildSessionContext(meta.header.id);

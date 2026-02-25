@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findCutPoint, prepareCompaction, shouldCompact } from "../compaction.browser";
+import { compact, findCutPoint, prepareCompaction, shouldCompact } from "../compaction.browser";
 import type { SessionEntry } from "../types";
 
 function message(id: string, role: "user" | "assistant", text: string, parentId: string | null): SessionEntry {
@@ -40,7 +40,7 @@ describe("compaction.browser", () => {
     expect(cut.firstKeptEntryId).toBe("u2");
   });
 
-  it("prepareCompaction 返回 kept/dropped 和 summary", () => {
+  it("prepareCompaction 返回 kept/dropped 和 draft", () => {
     const entries = [
       message("u1", "user", "first", null),
       message("a1", "assistant", "answer1", "u1"),
@@ -60,6 +60,30 @@ describe("compaction.browser", () => {
     expect(draft.droppedEntries.length).toBeGreaterThan(0);
     expect(draft.firstKeptEntryId).toBe("u2");
     expect(draft.tokensBefore).toBeGreaterThan(0);
+    expect(draft.tokensAfter).toBeGreaterThan(0);
+  });
+
+  it("compact 通过 summary generator 生成最终摘要", async () => {
+    const entries = [
+      message("u1", "user", "first", null),
+      message("a1", "assistant", "answer1", "u1"),
+      message("u2", "user", "second", "a1"),
+      message("a2", "assistant", "answer2", "u2")
+    ];
+    const preparation = prepareCompaction({
+      reason: "threshold",
+      entries,
+      previousSummary: "old-summary",
+      keepTail: 1,
+      splitTurn: true
+    });
+    const draft = await compact(preparation, async (input) => {
+      if (input.mode === "turn_prefix") return "turn-prefix-summary";
+      return "history-summary";
+    });
+
+    expect(draft.summary).toContain("history-summary");
+    expect(draft.summary).toContain("turn-prefix-summary");
     expect(draft.tokensAfter).toBeGreaterThan(0);
   });
 });

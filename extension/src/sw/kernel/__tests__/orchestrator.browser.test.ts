@@ -3,6 +3,13 @@ import "./test-setup";
 import { describe, expect, it } from "vitest";
 import { BrainOrchestrator } from "../orchestrator.browser";
 
+function mockCompactionSummary(orchestrator: BrainOrchestrator, summary = "mock-compaction-summary"): void {
+  orchestrator.onHook("compaction.summary", () => ({
+    action: "patch",
+    patch: { summary }
+  }));
+}
+
 async function waitForTraceEvent(
   orchestrator: BrainOrchestrator,
   sessionId: string,
@@ -41,6 +48,7 @@ describe("orchestrator.browser", () => {
 
   it("overflow 不走 retry，走 compaction", async () => {
     const orchestrator = new BrainOrchestrator({ thresholdTokens: 1 });
+    mockCompactionSummary(orchestrator);
     const events: string[] = [];
     orchestrator.events.subscribe((event) => {
       events.push(event.type);
@@ -86,6 +94,30 @@ describe("orchestrator.browser", () => {
 
     const restoredTrace = await waitForTraceEvent(restoredOrchestrator, sessionId, "loop_start");
     expect(restoredTrace.some((record) => record.type === "loop_start")).toBe(true);
+  });
+
+  it("冷启动读取 step stream 时不重复放大 trace 记录", async () => {
+    const first = new BrainOrchestrator();
+    const created = await first.createSession({ title: "trace-no-duplication" });
+    const sessionId = created.sessionId;
+
+    first.events.emit("loop_start", sessionId, { prompt: "trace check" });
+    first.events.emit("llm.request", sessionId, { step: 1, model: "gpt-test", messageCount: 1 });
+    first.events.emit("loop_done", sessionId, { status: "done", llmSteps: 1, toolSteps: 0 });
+
+    await waitForTraceEvent(first, sessionId, "loop_done");
+
+    const restored = new BrainOrchestrator();
+    const trace = await waitForTraceEvent(restored, sessionId, "loop_done");
+    const typeCounts = trace.reduce<Record<string, number>>((acc, item) => {
+      const key = String(item.type || "unknown");
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+
+    expect(typeCounts.loop_start).toBe(1);
+    expect(typeCounts["llm.request"]).toBe(1);
+    expect(typeCounts.loop_done).toBe(1);
   });
 
   it("script 成功时不走 fallback", async () => {
@@ -266,6 +298,7 @@ describe("orchestrator.browser", () => {
 
   it("agent_end.after 可改写最终决策", async () => {
     const orchestrator = new BrainOrchestrator({ thresholdTokens: 1 });
+    mockCompactionSummary(orchestrator);
     const created = await orchestrator.createSession({ title: "agent-end-after-patch" });
     await orchestrator.appendUserMessage(created.sessionId, "hello");
     orchestrator.onHook("agent_end.after", () => ({

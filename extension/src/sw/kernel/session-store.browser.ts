@@ -293,18 +293,64 @@ export async function removeSessionEntriesChunk(sessionId: string, chunk: number
   await storageRemove([buildSessionEntriesChunkKey(sessionId, chunk)]);
 }
 
+function readTraceTimestamp(record: unknown): number {
+  const value = isRecord(record) ? record.timestamp : undefined;
+  const parsed = Date.parse(typeof value === "string" ? value : "");
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function readTraceId(record: unknown): string {
+  if (!isRecord(record)) return "";
+  return typeof record.id === "string" ? record.id : "";
+}
+
+function sortTraceRecords<TTrace>(records: TTrace[]): TTrace[] {
+  return records.slice().sort((a, b) => {
+    const tsA = readTraceTimestamp(a);
+    const tsB = readTraceTimestamp(b);
+    if (tsA !== tsB) return tsA - tsB;
+    return readTraceId(a).localeCompare(readTraceId(b));
+  });
+}
+
 export async function readTraceChunk<TTrace = unknown>(traceId: string, _chunk: number): Promise<TTrace[]> {
   const db = await getDB();
-  return db.getAllFromIndex("traces", "by-trace", traceId) as Promise<TTrace[]>;
+  const chunk = sanitizeChunk(_chunk);
+  const all = (await db.getAllFromIndex("traces", "by-trace", traceId)) as Array<TTrace & { chunk?: unknown }>;
+  if (all.length === 0) return [];
+
+  const withChunk: Array<TTrace & { chunk: number }> = [];
+  const legacyNoChunk: TTrace[] = [];
+  for (const item of all) {
+    const rawChunk = Number((item as { chunk?: unknown }).chunk);
+    if (Number.isInteger(rawChunk) && rawChunk >= 0) {
+      withChunk.push({ ...(item as TTrace), chunk: rawChunk });
+    } else {
+      legacyNoChunk.push(item as TTrace);
+    }
+  }
+
+  if (withChunk.length === 0) {
+    // 兼容历史数据：旧实现未写入 chunk，统一视作 chunk=0
+    return chunk === 0 ? sortTraceRecords(legacyNoChunk) : [];
+  }
+
+  const picked = withChunk.filter((item) => item.chunk === chunk).map((item) => item as TTrace);
+  if (chunk === 0 && legacyNoChunk.length > 0) {
+    picked.push(...legacyNoChunk);
+  }
+  return sortTraceRecords(picked);
 }
 
 export async function writeTraceChunk<TTrace = unknown>(traceId: string, _chunk: number, records: TTrace[]): Promise<void> {
   const db = await getDB();
+  const chunk = sanitizeChunk(_chunk);
   const tx = db.transaction("traces", "readwrite");
   for (const record of records) {
     await tx.store.put({
       ...(record as any),
-      traceId
+      traceId,
+      chunk
     });
   }
   await tx.done;
