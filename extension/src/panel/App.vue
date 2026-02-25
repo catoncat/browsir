@@ -8,6 +8,7 @@ import { collectDiagnostics } from "./utils/diagnostics";
 
 import SessionList from "./components/SessionList.vue";
 import ChatMessage from "./components/ChatMessage.vue";
+import StreamingDraftContainer from "./components/StreamingDraftContainer.vue";
 import ChatInput from "./components/ChatInput.vue";
 import SettingsView from "./components/SettingsView.vue";
 import DebugView from "./components/DebugView.vue";
@@ -90,6 +91,17 @@ interface StepTraceRecord {
   timestamp?: string;
   ts?: string;
   payload?: Record<string, unknown>;
+}
+
+interface StepStreamMeta {
+  truncated: boolean;
+  cutBy: "events" | "bytes" | null;
+  totalEvents: number;
+  totalBytes: number;
+  returnedEvents: number;
+  returnedBytes: number;
+  maxEvents: number;
+  maxBytes: number;
 }
 
 interface ToolRunSnapshot {
@@ -186,12 +198,13 @@ const runViewState = ref<RunViewState>({
 const llmStreamingText = ref("");
 const llmStreamingSessionId = ref("");
 const llmStreamingActive = ref(false);
-const llmStreamingReplaceOnNextDelta = ref(false);
 const recentRuntimeEvents = ref<RuntimeEventDigest[]>([]);
 let forkSessionHighlightTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingStepLogFlushTimer: ReturnType<typeof setTimeout> | null = null;
 let toolPendingCardLeaveTimer: ReturnType<typeof setTimeout> | null = null;
 let initialToolSyncTimer: ReturnType<typeof setTimeout> | null = null;
+let llmStreamFlushRaf: number | null = null;
+let llmStreamingDeltaBuffer = "";
 const pendingStepLogBuffer = new Map<number, string[]>();
 
 const USER_FORK_MIN_VISIBLE_MS = 620;
@@ -200,6 +213,8 @@ const USER_FORK_SCENE_LEAVE_MS = 170;
 const USER_FORK_SCENE_ENTER_MS = 240;
 const FORK_SWITCH_HIGHLIGHT_MS = 1800;
 const TOOL_STREAM_SYNC_INTERVAL_MS = 3200;
+const TOOL_STREAM_SYNC_MAX_EVENTS = 5000;
+const TOOL_STREAM_SYNC_MAX_BYTES = 4 * 1024 * 1024;
 const TOOL_STEP_MAX_LINES = 24;
 const TOOL_STEP_LOG_MAX_LINES = 24;
 const TOOL_STEP_LOG_FLUSH_MS = 72;
@@ -393,6 +408,29 @@ function findLatestUserEntryId(items: PanelMessageLike[]) {
 
 function toRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function normalizeStepStreamMeta(value: unknown): StepStreamMeta {
+  const row = toRecord(value);
+  const normalizeInt = (raw: unknown) => {
+    const n = Number(raw);
+    return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+  };
+  const cutByRaw = String(row.cutBy || "").trim().toLowerCase();
+  const cutBy: "events" | "bytes" | null = cutByRaw === "events" || cutByRaw === "bytes"
+    ? (cutByRaw as "events" | "bytes")
+    : null;
+
+  return {
+    truncated: row.truncated === true,
+    cutBy,
+    totalEvents: normalizeInt(row.totalEvents),
+    totalBytes: normalizeInt(row.totalBytes),
+    returnedEvents: normalizeInt(row.returnedEvents),
+    returnedBytes: normalizeInt(row.returnedBytes),
+    maxEvents: normalizeInt(row.maxEvents),
+    maxBytes: normalizeInt(row.maxBytes)
+  };
 }
 
 function normalizeStep(value: unknown): number {
@@ -637,16 +675,37 @@ function startInitialToolSync() {
   initialToolSyncTimer = setTimeout(tick, TOOL_INITIAL_SYNC_INTERVAL_MS);
 }
 
+function flushLlmStreamingDeltaBuffer() {
+  if (!llmStreamingDeltaBuffer) return;
+  llmStreamingText.value = `${llmStreamingText.value}${llmStreamingDeltaBuffer}`;
+  llmStreamingDeltaBuffer = "";
+}
+
+function scheduleLlmStreamingFlush() {
+  if (llmStreamFlushRaf != null) return;
+  llmStreamFlushRaf = requestAnimationFrame(() => {
+    llmStreamFlushRaf = null;
+    flushLlmStreamingDeltaBuffer();
+  });
+}
+
+function appendLlmStreamingDelta(chunk: string) {
+  const text = String(chunk || "");
+  if (!text) return;
+  llmStreamingDeltaBuffer += text;
+  scheduleLlmStreamingFlush();
+}
+
 function resetLlmStreamingState() {
+  if (llmStreamFlushRaf != null) {
+    cancelAnimationFrame(llmStreamFlushRaf);
+    llmStreamFlushRaf = null;
+  }
+  llmStreamingDeltaBuffer = "";
   llmStreamingText.value = "";
   llmStreamingSessionId.value = "";
   llmStreamingActive.value = false;
-  llmStreamingReplaceOnNextDelta.value = false;
   finalAssistantStreamingPhase.value = false;
-}
-
-function pauseLlmStreamingState() {
-  llmStreamingActive.value = false;
 }
 
 function resolveToolPendingLogStep(list: ToolPendingStepState[]): number {
@@ -906,6 +965,9 @@ function applyRuntimeEventToolRun(event: unknown) {
     return;
   }
   if (type === "llm.request") {
+    if (String(payload.mode || "").trim().toLowerCase() === "compaction") {
+      return;
+    }
     if (runPhase.value === "idle") {
       runPhase.value = "llm";
     }
@@ -913,13 +975,12 @@ function applyRuntimeEventToolRun(event: unknown) {
     return;
   }
   if (type === "llm.stream.start") {
-    llmStreamingSessionId.value = eventSessionId || String(activeSessionId.value || "");
+    flushLlmStreamingDeltaBuffer();
     if (String(llmStreamingText.value || "").trim()) {
-      llmStreamingReplaceOnNextDelta.value = true;
-    } else {
-      llmStreamingText.value = "";
-      llmStreamingReplaceOnNextDelta.value = false;
+      const tail = llmStreamingText.value.endsWith("\n") ? "" : "\n";
+      llmStreamingText.value = `${llmStreamingText.value}${tail}`;
     }
+    llmStreamingSessionId.value = eventSessionId || String(activeSessionId.value || "");
     llmStreamingActive.value = true;
     if (runPhase.value !== "tool_running" && runPhase.value !== "tool_handoff_leaving") {
       runPhase.value = "final_assistant";
@@ -934,21 +995,21 @@ function applyRuntimeEventToolRun(event: unknown) {
     const sourceId = llmStreamingSessionId.value || eventSessionId;
     if (sourceId && activeId && sourceId !== activeId) return;
     llmStreamingSessionId.value = sourceId || activeId;
-    if (llmStreamingReplaceOnNextDelta.value) {
-      llmStreamingText.value = "";
-      llmStreamingReplaceOnNextDelta.value = false;
-    }
-    llmStreamingText.value = `${llmStreamingText.value}${chunk}`;
+    appendLlmStreamingDelta(chunk);
     llmStreamingActive.value = true;
     return;
   }
   if (type === "llm.stream.end") {
+    flushLlmStreamingDeltaBuffer();
     llmStreamingActive.value = false;
     return;
   }
   if (type === "llm.response.parsed") {
     const toolCalls = Number(payload.toolCalls || 0);
     if (Number.isFinite(toolCalls) && toolCalls > 0) {
+      flushLlmStreamingDeltaBuffer();
+      llmStreamingText.value = "";
+      llmStreamingActive.value = false;
       finalAssistantStreamingPhase.value = false;
       if (runPhase.value !== "tool_running") {
         runPhase.value = "llm";
@@ -965,7 +1026,6 @@ function applyRuntimeEventToolRun(event: unknown) {
     finalAssistantStreamingPhase.value = false;
     runPhase.value = "tool_running";
     resetToolPendingCardHandoff();
-    pauseLlmStreamingState();
     const action = String(payload.action || "");
     const detail = formatToolPendingDetail(action, String(payload.arguments || ""));
     upsertToolPendingStepState({
@@ -1007,6 +1067,7 @@ function applyRuntimeEventToolRun(event: unknown) {
     return;
   }
   if (type === "step_finished" && mode === "llm") {
+    flushLlmStreamingDeltaBuffer();
     llmStreamingActive.value = false;
     return;
   }
@@ -1044,14 +1105,29 @@ async function syncActiveToolRun(sessionId: string) {
   if (!normalizedSessionId) return;
   const response = (await chrome.runtime.sendMessage({
     type: "brain.step.stream",
-    sessionId: normalizedSessionId
-  })) as { ok?: boolean; data?: { stream?: StepTraceRecord[] }; error?: string };
+    sessionId: normalizedSessionId,
+    maxEvents: TOOL_STREAM_SYNC_MAX_EVENTS,
+    maxBytes: TOOL_STREAM_SYNC_MAX_BYTES
+  })) as { ok?: boolean; data?: { stream?: StepTraceRecord[]; streamMeta?: unknown }; error?: string };
   if (!response?.ok) {
     throw new Error(String(response?.error || "读取 step stream 失败"));
   }
   const stream = Array.isArray(response?.data?.stream) ? response.data?.stream || [] : [];
+  const meta = normalizeStepStreamMeta(response?.data?.streamMeta);
   const currentLoop = deriveCurrentLoopWindow(stream);
+  const hasLoopStartEvent = stream.some((item) => String(item?.type || "") === "loop_start");
+  const shouldHoldStateForTruncatedWindow = Boolean(
+    isRunning.value &&
+    meta.truncated &&
+    !hasLoopStartEvent
+  );
   if (!currentLoop.inProgress) {
+    if (shouldHoldStateForTruncatedWindow) {
+      if (!activeRunHint.value || activeRunHint.value.phase !== "tool") {
+        setLlmRunHint("恢复中", "事件窗口已裁剪，等待增量事件同步");
+      }
+      return;
+    }
     if (!isRunning.value) {
       runPhase.value = "idle";
     } else if (runPhase.value !== "final_assistant") {
@@ -1165,7 +1241,7 @@ const hasToolPendingActivity = computed(() =>
   Boolean(activeToolRun.value) || toolPendingStepStates.value.length > 0
 );
 
-const shouldShowStreamingAssistant = computed(() => {
+const shouldShowStreamingDraft = computed(() => {
   if (!isRunning.value) return false;
 
   const sourceSessionId = String(llmStreamingSessionId.value || "").trim();
@@ -1174,15 +1250,18 @@ const shouldShowStreamingAssistant = computed(() => {
     return false;
   }
 
+  const text = String(llmStreamingText.value || "");
+  const normalizedText = text.trim();
+
   if (llmStreamingActive.value) {
+    if (runPhase.value === "tool_running" || runPhase.value === "tool_handoff_leaving") {
+      return normalizedText.length > 0;
+    }
     return true;
   }
 
-  const text = String(llmStreamingText.value || "");
-  const normalizedText = text.trim();
   if (!normalizedText) {
-    // 避免刚开始执行时出现整段空白：在工具步骤尚未出现前先展示统一流式占位。
-    return !hasToolPendingActivity.value;
+    return false;
   }
 
   for (let i = messages.value.length - 1; i >= 0; i -= 1) {
@@ -1219,9 +1298,8 @@ const toolPendingCardDetail = computed(() => {
   return String(primaryToolPendingStepState.value?.detail || "").trim();
 });
 
-const displayMessages = computed<DisplayMessage[]>(() => {
+const stableMessages = computed<DisplayMessage[]>(() => {
   const rendered = (messages.value || [])
-    .filter((item) => String(item?.role || "") !== "tool")
     .map((item) => ({
       role: String(item?.role || ""),
       content: String(item?.content || ""),
@@ -1230,7 +1308,14 @@ const displayMessages = computed<DisplayMessage[]>(() => {
       toolCallId: String(item?.toolCallId || "")
     }));
   const pending = pendingRegenerate.value || userPendingRegenerate.value;
-  if (pending && !isRunning.value) {
+  const showRegeneratePlaceholder = Boolean(
+    pending &&
+    (
+      !isRunning.value ||
+      (!shouldShowStreamingDraft.value && !shouldShowToolPendingCard.value)
+    )
+  );
+  if (pending && showRegeneratePlaceholder) {
     const placeholder: DisplayMessage = {
       role: "assistant_placeholder",
       content: "正在重新生成回复…",
@@ -1259,39 +1344,12 @@ const displayMessages = computed<DisplayMessage[]>(() => {
       }
     }
   }
-
-  if (shouldShowStreamingAssistant.value) {
-    rendered.push({
-      role: "assistant_streaming",
-      content: llmStreamingText.value,
-      entryId: `__assistant_streaming__${String(activeSessionId.value || "__global__")}__${activeRunToken.value}`
-    });
-  }
-
-  if (shouldShowToolPendingCard.value) {
-    rendered.push({
-      role: "tool_pending",
-      content: "",
-      entryId: `__tool_pending__${String(activeSessionId.value || "__global__")}__${activeRunToken.value}`,
-      toolName: activeToolRun.value?.action || "llm",
-      toolPending: true,
-      toolPendingLeaving: toolPendingCardLeaving.value,
-      toolPendingStatus: toolPendingCardStatus.value,
-      toolPendingHeadline: toolPendingCardHeadline.value,
-      toolPendingAction: toolPendingCardAction.value,
-      toolPendingDetail: toolPendingCardDetail.value,
-      toolPendingSteps: toolPendingStepLines.value,
-      toolPendingStepsData: toolPendingStepStates.value.map((item) => ({
-        step: item.step,
-        status: item.status,
-        line: formatToolPendingStepLine(item),
-        logs: Array.isArray(item.logs) ? [...item.logs] : []
-      }))
-    });
-  }
-
   return rendered;
 });
+
+const hasVisibleConversation = computed(() =>
+  stableMessages.value.length > 0 || shouldShowStreamingDraft.value || shouldShowToolPendingCard.value
+);
 
 watch(isRunning, (running, wasRunning) => {
   if (running) {
@@ -1443,11 +1501,19 @@ function isMainScrollNearBottom() {
   return remain <= MAIN_SCROLL_BOTTOM_THRESHOLD_PX;
 }
 
-const displayMessageStructureKey = computed(() =>
-  displayMessages.value.map((item) => `${item.role}:${item.entryId}`).join("|")
+const visibleMessageStructureKey = computed(() =>
+  [
+    stableMessages.value.map((item) => `${item.role}:${item.entryId}`).join("|"),
+    shouldShowStreamingDraft.value
+      ? `draft:${String(activeSessionId.value || "__global__")}:${activeRunToken.value}`
+      : "",
+    shouldShowToolPendingCard.value
+      ? `tool:${String(activeSessionId.value || "__global__")}:${activeRunToken.value}`
+      : ""
+  ].join("|")
 );
 
-watch(displayMessageStructureKey, async () => {
+watch(visibleMessageStructureKey, async () => {
   const shouldFollow = isMainScrollNearBottom();
   await nextTick();
   if (shouldFollow && scrollContainer.value) {
@@ -1463,6 +1529,21 @@ watch(llmStreamingText, async () => {
     scrollContainer.value.scrollTop = scrollContainer.value.scrollHeight;
   }
 });
+
+watch(
+  () =>
+    toolPendingStepStates.value
+      .map((item) => `${item.step}:${item.status}:${item.logs.length}`)
+      .join("|"),
+  async () => {
+    if (!isRunning.value) return;
+    const shouldFollow = isMainScrollNearBottom();
+    await nextTick();
+    if (shouldFollow && scrollContainer.value) {
+      scrollContainer.value.scrollTop = scrollContainer.value.scrollHeight;
+    }
+  }
+);
 
 function setErrorMessage(err: unknown, fallback: string) {
   const message = err instanceof Error ? err.message : String(err || "");
@@ -1801,6 +1882,7 @@ onUnmounted(() => {
   resetForkSceneState();
   clearActiveToolRun();
   clearToolPendingSteps();
+  resetLlmStreamingState();
   recentRuntimeEvents.value = [];
   chrome.runtime.onMessage.removeListener(onRuntimeMessage);
   cleanupMessageActions();
@@ -1829,7 +1911,7 @@ onUnmounted(() => {
       class="relative flex-1 flex flex-col min-w-0 min-h-0 bg-ui-bg"
       :aria-busy="isForkSceneActive ? 'true' : undefined"
     >
-      <div v-if="loading && !displayMessages.length" class="absolute inset-0 z-40 flex items-center justify-center bg-white/80">
+      <div v-if="loading && !hasVisibleConversation" class="absolute inset-0 z-40 flex items-center justify-center bg-white/80">
         <Loader2 class="animate-spin text-ui-accent" :size="24" />
       </div>
 
@@ -1996,23 +2078,15 @@ onUnmounted(() => {
         aria-label="对话历史记录"
       >
         <div class="w-full px-5 pt-6 pb-8">
-          <div v-if="displayMessages.length" class="space-y-8" role="list">
+          <div v-if="hasVisibleConversation" class="space-y-8" role="list">
             <ChatMessage
-              v-for="(msg, index) in displayMessages"
+              v-for="(msg, index) in stableMessages"
               :key="msg.entryId"
               :role="msg.role"
               :content="msg.content"
               :entry-id="msg.entryId"
               :tool-name="msg.toolName"
               :tool-call-id="msg.toolCallId"
-              :tool-pending="msg.toolPending"
-              :tool-pending-leaving="msg.toolPendingLeaving"
-              :tool-pending-status="msg.toolPendingStatus"
-              :tool-pending-headline="msg.toolPendingHeadline"
-              :tool-pending-action="msg.toolPendingAction"
-              :tool-pending-detail="msg.toolPendingDetail"
-              :tool-pending-steps="msg.toolPendingSteps"
-              :tool-pending-steps-data="msg.toolPendingStepsData"
               :busy-placeholder="msg.busyPlaceholder"
                 :busy-mode="msg.busyMode"
                 :busy-source-entry-id="msg.busySourceEntryId"
@@ -2038,6 +2112,34 @@ onUnmounted(() => {
                 @retry="handleRetryMessage"
                 @fork="handleForkMessage"
               />
+
+            <StreamingDraftContainer
+              v-if="shouldShowStreamingDraft"
+              :content="llmStreamingText"
+              :active="llmStreamingActive"
+            />
+
+            <ChatMessage
+              v-if="shouldShowToolPendingCard"
+              :key="`__tool_pending__${String(activeSessionId || '__global__')}__${activeRunToken}`"
+              role="tool_pending"
+              content=""
+              :entry-id="`__tool_pending__${String(activeSessionId || '__global__')}__${activeRunToken}`"
+              :tool-name="activeToolRun?.action || 'llm'"
+              :tool-pending="true"
+              :tool-pending-leaving="toolPendingCardLeaving"
+              :tool-pending-status="toolPendingCardStatus"
+              :tool-pending-headline="toolPendingCardHeadline"
+              :tool-pending-action="toolPendingCardAction"
+              :tool-pending-detail="toolPendingCardDetail"
+              :tool-pending-steps="toolPendingStepLines"
+              :tool-pending-steps-data="toolPendingStepStates.map((item) => ({
+                step: item.step,
+                status: item.status,
+                line: formatToolPendingStepLine(item),
+                logs: Array.isArray(item.logs) ? [...item.logs] : []
+              }))"
+            />
           </div>
 
           <div v-else class="flex flex-col items-start py-8 animate-in fade-in duration-500">

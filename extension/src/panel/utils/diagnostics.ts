@@ -46,6 +46,8 @@ const SANITIZE_MAX_DEPTH = 5;
 const SANITIZE_MAX_ARRAY = 80;
 const SANITIZE_MAX_OBJECT_KEYS = 80;
 const SANITIZE_MAX_STRING = 1800;
+const DIAGNOSTICS_STEP_STREAM_MAX_EVENTS = 5000;
+const DIAGNOSTICS_STEP_STREAM_MAX_BYTES = 4 * 1024 * 1024;
 
 function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" ? (value as JsonRecord) : {};
@@ -157,7 +159,13 @@ function normalizeStepTimeline(stepStream: unknown, limit = 24): string[] {
       continue;
     }
     if (type === "llm.request") {
-      lines.push(`LLM 请求 · model=${String(payload.model || "")}`);
+      const mode = String(payload.mode || "").trim();
+      const summaryMode = String(payload.summaryMode || "").trim();
+      if (mode === "compaction") {
+        lines.push(`LLM 摘要请求 · mode=${summaryMode || "history"} · model=${String(payload.model || "")}`);
+      } else {
+        lines.push(`LLM 请求 · model=${String(payload.model || "")}`);
+      }
       continue;
     }
     if (type === "llm.response.parsed") {
@@ -720,8 +728,15 @@ export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}
   const [config, dump] = await Promise.all([
     sendMessage<Record<string, unknown>>("brain.debug.config"),
     sessionId
-      ? sendMessage<Record<string, unknown>>("brain.debug.dump", { sessionId })
-      : sendMessage<Record<string, unknown>>("brain.debug.dump")
+      ? sendMessage<Record<string, unknown>>("brain.debug.dump", {
+          sessionId,
+          maxEvents: DIAGNOSTICS_STEP_STREAM_MAX_EVENTS,
+          maxBytes: DIAGNOSTICS_STEP_STREAM_MAX_BYTES
+        })
+      : sendMessage<Record<string, unknown>>("brain.debug.dump", {
+          maxEvents: DIAGNOSTICS_STEP_STREAM_MAX_EVENTS,
+          maxBytes: DIAGNOSTICS_STEP_STREAM_MAX_BYTES
+        })
   ]);
 
   const dumpRecord = toRecord(dump);
@@ -729,6 +744,7 @@ export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}
   const conversationView = toRecord(dumpRecord.conversationView);
   const messages = Array.isArray(conversationView.messages) ? conversationView.messages : [];
   const stepStream = Array.isArray(dumpRecord.stepStream) ? (dumpRecord.stepStream as unknown[]) : [];
+  const stepStreamMeta = toRecord(dumpRecord.stepStreamMeta);
   const events = normalizeStepEvents(stepStream);
 
   const timeline = normalizeStepTimeline(stepStream, options.timelineLimit ?? 24);
@@ -767,6 +783,7 @@ export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}
       paused: runtime.paused === true,
       messageCount: Number(conversationView.messageCount || messages.length || 0),
       stepCount: events.length,
+      stepStreamTruncated: stepStreamMeta.truncated === true,
       lastError
     },
     timeline,
@@ -792,6 +809,7 @@ export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}
     debug: {
       entryCount: Number(dumpRecord.entryCount || 0),
       stepStreamCount: events.length,
+      stepStreamMeta: sanitizeValue(stepStreamMeta),
       globalTailCount: Array.isArray(dumpRecord.globalTail) ? dumpRecord.globalTail.length : 0
     }
   };

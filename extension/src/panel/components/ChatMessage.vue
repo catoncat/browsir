@@ -73,6 +73,7 @@ const emit = defineEmits<{
 }>();
 
 const isUser = computed(() => props.role === "user");
+const isSystem = computed(() => props.role === "system");
 const isAssistant = computed(() => props.role === "assistant");
 const isAssistantStreaming = computed(() => props.role === "assistant_streaming");
 const isAssistantLike = computed(() => isAssistant.value || isAssistantStreaming.value);
@@ -91,6 +92,7 @@ const incremarkTheme = computed(() => isDark.value ? "dark" : "default");
 const isFinished = computed(() => props.role !== "assistant_streaming");
 
 const showThinking = ref(false);
+const showSystemSummary = ref(false);
 const inlineTextarea = ref<HTMLTextAreaElement | null>(null);
 const pendingActivityViewport = ref<HTMLElement | null>(null);
 const pendingCardExpanded = ref(false);
@@ -104,11 +106,24 @@ const toolRender = computed(() =>
     toolCallId: props.toolCallId
   })
 );
+const isSummarySystemMessage = computed(() =>
+  isSystem.value &&
+  (String(props.entryId || "").startsWith("summary:") || String(props.content || "").startsWith("Previous summary:\n"))
+);
+const normalizedSystemContent = computed(() => {
+  const content = String(props.content || "");
+  if (!isSummarySystemMessage.value) return content;
+  const prefix = "Previous summary:\n";
+  if (!content.startsWith(prefix)) return content;
+  return content.slice(prefix.length);
+});
 const toolTextContent = computed(() => {
   if (!isTool.value) return "";
   return toolRender.value.detail;
 });
 const messageAriaPreview = computed(() => {
+  if (isSummarySystemMessage.value) return "历史摘要";
+  if (isSystem.value) return "系统消息";
   if (isToolPending.value) {
     const action = props.toolPendingAction || props.toolName || "工具调用";
     const detail = String(props.toolPendingDetail || "").trim();
@@ -172,6 +187,10 @@ function visibleLogsForStep(logs: string[]) {
 
 function toggleThinking() {
   showThinking.value = !showThinking.value;
+}
+
+function toggleSystemSummary() {
+  showSystemSummary.value = !showSystemSummary.value;
 }
 
 function togglePendingCardExpand() {
@@ -272,13 +291,21 @@ watch(
     syncPendingActivityScroll(true);
   }
 );
+
+watch(
+  () => isSummarySystemMessage.value,
+  (isSummary) => {
+    showSystemSummary.value = !isSummary;
+  },
+  { immediate: true }
+);
 </script>
 
 <template>
   <div 
     class="flex flex-col mb-6 animate-in fade-in duration-300 group"
     role="listitem"
-    :aria-label="`${isUser ? '用户' : (isAssistantLike || isAssistantPlaceholder) ? '助手' : '工具'}消息: ${messageAriaPreview}...`"
+    :aria-label="`${isUser ? '用户' : isSystem ? '系统' : (isAssistantLike || isAssistantPlaceholder) ? '助手' : '工具'}消息: ${messageAriaPreview}...`"
   >
     <!-- User Message: Rounded Bubble -->
     <div
@@ -362,6 +389,55 @@ watch(
         >
           <Pencil :size="14" aria-hidden="true" />
         </button>
+      </div>
+    </div>
+
+    <!-- System Message -->
+    <div
+      v-else-if="isSystem"
+      class="flex flex-col gap-2 pr-2"
+      role="group"
+      aria-label="系统消息"
+      data-testid="system-message"
+    >
+      <div class="rounded-lg border border-ui-border bg-ui-surface/60 px-3 py-2.5">
+        <div class="flex items-center gap-2">
+          <Sparkles :size="12" class="text-ui-accent" aria-hidden="true" />
+          <span class="text-[12px] font-semibold text-ui-text">
+            {{ isSummarySystemMessage ? "历史摘要（压缩上下文）" : "系统提示" }}
+          </span>
+        </div>
+
+        <div v-if="!isSummarySystemMessage" class="mt-2 prose max-w-none text-[13px] leading-relaxed text-ui-text">
+          <ThemeProvider :theme="incremarkTheme">
+            <IncremarkContent :content="normalizedSystemContent" :is-finished="true" :components="incremarkComponents" />
+          </ThemeProvider>
+        </div>
+
+        <button
+          v-else
+          type="button"
+          class="mt-2 flex w-fit items-center gap-2 py-1 text-[11px] font-bold text-ui-accent cursor-pointer select-none hover:opacity-80 transition-opacity rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+          :aria-expanded="showSystemSummary"
+          @click="toggleSystemSummary"
+        >
+          <span class="uppercase tracking-wider">{{ showSystemSummary ? "隐藏摘要" : "查看摘要" }}</span>
+          <ChevronUp v-if="showSystemSummary" :size="12" aria-hidden="true" />
+          <ChevronDown v-else :size="12" aria-hidden="true" />
+        </button>
+      </div>
+
+      <div
+        v-if="isSummarySystemMessage && showSystemSummary"
+        class="animate-in slide-in-from-top-1 duration-200"
+        role="region"
+        aria-label="历史摘要详情"
+      >
+        <div class="prose max-w-none rounded-md border border-ui-border bg-ui-bg px-3 py-2.5 text-[13px] leading-relaxed text-ui-text">
+          <ThemeProvider :theme="incremarkTheme">
+            <IncremarkContent :content="normalizedSystemContent" :is-finished="true" :components="incremarkComponents" />
+          </ThemeProvider>
+        </div>
       </div>
     </div>
 
