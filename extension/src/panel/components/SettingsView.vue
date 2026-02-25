@@ -2,7 +2,7 @@
 import { storeToRefs } from "pinia";
 import { ref, onMounted } from "vue";
 import { useRuntimeStore } from "../stores/runtime";
-import { ShieldCheck, Cpu, Loader2, ArrowLeft } from "lucide-vue-next";
+import { ShieldCheck, Cpu, Loader2, ArrowLeft, Eye, EyeOff } from "lucide-vue-next";
 
 const emit = defineEmits(["close"]);
 const store = useRuntimeStore();
@@ -12,9 +12,13 @@ const dialogRef = ref<HTMLElement | null>(null);
 const apiBaseId = "settings-api-base";
 const apiKeyId = "settings-api-key";
 const modelNameId = "settings-model-name";
+const systemPromptCustomId = "settings-system-prompt-custom";
 const maxStepsId = "settings-max-steps";
 const autoTitleIntervalId = "settings-auto-title-interval";
 const bridgeUrlId = "settings-bridge-url";
+const bridgeTokenId = "settings-bridge-token";
+const showApiKey = ref(false);
+const showBridgeToken = ref(false);
 
 async function handleSave() {
   try {
@@ -69,12 +73,24 @@ onMounted(() => {
           </div>
           <div class="space-y-1.5">
             <label :for="apiKeyId" class="block text-[11px] font-bold text-ui-text-muted/80 ml-0.5 uppercase tracking-tighter">API Key</label>
-            <input
-              :id="apiKeyId"
-              v-model="config.llmApiKey"
-              type="password"
-              class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-            />
+            <div class="relative">
+              <input
+                :id="apiKeyId"
+                v-model="config.llmApiKey"
+                :type="showApiKey ? 'text' : 'password'"
+                class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 pr-10 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+              />
+              <button
+                type="button"
+                class="absolute inset-y-0 right-0 px-2.5 text-ui-text-muted hover:text-ui-text transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+                :aria-label="showApiKey ? '隐藏 API Key' : '显示 API Key'"
+                :aria-pressed="showApiKey"
+                @click="showApiKey = !showApiKey"
+              >
+                <EyeOff v-if="showApiKey" :size="15" aria-hidden="true" />
+                <Eye v-else :size="15" aria-hidden="true" />
+              </button>
+            </div>
           </div>
           <div class="space-y-1.5">
             <label :for="modelNameId" class="block text-[11px] font-bold text-ui-text-muted/80 ml-0.5 uppercase tracking-tighter">Model Name</label>
@@ -84,6 +100,17 @@ onMounted(() => {
               type="text"
               class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
             />
+          </div>
+          <div class="space-y-1.5">
+            <label :for="systemPromptCustomId" class="block text-[11px] font-bold text-ui-text-muted/80 ml-0.5 uppercase tracking-tighter">System Prompt（可编辑）</label>
+            <textarea
+              :id="systemPromptCustomId"
+              v-model="config.llmSystemPromptCustom"
+              rows="6"
+              class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent resize-y"
+              placeholder="这里展示当前生效的 System Prompt，可直接编辑"
+            />
+            <p class="text-[10px] text-ui-text-muted/60 px-0.5">这里展示当前生效的 System Prompt，可直接修改并保存。</p>
           </div>
           <div class="space-y-1.5">
             <label :for="maxStepsId" class="block text-[11px] font-bold text-ui-text-muted/80 ml-0.5 uppercase tracking-tighter">Max Steps</label>
@@ -125,6 +152,28 @@ onMounted(() => {
               type="text"
               class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
             />
+          </div>
+          <div class="space-y-1.5">
+            <label :for="bridgeTokenId" class="block text-[11px] font-bold text-ui-text-muted/80 ml-0.5 uppercase tracking-tighter">Bridge Token</label>
+            <div class="relative">
+              <input
+                :id="bridgeTokenId"
+                v-model="config.bridgeToken"
+                :type="showBridgeToken ? 'text' : 'password'"
+                autocomplete="off"
+                class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 pr-10 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+              />
+              <button
+                type="button"
+                class="absolute inset-y-0 right-0 px-2.5 text-ui-text-muted hover:text-ui-text transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+                :aria-label="showBridgeToken ? '隐藏 Bridge Token' : '显示 Bridge Token'"
+                :aria-pressed="showBridgeToken"
+                @click="showBridgeToken = !showBridgeToken"
+              >
+                <EyeOff v-if="showBridgeToken" :size="15" aria-hidden="true" />
+                <Eye v-else :size="15" aria-hidden="true" />
+              </button>
+            </div>
           </div>
         </div>
       </section>

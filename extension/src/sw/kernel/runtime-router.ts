@@ -1,7 +1,8 @@
 import { archiveLegacyState, initSessionIndex, resetSessionStore } from "./storage-reset.browser";
 import { BrainOrchestrator } from "./orchestrator.browser";
 import { createRuntimeInfraHandler, type RuntimeInfraHandler, type RuntimeInfraResult } from "./runtime-infra.browser";
-import { createRuntimeLoopController } from "./runtime-loop.browser";
+import { createRuntimeLoopController, type RuntimeLoopController } from "./runtime-loop.browser";
+import { isVirtualUri } from "./virtual-fs.browser";
 import {
   listSessionEntryChunkKeys,
   listTraceChunkKeys,
@@ -40,8 +41,7 @@ const CHAIN_PREVIOUS_TOKEN = "{previous}";
 const DEFAULT_SKILL_DISCOVER_MAX_FILES = 256;
 const MAX_SKILL_DISCOVER_MAX_FILES = 4096;
 const DEFAULT_SKILL_DISCOVER_ROOTS: Array<{ root: string; source: string }> = [
-  { root: ".agents/skills", source: "project" },
-  { root: "~/.agents/skills", source: "global" }
+  { root: "mem://skills", source: "browser" }
 ];
 
 function ok<T>(data: T): RuntimeResult<T> {
@@ -1278,7 +1278,7 @@ function sanitizeSkillDiscoverCell(input: unknown, field: string): string {
 }
 
 function normalizeSkillDiscoverRoots(payload: Record<string, unknown>): SkillDiscoverRootInput[] {
-  const fallbackSource = String(payload.source || "").trim() || "project";
+  const fallbackSource = String(payload.source || "").trim() || "browser";
   const rawRoots = Array.isArray(payload.roots) ? payload.roots : [];
   const out: SkillDiscoverRootInput[] = [];
 
@@ -1287,17 +1287,28 @@ function normalizeSkillDiscoverRoots(payload: Record<string, unknown>): SkillDis
       if (typeof item === "string") {
         const root = sanitizeSkillDiscoverCell(item, "root");
         if (!root) continue;
-        out.push({ root, source: fallbackSource });
+        if (!isVirtualUri(root)) {
+          throw new Error("brain.skill.discover 仅支持 mem:// 或 vfs:// roots");
+        }
+        out.push({ root: normalizeSkillPath(root), source: fallbackSource });
         continue;
       }
       const row = toRecord(item);
       const root = sanitizeSkillDiscoverCell(row.root || row.path || "", "root");
       if (!root) continue;
+      if (!isVirtualUri(root)) {
+        throw new Error("brain.skill.discover 仅支持 mem:// 或 vfs:// roots");
+      }
       const source = sanitizeSkillDiscoverCell(row.source || fallbackSource, "source") || fallbackSource;
-      out.push({ root, source });
+      out.push({ root: normalizeSkillPath(root), source });
     }
   } else {
-    out.push(...DEFAULT_SKILL_DISCOVER_ROOTS);
+    out.push(
+      ...DEFAULT_SKILL_DISCOVER_ROOTS.map((item) => ({
+        root: normalizeSkillPath(item.root),
+        source: item.source
+      }))
+    );
   }
 
   const dedup = new Set<string>();
@@ -1312,8 +1323,18 @@ function normalizeSkillDiscoverRoots(payload: Record<string, unknown>): SkillDis
 }
 
 function normalizeSkillPath(input: unknown): string {
-  let text = String(input || "").trim().replace(/\\/g, "/");
-  text = text.replace(/\/+/g, "/");
+  const raw = String(input || "").trim().replace(/\\/g, "/");
+  const uriMatch = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/(.*)$/.exec(raw);
+  if (uriMatch) {
+    const scheme = String(uriMatch[1] || "").trim().toLowerCase();
+    let rest = String(uriMatch[2] || "").replace(/^\/+/, "").replace(/\/+/g, "/");
+    if (rest.length > 1) {
+      rest = rest.replace(/\/+$/g, "");
+    }
+    return `${scheme}://${rest}`;
+  }
+
+  let text = raw.replace(/\/+/g, "/");
   if (text.length > 1) {
     text = text.replace(/\/+$/g, "");
   }
@@ -1495,55 +1516,21 @@ function extractBashExecResult(data: unknown): { stdout: string; stderr: string;
   throw new Error("brain.skill.discover 未返回 stdout");
 }
 
-function buildSkillDiscoverScanScript(roots: SkillDiscoverRootInput[], maxFiles: number): string {
-  const marker = `SKILL_DISCOVER_ROOTS_${randomId("scan").replace(/[^a-zA-Z0-9_]+/g, "_")}`;
-  const rootRows = roots.map((item, index) => {
-    const root = sanitizeSkillDiscoverCell(item.root, `roots[${index}]`);
-    const source = sanitizeSkillDiscoverCell(item.source, `roots[${index}].source`) || "project";
-    return `${index}\t${root}\t${source}`;
-  });
-
-  return [
-    "set -euo pipefail",
-    `max_files=${Math.max(1, Math.floor(maxFiles))}`,
-    "count=0",
-    "while IFS=$'\\t' read -r idx root source; do",
-    "  [ -n \"$root\" ] || continue",
-    "  case \"$root\" in",
-    "    '~') root=\"$HOME\" ;;",
-    "    '~/'*) root=\"$HOME/${root#~/}\" ;;",
-    "  esac",
-    "  if [ ! -d \"$root\" ]; then",
-    "    continue",
-    "  fi",
-    "  while IFS= read -r path; do",
-    "    printf '%s\\t%s\\t%s\\t%s\\n' \"$idx\" \"$source\" \"$root\" \"$path\"",
-    "    count=$((count + 1))",
-    "    if [ \"$count\" -ge \"$max_files\" ]; then",
-    "      exit 0",
-    "    fi",
-    "  done < <(find \"$root\" -type f -name '*.md' 2>/dev/null)",
-    `done <<'${marker}'`,
-    ...rootRows,
-    marker
-  ].join("\n");
-}
-
-function parseSkillDiscoverScanOutput(stdout: string): SkillDiscoverScanHit[] {
-  const rows = String(stdout || "")
+function parseSkillDiscoverFindOutput(input: { root: string; source: string; stdout: string }): SkillDiscoverScanHit[] {
+  const rows = String(input.stdout || "")
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
   const out: SkillDiscoverScanHit[] = [];
   for (const row of rows) {
-    const parts = row.split("\t");
-    if (parts.length < 4) continue;
-    const source = String(parts[1] || "").trim() || "project";
-    const root = String(parts[2] || "").trim();
-    const path = parts.slice(3).join("\t").trim();
-    if (!root || !path) continue;
-    if (!shouldAcceptDiscoveredSkillPath(root, path)) continue;
-    out.push({ root, source, path });
+    const path = normalizeSkillPath(row);
+    if (!path) continue;
+    if (!shouldAcceptDiscoveredSkillPath(input.root, path)) continue;
+    out.push({
+      root: input.root,
+      source: input.source,
+      path
+    });
   }
   return out;
 }
@@ -1564,8 +1551,11 @@ async function handleBrainSkill(
 
   if (action === "brain.skill.install") {
     const skillPayload = Object.keys(toRecord(payload.skill)).length > 0 ? toRecord(payload.skill) : payload;
-    const location = String(skillPayload.location || "").trim();
+    const location = normalizeSkillPath(skillPayload.location);
     if (!location) return fail("brain.skill.install 需要 location");
+    if (!isVirtualUri(location)) {
+      return fail("brain.skill.install location 仅支持 mem:// 或 vfs://");
+    }
 
     const skill = await orchestrator.installSkill(
       {
@@ -1626,29 +1616,56 @@ async function handleBrainSkill(
     const autoInstall = payload.autoInstall !== false;
     const replace = payload.replace !== false;
 
-    const scanScript = buildSkillDiscoverScanScript(roots, maxFiles);
-    const discoveredStep = await runtimeLoop.executeStep({
-      sessionId,
-      capability: discoverCapability,
-      action: "invoke",
-      args: {
-        frame: {
-          tool: "bash",
-          args: {
-            cmdId: "bash.exec",
-            args: [scanScript],
-            timeoutMs
+    const hits: SkillDiscoverScanHit[] = [];
+    let scanStdoutBytes = 0;
+    const scanStderrChunks: string[] = [];
+    let scanExitCode: number | null = 0;
+
+    for (let i = 0; i < roots.length; i += 1) {
+      if (hits.length >= maxFiles) break;
+      const rootItem = roots[i];
+      const root = normalizeSkillPath(rootItem.root);
+      const source = String(rootItem.source || "").trim() || "browser";
+      const quotedRoot = `'${root.replace(/'/g, "'\"'\"'")}'`;
+      const command = `find ${quotedRoot} -name '*.md'`;
+      const discoveredStep = await runtimeLoop.executeStep({
+        sessionId,
+        capability: discoverCapability,
+        action: "invoke",
+        args: {
+          frame: {
+            tool: "bash",
+            args: {
+              cmdId: "bash.exec",
+              args: [command],
+              runtime: "browser",
+              timeoutMs
+            }
           }
-        }
-      },
-      verifyPolicy: "off"
-    });
-    if (!discoveredStep.ok) {
-      return fail(discoveredStep.error || "brain.skill.discover 扫描失败");
+        },
+        verifyPolicy: "off"
+      });
+      if (!discoveredStep.ok) {
+        return fail(discoveredStep.error || `brain.skill.discover 扫描失败: ${root}`);
+      }
+
+      const scanResult = extractBashExecResult(discoveredStep.data);
+      scanStdoutBytes += scanResult.stdout.length;
+      if (scanResult.stderr) scanStderrChunks.push(scanResult.stderr);
+      if (scanResult.exitCode !== null && scanResult.exitCode !== 0) {
+        scanExitCode = scanResult.exitCode;
+      }
+      const foundInRoot = parseSkillDiscoverFindOutput({
+        root,
+        source,
+        stdout: scanResult.stdout
+      });
+      for (const hit of foundInRoot) {
+        hits.push(hit);
+        if (hits.length >= maxFiles) break;
+      }
     }
 
-    const scanResult = extractBashExecResult(discoveredStep.data);
-    const hits = parseSkillDiscoverScanOutput(scanResult.stdout);
     const uniqueHits: SkillDiscoverScanHit[] = [];
     const seenPaths = new Set<string>();
     for (const hit of hits) {
@@ -1671,9 +1688,16 @@ async function handleBrainSkill(
         const readOut = await runtimeLoop.executeStep({
           sessionId,
           capability: readCapability,
-          action: "read_file",
+          action: "invoke",
           args: {
-            path: hit.path
+            path: hit.path,
+            frame: {
+              tool: "read",
+              args: {
+                path: hit.path,
+                ...(isVirtualUri(hit.path) ? { runtime: "browser" } : {})
+              }
+            }
           },
           verifyPolicy: "off"
         });
@@ -1755,9 +1779,9 @@ async function handleBrainSkill(
         timeoutMs,
         discoverCapability,
         readCapability,
-        stdoutBytes: scanResult.stdout.length,
-        stderr: scanResult.stderr,
-        exitCode: scanResult.exitCode
+        stdoutBytes: scanStdoutBytes,
+        stderr: scanStderrChunks.join("\n"),
+        exitCode: scanExitCode
       },
       counts: {
         scanned: uniqueHits.length,
@@ -1806,7 +1830,12 @@ async function handleBrainSkill(
   return fail(`unsupported brain.skill action: ${action}`);
 }
 
-async function handleBrainDebug(orchestrator: BrainOrchestrator, infra: RuntimeInfraHandler, message: unknown): Promise<RuntimeResult> {
+async function handleBrainDebug(
+  orchestrator: BrainOrchestrator,
+  runtimeLoop: RuntimeLoopController,
+  infra: RuntimeInfraHandler,
+  message: unknown
+): Promise<RuntimeResult> {
   const payload = toRecord(message);
   const action = String(payload.type || "");
 
@@ -1850,6 +1879,7 @@ async function handleBrainDebug(orchestrator: BrainOrchestrator, infra: RuntimeI
       return fail(cfgResult?.error || "config.get failed");
     }
     const cfg = toRecord(cfgResult.data);
+    const systemPromptPreview = await runtimeLoop.getSystemPromptPreview();
     return ok({
       bridgeUrl: String(cfg.bridgeUrl || ""),
       llmApiBase: String(cfg.llmApiBase || ""),
@@ -1858,7 +1888,8 @@ async function handleBrainDebug(orchestrator: BrainOrchestrator, infra: RuntimeI
       llmTimeoutMs: Number(cfg.llmTimeoutMs || 0),
       llmRetryMaxAttempts: Number(cfg.llmRetryMaxAttempts || 0),
       llmMaxRetryDelayMs: Number(cfg.llmMaxRetryDelayMs || 0),
-      hasLlmApiKey: !!String(cfg.llmApiKey || "").trim()
+      hasLlmApiKey: !!String(cfg.llmApiKey || "").trim(),
+      systemPromptPreview
     });
   }
 
@@ -1928,7 +1959,7 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
         }
 
         if (type.startsWith("brain.debug.")) {
-          return await applyAfter(await handleBrainDebug(orchestrator, infra, routeMessage));
+          return await applyAfter(await handleBrainDebug(orchestrator, runtimeLoop, infra, routeMessage));
         }
 
         if (type === "brain.agent.run") {

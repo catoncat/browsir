@@ -27,23 +27,47 @@ export interface ToolDefinition {
   };
 }
 
-const DEFAULT_TOOL_CONTRACTS: ToolContract[] = [
+const TARGET_PROPERTIES: JsonRecord = {
+  tabId: { type: "number", description: "Target tab id. Omit to use run-scope tab." },
+  uid: { type: "string", description: "Element uid from latest search_elements result." },
+  ref: { type: "string", description: "Stable element ref from latest search_elements result." },
+  backendNodeId: { type: "number", description: "Stable backend DOM node id from latest snapshot." },
+  selector: {
+    type: "string",
+    description: "Fallback CSS selector. Prefer uid/ref/backendNodeId first."
+  },
+  expect: {
+    type: "object",
+    description: "Post-action expectation for deterministic verify (url/title/text/selector checks)."
+  },
+  requireFocus: { type: "boolean", description: "Fail fast if tab is not focused." },
+  forceFocus: { type: "boolean", description: "Auto-focus target tab before action." }
+};
+
+const TARGET_ANY_OF = [
+  { required: ["uid"] },
+  { required: ["ref"] },
+  { required: ["backendNodeId"] },
+  { required: ["selector"] }
+];
+
+const FILE_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "bash",
     description:
-      "Execute a shell command via bash.exec. Use runtime=browser for browser virtual runtime, runtime=local for local shell.",
+      "Execute a shell command via bash.exec. Use bridge runtime for command-line inspection/build tasks. On timeout, increase timeoutMs and retry the same goal.",
     parameters: {
       type: "object",
       properties: {
-        command: { type: "string" },
+        command: { type: "string", description: "Shell command to execute." },
         runtime: {
           type: "string",
           enum: ["browser", "local"],
-          description: "Optional runtime hint for command execution backend."
+          description: "browser=virtual fs runtime, local=host shell runtime."
         },
         timeoutMs: {
           type: "number",
-          description: "Optional command timeout in milliseconds. For long tasks, increase this value."
+          description: "Execution timeout in milliseconds."
         }
       },
       required: ["command"]
@@ -52,15 +76,15 @@ const DEFAULT_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "read_file",
     description:
-      "Read a file's content. mem:// or vfs:// paths target browser virtual files; regular paths target local files.",
+      "Read file text content. Use before edit/write to ground changes. On path error, fix path and retry.",
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string" },
+        path: { type: "string", description: "File path. mem:// or vfs:// routes to browser virtual fs." },
         runtime: {
           type: "string",
           enum: ["browser", "local"],
-          description: "Optional runtime hint. Prefer matching the path semantics."
+          description: "Optional runtime hint."
         },
         offset: { type: "number" },
         limit: { type: "number" }
@@ -71,17 +95,17 @@ const DEFAULT_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "write_file",
     description:
-      "Write content to a file. mem:// or vfs:// paths target browser virtual files; regular paths target local files.",
+      "Write file content (overwrite/append/create). Use for new files or full rewrites. Prefer edit_file for surgical patching.",
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string" },
+        path: { type: "string", description: "Destination path." },
         runtime: {
           type: "string",
           enum: ["browser", "local"],
-          description: "Optional runtime hint. Prefer matching the path semantics."
+          description: "Optional runtime hint."
         },
-        content: { type: "string" },
+        content: { type: "string", description: "Text content to write." },
         mode: { type: "string", enum: ["overwrite", "append", "create"] }
       },
       required: ["path", "content"]
@@ -90,15 +114,15 @@ const DEFAULT_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "edit_file",
     description:
-      "Apply edits to a file. mem:// or vfs:// paths target browser virtual files; regular paths target local files.",
+      "Apply exact text replacements. Use when patching existing file sections. If old text not found, read_file first and retry with exact context.",
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string" },
+        path: { type: "string", description: "Target file path." },
         runtime: {
           type: "string",
           enum: ["browser", "local"],
-          description: "Optional runtime hint. Prefer matching the path semantics."
+          description: "Optional runtime hint."
         },
         edits: {
           type: "array",
@@ -114,27 +138,93 @@ const DEFAULT_TOOL_CONTRACTS: ToolContract[] = [
       },
       required: ["path", "edits"]
     }
+  }
+];
+
+const BROWSER_TOOL_CONTRACTS: ToolContract[] = [
+  {
+    name: "get_all_tabs",
+    description:
+      "List all open tabs. Use when tab context is ambiguous before browser actions.",
+    parameters: {
+      type: "object",
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: "get_current_tab",
+    description: "Return active tab information.",
+    parameters: {
+      type: "object",
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: "create_new_tab",
+    description:
+      "Open a new tab with URL. Use for navigation bootstrap when current tab is unsuitable.",
+    parameters: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "Target URL." },
+        active: { type: "boolean", description: "Whether new tab should be active." }
+      },
+      required: ["url"]
+    }
+  },
+  {
+    name: "get_tab_info",
+    description: "Get detailed info for a tab id. Use after get_all_tabs when selecting targets.",
+    parameters: {
+      type: "object",
+      properties: {
+        tabId: { type: "number", description: "Target tab id." }
+      },
+      required: ["tabId"]
+    }
+  },
+  {
+    name: "close_tab",
+    description:
+      "Close a tab (or current tab if omitted). Use with care because it is destructive.",
+    parameters: {
+      type: "object",
+      properties: {
+        tabId: { type: "number", description: "Optional target tab id. Defaults to current tab." }
+      },
+      required: []
+    }
+  },
+  {
+    name: "ungroup_tabs",
+    description: "Ungroup all tab groups in current window.",
+    parameters: {
+      type: "object",
+      properties: {
+        windowId: { type: "number", description: "Optional window id. Defaults to active window." }
+      },
+      required: []
+    }
   },
   {
     name: "search_elements",
     description:
-      "Search interactive elements from an accessibility snapshot and return uid/ref/backendNodeId targets for follow-up actions. Prefer user-visible semantic query words (placeholder/aria/name/visible text) instead of implementation-only selectors.",
+      "Search interactive elements from accessibility snapshot. Use semantic query terms (placeholder/aria/name/text). If no hit, change query strategy before retrying.",
     parameters: {
       type: "object",
       properties: {
         tabId: { type: "number", description: "Target tab id." },
         query: {
           type: "string",
-          description: "User-visible semantic query (e.g. search, like, submit, email)."
+          description: "Semantic query words (e.g. like, submit, email, search)."
         },
-        selector: {
-          type: "string",
-          description: "Optional scope selector to narrow search region."
-        },
-        maxResults: { type: "number", description: "Max matched nodes to return (default 20)." },
-        maxTokens: { type: "number", description: "Snapshot token budget hint." },
-        depth: { type: "number", description: "DOM/a11y traversal depth hint." },
-        noAnimations: { type: "boolean", description: "Disable animations during snapshot for stability." }
+        selector: { type: "string", description: "Optional scope selector." },
+        maxResults: { type: "number", description: "Maximum returned nodes." },
+        maxTokens: { type: "number", description: "Snapshot token budget." },
+        depth: { type: "number", description: "Traversal depth hint." },
+        noAnimations: { type: "boolean", description: "Disable animations for stable snapshots." }
       },
       required: []
     }
@@ -142,98 +232,83 @@ const DEFAULT_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "click",
     description:
-      "Click an element by uid/ref/backendNodeId from search_elements. Prefer fresh uid/ref targets. Add expect when this click should cause a state change.",
+      "Click target element from latest snapshot. Preconditions: must provide uid/ref/backendNodeId/selector. If E_REF_REQUIRED, call search_elements again.",
     parameters: {
       type: "object",
       properties: {
-        tabId: { type: "number", description: "Target tab id." },
-        uid: { type: "string", description: "Element uid from search_elements." },
-        ref: { type: "string", description: "Stable ref from search_elements." },
-        backendNodeId: { type: "number", description: "Stable backend node id." },
-        selector: {
-          type: "string",
-          description: "Fallback selector only. Prefer uid/ref/backendNodeId."
-        },
-        expect: {
-          type: "object",
-          description: "Optional post-action verification expectation (url/text/selector)."
-        },
-        requireFocus: { type: "boolean", description: "Require focused tab before action." },
-        forceFocus: { type: "boolean", description: "Auto-focus tab before action." }
+        ...TARGET_PROPERTIES,
+        dblClick: { type: "boolean", description: "Double click instead of single click." }
       },
-      anyOf: [{ required: ["uid"] }, { required: ["ref"] }, { required: ["backendNodeId"] }],
+      anyOf: TARGET_ANY_OF,
       required: []
     }
   },
   {
     name: "fill_element_by_uid",
     description:
-      "Fill/type into an element by uid/ref/backendNodeId from search_elements. Works for input/textarea/contenteditable editors.",
+      "Fill text into input/textarea/contenteditable target. Preconditions: target + non-empty value. For stateful forms, pair with expect.",
     parameters: {
       type: "object",
       properties: {
-        tabId: { type: "number", description: "Target tab id." },
-        uid: { type: "string", description: "Element uid from search_elements." },
-        ref: { type: "string", description: "Stable ref from search_elements." },
-        backendNodeId: { type: "number", description: "Stable backend node id." },
-        selector: {
-          type: "string",
-          description: "Fallback selector only. Prefer uid/ref/backendNodeId."
-        },
-        value: { type: "string", description: "Value/text to fill." },
-        expect: {
-          type: "object",
-          description: "Optional post-action verification expectation."
-        },
-        requireFocus: { type: "boolean", description: "Require focused tab before action." },
-        forceFocus: { type: "boolean", description: "Auto-focus tab before action." }
+        ...TARGET_PROPERTIES,
+        value: { type: "string", description: "Text value to input." }
       },
-      anyOf: [{ required: ["uid"] }, { required: ["ref"] }, { required: ["backendNodeId"] }],
+      anyOf: TARGET_ANY_OF,
       required: ["value"]
     }
   },
   {
     name: "select_option_by_uid",
     description:
-      "Select/set value for a selectable element by uid/ref/backendNodeId from search_elements. Useful for <select> and similar controls.",
+      "Set selected value on select-like control. Preconditions: target + value. If selection seems stale, refresh with search_elements then retry.",
     parameters: {
       type: "object",
       properties: {
-        tabId: { type: "number", description: "Target tab id." },
-        uid: { type: "string", description: "Element uid from search_elements." },
-        ref: { type: "string", description: "Stable ref from search_elements." },
-        backendNodeId: { type: "number", description: "Stable backend node id." },
-        selector: {
-          type: "string",
-          description: "Fallback selector only. Prefer uid/ref/backendNodeId."
-        },
-        value: { type: "string", description: "Option value to set." },
-        expect: {
-          type: "object",
-          description: "Optional post-action verification expectation."
-        },
-        requireFocus: { type: "boolean", description: "Require focused tab before action." },
-        forceFocus: { type: "boolean", description: "Auto-focus tab before action." }
+        ...TARGET_PROPERTIES,
+        value: { type: "string", description: "Option value." }
       },
-      anyOf: [{ required: ["uid"] }, { required: ["ref"] }, { required: ["backendNodeId"] }],
+      anyOf: TARGET_ANY_OF,
       required: ["value"]
+    }
+  },
+  {
+    name: "hover_element_by_uid",
+    description:
+      "Hover a target element to reveal menus/tooltips. Preconditions: provide target from fresh snapshot.",
+    parameters: {
+      type: "object",
+      properties: {
+        ...TARGET_PROPERTIES
+      },
+      anyOf: TARGET_ANY_OF,
+      required: []
+    }
+  },
+  {
+    name: "get_editor_value",
+    description:
+      "Read full value from input/textarea/contenteditable/editor-like target. Use before overwrite to avoid accidental truncation.",
+    parameters: {
+      type: "object",
+      properties: {
+        ...TARGET_PROPERTIES
+      },
+      anyOf: TARGET_ANY_OF,
+      required: []
     }
   },
   {
     name: "press_key",
     description:
-      "Send a keyboard key to the active element on a tab (e.g. Enter, Escape, ArrowDown).",
+      "Press keyboard key on active element. Use for submit/close/navigation shortcuts.",
     parameters: {
       type: "object",
       properties: {
         tabId: { type: "number", description: "Target tab id." },
-        key: { type: "string", description: "Key name to press." },
-        expect: {
-          type: "object",
-          description: "Optional post-action verification expectation."
-        },
-        requireFocus: { type: "boolean", description: "Require focused tab before action." },
-        forceFocus: { type: "boolean", description: "Auto-focus tab before action." }
+        key: { type: "string", description: "Key name (Enter/Escape/ArrowDown...)." },
+        expect: TARGET_PROPERTIES.expect,
+        requireFocus: TARGET_PROPERTIES.requireFocus,
+        forceFocus: TARGET_PROPERTIES.forceFocus
       },
       required: ["key"]
     }
@@ -241,18 +316,15 @@ const DEFAULT_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "scroll_page",
     description:
-      "Scroll current page by deltaY pixels. Positive moves down, negative moves up.",
+      "Scroll viewport by deltaY. Use when more content must be revealed before next action.",
     parameters: {
       type: "object",
       properties: {
         tabId: { type: "number", description: "Target tab id." },
-        deltaY: { type: "number", description: "Pixels to scroll (default 600)." },
-        expect: {
-          type: "object",
-          description: "Optional post-action verification expectation."
-        },
-        requireFocus: { type: "boolean", description: "Require focused tab before action." },
-        forceFocus: { type: "boolean", description: "Auto-focus tab before action." }
+        deltaY: { type: "number", description: "Scroll delta in pixels. Positive=down." },
+        expect: TARGET_PROPERTIES.expect,
+        requireFocus: TARGET_PROPERTIES.requireFocus,
+        forceFocus: TARGET_PROPERTIES.forceFocus
       },
       required: []
     }
@@ -260,29 +332,27 @@ const DEFAULT_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "navigate_tab",
     description:
-      "Navigate a tab to the given URL. Use expect to verify destination when needed.",
+      "Navigate tab to URL. Prefer expectUrlContains/urlChanged to confirm progress.",
     parameters: {
       type: "object",
       properties: {
         tabId: { type: "number", description: "Target tab id." },
         url: { type: "string", description: "Destination URL." },
-        expect: {
-          type: "object",
-          description: "Optional post-action verification expectation."
-        },
-        requireFocus: { type: "boolean", description: "Require focused tab before action." },
-        forceFocus: { type: "boolean", description: "Auto-focus tab before action." }
+        expect: TARGET_PROPERTIES.expect,
+        requireFocus: TARGET_PROPERTIES.requireFocus,
+        forceFocus: TARGET_PROPERTIES.forceFocus
       },
       required: ["url"]
     }
   },
   {
     name: "fill_form",
-    description: "Fill multiple form fields in one step using uid/ref/backendNodeId from search_elements.",
+    description:
+      "Fill multiple fields in one call. Preconditions: each field must include target + value. If any field fails, refresh refs with search_elements then retry.",
     parameters: {
       type: "object",
       properties: {
-        tabId: { type: "number" },
+        tabId: { type: "number", description: "Target tab id." },
         elements: {
           type: "array",
           items: {
@@ -294,6 +364,7 @@ const DEFAULT_TOOL_CONTRACTS: ToolContract[] = [
               selector: { type: "string" },
               value: { type: "string" }
             },
+            anyOf: TARGET_ANY_OF,
             required: ["value"]
           }
         },
@@ -303,6 +374,7 @@ const DEFAULT_TOOL_CONTRACTS: ToolContract[] = [
             kind: { type: "string", enum: ["click", "press"] },
             uid: { type: "string" },
             ref: { type: "string" },
+            backendNodeId: { type: "number" },
             selector: { type: "string" },
             key: { type: "string" }
           }
@@ -315,47 +387,352 @@ const DEFAULT_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "browser_verify",
     description:
-      "Verify current browser state after action. Provide a non-empty expect object (url/title/text/selector checks) for deterministic validation.",
+      "Run explicit browser verification checks. Use after state-changing actions. Never claim task done when verify fails or checks are empty.",
+    parameters: {
+      type: "object",
+      properties: {
+        tabId: { type: "number", description: "Target tab id." },
+        expect: {
+          type: "object",
+          description: "At least one check: expectUrlContains/titleContains/urlChanged/textIncludes/selectorExists."
+        }
+      },
+      required: []
+    }
+  },
+  {
+    name: "computer",
+    description:
+      "Coordinate-based browser interaction toolcall. Use only when semantic element targeting is insufficient (canvas/visual UIs).",
+    parameters: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: [
+            "left_click",
+            "right_click",
+            "double_click",
+            "triple_click",
+            "left_click_drag",
+            "hover",
+            "scroll",
+            "scroll_to",
+            "type",
+            "key",
+            "wait"
+          ]
+        },
+        tabId: { type: "number" },
+        coordinate: {
+          type: "array",
+          items: { type: "number" },
+          minItems: 2,
+          maxItems: 2,
+          description: "[x,y] coordinates in viewport pixel space."
+        },
+        start_coordinate: {
+          type: "array",
+          items: { type: "number" },
+          minItems: 2,
+          maxItems: 2,
+          description: "Drag start coordinate for left_click_drag."
+        },
+        text: { type: "string", description: "Text for type/key action." },
+        scroll_direction: { type: "string", enum: ["up", "down", "left", "right"] },
+        scroll_amount: { type: "number" },
+        duration: { type: "number", description: "Seconds for wait action." },
+        uid: { type: "string", description: "Element uid for scroll_to." },
+        selector: { type: "string", description: "Selector fallback for scroll_to." }
+      },
+      required: ["action"]
+    }
+  },
+  {
+    name: "get_page_metadata",
+    description: "Read current page metadata (title/url/description/keywords/author/og).",
+    parameters: {
+      type: "object",
+      properties: {
+        tabId: { type: "number", description: "Optional target tab id." }
+      },
+      required: []
+    }
+  },
+  {
+    name: "scroll_to_element",
+    description:
+      "Scroll target element into view. Preconditions: provide selector or uid/ref/backendNodeId from search_elements.",
+    parameters: {
+      type: "object",
+      properties: {
+        ...TARGET_PROPERTIES,
+        behavior: { type: "string", enum: ["auto", "smooth"], description: "Scroll behavior." },
+        block: { type: "string", enum: ["start", "center", "end", "nearest"] },
+        inline: { type: "string", enum: ["start", "center", "end", "nearest"] }
+      },
+      anyOf: TARGET_ANY_OF,
+      required: []
+    }
+  },
+  {
+    name: "highlight_element",
+    description: "Highlight target element for visual confirmation/debugging.",
+    parameters: {
+      type: "object",
+      properties: {
+        ...TARGET_PROPERTIES,
+        color: { type: "string", description: "Outline color, e.g. #00d4ff." },
+        durationMs: { type: "number", description: "Highlight duration in ms. 0 keeps highlight until refresh." }
+      },
+      anyOf: TARGET_ANY_OF,
+      required: []
+    }
+  },
+  {
+    name: "highlight_text_inline",
+    description: "Highlight matched inline text under selector scope.",
     parameters: {
       type: "object",
       properties: {
         tabId: { type: "number" },
-        expect: { type: "object" }
+        selector: { type: "string", description: "Scope selector for text search." },
+        searchText: { type: "string", description: "Text to highlight." },
+        caseSensitive: { type: "boolean" },
+        wholeWords: { type: "boolean" },
+        highlightColor: { type: "string" },
+        backgroundColor: { type: "string" },
+        fontWeight: { type: "string" }
       },
-      required: []
+      required: ["selector", "searchText"]
     }
   },
   {
-    name: "get_all_tabs",
-    description: "Get all open tabs across all windows with metadata",
-    parameters: {
-      type: "object",
-      properties: {},
-      required: []
-    }
-  },
-  {
-    name: "get_current_tab",
-    description: "Get information about the currently active tab",
-    parameters: {
-      type: "object",
-      properties: {},
-      required: []
-    }
-  },
-  {
-    name: "create_new_tab",
-    description: "Create a new browser tab with the provided URL",
+    name: "capture_screenshot",
+    description:
+      "Capture screenshot for current tab and return base64 data URL. Use for visual analysis when semantic snapshot is insufficient.",
     parameters: {
       type: "object",
       properties: {
-        url: { type: "string" },
-        active: { type: "boolean" }
+        tabId: { type: "number", description: "Optional target tab id. Defaults to run-scope tab." },
+        format: { type: "string", enum: ["png", "jpeg"], description: "Image format." },
+        quality: { type: "number", description: "JPEG quality 0-100." },
+        sendToLLM: { type: "boolean", description: "Hint that this screenshot is intended for visual reasoning." }
       },
-      required: ["url"]
+      required: []
+    }
+  },
+  {
+    name: "capture_tab_screenshot",
+    description: "Capture screenshot for a specific tab id.",
+    parameters: {
+      type: "object",
+      properties: {
+        tabId: { type: "number", description: "Target tab id." },
+        format: { type: "string", enum: ["png", "jpeg"] },
+        quality: { type: "number" },
+        sendToLLM: { type: "boolean" }
+      },
+      required: ["tabId"]
+    }
+  },
+  {
+    name: "capture_screenshot_with_highlight",
+    description:
+      "Capture screenshot with optional element highlight. Use for visual debugging and evidence capture.",
+    parameters: {
+      type: "object",
+      properties: {
+        tabId: { type: "number" },
+        selector: { type: "string", description: "Optional selector to highlight before capture." },
+        cropToElement: { type: "boolean", description: "Crop around highlighted element when possible." },
+        padding: { type: "number", description: "Padding in pixels for crop region." },
+        sendToLLM: { type: "boolean" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "download_image",
+    description:
+      "Trigger browser download from data:image/* URL. Use after screenshot/image generation.",
+    parameters: {
+      type: "object",
+      properties: {
+        imageData: { type: "string", description: "data:image/... base64 URL." },
+        filename: { type: "string", description: "Optional download filename." },
+        tabId: { type: "number", description: "Optional tab id used to trigger download." }
+      },
+      required: ["imageData"]
+    }
+  },
+  {
+    name: "download_chat_images",
+    description:
+      "Batch-download images from chat-like message payload. messages[].parts[].imageData must be valid data:image URL.",
+    parameters: {
+      type: "object",
+      properties: {
+        messages: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string" },
+              parts: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    type: { type: "string" },
+                    imageData: { type: "string" },
+                    imageTitle: { type: "string" }
+                  },
+                  required: ["type"]
+                }
+              }
+            },
+            required: ["id"]
+          }
+        },
+        folderPrefix: { type: "string" },
+        filenamingStrategy: { type: "string", enum: ["descriptive", "sequential", "timestamp"] },
+        displayResults: { type: "boolean" },
+        tabId: { type: "number" }
+      },
+      required: ["messages"]
+    }
+  },
+  {
+    name: "list_interventions",
+    description:
+      "List available human intervention types. Use when automation needs explicit user action.",
+    parameters: {
+      type: "object",
+      properties: {
+        enabledOnly: { type: "boolean", description: "Return only enabled interventions." }
+      },
+      required: []
+    }
+  },
+  {
+    name: "get_intervention_info",
+    description: "Get detailed schema and usage for a specific intervention type.",
+    parameters: {
+      type: "object",
+      properties: {
+        type: {
+          type: "string",
+          enum: ["monitor-operation", "voice-input", "user-selection"],
+          description: "Intervention type."
+        }
+      },
+      required: ["type"]
+    }
+  },
+  {
+    name: "request_intervention",
+    description:
+      "Request a human intervention task. Use when required information/action cannot be completed programmatically.",
+    parameters: {
+      type: "object",
+      properties: {
+        type: {
+          type: "string",
+          enum: ["monitor-operation", "voice-input", "user-selection"]
+        },
+        params: { type: "object", description: "Intervention-specific payload." },
+        timeout: { type: "number", description: "Timeout in seconds." },
+        reason: { type: "string", description: "User-facing reason for intervention." }
+      },
+      required: ["type"]
+    }
+  },
+  {
+    name: "cancel_intervention",
+    description: "Cancel a pending intervention request.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Optional intervention request id." }
+      },
+      required: []
+    }
+  },
+  {
+    name: "load_skill",
+    description: "Load skill main document (SKILL.md) by skill name/id.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Skill id or name." }
+      },
+      required: ["name"]
+    }
+  },
+  {
+    name: "execute_skill_script",
+    description:
+      "Execute a script inside skill package. If script fails or is missing, call get_skill_info/read_skill_reference to re-check path and preconditions.",
+    parameters: {
+      type: "object",
+      properties: {
+        skillName: { type: "string", description: "Skill id/name." },
+        scriptPath: { type: "string", description: "Path under scripts/ directory." },
+        args: { description: "Script args payload." }
+      },
+      required: ["skillName", "scriptPath"]
+    }
+  },
+  {
+    name: "read_skill_reference",
+    description: "Read a reference file under skill references/ directory.",
+    parameters: {
+      type: "object",
+      properties: {
+        skillName: { type: "string" },
+        refPath: { type: "string", description: "Path under references/." }
+      },
+      required: ["skillName", "refPath"]
+    }
+  },
+  {
+    name: "get_skill_asset",
+    description: "Read an asset under skill assets/ directory.",
+    parameters: {
+      type: "object",
+      properties: {
+        skillName: { type: "string" },
+        assetPath: { type: "string", description: "Path under assets/." }
+      },
+      required: ["skillName", "assetPath"]
+    }
+  },
+  {
+    name: "list_skills",
+    description: "List installed skills and status.",
+    parameters: {
+      type: "object",
+      properties: {
+        enabledOnly: { type: "boolean", description: "If true, return only enabled skills." }
+      },
+      required: []
+    }
+  },
+  {
+    name: "get_skill_info",
+    description: "Get skill metadata and resolved paths for scripts/references/assets.",
+    parameters: {
+      type: "object",
+      properties: {
+        skillName: { type: "string", description: "Skill id or name." }
+      },
+      required: ["skillName"]
     }
   }
 ];
+
+const DEFAULT_TOOL_CONTRACTS: ToolContract[] = [...FILE_TOOL_CONTRACTS, ...BROWSER_TOOL_CONTRACTS];
 
 function normalizeName(input: unknown): string {
   return String(input || "").trim();
@@ -363,6 +740,21 @@ function normalizeName(input: unknown): string {
 
 function cloneRecord(input: JsonRecord): JsonRecord {
   return JSON.parse(JSON.stringify(input));
+}
+
+function normalizeAliasList(input: unknown, canonicalName: string): string[] {
+  if (!Array.isArray(input)) return [];
+  const dedup = new Set<string>();
+  const out: string[] = [];
+  for (const raw of input) {
+    const alias = normalizeName(raw);
+    if (!alias) continue;
+    if (alias === canonicalName) continue;
+    if (dedup.has(alias)) continue;
+    dedup.add(alias);
+    out.push(alias);
+  }
+  return out;
 }
 
 function cloneContract(contract: ToolContract): ToolContract {
@@ -383,12 +775,7 @@ function validateContract(contract: ToolContract): ToolContract {
   if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) {
     throw new Error(`tool contract parameters 必须是 object: ${name}`);
   }
-  const aliases = Array.isArray(contract.aliases)
-    ? contract.aliases
-        .map((item) => normalizeName(item))
-        .filter(Boolean)
-        .filter((alias, index, list) => list.indexOf(alias) === index && alias !== name)
-    : [];
+  const aliases = normalizeAliasList(contract.aliases, name);
   return {
     name,
     description,
@@ -400,15 +787,70 @@ function validateContract(contract: ToolContract): ToolContract {
 export class ToolContractRegistry {
   private readonly builtins = new Map<string, ToolContract>();
   private readonly overrides = new Map<string, ToolContract>();
-  private readonly builtinAlias = new Map<string, string>();
-  private readonly overrideAlias = new Map<string, string>();
 
   constructor(defaultContracts: ToolContract[] = DEFAULT_TOOL_CONTRACTS) {
     for (const contract of defaultContracts) {
       const normalized = validateContract(contract);
       this.builtins.set(normalized.name, normalized);
-      for (const alias of normalized.aliases || []) {
-        this.builtinAlias.set(alias, normalized.name);
+    }
+  }
+
+  private listEffectiveContracts(): Array<{ source: "builtin" | "override"; contract: ToolContract }> {
+    const out: Array<{ source: "builtin" | "override"; contract: ToolContract }> = [];
+
+    for (const [name, builtin] of this.builtins.entries()) {
+      const override = this.overrides.get(name);
+      if (override) {
+        out.push({ source: "override", contract: override });
+      } else {
+        out.push({ source: "builtin", contract: builtin });
+      }
+    }
+
+    for (const [name, override] of this.overrides.entries()) {
+      if (this.builtins.has(name)) continue;
+      out.push({ source: "override", contract: override });
+    }
+
+    return out;
+  }
+
+  private resolveAliasOwner(nameOrAlias: string): ToolContract | null {
+    const key = normalizeName(nameOrAlias);
+    if (!key) return null;
+
+    const directOverride = this.overrides.get(key);
+    if (directOverride) return directOverride;
+    const directBuiltin = this.builtins.get(key);
+    if (directBuiltin) return directBuiltin;
+
+    const effective = this.listEffectiveContracts();
+    for (const entry of effective) {
+      const aliases = Array.isArray(entry.contract.aliases) ? entry.contract.aliases : [];
+      if (aliases.includes(key)) return entry.contract;
+    }
+    return null;
+  }
+
+  private assertAliasConflicts(contract: ToolContract, replacingName?: string): void {
+    const aliases = Array.isArray(contract.aliases) ? contract.aliases : [];
+    if (!aliases.length) return;
+
+    const effective = this.listEffectiveContracts();
+    const occupied = new Set<string>();
+
+    for (const entry of effective) {
+      const current = entry.contract;
+      if (replacingName && current.name === replacingName) continue;
+      occupied.add(current.name);
+      for (const alias of current.aliases || []) {
+        occupied.add(alias);
+      }
+    }
+
+    for (const alias of aliases) {
+      if (occupied.has(alias)) {
+        throw new Error(`tool contract alias already registered: ${alias}`);
       }
     }
   }
@@ -419,104 +861,57 @@ export class ToolContractRegistry {
     if (exists && !options.replace) {
       throw new Error(`tool contract already registered: ${normalized.name}`);
     }
-
-    const previous = this.overrides.get(normalized.name);
-    if (previous) {
-      for (const alias of previous.aliases || []) this.overrideAlias.delete(alias);
-    }
+    this.assertAliasConflicts(normalized, exists ? normalized.name : undefined);
     this.overrides.set(normalized.name, normalized);
-    for (const alias of normalized.aliases || []) {
-      this.overrideAlias.set(alias, normalized.name);
-    }
   }
 
   unregister(name: string): boolean {
     const normalizedName = normalizeName(name);
-    const previous = this.overrides.get(normalizedName);
-    if (!previous) return false;
-    for (const alias of previous.aliases || []) {
-      this.overrideAlias.delete(alias);
-    }
-    this.overrides.delete(normalizedName);
-    return true;
+    if (!normalizedName) return false;
+    return this.overrides.delete(normalizedName);
   }
 
   resolve(nameOrAlias: string): ToolContract | null {
-    const key = normalizeName(nameOrAlias);
-    if (!key) return null;
-    const overrideByName = this.overrides.get(key);
-    if (overrideByName) return cloneContract(overrideByName);
-    const builtinByName = this.builtins.get(key);
-    if (builtinByName) return cloneContract(builtinByName);
-
-    const overrideName = this.overrideAlias.get(key);
-    if (overrideName) {
-      const contract = this.overrides.get(overrideName);
-      if (contract) return cloneContract(contract);
-    }
-    const builtinName = this.builtinAlias.get(key);
-    if (builtinName) {
-      const override = this.overrides.get(builtinName);
-      if (override) return cloneContract(override);
-      const builtin = this.builtins.get(builtinName);
-      if (builtin) return cloneContract(builtin);
-    }
-
-    return null;
+    const resolved = this.resolveAliasOwner(nameOrAlias);
+    if (!resolved) return null;
+    return cloneContract(resolved);
   }
 
   listContracts(): ToolContractView[] {
-    const out: ToolContractView[] = [];
-
-    for (const [name, builtin] of this.builtins.entries()) {
-      const resolved = this.overrides.get(name) || builtin;
-      out.push({
-        name: resolved.name,
-        description: resolved.description,
-        aliases: [...(resolved.aliases || [])],
-        source: this.overrides.has(name) ? "override" : "builtin"
-      });
-    }
-    for (const [name, override] of this.overrides.entries()) {
-      if (this.builtins.has(name)) continue;
-      out.push({
-        name: override.name,
-        description: override.description,
-        aliases: [...(override.aliases || [])],
-        source: "override"
-      });
-    }
-
-    return out;
+    return this.listEffectiveContracts().map((entry) => ({
+      name: entry.contract.name,
+      description: entry.contract.description,
+      aliases: [...(entry.contract.aliases || [])],
+      source: entry.source
+    }));
   }
 
   listLlmToolDefinitions(options: { includeAliases?: boolean } = {}): ToolDefinition[] {
-    const includeAliases = options.includeAliases !== false;
+    const includeAliases = options.includeAliases === true;
     const out: ToolDefinition[] = [];
-    const seen = new Set<string>();
+    const exported = new Set<string>();
 
-    const pushDefinition = (name: string, description: string, parameters: JsonRecord) => {
-      const normalized = normalizeName(name);
-      if (!normalized || seen.has(normalized)) return;
-      seen.add(normalized);
-      out.push({
-        type: "function",
-        function: {
-          name: normalized,
-          description,
-          parameters: cloneRecord(parameters)
-        }
-      });
-    };
-
-    const entries = this.listContracts();
-    for (const entry of entries) {
+    for (const entry of this.listContracts()) {
       const resolved = this.resolve(entry.name);
       if (!resolved) continue;
-      pushDefinition(resolved.name, resolved.description, resolved.parameters);
-      if (!includeAliases) continue;
-      for (const alias of resolved.aliases || []) {
-        pushDefinition(alias, resolved.description, resolved.parameters);
+      const addDefinition = (name: string): void => {
+        if (!name || exported.has(name)) return;
+        exported.add(name);
+        out.push({
+          type: "function",
+          function: {
+            name,
+            description: resolved.description,
+            parameters: cloneRecord(resolved.parameters)
+          }
+        });
+      };
+
+      addDefinition(resolved.name);
+      if (includeAliases) {
+        for (const alias of resolved.aliases || []) {
+          addDefinition(alias);
+        }
       }
     }
 

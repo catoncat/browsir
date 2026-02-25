@@ -179,6 +179,7 @@ describe("runtime infra handler", () => {
         llmApiBase: "https://example.com/v1",
         llmApiKey: "k1",
         llmModel: "gpt-test",
+        llmSystemPromptCustom: "Always provide concise evidence.",
         autoTitleInterval: 7,
         bridgeInvokeTimeoutMs: 180000,
         llmTimeoutMs: 175000,
@@ -195,6 +196,7 @@ describe("runtime infra handler", () => {
     expect(updated.bridgeUrl).toBe("ws://127.0.0.1:18787/ws");
     expect(updated.bridgeToken).toBe("token-x");
     expect(updated.llmModel).toBe("gpt-test");
+    expect(updated.llmSystemPromptCustom).toBe("Always provide concise evidence.");
     expect(updated.autoTitleInterval).toBe(7);
     expect(updated.bridgeInvokeTimeoutMs).toBe(180000);
     expect(updated.llmTimeoutMs).toBe(175000);

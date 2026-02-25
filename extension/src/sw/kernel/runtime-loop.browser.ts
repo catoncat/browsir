@@ -115,6 +115,7 @@ export interface RuntimeLoopController {
     verifyPolicy?: "off" | "on_critical" | "always";
   }): Promise<ExecuteStepResult>;
   refreshSessionTitle(sessionId: string, options?: { force?: boolean }): Promise<string>;
+  getSystemPromptPreview(): Promise<string>;
 }
 
 const TOOL_CAPABILITIES = {
@@ -132,6 +133,46 @@ const TOOL_CAPABILITIES = {
   fill_form: "browser.action",
   browser_verify: "browser.verify"
 } as const;
+
+const CANONICAL_BROWSER_TOOL_NAMES = [
+  "get_all_tabs",
+  "get_current_tab",
+  "create_new_tab",
+  "get_tab_info",
+  "close_tab",
+  "ungroup_tabs",
+  "search_elements",
+  "click",
+  "fill_element_by_uid",
+  "select_option_by_uid",
+  "hover_element_by_uid",
+  "get_editor_value",
+  "press_key",
+  "scroll_page",
+  "navigate_tab",
+  "fill_form",
+  "browser_verify",
+  "computer",
+  "get_page_metadata",
+  "scroll_to_element",
+  "highlight_element",
+  "highlight_text_inline",
+  "capture_screenshot",
+  "capture_tab_screenshot",
+  "capture_screenshot_with_highlight",
+  "download_image",
+  "download_chat_images",
+  "list_interventions",
+  "get_intervention_info",
+  "request_intervention",
+  "cancel_intervention",
+  "load_skill",
+  "execute_skill_script",
+  "read_skill_reference",
+  "get_skill_asset",
+  "list_skills",
+  "get_skill_info"
+] as const;
 
 const BUILTIN_BRIDGE_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [
   {
@@ -191,18 +232,7 @@ const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
   "read_file",
   "write_file",
   "edit_file",
-  "get_all_tabs",
-  "get_current_tab",
-  "create_new_tab",
-  "search_elements",
-  "click",
-  "fill_element_by_uid",
-  "select_option_by_uid",
-  "press_key",
-  "scroll_page",
-  "navigate_tab",
-  "fill_form",
-  "browser_verify"
+  ...CANONICAL_BROWSER_TOOL_NAMES
 ]);
 
 function toRecord(value: unknown): JsonRecord {
@@ -379,14 +409,26 @@ function isSideEffectingToolName(toolName: string): boolean {
   return [
     "write_file",
     "edit_file",
+    "create_new_tab",
+    "close_tab",
+    "ungroup_tabs",
     "click",
     "fill_element_by_uid",
     "select_option_by_uid",
+    "hover_element_by_uid",
     "press_key",
     "scroll_page",
     "navigate_tab",
+    "scroll_to_element",
+    "highlight_element",
+    "highlight_text_inline",
     "fill_form",
-    "create_new_tab"
+    "computer",
+    "download_image",
+    "download_chat_images",
+    "request_intervention",
+    "cancel_intervention",
+    "execute_skill_script"
   ].includes(normalized);
 }
 
@@ -486,18 +528,8 @@ function inferFailurePhase(reason: FailureReason): FailurePhase {
 }
 
 function isBrowserToolName(toolName: string): boolean {
-  return [
-    "search_elements",
-    "click",
-    "fill_element_by_uid",
-    "select_option_by_uid",
-    "press_key",
-    "scroll_page",
-    "navigate_tab",
-    "fill_form",
-    "browser_verify"
-  ].includes(
-    String(toolName || "").trim().toLowerCase()
+  return CANONICAL_BROWSER_TOOL_NAMES.includes(
+    String(toolName || "").trim().toLowerCase() as (typeof CANONICAL_BROWSER_TOOL_NAMES)[number]
   );
 }
 
@@ -524,10 +556,15 @@ function inferModeEscalationDirective(input: {
       "click",
       "fill_element_by_uid",
       "select_option_by_uid",
+      "hover_element_by_uid",
       "press_key",
       "scroll_page",
       "navigate_tab",
+      "scroll_to_element",
+      "highlight_element",
+      "highlight_text_inline",
       "fill_form",
+      "computer",
       "browser_verify"
     ].includes(String(input.toolName || "").trim().toLowerCase()) &&
     (input.errorReason === "failed_execute" || input.errorReason === "failed_verify");
@@ -576,6 +613,12 @@ function inferResumeStrategy(input: {
   if (input.retryAction === "auto_replay") return "retry_same_args";
   if (input.retryAction === "llm_replan" && input.retryable) return "retry_with_fresh_snapshot";
   return "replan";
+}
+
+function mapNextBestAction(strategy: ResumeStrategy): string {
+  if (strategy === "retry_same_args") return "retry_same_args";
+  if (strategy === "retry_with_fresh_snapshot") return "refresh_snapshot_then_retry";
+  return "replan_with_new_toolcall";
 }
 
 function attachFailureProtocol(
@@ -647,6 +690,7 @@ function attachFailureProtocol(
     errorReason,
     retryable,
     retryHint,
+    next_best_action: mapNextBestAction(resumeStrategy),
     details: payload.details || payload.errorDetails || null,
     failureClass,
     resume
@@ -924,9 +968,13 @@ function buildFocusEscalationToolCall(toolCall: ToolCallItem): ToolCallItem | nu
       "click",
       "fill_element_by_uid",
       "select_option_by_uid",
+      "hover_element_by_uid",
       "press_key",
       "scroll_page",
       "navigate_tab",
+      "scroll_to_element",
+      "highlight_element",
+      "highlight_text_inline",
       "fill_form"
     ].includes(normalized)
   ) {
@@ -967,6 +1015,17 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
     const url = pick("url");
     return url ? `目标：${clipText(url, 220)}` : "";
   }
+  if (normalized === "get_tab_info") {
+    const tabId = pick("tabId");
+    return tabId ? `读取标签页详情 · tabId=${clipText(tabId, 80)}` : "读取标签页详情";
+  }
+  if (normalized === "close_tab") {
+    const tabId = pick("tabId");
+    return tabId ? `关闭标签页 · tabId=${clipText(tabId, 80)}` : "关闭当前标签页";
+  }
+  if (normalized === "ungroup_tabs") {
+    return "取消标签页分组";
+  }
   if (["read_file", "write_file", "edit_file"].includes(normalized)) {
     const path = pick("path");
     return path ? `路径：${clipText(path, 220)}` : "";
@@ -993,6 +1052,14 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
     if (target && value) return `选择选项 · ${clipText(target, 120)} = ${clipText(value, 120)}`;
     return target ? `选择选项 · ${clipText(target, 180)}` : "选择选项";
   }
+  if (normalized === "hover_element_by_uid") {
+    const target = pick("uid") || pick("ref") || pick("selector");
+    return target ? `悬停 · ${clipText(target, 180)}` : "悬停元素";
+  }
+  if (normalized === "get_editor_value") {
+    const target = pick("uid") || pick("ref") || pick("selector");
+    return target ? `读取编辑器内容 · ${clipText(target, 180)}` : "读取编辑器内容";
+  }
   if (normalized === "press_key") {
     const key = pick("key") || pick("value");
     return key ? `按键 · ${clipText(key, 120)}` : "按键";
@@ -1008,6 +1075,79 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
   if (normalized === "fill_form") {
     const elements = Array.isArray(args?.elements) ? args?.elements : [];
     return `批量填表：${elements.length} 项`;
+  }
+  if (normalized === "computer") {
+    const action = pick("action");
+    return action ? `视觉操作 · ${clipText(action, 120)}` : "视觉操作";
+  }
+  if (normalized === "get_page_metadata") return "读取页面元信息";
+  if (normalized === "scroll_to_element") {
+    const target = pick("uid") || pick("ref") || pick("selector");
+    return target ? `滚动到元素 · ${clipText(target, 180)}` : "滚动到元素";
+  }
+  if (normalized === "highlight_element") {
+    const target = pick("uid") || pick("ref") || pick("selector");
+    return target ? `高亮元素 · ${clipText(target, 180)}` : "高亮元素";
+  }
+  if (normalized === "highlight_text_inline") {
+    const selector = pick("selector");
+    const text = pick("searchText");
+    if (selector && text) return `高亮文本 · ${clipText(text, 120)} @ ${clipText(selector, 120)}`;
+    return "高亮文本";
+  }
+  if (normalized === "capture_screenshot") return "截图";
+  if (normalized === "capture_tab_screenshot") {
+    const tabId = pick("tabId");
+    return tabId ? `标签页截图 · tabId=${clipText(tabId, 80)}` : "标签页截图";
+  }
+  if (normalized === "capture_screenshot_with_highlight") {
+    const selector = pick("selector");
+    return selector ? `高亮截图 · ${clipText(selector, 120)}` : "高亮截图";
+  }
+  if (normalized === "download_image") {
+    const filename = pick("filename");
+    return filename ? `下载图片 · ${clipText(filename, 160)}` : "下载图片";
+  }
+  if (normalized === "download_chat_images") return "批量下载聊天图片";
+  if (normalized === "list_interventions") return "读取可用人工干预";
+  if (normalized === "get_intervention_info") {
+    const type = pick("type");
+    return type ? `读取干预详情 · ${clipText(type, 120)}` : "读取干预详情";
+  }
+  if (normalized === "request_intervention") {
+    const type = pick("type");
+    return type ? `请求人工干预 · ${clipText(type, 120)}` : "请求人工干预";
+  }
+  if (normalized === "cancel_intervention") {
+    const id = pick("id");
+    return id ? `取消干预 · ${clipText(id, 160)}` : "取消干预";
+  }
+  if (normalized === "load_skill") {
+    const name = pick("name");
+    return name ? `加载技能 · ${clipText(name, 160)}` : "加载技能";
+  }
+  if (normalized === "execute_skill_script") {
+    const name = pick("skillName");
+    const scriptPath = pick("scriptPath");
+    if (name && scriptPath) return `执行技能脚本 · ${clipText(name, 120)}:${clipText(scriptPath, 120)}`;
+    return "执行技能脚本";
+  }
+  if (normalized === "read_skill_reference") {
+    const name = pick("skillName");
+    const refPath = pick("refPath");
+    if (name && refPath) return `读取技能参考 · ${clipText(name, 120)}:${clipText(refPath, 120)}`;
+    return "读取技能参考";
+  }
+  if (normalized === "get_skill_asset") {
+    const name = pick("skillName");
+    const assetPath = pick("assetPath");
+    if (name && assetPath) return `读取技能资产 · ${clipText(name, 120)}:${clipText(assetPath, 120)}`;
+    return "读取技能资产";
+  }
+  if (normalized === "list_skills") return "读取技能列表";
+  if (normalized === "get_skill_info") {
+    const name = pick("skillName");
+    return name ? `读取技能详情 · ${clipText(name, 160)}` : "读取技能详情";
   }
   if (normalized === "browser_verify") return "页面验证";
   if (normalized === "get_all_tabs") return "读取标签页列表";
@@ -1364,17 +1504,42 @@ const EXTENSION_AGENT_PROMPT_TOOL_ORDER = [
   "write_file",
   "edit_file",
   "bash",
-  "get_current_tab",
   "get_all_tabs",
+  "get_current_tab",
   "create_new_tab",
+  "get_tab_info",
+  "close_tab",
+  "ungroup_tabs",
   "search_elements",
   "click",
   "fill_element_by_uid",
   "select_option_by_uid",
+  "hover_element_by_uid",
+  "get_editor_value",
   "press_key",
   "scroll_page",
   "navigate_tab",
   "fill_form",
+  "computer",
+  "get_page_metadata",
+  "scroll_to_element",
+  "highlight_element",
+  "highlight_text_inline",
+  "capture_screenshot",
+  "capture_tab_screenshot",
+  "capture_screenshot_with_highlight",
+  "download_image",
+  "download_chat_images",
+  "list_interventions",
+  "get_intervention_info",
+  "request_intervention",
+  "cancel_intervention",
+  "load_skill",
+  "execute_skill_script",
+  "read_skill_reference",
+  "get_skill_asset",
+  "list_skills",
+  "get_skill_info",
   "browser_verify"
 ] as const;
 
@@ -1383,18 +1548,43 @@ const EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS: Record<string, string> = {
   write_file: "Create or overwrite files on local FS or browser virtual FS.",
   edit_file: "Patch files with exact oldText/newText replacement.",
   bash: "Execute shell commands through bridge bash.exec (supports runtime + timeoutMs).",
-  get_current_tab: "Get the active browser tab context.",
   get_all_tabs: "List currently open browser tabs.",
+  get_current_tab: "Get the active browser tab context.",
   create_new_tab: "Open a new browser tab when task flow requires it.",
+  get_tab_info: "Get detailed tab metadata by tabId.",
+  close_tab: "Close a specific tab or current tab.",
+  ungroup_tabs: "Ungroup tab groups in current window.",
   search_elements:
     "Capture accessibility-first page snapshot to discover actionable targets. Query should describe user-visible semantics (placeholder/aria/name/text).",
   click: "Click a specific page element by uid/ref/backendNodeId.",
   fill_element_by_uid: "Type/fill a specific page element by uid/ref/backendNodeId.",
   select_option_by_uid: "Select/set value on a selectable page element by uid/ref/backendNodeId.",
+  hover_element_by_uid: "Hover a target element by uid/ref/backendNodeId.",
+  get_editor_value: "Read full value from input/textarea/contenteditable/editor target.",
   press_key: "Press a keyboard key on active element (e.g. Enter/Escape/ArrowDown).",
   scroll_page: "Scroll page by deltaY pixels (positive=down, negative=up).",
   navigate_tab: "Navigate tab to target URL.",
   fill_form: "Fill multiple form fields in one structured call.",
+  computer: "Coordinate-based browser interaction (click/hover/scroll/key/type/wait/drag).",
+  get_page_metadata: "Read page metadata (title/url/description/keywords/author/og).",
+  scroll_to_element: "Scroll target element into view by selector or uid/ref/backendNodeId.",
+  highlight_element: "Highlight element for visual confirmation.",
+  highlight_text_inline: "Highlight matched text under selector scope.",
+  capture_screenshot: "Capture screenshot and return base64 data URL.",
+  capture_tab_screenshot: "Capture screenshot for a specific tab id.",
+  capture_screenshot_with_highlight: "Capture screenshot with optional highlight selector.",
+  download_image: "Download data:image URL to local browser downloads.",
+  download_chat_images: "Batch-download image parts from message payload.",
+  list_interventions: "List available human intervention types.",
+  get_intervention_info: "Read intervention schema/details by type.",
+  request_intervention: "Request a human intervention task.",
+  cancel_intervention: "Cancel a pending intervention request.",
+  load_skill: "Load skill main content (SKILL.md).",
+  execute_skill_script: "Execute script under a skill package.",
+  read_skill_reference: "Read skill reference doc under references/.",
+  get_skill_asset: "Read skill asset under assets/.",
+  list_skills: "List installed skills.",
+  get_skill_info: "Get detailed skill metadata.",
   browser_verify: "Assert URL/title/text/selector to confirm the task actually progressed."
 };
 
@@ -1402,13 +1592,15 @@ const EXTENSION_AGENT_PROMPT_BASE_GUIDELINES = [
   "Use tools instead of guessing. Ground decisions in tool outputs.",
   "For file tasks, read_file before edit_file/write_file.",
   "Prefer edit_file for surgical changes; use write_file for new files or full rewrites.",
-  "For browser tasks, prefer search_elements -> action -> browser_verify.",
+  "For browser tasks, enforce: semantic search -> action -> browser_verify.",
   "Use user-visible query words in search_elements (placeholder/label/text), avoid implementation-only query text.",
-  "For click/fill/select, prefer uid/ref/backendNodeId from latest search_elements; selector is fallback only.",
-  "For state-changing actions (click/fill/select/press/navigate), include expect whenever you can define success criteria.",
+  "For click/fill/select/hover/get_editor_value/scroll_to/highlight, prefer uid/ref/backendNodeId from latest search_elements; selector is fallback only.",
+  "For state-changing actions (click/fill/select/press/navigate/fill_form/computer/download/intervention), include expect whenever success criteria is clear.",
   "Never claim done when verify failed, verify skipped, or verify has empty checks.",
-  "Avoid repeating the same search_elements query+selector pair without changing strategy.",
+  "Avoid blind repeat: do not run identical search_elements query+selector multiple times without strategy change.",
+  "Avoid blind click: never click toggle-like controls before reading current state label/count.",
   "For toggle-like controls (like/follow/bookmark), read current label/state first to avoid accidental flip.",
+  "If browser_verify fails, do not claim done; re-observe and retry with updated target or expectation.",
   "Do not invent selectors, URLs, tab state, or command output; re-observe when uncertain.",
   "Use mem:// or vfs:// paths (or runtime=browser) for browser virtual files; use regular paths (or runtime=local) for local files.",
   "When tab context is ambiguous, query get_current_tab/get_all_tabs before acting.",
@@ -1416,14 +1608,15 @@ const EXTENSION_AGENT_PROMPT_BASE_GUIDELINES = [
 ];
 
 function buildBrowserAgentSystemPrompt(config: BridgeConfig): string {
+  const overridePrompt = String(config.llmSystemPromptCustom || "");
+  if (overridePrompt.trim()) {
+    return overridePrompt;
+  }
+
   const tools = EXTENSION_AGENT_PROMPT_TOOL_ORDER
     .map((name) => `- ${name}: ${EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS[name] || "Use when needed."}`)
     .join("\n");
   const guidelines = EXTENSION_AGENT_PROMPT_BASE_GUIDELINES.map((line) => `- ${line}`).join("\n");
-  const customPrompt = String(config.llmSystemPromptCustom || "");
-  const customPromptSection = customPrompt.trim()
-    ? ["", "Custom system instructions (user-defined):", customPrompt]
-    : [];
   return [
     "You are an expert coding assistant operating inside Browser Brain Loop, a browser-extension agent harness.",
     "You help users by reading files, executing commands, editing code, writing files, and operating browser tabs.",
@@ -1438,7 +1631,6 @@ function buildBrowserAgentSystemPrompt(config: BridgeConfig): string {
     "",
     "Guidelines:",
     guidelines,
-    ...customPromptSection,
     "",
     `Current date and time: ${nowIso()}`,
     "Runtime: Browser extension agent (Chrome MV3)."
@@ -1528,7 +1720,7 @@ function shouldVerifyStep(action: string, verifyPolicy: unknown): boolean {
 }
 
 function actionRequiresLease(kind: string): boolean {
-  return ["click", "type", "fill", "press", "scroll", "select", "navigate"].includes(kind);
+  return ["click", "type", "fill", "press", "scroll", "select", "navigate", "hover"].includes(kind);
 }
 
 function shouldAcquireLease(kind: string, policy: CapabilityExecutionPolicy): boolean {
@@ -2928,6 +3120,71 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         args: JsonRecord;
       }
     | {
+        kind: "local.get_tab_info";
+        tabId: number;
+      }
+    | {
+        kind: "local.close_tab";
+        tabId: number | null;
+      }
+    | {
+        kind: "local.ungroup_tabs";
+        windowId: number | null;
+      }
+    | {
+        kind: "local.list_interventions";
+        enabledOnly: boolean;
+      }
+    | {
+        kind: "local.get_intervention_info";
+        interventionType: string;
+      }
+    | {
+        kind: "local.request_intervention";
+        sessionId: string;
+        interventionType: string;
+        params: JsonRecord;
+        timeoutSec: number;
+        reason: string;
+      }
+    | {
+        kind: "local.cancel_intervention";
+        sessionId: string;
+        requestId: string;
+      }
+    | {
+        kind: "local.list_skills";
+        enabledOnly: boolean;
+      }
+    | {
+        kind: "local.get_skill_info";
+        skillName: string;
+      }
+    | {
+        kind: "local.load_skill";
+        sessionId: string;
+        skillName: string;
+      }
+    | {
+        kind: "local.read_skill_reference";
+        sessionId: string;
+        skillName: string;
+        refPath: string;
+      }
+    | {
+        kind: "local.get_skill_asset";
+        sessionId: string;
+        skillName: string;
+        assetPath: string;
+      }
+    | {
+        kind: "local.execute_skill_script";
+        sessionId: string;
+        skillName: string;
+        scriptPath: string;
+        scriptArgs: unknown;
+      }
+    | {
         kind: "step.search_elements";
         capability: ExecuteCapability;
         tabId: number;
@@ -2941,14 +3198,67 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           | "click"
           | "fill_element_by_uid"
           | "select_option_by_uid"
+          | "hover_element_by_uid"
+          | "get_editor_value"
           | "press_key"
           | "scroll_page"
-          | "navigate_tab";
+          | "navigate_tab"
+          | "scroll_to_element";
         capability: ExecuteCapability;
         tabId: number;
         kindValue: string;
         action: JsonRecord;
         expect: unknown;
+      }
+    | {
+        kind: "step.script_action";
+        toolName:
+          | "get_page_metadata"
+          | "highlight_element"
+          | "highlight_text_inline";
+        capability: ExecuteCapability;
+        tabId: number;
+        expression: string;
+        expect: JsonRecord | null;
+      }
+    | {
+        kind: "step.capture_screenshot";
+        toolName:
+          | "capture_screenshot"
+          | "capture_tab_screenshot"
+          | "capture_screenshot_with_highlight";
+        tabId: number;
+        format: "png" | "jpeg";
+        quality: number | null;
+        selector: string;
+        sendToLLM: boolean;
+      }
+    | {
+        kind: "step.download_image";
+        tabId: number;
+        imageData: string;
+        filename: string;
+      }
+    | {
+        kind: "step.download_chat_images";
+        tabId: number;
+        files: Array<{
+          imageData: string;
+          filename: string;
+        }>;
+      }
+    | {
+        kind: "step.computer";
+        tabId: number;
+        action: string;
+        coordinate: [number, number] | null;
+        startCoordinate: [number, number] | null;
+        text: string;
+        scrollDirection: string;
+        scrollAmount: number | null;
+        durationSec: number | null;
+        uid: string;
+        selector: string;
       }
     | {
         kind: "step.fill_form";
@@ -2977,18 +3287,27 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     hasContract: boolean;
   }): JsonRecord {
     const unsupported = input.hasContract;
-    return {
+    return attachFailureProtocol(input.requestedTool || input.resolvedTool || "unknown_tool", {
       error: unsupported
         ? `工具已注册但当前 runtime 不支持执行: ${input.requestedTool}`
         : `未知工具: ${input.requestedTool}`,
       errorCode: unsupported ? "E_TOOL_UNSUPPORTED" : "E_TOOL",
+      errorReason: "failed_execute",
+      retryable: unsupported,
+      retryHint: unsupported
+        ? "Call a supported canonical tool name from tool list."
+        : "Use list of available tools and retry with valid name.",
       details: {
         requestedTool: input.requestedTool,
         resolvedTool: input.resolvedTool,
         canonicalTool: input.resolvedTool || null,
         supportedTools: Array.from(RUNTIME_EXECUTABLE_TOOL_NAMES)
       }
-    };
+    }, {
+      phase: "plan",
+      category: "missing_target",
+      resumeStrategy: unsupported ? "replan" : "replan"
+    });
   }
 
   function resolveToolCallContext(toolCall: ToolCallItem): { ok: true; value: ResolvedToolCallContext } | { ok: false; error: JsonRecord } {
@@ -3031,6 +3350,135 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     };
   }
 
+  const INTERVENTION_CATALOG: Record<
+    string,
+    {
+      type: string;
+      name: string;
+      description: string;
+      enabled: boolean;
+      inputSchema: JsonRecord;
+    }
+  > = {
+    "monitor-operation": {
+      type: "monitor-operation",
+      name: "Monitor Operation",
+      description: "Ask user to watch/confirm a browser operation before continuing.",
+      enabled: true,
+      inputSchema: { type: "object", properties: { instruction: { type: "string" } } }
+    },
+    "voice-input": {
+      type: "voice-input",
+      name: "Voice Input",
+      description: "Ask user to provide missing information via voice/text.",
+      enabled: true,
+      inputSchema: { type: "object", properties: { prompt: { type: "string" } } }
+    },
+    "user-selection": {
+      type: "user-selection",
+      name: "User Selection",
+      description: "Ask user to choose one option from AI-provided candidates.",
+      enabled: true,
+      inputSchema: { type: "object", properties: { options: { type: "array" } } }
+    }
+  };
+
+  const interventionRequests = new Map<
+    string,
+    {
+      id: string;
+      sessionId: string;
+      type: string;
+      params: JsonRecord;
+      reason: string;
+      timeoutSec: number;
+      status: "pending" | "cancelled";
+      createdAt: string;
+    }
+  >();
+
+  function normalizeInterventionType(raw: unknown): string {
+    const type = String(raw || "").trim().toLowerCase();
+    if (!type) return "";
+    return type;
+  }
+
+  function buildSkillChildLocation(location: string, relativePath: string): string {
+    const normalizedLocation = String(location || "").trim();
+    const normalizedRelative = String(relativePath || "")
+      .trim()
+      .replace(/^\.\//, "")
+      .replace(/^\/+/, "");
+    if (!normalizedLocation) return "";
+    if (!normalizedRelative) return "";
+    if (normalizedRelative.includes("..")) {
+      throw new Error("skill path 不能包含 ..");
+    }
+    const cut = normalizedLocation.lastIndexOf("/");
+    const base = cut >= 0 ? normalizedLocation.slice(0, cut) : normalizedLocation;
+    return `${base}/${normalizedRelative}`;
+  }
+
+  async function resolveSkillByName(skillName: string): Promise<SkillMetadata | null> {
+    const normalized = String(skillName || "").trim();
+    if (!normalized) return null;
+    const byId = await orchestrator.getSkill(normalized);
+    if (byId) return byId;
+    const all = await orchestrator.listSkills();
+    const needle = normalized.toLowerCase();
+    return (
+      all.find((item) => String(item.id || "").toLowerCase() === needle) ||
+      all.find((item) => String(item.name || "").toLowerCase() === needle) ||
+      null
+    );
+  }
+
+  async function readTextByLocation(sessionId: string, location: string): Promise<string> {
+    const runtimeHint = isVirtualUri(location) ? "browser" : "local";
+    const result = await executeStep({
+      sessionId,
+      capability: TOOL_CAPABILITIES.read_file,
+      action: "invoke",
+      args: {
+        path: location,
+        runtime: runtimeHint,
+        frame: {
+          tool: "read",
+          args: {
+            path: location,
+            runtime: runtimeHint
+          }
+        }
+      },
+      verifyPolicy: "off"
+    });
+    if (!result.ok) {
+      throw new Error(result.error || `read_file 失败: ${location}`);
+    }
+    return extractSkillReadContent(result.data);
+  }
+
+  function normalizeDownloadFilename(input: string, fallback: string): string {
+    const name = String(input || "").trim();
+    const base = (name || fallback)
+      .replace(/[\\/:*?\"<>|]+/g, "-")
+      .replace(/\s+/g, " ")
+      .trim();
+    return base || fallback;
+  }
+
+  function shellQuote(input: string): string {
+    return `'${String(input || "").replace(/'/g, `'\"'\"'`)}'`;
+  }
+
+  function toCoordinatePair(raw: unknown): [number, number] | null {
+    if (!Array.isArray(raw) || raw.length < 2) return null;
+    const x = Number(raw[0]);
+    const y = Number(raw[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    return [x, y];
+  }
+
   async function buildToolPlan(
     sessionId: string,
     context: ResolvedToolCallContext
@@ -3038,7 +3486,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const args = context.args;
     const buildUidActionPlan = async (
       toolName: string,
-      kindValue: "click" | "fill" | "select",
+      kindValue: "click" | "fill" | "select" | "hover" | "read",
       options: {
         requireValue?: boolean;
       } = {}
@@ -3089,7 +3537,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         ok: true,
         plan: {
           kind: "step.element_action",
-          toolName: toolName as "click" | "fill_element_by_uid" | "select_option_by_uid",
+          toolName: toolName as
+            | "click"
+            | "fill_element_by_uid"
+            | "select_option_by_uid"
+            | "hover_element_by_uid"
+            | "get_editor_value"
+            | "scroll_to_element",
           capability: TOOL_CAPABILITIES.click,
           tabId,
           kindValue,
@@ -3292,6 +3746,57 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           }
         };
       }
+      case "get_tab_info": {
+        const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
+        if (!tabId) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("get_tab_info", {
+              error: "get_tab_info 需要 tabId，当前无可用 tab",
+              errorCode: "E_NO_TAB",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint: "Call get_all_tabs and retry get_tab_info with a valid tabId."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+          };
+        }
+        return {
+          ok: true,
+          plan: {
+            kind: "local.get_tab_info",
+            tabId
+          }
+        };
+      }
+      case "close_tab": {
+        const explicitTabId = parsePositiveInt(args.tabId);
+        if (explicitTabId) {
+          return {
+            ok: true,
+            plan: {
+              kind: "local.close_tab",
+              tabId: explicitTabId
+            }
+          };
+        }
+        return {
+          ok: true,
+          plan: {
+            kind: "local.close_tab",
+            tabId: null
+          }
+        };
+      }
+      case "ungroup_tabs": {
+        const windowId = parsePositiveInt(args.windowId);
+        return {
+          ok: true,
+          plan: {
+            kind: "local.ungroup_tabs",
+            windowId: windowId || null
+          }
+        };
+      }
       case "search_elements": {
         const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
         if (!tabId) {
@@ -3335,12 +3840,594 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         return await buildUidActionPlan("fill_element_by_uid", "fill");
       case "select_option_by_uid":
         return await buildUidActionPlan("select_option_by_uid", "select", { requireValue: true });
+      case "hover_element_by_uid":
+        return await buildUidActionPlan("hover_element_by_uid", "hover");
+      case "get_editor_value":
+        return await buildUidActionPlan("get_editor_value", "read");
       case "press_key":
         return await buildTabActionPlan("press_key", "press");
       case "scroll_page":
         return await buildTabActionPlan("scroll_page", "scroll");
       case "navigate_tab":
         return await buildTabActionPlan("navigate_tab", "navigate");
+      case "scroll_to_element":
+        return await buildUidActionPlan("scroll_to_element", "hover");
+      case "get_page_metadata": {
+        const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
+        if (!tabId) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("get_page_metadata", {
+              error: "get_page_metadata 需要 tabId，当前无可用 tab",
+              errorCode: "E_NO_TAB",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint: "Call get_all_tabs and retry get_page_metadata with a valid tabId."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+          };
+        }
+        const expression = `(() => {
+          const getMeta = (name, property) => {
+            const selector = property ? 'meta[property=\"' + property + '\"]' : 'meta[name=\"' + name + '\"]';
+            const el = document.querySelector(selector);
+            return el && typeof el.content === 'string' ? el.content : '';
+          };
+          return {
+            title: document.title || '',
+            url: location.href,
+            description: getMeta('description', '') || getMeta('', 'og:description'),
+            keywords: getMeta('keywords', ''),
+            author: getMeta('author', '') || getMeta('', 'og:author'),
+            ogImage: getMeta('', 'og:image'),
+            favicon:
+              (document.querySelector('link[rel=\"icon\"]') || document.querySelector('link[rel=\"shortcut icon\"]'))?.href || ''
+          };
+        })()`;
+        return {
+          ok: true,
+          plan: {
+            kind: "step.script_action",
+            toolName: "get_page_metadata",
+            capability: TOOL_CAPABILITIES.click,
+            tabId,
+            expression,
+            expect: null
+          }
+        };
+      }
+      case "highlight_element": {
+        const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
+        if (!tabId) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("highlight_element", {
+              error: "highlight_element 需要 tabId，当前无可用 tab",
+              errorCode: "E_NO_TAB",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint: "Call get_all_tabs and retry highlight_element with a valid tabId."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+          };
+        }
+        const selector = String(args.selector || "").trim();
+        if (!selector) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("highlight_element", {
+              error: "highlight_element 需要 selector",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide selector and retry highlight_element."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+          };
+        }
+        const color = String(args.color || "#00d4ff");
+        const durationMs = Number(args.durationMs ?? 1600);
+        const normalizedDuration = Number.isFinite(durationMs) ? Math.max(0, Math.min(30_000, Math.floor(durationMs))) : 1600;
+        const expression = `(() => {
+          const selector = ${JSON.stringify(selector)};
+          const color = ${JSON.stringify(color)};
+          const duration = ${normalizedDuration};
+          const nodes = Array.from(document.querySelectorAll(selector));
+          if (!nodes.length) return { success: false, error: 'selector not found', selector };
+          const marker = 'bbl-highlight-' + Date.now();
+          for (const node of nodes) {
+            const el = node;
+            if (!(el instanceof HTMLElement)) continue;
+            el.setAttribute('data-bbl-highlight', marker);
+            el.style.outline = '2px solid ' + color;
+            el.style.outlineOffset = '2px';
+            el.style.boxShadow = '0 0 0 3px color-mix(in srgb, ' + color + ' 30%, transparent)';
+          }
+          if (duration > 0) {
+            setTimeout(() => {
+              for (const el of document.querySelectorAll('[data-bbl-highlight=\"' + marker + '\"]')) {
+                if (!(el instanceof HTMLElement)) continue;
+                el.style.outline = '';
+                el.style.outlineOffset = '';
+                el.style.boxShadow = '';
+                el.removeAttribute('data-bbl-highlight');
+              }
+            }, duration);
+          }
+          return { success: true, count: nodes.length, selector, color, durationMs: duration, url: location.href, title: document.title };
+        })()`;
+        return {
+          ok: true,
+          plan: {
+            kind: "step.script_action",
+            toolName: "highlight_element",
+            capability: TOOL_CAPABILITIES.click,
+            tabId,
+            expression,
+            expect: normalizeVerifyExpect(args.expect || null)
+          }
+        };
+      }
+      case "highlight_text_inline": {
+        const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
+        if (!tabId) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("highlight_text_inline", {
+              error: "highlight_text_inline 需要 tabId，当前无可用 tab",
+              errorCode: "E_NO_TAB",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint: "Call get_all_tabs and retry highlight_text_inline with a valid tabId."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+          };
+        }
+        const selector = String(args.selector || "").trim();
+        const searchText = String(args.searchText || "").trim();
+        if (!selector || !searchText) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("highlight_text_inline", {
+              error: "highlight_text_inline 需要 selector 和 searchText",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide selector + searchText and retry highlight_text_inline."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+          };
+        }
+        const caseSensitive = args.caseSensitive === true;
+        const wholeWords = args.wholeWords === true;
+        const highlightColor = String(args.highlightColor || "#DC143C");
+        const backgroundColor = String(args.backgroundColor || "transparent");
+        const fontWeight = String(args.fontWeight || "bold");
+        const expression = `(() => {
+          const selector = ${JSON.stringify(selector)};
+          const searchText = ${JSON.stringify(searchText)};
+          const caseSensitive = ${caseSensitive};
+          const wholeWords = ${wholeWords};
+          const highlightColor = ${JSON.stringify(highlightColor)};
+          const backgroundColor = ${JSON.stringify(backgroundColor)};
+          const fontWeight = ${JSON.stringify(fontWeight)};
+          const nodes = Array.from(document.querySelectorAll(selector));
+          if (!nodes.length) return { success: false, error: 'selector not found', selector };
+          const escaped = searchText.replace(/[.*+?^$()|[\\]\\\\]/g, '\\\\$&');
+          const source = wholeWords ? ('\\\\b' + escaped + '\\\\b') : escaped;
+          const flags = caseSensitive ? 'g' : 'gi';
+          const re = new RegExp(source, flags);
+          let count = 0;
+          for (const root of nodes) {
+            if (!(root instanceof HTMLElement)) continue;
+            const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+            const textNodes = [];
+            while (walker.nextNode()) textNodes.push(walker.currentNode);
+            for (const node of textNodes) {
+              const text = node.textContent || '';
+              if (!re.test(text)) continue;
+              re.lastIndex = 0;
+              const frag = document.createDocumentFragment();
+              let last = 0;
+              let hit;
+              while ((hit = re.exec(text)) !== null) {
+                if (hit.index > last) frag.appendChild(document.createTextNode(text.slice(last, hit.index)));
+                const span = document.createElement('span');
+                span.textContent = hit[0];
+                span.style.color = highlightColor;
+                span.style.backgroundColor = backgroundColor;
+                span.style.fontWeight = fontWeight;
+                span.setAttribute('data-bbl-inline-highlight', '1');
+                frag.appendChild(span);
+                count += 1;
+                last = hit.index + hit[0].length;
+              }
+              if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+              node.parentNode?.replaceChild(frag, node);
+            }
+          }
+          return { success: true, selector, searchText, matches: count, url: location.href, title: document.title };
+        })()`;
+        return {
+          ok: true,
+          plan: {
+            kind: "step.script_action",
+            toolName: "highlight_text_inline",
+            capability: TOOL_CAPABILITIES.click,
+            tabId,
+            expression,
+            expect: normalizeVerifyExpect(args.expect || null)
+          }
+        };
+      }
+      case "capture_screenshot":
+      case "capture_tab_screenshot":
+      case "capture_screenshot_with_highlight": {
+        const requested = context.executionTool as "capture_screenshot" | "capture_tab_screenshot" | "capture_screenshot_with_highlight";
+        const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
+        if (!tabId) {
+          return {
+            ok: false,
+            error: attachFailureProtocol(requested, {
+              error: `${requested} 需要 tabId，当前无可用 tab`,
+              errorCode: "E_NO_TAB",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint: `Call get_all_tabs and retry ${requested} with a valid tabId.`
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+          };
+        }
+        const format = String(args.format || "png").trim().toLowerCase() === "jpeg" ? "jpeg" : "png";
+        const qualityRaw = Number(args.quality);
+        const quality = Number.isFinite(qualityRaw) ? Math.max(0, Math.min(100, Math.floor(qualityRaw))) : null;
+        return {
+          ok: true,
+          plan: {
+            kind: "step.capture_screenshot",
+            toolName: requested,
+            tabId,
+            format,
+            quality,
+            selector: String(args.selector || "").trim(),
+            sendToLLM: args.sendToLLM !== false
+          }
+        };
+      }
+      case "download_image": {
+        const imageData = String(args.imageData || "").trim();
+        if (!imageData.startsWith("data:image/")) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("download_image", {
+              error: "download_image 需要 data:image/* 格式 imageData",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide a valid data:image URL and retry download_image."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+          };
+        }
+        const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
+        if (!tabId) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("download_image", {
+              error: "download_image 需要 tabId，当前无可用 tab",
+              errorCode: "E_NO_TAB",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint: "Call get_all_tabs and retry download_image with a valid tabId."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+          };
+        }
+        const fallbackName = `image-${Date.now()}.png`;
+        const filename = normalizeDownloadFilename(String(args.filename || ""), fallbackName);
+        return {
+          ok: true,
+          plan: {
+            kind: "step.download_image",
+            tabId,
+            imageData,
+            filename
+          }
+        };
+      }
+      case "download_chat_images": {
+        const rawMessages = Array.isArray(args.messages) ? (args.messages as unknown[]) : [];
+        const strategy = String(args.filenamingStrategy || "descriptive").trim().toLowerCase();
+        const files: Array<{ imageData: string; filename: string }> = [];
+        let index = 0;
+        for (const message of rawMessages) {
+          const messageRecord = toRecord(message);
+          const parts = Array.isArray(messageRecord.parts) ? (messageRecord.parts as unknown[]) : [];
+          for (const part of parts) {
+            const partRecord = toRecord(part);
+            if (String(partRecord.type || "").trim().toLowerCase() !== "image") continue;
+            const imageData = String(partRecord.imageData || "").trim();
+            if (!imageData.startsWith("data:image/")) continue;
+            index += 1;
+            const imageTitle = String(partRecord.imageTitle || "").trim();
+            const messageId = String(messageRecord.id || "").trim();
+            const stem = strategy === "sequential"
+              ? `image-${String(index).padStart(3, "0")}`
+              : strategy === "timestamp"
+                ? `image-${Date.now()}-${index}`
+                : imageTitle || messageId || `image-${index}`;
+            files.push({
+              imageData,
+              filename: normalizeDownloadFilename(stem, `image-${index}`)
+            });
+          }
+        }
+        if (!files.length) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("download_chat_images", {
+              error: "download_chat_images 未找到可下载的 imageData",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide messages[].parts[].imageData with data:image URL."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+          };
+        }
+        const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
+        if (!tabId) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("download_chat_images", {
+              error: "download_chat_images 需要 tabId，当前无可用 tab",
+              errorCode: "E_NO_TAB",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint: "Call get_all_tabs and retry download_chat_images with a valid tabId."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+          };
+        }
+        return {
+          ok: true,
+          plan: {
+            kind: "step.download_chat_images",
+            tabId,
+            files
+          }
+        };
+      }
+      case "computer": {
+        const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
+        if (!tabId) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("computer", {
+              error: "computer 需要 tabId，当前无可用 tab",
+              errorCode: "E_NO_TAB",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint: "Call get_all_tabs and retry computer with a valid tabId."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+          };
+        }
+        const action = String(args.action || "").trim().toLowerCase();
+        if (!action) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("computer", {
+              error: "computer 需要 action",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide action and retry computer."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+          };
+        }
+        return {
+          ok: true,
+          plan: {
+            kind: "step.computer",
+            tabId,
+            action,
+            coordinate: toCoordinatePair(args.coordinate),
+            startCoordinate: toCoordinatePair(args.start_coordinate),
+            text: String(args.text || "").trim(),
+            scrollDirection: String(args.scroll_direction || "").trim().toLowerCase(),
+            scrollAmount: Number.isFinite(Number(args.scroll_amount)) ? Number(args.scroll_amount) : null,
+            durationSec: Number.isFinite(Number(args.duration)) ? Number(args.duration) : null,
+            uid: String(args.uid || "").trim(),
+            selector: String(args.selector || "").trim()
+          }
+        };
+      }
+      case "list_interventions":
+        return {
+          ok: true,
+          plan: {
+            kind: "local.list_interventions",
+            enabledOnly: args.enabledOnly === true
+          }
+        };
+      case "get_intervention_info": {
+        const type = normalizeInterventionType(args.type);
+        if (!type) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("get_intervention_info", {
+              error: "get_intervention_info 需要 type",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide intervention type and retry get_intervention_info."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+          };
+        }
+        return {
+          ok: true,
+          plan: {
+            kind: "local.get_intervention_info",
+            interventionType: type
+          }
+        };
+      }
+      case "request_intervention": {
+        const type = normalizeInterventionType(args.type);
+        if (!type) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("request_intervention", {
+              error: "request_intervention 需要 type",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide intervention type and retry request_intervention."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+          };
+        }
+        const timeoutSecRaw = Number(args.timeout ?? 300);
+        const timeoutSec = Number.isFinite(timeoutSecRaw) ? Math.max(30, Math.min(3600, Math.floor(timeoutSecRaw))) : 300;
+        return {
+          ok: true,
+          plan: {
+            kind: "local.request_intervention",
+            sessionId,
+            interventionType: type,
+            params: toRecord(args.params),
+            timeoutSec,
+            reason: String(args.reason || "").trim()
+          }
+        };
+      }
+      case "cancel_intervention":
+        return {
+          ok: true,
+          plan: {
+            kind: "local.cancel_intervention",
+            sessionId,
+            requestId: String(args.id || "").trim()
+          }
+        };
+      case "list_skills":
+        return {
+          ok: true,
+          plan: {
+            kind: "local.list_skills",
+            enabledOnly: args.enabledOnly === true
+          }
+        };
+      case "get_skill_info": {
+        const skillName = String(args.skillName || args.name || "").trim();
+        if (!skillName) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("get_skill_info", {
+              error: "get_skill_info 需要 skillName",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide skillName and retry get_skill_info."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+          };
+        }
+        return {
+          ok: true,
+          plan: {
+            kind: "local.get_skill_info",
+            skillName
+          }
+        };
+      }
+      case "load_skill": {
+        const skillName = String(args.name || args.skillName || "").trim();
+        if (!skillName) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("load_skill", {
+              error: "load_skill 需要 name",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide skill name and retry load_skill."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+          };
+        }
+        return {
+          ok: true,
+          plan: {
+            kind: "local.load_skill",
+            sessionId,
+            skillName
+          }
+        };
+      }
+      case "read_skill_reference": {
+        const skillName = String(args.skillName || args.name || "").trim();
+        const refPath = String(args.refPath || "").trim();
+        if (!skillName || !refPath) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("read_skill_reference", {
+              error: "read_skill_reference 需要 skillName 和 refPath",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide skillName + refPath and retry read_skill_reference."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+          };
+        }
+        return {
+          ok: true,
+          plan: {
+            kind: "local.read_skill_reference",
+            sessionId,
+            skillName,
+            refPath
+          }
+        };
+      }
+      case "get_skill_asset": {
+        const skillName = String(args.skillName || args.name || "").trim();
+        const assetPath = String(args.assetPath || "").trim();
+        if (!skillName || !assetPath) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("get_skill_asset", {
+              error: "get_skill_asset 需要 skillName 和 assetPath",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide skillName + assetPath and retry get_skill_asset."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+          };
+        }
+        return {
+          ok: true,
+          plan: {
+            kind: "local.get_skill_asset",
+            sessionId,
+            skillName,
+            assetPath
+          }
+        };
+      }
+      case "execute_skill_script": {
+        const skillName = String(args.skillName || args.name || "").trim();
+        const scriptPath = String(args.scriptPath || "").trim();
+        if (!skillName || !scriptPath) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("execute_skill_script", {
+              error: "execute_skill_script 需要 skillName 和 scriptPath",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide skillName + scriptPath and retry execute_skill_script."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+          };
+        }
+        return {
+          ok: true,
+          plan: {
+            kind: "local.execute_skill_script",
+            sessionId,
+            skillName,
+            scriptPath,
+            scriptArgs: args.args
+          }
+        };
+      }
       case "fill_form": {
         const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
         if (!tabId) {
@@ -3473,6 +4560,346 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           }
         });
       }
+      case "local.get_tab_info": {
+        const tab = await chrome.tabs.get(plan.tabId).catch(() => null);
+        if (!tab?.id) {
+          return attachFailureProtocol("get_tab_info", {
+            error: `tab 不存在: ${plan.tabId}`,
+            errorCode: "E_NO_TAB",
+            errorReason: "failed_execute",
+            retryable: true,
+            retryHint: "Call get_all_tabs and retry get_tab_info with a valid tabId."
+          }, { phase: "execute", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" });
+        }
+        return buildToolResponseEnvelope("tab_info", {
+          id: Number(tab.id),
+          index: Number(tab.index || 0),
+          windowId: Number(tab.windowId || 0),
+          active: tab.active === true,
+          pinned: tab.pinned === true,
+          title: String(tab.title || ""),
+          url: String(tab.url || tab.pendingUrl || "")
+        });
+      }
+      case "local.close_tab": {
+        let tabId = plan.tabId;
+        if (!tabId) {
+          tabId = await getActiveTabIdForRuntime();
+        }
+        if (!tabId) {
+          return attachFailureProtocol("close_tab", {
+            error: "close_tab 未找到可关闭 tab",
+            errorCode: "E_NO_TAB",
+            errorReason: "failed_execute",
+            retryable: true,
+            retryHint: "Call get_all_tabs then retry close_tab with tabId."
+          }, { phase: "execute", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" });
+        }
+        await chrome.tabs.remove(tabId).catch((error) => {
+          throw createRuntimeError(`close_tab 失败: ${error instanceof Error ? error.message : String(error)}`, {
+            code: "E_TOOL_EXECUTE",
+            retryable: true
+          });
+        });
+        return buildToolResponseEnvelope("close_tab", {
+          success: true,
+          tabId
+        });
+      }
+      case "local.ungroup_tabs": {
+        const tabs = await chrome.tabs.query(plan.windowId ? { windowId: plan.windowId } : { currentWindow: true });
+        let ungroupedCount = 0;
+        for (const tab of tabs) {
+          if (!tab?.id) continue;
+          if (typeof tab.groupId !== "number" || tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) continue;
+          await chrome.tabs.ungroup(tab.id).catch(() => undefined);
+          ungroupedCount += 1;
+        }
+        return buildToolResponseEnvelope("ungroup_tabs", {
+          success: true,
+          windowId: plan.windowId || null,
+          ungroupedCount
+        });
+      }
+      case "local.list_interventions": {
+        const interventions = Object.values(INTERVENTION_CATALOG).filter((item) => (plan.enabledOnly ? item.enabled : true));
+        return buildToolResponseEnvelope("list_interventions", {
+          success: true,
+          count: interventions.length,
+          interventions
+        });
+      }
+      case "local.get_intervention_info": {
+        const info = INTERVENTION_CATALOG[plan.interventionType];
+        if (!info) {
+          return attachFailureProtocol("get_intervention_info", {
+            error: `未知 intervention type: ${plan.interventionType}`,
+            errorCode: "E_ARGS",
+            errorReason: "failed_execute",
+            retryable: false,
+            retryHint: "Use list_interventions and retry with valid type."
+          }, { phase: "execute", category: "missing_target", resumeStrategy: "replan" });
+        }
+        return buildToolResponseEnvelope("get_intervention_info", {
+          success: true,
+          intervention: info
+        });
+      }
+      case "local.request_intervention": {
+        const info = INTERVENTION_CATALOG[plan.interventionType];
+        if (!info) {
+          return attachFailureProtocol("request_intervention", {
+            error: `未知 intervention type: ${plan.interventionType}`,
+            errorCode: "E_ARGS",
+            errorReason: "failed_execute",
+            retryable: false,
+            retryHint: "Use list_interventions and retry with valid type."
+          }, { phase: "execute", category: "missing_target", resumeStrategy: "replan" });
+        }
+        const requestId = `ivr_${crypto.randomUUID()}`;
+        interventionRequests.set(requestId, {
+          id: requestId,
+          sessionId: plan.sessionId,
+          type: plan.interventionType,
+          params: plan.params,
+          reason: plan.reason,
+          timeoutSec: plan.timeoutSec,
+          status: "pending",
+          createdAt: nowIso()
+        });
+        const summary = [
+          `[Intervention:${plan.interventionType}]`,
+          plan.reason || "Need user intervention to continue.",
+          Object.keys(plan.params || {}).length ? `params=${safeStringify(plan.params, 800)}` : ""
+        ]
+          .filter(Boolean)
+          .join(" ");
+        orchestrator.enqueueQueuedPrompt(plan.sessionId, "followUp", summary);
+        return buildToolResponseEnvelope("request_intervention", {
+          success: true,
+          id: requestId,
+          status: "pending",
+          intervention: info,
+          timeoutSec: plan.timeoutSec,
+          message: "Intervention request queued as follow-up prompt."
+        });
+      }
+      case "local.cancel_intervention": {
+        const id = String(plan.requestId || "").trim();
+        if (id) {
+          const found = interventionRequests.get(id);
+          if (!found) {
+            return attachFailureProtocol("cancel_intervention", {
+              error: `intervention 不存在: ${id}`,
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Use request_intervention result id or omit id to cancel pending queue."
+            }, { phase: "execute", category: "missing_target", resumeStrategy: "replan" });
+          }
+          found.status = "cancelled";
+          interventionRequests.set(id, found);
+        }
+        orchestrator.clearQueuedPrompts(plan.sessionId);
+        return buildToolResponseEnvelope("cancel_intervention", {
+          success: true,
+          id: id || null,
+          cancelled: id ? 1 : "all_pending_queue"
+        });
+      }
+      case "local.list_skills": {
+        const skills = await orchestrator.listSkills();
+        const filtered = plan.enabledOnly ? skills.filter((item) => item.enabled) : skills;
+        return buildToolResponseEnvelope("list_skills", {
+          success: true,
+          count: filtered.length,
+          skills: filtered
+        });
+      }
+      case "local.get_skill_info": {
+        const skill = await resolveSkillByName(plan.skillName);
+        if (!skill) {
+          return attachFailureProtocol("get_skill_info", {
+            error: `skill 不存在: ${plan.skillName}`,
+            errorCode: "E_ARGS",
+            errorReason: "failed_execute",
+            retryable: false,
+            retryHint: "Use list_skills then retry get_skill_info with valid skillName."
+          }, { phase: "execute", category: "missing_target", resumeStrategy: "replan" });
+        }
+        const base = String(skill.location || "").replace(/\/[^/]*$/, "");
+        return buildToolResponseEnvelope("get_skill_info", {
+          success: true,
+          skill: {
+            ...skill,
+            paths: {
+              scripts: `${base}/scripts/`,
+              references: `${base}/references/`,
+              assets: `${base}/assets/`
+            }
+          }
+        });
+      }
+      case "local.load_skill": {
+        const skill = await resolveSkillByName(plan.skillName);
+        if (!skill) {
+          return attachFailureProtocol("load_skill", {
+            error: `skill 不存在: ${plan.skillName}`,
+            errorCode: "E_ARGS",
+            errorReason: "failed_execute",
+            retryable: false,
+            retryHint: "Use list_skills then retry load_skill with valid name."
+          }, { phase: "execute", category: "missing_target", resumeStrategy: "replan" });
+        }
+        const content = await readTextByLocation(plan.sessionId, skill.location);
+        return buildToolResponseEnvelope("load_skill", {
+          success: true,
+          skill,
+          content
+        });
+      }
+      case "local.read_skill_reference": {
+        const skill = await resolveSkillByName(plan.skillName);
+        if (!skill) {
+          return attachFailureProtocol("read_skill_reference", {
+            error: `skill 不存在: ${plan.skillName}`,
+            errorCode: "E_ARGS",
+            errorReason: "failed_execute",
+            retryable: false,
+            retryHint: "Use list_skills then retry read_skill_reference with valid skillName."
+          }, { phase: "execute", category: "missing_target", resumeStrategy: "replan" });
+        }
+        const normalizedRef = plan.refPath.startsWith("references/") ? plan.refPath : `references/${plan.refPath}`;
+        const location = buildSkillChildLocation(skill.location, normalizedRef);
+        const content = await readTextByLocation(plan.sessionId, location);
+        return buildToolResponseEnvelope("read_skill_reference", {
+          success: true,
+          skill: {
+            id: skill.id,
+            name: skill.name
+          },
+          refPath: normalizedRef,
+          location,
+          content
+        });
+      }
+      case "local.get_skill_asset": {
+        const skill = await resolveSkillByName(plan.skillName);
+        if (!skill) {
+          return attachFailureProtocol("get_skill_asset", {
+            error: `skill 不存在: ${plan.skillName}`,
+            errorCode: "E_ARGS",
+            errorReason: "failed_execute",
+            retryable: false,
+            retryHint: "Use list_skills then retry get_skill_asset with valid skillName."
+          }, { phase: "execute", category: "missing_target", resumeStrategy: "replan" });
+        }
+        const normalizedAsset = plan.assetPath.startsWith("assets/") ? plan.assetPath : `assets/${plan.assetPath}`;
+        const location = buildSkillChildLocation(skill.location, normalizedAsset);
+        const content = await readTextByLocation(plan.sessionId, location);
+        return buildToolResponseEnvelope("get_skill_asset", {
+          success: true,
+          skill: {
+            id: skill.id,
+            name: skill.name
+          },
+          assetPath: normalizedAsset,
+          location,
+          content
+        });
+      }
+      case "local.execute_skill_script": {
+        const skill = await resolveSkillByName(plan.skillName);
+        if (!skill) {
+          return attachFailureProtocol("execute_skill_script", {
+            error: `skill 不存在: ${plan.skillName}`,
+            errorCode: "E_ARGS",
+            errorReason: "failed_execute",
+            retryable: false,
+            retryHint: "Use list_skills then retry execute_skill_script with valid skillName."
+          }, { phase: "execute", category: "missing_target", resumeStrategy: "replan" });
+        }
+        const normalizedScript = plan.scriptPath.startsWith("scripts/") ? plan.scriptPath : `scripts/${plan.scriptPath}`;
+        const location = buildSkillChildLocation(skill.location, normalizedScript);
+        if (isVirtualUri(location)) {
+          const source = await readTextByLocation(plan.sessionId, location);
+          return attachFailureProtocol("execute_skill_script", {
+            error: "当前脚本位于虚拟文件系统，无法直接在本地 shell 执行",
+            errorCode: "E_TOOL_UNSUPPORTED",
+            errorReason: "failed_execute",
+            retryable: false,
+            retryHint: "Move script to local path or execute equivalent steps via bash/read_file.",
+            details: {
+              location,
+              sourcePreview: clipText(source, 1200)
+            }
+          }, {
+            phase: "execute",
+            category: "missing_target",
+            resumeStrategy: "replan"
+          });
+        }
+
+        const argPayload =
+          plan.scriptArgs === undefined
+            ? "{}"
+            : safeStringify(plan.scriptArgs, 8_000);
+        const ext = location.split(".").pop()?.toLowerCase() || "";
+        const command = (() => {
+          if (ext === "js" || ext === "mjs" || ext === "cjs") {
+            return `node ${shellQuote(location)} ${shellQuote(argPayload)}`;
+          }
+          if (ext === "ts" || ext === "tsx") {
+            return `bun ${shellQuote(location)} ${shellQuote(argPayload)}`;
+          }
+          if (ext === "sh") {
+            return `bash ${shellQuote(location)} ${shellQuote(argPayload)}`;
+          }
+          return `bash ${shellQuote(location)} ${shellQuote(argPayload)}`;
+        })();
+
+        const out = await executeStep({
+          sessionId: plan.sessionId,
+          capability: TOOL_CAPABILITIES.bash,
+          action: "invoke",
+          args: {
+            frame: {
+              tool: "bash",
+              args: {
+                cmdId: "bash.exec",
+                args: [command],
+                runtime: "local"
+              }
+            }
+          },
+          verifyPolicy: "off"
+        });
+        if (!out.ok) {
+          return buildStepFailureEnvelope(
+            "execute_skill_script",
+            out,
+            "execute_skill_script 执行失败",
+            "Check script path/runtime and retry execute_skill_script.",
+            {
+              defaultRetryable: true,
+              phase: "execute",
+              resumeStrategy: "replan"
+            }
+          );
+        }
+        return buildToolResponseEnvelope("execute_skill_script", {
+          success: true,
+          executed: true,
+          skill: {
+            id: skill.id,
+            name: skill.name
+          },
+          scriptPath: normalizedScript,
+          location,
+          command,
+          result: out.data
+        });
+      }
       case "step.search_elements": {
         const out = await executeStep({
           sessionId,
@@ -3597,6 +5024,448 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           verifyReason,
           verified
         });
+      }
+      case "step.script_action": {
+        const out = await callInfra(infra, {
+          type: "cdp.execute",
+          tabId: plan.tabId,
+          action: {
+            type: "runtime.evaluate",
+            expression: plan.expression,
+            returnByValue: true
+          }
+        }).catch((error) => {
+          const runtimeError = asRuntimeErrorWithMeta(error);
+          return {
+            error: attachFailureProtocol(plan.toolName, {
+              error: runtimeError.message,
+              errorCode: normalizeErrorCode(runtimeError.code) || "E_TOOL_EXECUTE",
+              errorReason: "failed_execute",
+              retryable: runtimeError.retryable === true,
+              retryHint: "Re-observe page state and retry with updated selector/target.",
+              details: runtimeError.details
+            }, { phase: "execute", resumeStrategy: "retry_with_fresh_snapshot" })
+          };
+        });
+        if (toRecord(out).error) return toRecord(out).error as JsonRecord;
+        const resultValue = toRecord(toRecord(out).result).value ?? toRecord(out).result ?? out;
+        const expect = normalizeVerifyExpect(plan.expect || null);
+        if (expect) {
+          const verifyOut = await executeStep({
+            sessionId,
+            capability: TOOL_CAPABILITIES.browser_verify,
+            action: "verify",
+            args: {
+              tabId: plan.tabId,
+              action: {
+                expect
+              },
+              result: resultValue
+            },
+            verifyPolicy: "off"
+          });
+          if (!verifyOut.ok || verifyOut.verified !== true) {
+            return attachFailureProtocol(plan.toolName, {
+              error: `${plan.toolName} 后置验证失败`,
+              errorCode: normalizeErrorCode(verifyOut.errorCode) || "E_VERIFY_FAILED",
+              errorReason: mapVerifyReasonToFailureReason(verifyOut.verifyReason),
+              retryable: true,
+              retryHint: "Refine selector/expect and retry.",
+              details: verifyOut.data || verifyOut.errorDetails || null
+            }, { phase: "verify", resumeStrategy: "retry_with_fresh_snapshot" });
+          }
+        }
+        return buildToolResponseEnvelope(plan.toolName, resultValue, {
+          capabilityUsed: plan.capability,
+          modeUsed: "cdp"
+        });
+      }
+      case "step.capture_screenshot": {
+        if (plan.toolName === "capture_screenshot_with_highlight" && plan.selector) {
+          const highlightExpression = `(() => {
+            const selector = ${JSON.stringify(plan.selector)};
+            const nodes = Array.from(document.querySelectorAll(selector));
+            if (!nodes.length) return { ok: false, selector };
+            for (const node of nodes) {
+              if (!(node instanceof HTMLElement)) continue;
+              node.setAttribute('data-bbl-capture-highlight', '1');
+              node.style.outline = '2px solid #ff6a00';
+              node.style.outlineOffset = '2px';
+            }
+            return { ok: true, count: nodes.length, selector };
+          })()`;
+          await callInfra(infra, {
+            type: "cdp.execute",
+            tabId: plan.tabId,
+            action: {
+              type: "runtime.evaluate",
+              expression: highlightExpression,
+              returnByValue: true
+            }
+          }).catch(() => undefined);
+        }
+
+        const screenshot = await callInfra(infra, {
+          type: "cdp.execute",
+          tabId: plan.tabId,
+          action: {
+            domain: "Page",
+            method: "captureScreenshot",
+            params: {
+              format: plan.format,
+              ...(plan.quality == null ? {} : { quality: plan.quality })
+            }
+          }
+        }).catch((error) => {
+          const runtimeError = asRuntimeErrorWithMeta(error);
+          return {
+            error: attachFailureProtocol(plan.toolName, {
+              error: runtimeError.message,
+              errorCode: normalizeErrorCode(runtimeError.code) || "E_TOOL_EXECUTE",
+              errorReason: "failed_execute",
+              retryable: runtimeError.retryable === true,
+              retryHint: "Re-check tab focus/state and retry screenshot.",
+              details: runtimeError.details
+            }, { phase: "execute", resumeStrategy: "retry_with_fresh_snapshot" })
+          };
+        });
+
+        if (toRecord(screenshot).error) return toRecord(screenshot).error as JsonRecord;
+        const base64 = String(toRecord(screenshot).data || "");
+        if (!base64) {
+          return attachFailureProtocol(plan.toolName, {
+            error: "截图结果为空",
+            errorCode: "E_TOOL_EXECUTE",
+            errorReason: "failed_execute",
+            retryable: true,
+            retryHint: "Retry capture_screenshot after page settles."
+          }, { phase: "execute", resumeStrategy: "retry_with_fresh_snapshot" });
+        }
+
+        if (plan.toolName === "capture_screenshot_with_highlight" && plan.selector) {
+          const cleanupExpression = `(() => {
+            for (const node of document.querySelectorAll('[data-bbl-capture-highlight=\"1\"]')) {
+              if (!(node instanceof HTMLElement)) continue;
+              node.style.outline = '';
+              node.style.outlineOffset = '';
+              node.removeAttribute('data-bbl-capture-highlight');
+            }
+            return { ok: true };
+          })()`;
+          await callInfra(infra, {
+            type: "cdp.execute",
+            tabId: plan.tabId,
+            action: {
+              type: "runtime.evaluate",
+              expression: cleanupExpression,
+              returnByValue: true
+            }
+          }).catch(() => undefined);
+        }
+
+        const tabInfo = await chrome.tabs.get(plan.tabId).catch(() => null);
+        const imageData = `data:image/${plan.format};base64,${base64}`;
+        return buildToolResponseEnvelope(plan.toolName, {
+          success: true,
+          tabId: plan.tabId,
+          imageData,
+          sendToLLM: plan.sendToLLM,
+          selector: plan.selector || undefined,
+          url: String(tabInfo?.url || tabInfo?.pendingUrl || ""),
+          title: String(tabInfo?.title || "")
+        });
+      }
+      case "step.download_image": {
+        const expression = `(() => {
+          const dataUrl = ${JSON.stringify(plan.imageData)};
+          const filename = ${JSON.stringify(plan.filename)};
+          if (!dataUrl || !String(dataUrl).startsWith('data:image/')) {
+            return { success: false, error: 'invalid_image_data' };
+          }
+          const a = document.createElement('a');
+          a.href = dataUrl;
+          a.download = filename;
+          a.rel = 'noopener';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          return { success: true, filename, url: location.href, title: document.title };
+        })()`;
+        const out = await callInfra(infra, {
+          type: "cdp.execute",
+          tabId: plan.tabId,
+          action: {
+            type: "runtime.evaluate",
+            expression,
+            returnByValue: true
+          }
+        });
+        return buildToolResponseEnvelope("download_image", toRecord(toRecord(out).result).value || out);
+      }
+      case "step.download_chat_images": {
+        const results: Array<JsonRecord> = [];
+        for (let i = 0; i < plan.files.length; i += 1) {
+          const file = plan.files[i];
+          const expression = `(() => {
+            const dataUrl = ${JSON.stringify(file.imageData)};
+            const filename = ${JSON.stringify(file.filename)};
+            const a = document.createElement('a');
+            a.href = dataUrl;
+            a.download = filename;
+            a.rel = 'noopener';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            return { success: true, filename };
+          })()`;
+          const out = await callInfra(infra, {
+            type: "cdp.execute",
+            tabId: plan.tabId,
+            action: {
+              type: "runtime.evaluate",
+              expression,
+              returnByValue: true
+            }
+          });
+          results.push(toRecord(toRecord(out).result).value || {});
+          await delay(60);
+        }
+        return buildToolResponseEnvelope("download_chat_images", {
+          success: true,
+          downloaded: results.length,
+          results
+        });
+      }
+      case "step.computer": {
+        const action = plan.action;
+        if (action === "wait") {
+          const waitMs = Math.max(0, Math.min(60_000, Math.floor((plan.durationSec ?? 1) * 1000)));
+          await delay(waitMs);
+          return buildToolResponseEnvelope("computer", {
+            success: true,
+            action,
+            waitedMs: waitMs
+          });
+        }
+        if (action === "type") {
+          const text = String(plan.text || "");
+          const expression = `(() => {
+            const text = ${JSON.stringify(text)};
+            const target = document.activeElement || document.body;
+            if (!target) return { success: false, error: 'no_active_element' };
+            if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+              target.value = text;
+              target.dispatchEvent(new Event('input', { bubbles: true }));
+              target.dispatchEvent(new Event('change', { bubbles: true }));
+              return { success: true, action: 'type', typed: text.length };
+            }
+            if (target.isContentEditable) {
+              target.textContent = text;
+              target.dispatchEvent(new Event('input', { bubbles: true }));
+              return { success: true, action: 'type', typed: text.length };
+            }
+            return { success: false, error: 'active_element_not_typable' };
+          })()`;
+          const out = await callInfra(infra, {
+            type: "cdp.execute",
+            tabId: plan.tabId,
+            action: {
+              type: "runtime.evaluate",
+              expression,
+              returnByValue: true
+            }
+          });
+          return buildToolResponseEnvelope("computer", toRecord(toRecord(out).result).value || out);
+        }
+        if (action === "key") {
+          const keys = String(plan.text || "")
+            .split(/\\s+/)
+            .map((item) => item.trim())
+            .filter(Boolean);
+          if (!keys.length) {
+            return attachFailureProtocol("computer", {
+              error: "computer(key) 需要 text",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide text key sequence and retry computer."
+            }, { phase: "execute", resumeStrategy: "replan" });
+          }
+          for (const key of keys) {
+            await executeStep({
+              sessionId,
+              capability: TOOL_CAPABILITIES.click,
+              action: "action",
+              args: {
+                tabId: plan.tabId,
+                action: {
+                  kind: "press",
+                  key
+                }
+              },
+              verifyPolicy: "off"
+            });
+          }
+          return buildToolResponseEnvelope("computer", {
+            success: true,
+            action,
+            keys
+          });
+        }
+        if (action === "scroll_to") {
+          const target = plan.uid || plan.selector;
+          if (!target) {
+            return attachFailureProtocol("computer", {
+              error: "computer(scroll_to) 需要 uid 或 selector",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide uid/selector and retry computer scroll_to."
+            }, { phase: "execute", resumeStrategy: "replan" });
+          }
+          const out = await executeStep({
+            sessionId,
+            capability: TOOL_CAPABILITIES.click,
+            action: "action",
+            args: {
+              tabId: plan.tabId,
+              action: {
+                kind: "hover",
+                uid: plan.uid || undefined,
+                ref: plan.uid || undefined,
+                selector: plan.selector || undefined
+              }
+            },
+            verifyPolicy: "off"
+          });
+          if (!out.ok) {
+            return buildStepFailureEnvelope("computer", out, "computer scroll_to 失败", "Refresh target and retry computer scroll_to.", {
+              defaultRetryable: true,
+              phase: "execute",
+              resumeStrategy: "retry_with_fresh_snapshot"
+            });
+          }
+          return buildToolResponseEnvelope("computer", {
+            success: true,
+            action,
+            target
+          });
+        }
+        const coordinate = plan.coordinate;
+        const startCoordinate = plan.startCoordinate;
+        if (!coordinate && action !== "scroll") {
+          return attachFailureProtocol("computer", {
+            error: `computer(${action}) 需要 coordinate`,
+            errorCode: "E_ARGS",
+            errorReason: "failed_execute",
+            retryable: false,
+            retryHint: "Provide coordinate and retry computer."
+          }, { phase: "execute", resumeStrategy: "replan" });
+        }
+        const [x, y] = coordinate || [0, 0];
+        const clickCount = action === "double_click" ? 2 : action === "triple_click" ? 3 : 1;
+        const button = action === "right_click" ? "right" : "left";
+        const dispatchMouse = async (type: string, params: JsonRecord = {}) =>
+          await callInfra(infra, {
+            type: "cdp.execute",
+            tabId: plan.tabId,
+            action: {
+              domain: "Input",
+              method: "dispatchMouseEvent",
+              params: {
+                type,
+                x,
+                y,
+                button,
+                clickCount,
+                ...params
+              }
+            }
+          });
+        if (action === "hover" || action === "left_click" || action === "right_click" || action === "double_click" || action === "triple_click") {
+          await dispatchMouse("mouseMoved");
+          if (action !== "hover") {
+            await dispatchMouse("mousePressed");
+            await dispatchMouse("mouseReleased");
+          }
+          return buildToolResponseEnvelope("computer", {
+            success: true,
+            action,
+            coordinate: [x, y]
+          });
+        }
+        if (action === "left_click_drag") {
+          if (!startCoordinate || !coordinate) {
+            return attachFailureProtocol("computer", {
+              error: "computer(left_click_drag) 需要 start_coordinate 和 coordinate",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide both start_coordinate and coordinate."
+            }, { phase: "execute", resumeStrategy: "replan" });
+          }
+          const [sx, sy] = startCoordinate;
+          await callInfra(infra, {
+            type: "cdp.execute",
+            tabId: plan.tabId,
+            action: {
+              domain: "Input",
+              method: "dispatchMouseEvent",
+              params: { type: "mouseMoved", x: sx, y: sy, button: "left" }
+            }
+          });
+          await callInfra(infra, {
+            type: "cdp.execute",
+            tabId: plan.tabId,
+            action: {
+              domain: "Input",
+              method: "dispatchMouseEvent",
+              params: { type: "mousePressed", x: sx, y: sy, button: "left", clickCount: 1 }
+            }
+          });
+          await dispatchMouse("mouseMoved", { buttons: 1 });
+          await dispatchMouse("mouseReleased", { clickCount: 1 });
+          return buildToolResponseEnvelope("computer", {
+            success: true,
+            action,
+            start_coordinate: [sx, sy],
+            coordinate: [x, y]
+          });
+        }
+        if (action === "scroll") {
+          const amount = Number.isFinite(Number(plan.scrollAmount)) ? Number(plan.scrollAmount) : 1000;
+          const direction = plan.scrollDirection || "down";
+          const deltaX = direction === "left" ? -amount : direction === "right" ? amount : 0;
+          const deltaY = direction === "up" ? -amount : direction === "down" ? amount : 0;
+          await callInfra(infra, {
+            type: "cdp.execute",
+            tabId: plan.tabId,
+            action: {
+              domain: "Input",
+              method: "dispatchMouseEvent",
+              params: {
+                type: "mouseWheel",
+                x: x || 0,
+                y: y || 0,
+                deltaX,
+                deltaY
+              }
+            }
+          });
+          return buildToolResponseEnvelope("computer", {
+            success: true,
+            action,
+            deltaX,
+            deltaY
+          });
+        }
+        return attachFailureProtocol("computer", {
+          error: `computer 不支持 action: ${action}`,
+          errorCode: "E_ARGS",
+          errorReason: "failed_execute",
+          retryable: false,
+          retryHint: "Use supported computer action and retry."
+        }, { phase: "execute", resumeStrategy: "replan" });
       }
       case "step.fill_form": {
         const itemResults: JsonRecord[] = [];
@@ -3785,6 +5654,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     if (
       plan.kind === "step.search_elements" ||
       plan.kind === "step.element_action" ||
+      plan.kind === "step.script_action" ||
+      plan.kind === "step.capture_screenshot" ||
+      plan.kind === "step.download_image" ||
+      plan.kind === "step.download_chat_images" ||
+      plan.kind === "step.computer" ||
       plan.kind === "step.fill_form" ||
       plan.kind === "step.browser_verify"
     ) {
@@ -3886,22 +5760,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       let rawBody = "";
       let contentType = "";
       try {
-        const browserOnlyTools = new Set([
-          "get_all_tabs",
-          "get_current_tab",
-          "create_new_tab",
-          "search_elements",
-          "click",
-          "fill_element_by_uid",
-          "select_option_by_uid",
-          "press_key",
-          "scroll_page",
-          "navigate_tab",
-          "fill_form",
-          "browser_verify"
-        ]);
+        const browserOnlyTools = new Set(CANONICAL_BROWSER_TOOL_NAMES);
         const llmToolDefs = orchestrator
-          .listLlmToolDefinitions({ includeAliases: true })
+          .listLlmToolDefinitions()
           .filter((definition) => {
             const toolName = String(definition.function?.name || "").trim();
             if (!toolName) return false;
@@ -4492,9 +6353,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 "click",
                 "fill_element_by_uid",
                 "select_option_by_uid",
+                "hover_element_by_uid",
                 "press_key",
                 "scroll_page",
                 "navigate_tab",
+                "scroll_to_element",
+                "highlight_element",
+                "highlight_text_inline",
                 "fill_form"
               ].includes(canonicalToolName) &&
               result.retryable === true &&
@@ -4959,6 +6824,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       await refreshSessionTitleAuto(orchestrator, sessionId, infra, llmProviders, options);
       const meta = await orchestrator.sessions.getMeta(sessionId);
       return normalizeSessionTitle(meta?.header.title, "");
+    },
+    async getSystemPromptPreview(): Promise<string> {
+      const cfgRaw = await callInfra(infra, { type: "config.get" });
+      const cfg = extractLlmConfig(cfgRaw);
+      return buildBrowserAgentSystemPrompt(cfg);
     }
   };
 }

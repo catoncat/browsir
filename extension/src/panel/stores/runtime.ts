@@ -76,6 +76,7 @@ interface PanelConfig {
   llmApiBase: string;
   llmApiKey: string;
   llmModel: string;
+  llmSystemPromptCustom: string;
   maxSteps: number;
   autoTitleInterval: number;
   bridgeInvokeTimeoutMs: number;
@@ -91,6 +92,7 @@ interface RuntimeHealth {
   llmApiBase: string;
   llmModel: string;
   hasLlmApiKey: boolean;
+  systemPromptPreview: string;
 }
 
 interface EditUserRerunResult {
@@ -121,12 +123,103 @@ interface RegenerateFromAssistantResult {
   sourceEntryId?: string;
 }
 
+export interface SkillMetadata {
+  id: string;
+  name: string;
+  description: string;
+  location: string;
+  source: string;
+  enabled: boolean;
+  disableModelInvocation: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SkillInstallInput {
+  id?: string;
+  name?: string;
+  description?: string;
+  location: string;
+  source?: string;
+  enabled?: boolean;
+  disableModelInvocation?: boolean;
+}
+
+export interface SkillDiscoverRoot {
+  root: string;
+  source?: string;
+}
+
+export interface SkillDiscoverOptions {
+  sessionId?: string;
+  roots?: SkillDiscoverRoot[];
+  autoInstall?: boolean;
+  replace?: boolean;
+  maxFiles?: number;
+  timeoutMs?: number;
+}
+
+export interface SkillDiscoverResult {
+  sessionId: string;
+  roots: Array<{ root: string; source: string }>;
+  counts: {
+    scanned: number;
+    discovered: number;
+    installed: number;
+    skipped: number;
+  };
+  discovered: Array<Record<string, unknown>>;
+  installed: SkillMetadata[];
+  skipped: Array<Record<string, unknown>>;
+  skills?: SkillMetadata[];
+}
+
 async function sendMessage<T = any>(type: string, payload: Record<string, unknown> = {}): Promise<T> {
   const response = (await chrome.runtime.sendMessage({ type, ...payload })) as RuntimeResponse<T>;
   if (!response?.ok) {
     throw new Error(response?.error || `${type} failed`);
   }
   return response.data as T;
+}
+
+function toRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function extractContentFromStepExecuteResult(value: unknown): string {
+  const root = toRecord(value);
+  const rootData = toRecord(root.data);
+  const rootDataData = toRecord(rootData.data);
+  const rootDataResponse = toRecord(rootData.response);
+  const rootDataResponseData = toRecord(rootDataResponse.data);
+  const rootResponse = toRecord(root.response);
+  const rootResponseData = toRecord(rootResponse.data);
+  const rootResponseInnerData = toRecord(rootResponseData.data);
+  const rootResult = toRecord(root.result);
+  const candidates: unknown[] = [
+    root.content,
+    root.text,
+    rootData.content,
+    rootData.text,
+    rootDataData.content,
+    rootDataData.text,
+    rootDataResponse.content,
+    rootDataResponse.text,
+    rootDataResponseData.content,
+    rootDataResponseData.text,
+    rootResponse.content,
+    rootResponse.text,
+    rootResponseData.content,
+    rootResponseData.text,
+    rootResponseInnerData.content,
+    rootResponseInnerData.text,
+    rootResult.content,
+    rootResult.text
+  ];
+  for (const item of candidates) {
+    if (typeof item === "string") return item;
+  }
+  throw new Error("read_file 未返回 content 文本");
 }
 
 function normalizeConfig(raw: Record<string, unknown> | null | undefined): PanelConfig {
@@ -136,6 +229,7 @@ function normalizeConfig(raw: Record<string, unknown> | null | undefined): Panel
     llmApiBase: String(raw?.llmApiBase || "https://ai.chen.rs/v1"),
     llmApiKey: String(raw?.llmApiKey || ""),
     llmModel: String(raw?.llmModel || "gpt-5.3-codex"),
+    llmSystemPromptCustom: String(raw?.llmSystemPromptCustom || ""),
     maxSteps: Number.isFinite(Number(raw?.maxSteps)) ? Number(raw?.maxSteps) : 100,
     autoTitleInterval: Number.isFinite(Number(raw?.autoTitleInterval)) ? Number(raw?.autoTitleInterval) : 10,
     bridgeInvokeTimeoutMs: Number.isFinite(Number(raw?.bridgeInvokeTimeoutMs)) ? Number(raw?.bridgeInvokeTimeoutMs) : 120000,
@@ -152,7 +246,8 @@ function normalizeHealth(raw: Record<string, unknown> | null | undefined): Runti
     bridgeUrl: String(raw?.bridgeUrl || "ws://127.0.0.1:8787/ws"),
     llmApiBase: String(raw?.llmApiBase || ""),
     llmModel: String(raw?.llmModel || "gpt-5.3-codex"),
-    hasLlmApiKey: Boolean(raw?.hasLlmApiKey)
+    hasLlmApiKey: Boolean(raw?.hasLlmApiKey),
+    systemPromptPreview: String(raw?.systemPromptPreview || "")
   };
 }
 
@@ -178,6 +273,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
       bridgeUrl: "ws://127.0.0.1:8787/ws",
       llmApiBase: "https://ai.chen.rs/v1",
       llmModel: "gpt-5.3-codex",
+      llmSystemPromptCustom: "",
       autoTitleInterval: 10,
       bridgeInvokeTimeoutMs: 120000,
       llmTimeoutMs: 120000,
@@ -260,6 +356,130 @@ export const useRuntimeStore = defineStore("runtime", () => {
     activeSessionId.value = result.sessionId;
     await refreshSessions();
     await loadConversation(result.sessionId, { setActive: true });
+  }
+
+  async function ensureSkillSessionId(inputSessionId?: string): Promise<string> {
+    const provided = String(inputSessionId || "").trim();
+    if (provided) return provided;
+    const current = String(activeSessionId.value || "").trim();
+    if (current) return current;
+    const created = await sendMessage<{ sessionId: string; runtime: RuntimeStateView }>("brain.run.start", {
+      autoRun: false
+    });
+    runtime.value = normalizeRuntimeState(created.runtime);
+    activeSessionId.value = created.sessionId;
+    await refreshSessions();
+    await loadConversation(created.sessionId, { setActive: true });
+    return created.sessionId;
+  }
+
+  async function listSkills(): Promise<SkillMetadata[]> {
+    const out = await sendMessage<{ skills: SkillMetadata[] }>("brain.skill.list");
+    return Array.isArray(out.skills) ? out.skills : [];
+  }
+
+  async function readVirtualFile(path: string, options: { offset?: number; limit?: number } = {}): Promise<string> {
+    const sessionId = await ensureSkillSessionId();
+    const step = await sendMessage<Record<string, unknown>>("brain.step.execute", {
+      sessionId,
+      capability: "fs.read",
+      action: "invoke",
+      args: {
+        frame: {
+          tool: "read",
+          args: {
+            path: String(path || "").trim(),
+            runtime: "browser",
+            ...(options.offset == null ? {} : { offset: options.offset }),
+            ...(options.limit == null ? {} : { limit: options.limit })
+          }
+        }
+      },
+      verifyPolicy: "off"
+    });
+    const result = toRecord(step);
+    if (result.ok !== true) {
+      throw new Error(String(result.error || "read_file 失败"));
+    }
+    return extractContentFromStepExecuteResult(result.data);
+  }
+
+  async function writeVirtualFile(
+    path: string,
+    content: string,
+    mode: "overwrite" | "append" | "create" = "overwrite"
+  ): Promise<void> {
+    const sessionId = await ensureSkillSessionId();
+    const step = await sendMessage<Record<string, unknown>>("brain.step.execute", {
+      sessionId,
+      capability: "fs.write",
+      action: "invoke",
+      args: {
+        frame: {
+          tool: "write",
+          args: {
+            path: String(path || "").trim(),
+            runtime: "browser",
+            content: String(content || ""),
+            mode
+          }
+        }
+      },
+      verifyPolicy: "off"
+    });
+    const result = toRecord(step);
+    if (result.ok !== true) {
+      throw new Error(String(result.error || "write_file 失败"));
+    }
+  }
+
+  async function installSkill(input: SkillInstallInput, options: { replace?: boolean } = {}): Promise<SkillMetadata> {
+    const payload: Record<string, unknown> = {
+      skill: {
+        ...input
+      }
+    };
+    if (options.replace === true) payload.replace = true;
+    const out = await sendMessage<{ skill: SkillMetadata }>("brain.skill.install", payload);
+    return out.skill;
+  }
+
+  async function enableSkill(skillId: string): Promise<SkillMetadata> {
+    const out = await sendMessage<{ skill: SkillMetadata }>("brain.skill.enable", { skillId });
+    return out.skill;
+  }
+
+  async function disableSkill(skillId: string): Promise<SkillMetadata> {
+    const out = await sendMessage<{ skill: SkillMetadata }>("brain.skill.disable", { skillId });
+    return out.skill;
+  }
+
+  async function uninstallSkill(skillId: string): Promise<boolean> {
+    const out = await sendMessage<{ removed: boolean }>("brain.skill.uninstall", { skillId });
+    return out.removed === true;
+  }
+
+  async function discoverSkills(options: SkillDiscoverOptions = {}): Promise<SkillDiscoverResult> {
+    const sessionId = await ensureSkillSessionId(options.sessionId);
+    const out = await sendMessage<SkillDiscoverResult>("brain.skill.discover", {
+      sessionId,
+      ...(Array.isArray(options.roots) && options.roots.length > 0 ? { roots: options.roots } : {}),
+      ...(options.autoInstall === undefined ? {} : { autoInstall: options.autoInstall }),
+      ...(options.replace === undefined ? {} : { replace: options.replace }),
+      ...(options.maxFiles == null ? {} : { maxFiles: options.maxFiles }),
+      ...(options.timeoutMs == null ? {} : { timeoutMs: options.timeoutMs })
+    });
+    return out;
+  }
+
+  async function runSkill(skillId: string, argsText = ""): Promise<void> {
+    const id = String(skillId || "").trim();
+    if (!id) {
+      throw new Error("skillId 不能为空");
+    }
+    const args = String(argsText || "").trim();
+    const prompt = args ? `/skill:${id} ${args}` : `/skill:${id}`;
+    await sendPrompt(prompt);
   }
 
   function findAssistantMessageIndex(entryId: string) {
@@ -487,6 +707,12 @@ export const useRuntimeStore = defineStore("runtime", () => {
       const cfg = await sendMessage<Record<string, unknown>>("config.get");
       config.value = normalizeConfig(cfg);
       await Promise.all([refreshHealth(), refreshSessions()]);
+      if (!String(config.value.llmSystemPromptCustom || "").trim()) {
+        const preview = String(health.value.systemPromptPreview || "");
+        if (preview.trim()) {
+          config.value.llmSystemPromptCustom = preview;
+        }
+      }
       if (activeSessionId.value) {
         await loadConversation(activeSessionId.value, { setActive: false });
       }
@@ -513,6 +739,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
           llmApiBase: config.value.llmApiBase.trim(),
           llmApiKey: config.value.llmApiKey,
           llmModel: config.value.llmModel.trim(),
+          llmSystemPromptCustom: config.value.llmSystemPromptCustom,
           maxSteps: Math.max(1, Number(config.value.maxSteps || 100)),
           autoTitleInterval: Math.max(0, Number(config.value.autoTitleInterval ?? 10)),
           bridgeInvokeTimeoutMs: Math.max(1000, Number(config.value.bridgeInvokeTimeoutMs || 120000)),
@@ -550,6 +777,15 @@ export const useRuntimeStore = defineStore("runtime", () => {
     loadConversation,
     createSession,
     sendPrompt,
+    listSkills,
+    readVirtualFile,
+    writeVirtualFile,
+    installSkill,
+    enableSkill,
+    disableSkill,
+    uninstallSkill,
+    discoverSkills,
+    runSkill,
     forkFromAssistantEntry,
     retryLastAssistantEntry,
     regenerateFromAssistantEntry,

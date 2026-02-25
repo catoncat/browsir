@@ -10,6 +10,7 @@ const DEFAULT_LLM_RETRY_MAX_ATTEMPTS = 2;
 const MAX_LLM_RETRY_MAX_ATTEMPTS = 6;
 const DEFAULT_LLM_MAX_RETRY_DELAY_MS = 60_000;
 const MAX_LLM_MAX_RETRY_DELAY_MS = 300_000;
+const MAX_CUSTOM_SYSTEM_PROMPT_CHARS = 12_000;
 const DEFAULT_CDP_COMMAND_TIMEOUT_MS = 10_000;
 const MAX_CDP_COMMAND_TIMEOUT_MS = 60_000;
 const CDP_AUTO_DETACH_MS = 30_000;
@@ -26,6 +27,7 @@ export interface BridgeConfig {
   llmProfiles?: unknown;
   llmProfileChains?: unknown;
   llmEscalationPolicy?: string;
+  llmSystemPromptCustom?: string;
   maxSteps: number;
   autoTitleInterval: number;
   bridgeInvokeTimeoutMs: number;
@@ -174,6 +176,14 @@ function toIntInRange(raw: unknown, fallback: number, min: number, max: number):
   if (floored < min) return min;
   if (floored > max) return max;
   return floored;
+}
+
+function normalizeCustomSystemPrompt(raw: unknown, fallback = ""): string {
+  if (raw == null) return String(fallback || "");
+  const text = String(raw);
+  if (!text.trim()) return "";
+  if (text.length <= MAX_CUSTOM_SYSTEM_PROMPT_CHARS) return text;
+  return text.slice(0, MAX_CUSTOM_SYSTEM_PROMPT_CHARS);
 }
 
 function toOptionalFiniteNumber(raw: unknown): number | null {
@@ -383,7 +393,7 @@ function collectFrameIdsFromTree(frameTree: unknown, out: string[] = []): string
 }
 
 function actionRequiresLease(kind: string): boolean {
-  return ["click", "type", "fill", "press", "scroll", "select", "navigate"].includes(kind);
+  return ["click", "type", "fill", "press", "scroll", "select", "navigate", "hover"].includes(kind);
 }
 
 function normalizeActionKind(rawKind: unknown): string {
@@ -553,6 +563,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       "llmProfiles",
       "llmProfileChains",
       "llmEscalationPolicy",
+      "llmSystemPromptCustom",
       "maxSteps",
       "autoTitleInterval",
       "bridgeInvokeTimeoutMs",
@@ -572,6 +583,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       llmProfiles: data.llmProfiles,
       llmProfileChains: data.llmProfileChains,
       llmEscalationPolicy: String(data.llmEscalationPolicy || "upgrade_only"),
+      llmSystemPromptCustom: normalizeCustomSystemPrompt(data.llmSystemPromptCustom, ""),
       maxSteps: toIntInRange(data.maxSteps, 100, 1, 500),
       autoTitleInterval: toIntInRange(data.autoTitleInterval, 10, 0, 100),
       bridgeInvokeTimeoutMs: toIntInRange(
@@ -612,6 +624,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       llmProfiles: source.llmProfiles !== undefined ? source.llmProfiles : current.llmProfiles,
       llmProfileChains: source.llmProfileChains !== undefined ? source.llmProfileChains : current.llmProfileChains,
       llmEscalationPolicy: String(source.llmEscalationPolicy || current.llmEscalationPolicy || "upgrade_only").trim() || "upgrade_only",
+      llmSystemPromptCustom: normalizeCustomSystemPrompt(source.llmSystemPromptCustom, current.llmSystemPromptCustom || ""),
       maxSteps: toIntInRange(source.maxSteps, current.maxSteps || 100, 1, 500),
       autoTitleInterval: toIntInRange(source.autoTitleInterval, current.autoTitleInterval ?? 10, 0, 100),
       bridgeInvokeTimeoutMs: toIntInRange(
@@ -1685,13 +1698,45 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
             return { ok: true, typed: text.length, mode, via: "backend-node-value", url: location.href, title: document.title };
           }
           if (target.isContentEditable) {
-            target.textContent = text;
+            let usedInsertText = false;
+            try {
+              // For React/Draft.js-like editors, prefer command-based insertion over raw textContent mutation.
+              if (typeof document.execCommand === "function") {
+                if (mode === "fill") {
+                  try { document.execCommand("selectAll", false); } catch {}
+                  try { document.execCommand("delete", false); } catch {}
+                }
+                usedInsertText = document.execCommand("insertText", false, text) === true;
+              }
+            } catch {
+              usedInsertText = false;
+            }
+            if (!usedInsertText) {
+              target.textContent = text;
+            }
             dispatchInputLikeEvents(target, text, mode);
-            return { ok: true, typed: text.length, mode, via: "backend-node-contenteditable", url: location.href, title: document.title };
+            return {
+              ok: true,
+              typed: text.length,
+              mode,
+              via: usedInsertText ? "backend-node-contenteditable-inserttext" : "backend-node-contenteditable-fallback",
+              url: location.href,
+              title: document.title
+            };
           }
           return { ok: false, error: "element is not typable" };
         };
         el.scrollIntoView?.({ block: "center", inline: "nearest" });
+        if (kind === "hover") {
+          try {
+            el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, cancelable: true, view: window }));
+            el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false, cancelable: true, view: window }));
+            el.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, cancelable: true, view: window }));
+          } catch {
+            // ignore
+          }
+          return { ok: true, hovered: true, via: "backend-node", url: location.href, title: document.title };
+        }
         if (kind === "click") {
           el.click?.();
           return { ok: true, clicked: true, via: "backend-node", url: location.href, title: document.title };
@@ -1705,6 +1750,17 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           el.dispatchEvent(new Event("input", { bubbles: true }));
           el.dispatchEvent(new Event("change", { bubbles: true }));
           return { ok: true, selected: value, via: "backend-node", url: location.href, title: document.title };
+        }
+        if (kind === "read") {
+          if ("value" in el) {
+            return { ok: true, value: String(el.value ?? ""), length: String(el.value ?? "").length, via: "backend-node-value", url: location.href, title: document.title };
+          }
+          if (el.isContentEditable) {
+            const text = String(el.textContent || "");
+            return { ok: true, value: text, length: text.length, via: "backend-node-contenteditable", url: location.href, title: document.title };
+          }
+          const text = String(el.textContent || "");
+          return { ok: true, value: text, length: text.length, via: "backend-node-text", url: location.href, title: document.title };
         }
         return { ok: false, error: "unsupported backend action", kind };
       }`;
@@ -1788,7 +1844,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         ? 1_500
         : 0;
 
-    if (backendNodeId && (kind === "click" || kind === "type" || kind === "fill" || kind === "select")) {
+    if (backendNodeId && (kind === "click" || kind === "type" || kind === "fill" || kind === "select" || kind === "hover" || kind === "read")) {
       try {
         const backendResult = await executeActionByBackendNode(tabId, {
           backendNodeId,
@@ -1982,6 +2038,16 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       let el = await waitForElement();
       if (!el) return { ok: false, error: "selector not found", selector };
       el.scrollIntoView?.({ block: "center", inline: "nearest" });
+      if (kind === "hover") {
+        try {
+          el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, cancelable: true, view: window }));
+          el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false, cancelable: true, view: window }));
+          el.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, cancelable: true, view: window }));
+        } catch {
+          // ignore
+        }
+        return { ok: true, hovered: true, url: location.href, title: document.title };
+      }
       if (kind === "click") {
         el.click?.();
         return { ok: true, clicked: true, url: location.href, title: document.title };
@@ -1995,6 +2061,18 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         el.dispatchEvent(new Event("input", { bubbles: true }));
         el.dispatchEvent(new Event("change", { bubbles: true }));
         return { ok: true, selected: value, url: location.href, title: document.title };
+      }
+      if (kind === "read") {
+        if ("value" in el) {
+          const val = String(el.value ?? "");
+          return { ok: true, value: val, length: val.length, url: location.href, title: document.title, via: "selector-value" };
+        }
+        if (el.isContentEditable) {
+          const text = String(el.textContent || "");
+          return { ok: true, value: text, length: text.length, url: location.href, title: document.title, via: "selector-contenteditable" };
+        }
+        const text = String(el.textContent || "");
+        return { ok: true, value: text, length: text.length, url: location.href, title: document.title, via: "selector-text" };
       }
       if (kind === "scroll") {
         return { ok: true, scrolled: true, url: location.href, title: document.title };

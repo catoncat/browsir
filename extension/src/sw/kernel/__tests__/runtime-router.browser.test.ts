@@ -3648,8 +3648,8 @@ describe("runtime-router.browser", () => {
       .map((item) => String(item.content || ""))
       .join("\n");
 
-    expect(systemText).toContain("Custom system instructions (user-defined):");
     expect(systemText).toContain("Always report changed file paths in the final response.");
+    expect(systemText).not.toContain("You are an expert coding assistant operating inside Browser Brain Loop");
   });
 
   it("brain.run.start 支持 /skill:<id> 显式展开并注入 skill block + args", async () => {
@@ -4214,6 +4214,7 @@ description missing`
     expect(debugCfgData.llmTimeoutMs).toBe(160000);
     expect(debugCfgData.llmRetryMaxAttempts).toBe(3);
     expect(debugCfgData.llmMaxRetryDelayMs).toBe(45000);
+    expect(String(debugCfgData.systemPromptPreview || "")).toContain("You are an expert coding assistant");
     expect(debugCfgData.llmApiKey).toBeUndefined();
 
     const dumped = await invokeRuntime({
