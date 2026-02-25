@@ -1446,6 +1446,99 @@ describe("runtime-router.browser", () => {
     expect(Number(noProgressPayload.sameSignatureStreak || 0)).toBeGreaterThanOrEqual(3);
   });
 
+  it("loop_no_progress 应先给出 retry 决策，超预算后 stop 收口", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.no-progress.budget",
+        name: "no-progress-budget",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["fs.read"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "fs.read": {
+            id: "plugin.no-progress.budget.provider",
+            mode: "script",
+            priority: 80,
+            invoke: async () => ({
+              text: "budget"
+            })
+          }
+        }
+      }
+    });
+
+    let llmCall = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "",
+                tool_calls: [
+                  {
+                    id: `call_budget_${llmCall}`,
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({
+                        path: "/tmp/no-progress-budget.txt"
+                      })
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test",
+        autoTitleInterval: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "请继续读取文件并推进"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId, 5000);
+    const done = stream.find((item) => String(item.type || "") === "loop_done") as Record<string, unknown> | undefined;
+    const donePayload = (done?.payload || {}) as Record<string, unknown>;
+    expect(String(donePayload.status || "")).toBe("progress_uncertain");
+
+    const noProgressEvents = stream.filter((item) => String(item.type || "") === "loop_no_progress");
+    expect(noProgressEvents.length).toBeGreaterThanOrEqual(2);
+    const firstPayload = (noProgressEvents[0]?.payload || {}) as Record<string, unknown>;
+    const lastPayload = (noProgressEvents[noProgressEvents.length - 1]?.payload || {}) as Record<string, unknown>;
+    expect(String(firstPayload.decision || "")).toBe("retry");
+    expect(String(lastPayload.decision || "")).toBe("stop");
+    expect(Number(firstPayload.repairMaxAttempts || 0)).toBeGreaterThanOrEqual(1);
+  });
+
   it("同一会话二轮请求会保留历史 tool role 并补齐 assistant/tool_call 配对", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
