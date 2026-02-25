@@ -6,9 +6,11 @@
 
 1. `docs/kernel-alignment-2026-02-25.md`
    - 本轮对齐基线：严格 done 语义、消息模型 transform、step stream 限流、trace 瘦身。
-2. `docs/pi-alignment-implementation-map.md`
+2. `docs/browser-automation-alignment-program-2026-02-25.md`
+   - 浏览器自动化专项统一跟踪文档（系统改造点、里程碑、可证明门禁）。
+3. `docs/pi-alignment-implementation-map.md`
    - Pi 对齐点到代码锚点/测试锚点的映射。
-3. `bdd/README.md`
+4. `bdd/README.md`
    - 门禁语义与证明链路（contract -> feature -> mapping -> evidence -> gate）。
 
 ## 2. 实施文档（按需）
@@ -24,6 +26,8 @@
 
 - `docs/non-ui-architecture-blueprint.md`
 - `docs/pi-mono-runtime-comparison.md`
+- `docs/aipex-skills-filesystem-investigation-2026-02-25.md`
+- `docs/aipex-browser-automation-research-2026-02-25.md`
 - `docs/browser-agent-reliability-playbook.md`
 - `docs/browser-agent-reliability-checklist.md`
 - `docs/adr-0001-browser-agent-reliability.md`

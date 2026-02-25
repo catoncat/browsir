@@ -5,6 +5,7 @@
 配套文档：
 - 交接：`bdd/SESSION-HANDOFF.md`
 - 写作规范：`bdd/CONTRACT-WRITING-GUIDELINE.md`
+- 浏览器自动化专项跟踪：`docs/browser-automation-alignment-program-2026-02-25.md`
 
 ## 目录与职责
 
@@ -39,6 +40,18 @@
 2. `BHV-LLM-LIVE-CAPABILITY`（live 门禁）
 - 使用真实 LLM endpoint，验证真实能力：浏览器任务成功率与可验证进展。
 - 该契约 `context.gate_profile=live`，默认 `bdd:gate` 不检查，`bdd:gate:live` 检查。
+
+## 浏览器自动化专项（live 必测场景）
+
+按 `docs/browser-automation-alignment-program-2026-02-25.md` 约束，live profile 至少应覆盖：
+
+1. 搜索站点 -> 输入文本 -> 返回分享链接。
+2. React 受控输入框稳定输入。
+3. Vue/动态加载输入框稳定输入。
+4. iframe 内点击/输入。
+5. background 失败后切 focus 并续跑当前 step。
+
+这些场景用于证明执行层能力，不可被纯 mock 场景替代。
 
 ## 本轮对齐重点契约
 
