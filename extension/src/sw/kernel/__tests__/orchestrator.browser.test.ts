@@ -120,6 +120,85 @@ describe("orchestrator.browser", () => {
     expect(typeCounts.loop_done).toBe(1);
   });
 
+  it("script provider 成功时保持 modeUsed=script 且无 mode 切换", async () => {
+    const orchestrator = new BrainOrchestrator();
+    orchestrator.registerToolProvider(
+      "script",
+      {
+        id: "test.script.success",
+        invoke: async () => ({ ok: true, source: "script" })
+      },
+      { replace: true }
+    );
+    const created = await orchestrator.createSession({ title: "script-success" });
+
+    const result = await orchestrator.executeStep({
+      sessionId: created.sessionId,
+      mode: "script",
+      action: "click",
+      args: { ref: "a1" }
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.modeUsed).toBe("script");
+    expect(result.fallbackFrom).toBeUndefined();
+    expect(result.data).toEqual({ ok: true, source: "script" });
+  });
+
+  it("script provider 失败时保持错误语义且不发生 mode 切换", async () => {
+    const orchestrator = new BrainOrchestrator();
+    orchestrator.registerToolProvider(
+      "script",
+      {
+        id: "test.script.fail",
+        invoke: async () => {
+          throw new Error("script-failed");
+        }
+      },
+      { replace: true }
+    );
+    const created = await orchestrator.createSession({ title: "script-no-switch" });
+
+    const result = await orchestrator.executeStep({
+      sessionId: created.sessionId,
+      mode: "script",
+      action: "click",
+      args: { ref: "a1" }
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.modeUsed).toBe("script");
+    expect(result.fallbackFrom).toBeUndefined();
+    expect(String(result.error || "")).toContain("script-failed");
+  });
+
+  it("script provider 失败且无 cdp provider 时仍保持 script 错误语义", async () => {
+    const orchestrator = new BrainOrchestrator();
+    orchestrator.registerToolProvider(
+      "script",
+      {
+        id: "test.script.only",
+        invoke: async () => {
+          throw new Error("script-failed");
+        }
+      },
+      { replace: true }
+    );
+    const created = await orchestrator.createSession({ title: "missing-cdp-provider" });
+
+    const result = await orchestrator.executeStep({
+      sessionId: created.sessionId,
+      mode: "script",
+      action: "click",
+      args: { ref: "a1" }
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.modeUsed).toBe("script");
+    expect(result.fallbackFrom).toBeUndefined();
+    expect(String(result.error || "")).toContain("script-failed");
+  });
+
   it("cdp 失败时直接返回失败", async () => {
     const orchestrator = new BrainOrchestrator();
     orchestrator.registerToolProvider(
