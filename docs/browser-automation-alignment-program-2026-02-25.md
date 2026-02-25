@@ -43,8 +43,8 @@
 | BA-03 | 动作执行层（Act Plane） | 动作优先真实节点句柄；smart click/fill | 已落 backendNodeId 优先执行与 Monaco-like model.setValue 适配；仍需补更多复杂控件策略 | React/Vue/Monaco 输入成功率显著提升；失败可分型 | in_progress |
 | BA-04 | 跨 Frame 统一模型 | 主文档 + iframe 快照/动作统一 | 已落 AXTree 跨 frame 采集与 frameId 标注；仍需补更完整跨 frame 动作/坐标恢复 | 含 iframe 场景可稳定点击/输入/验证 | in_progress |
 | BA-05 | 验证与进展判定层 | 时间窗轮询验证 + 多证据；no_progress 与 failed_execute 分离 | 已落 verify 时间窗轮询（含 selector/text 跨同源 iframe 检查）；语义收口仍需与 loop 联动强化 | 不再出现“动作成功但目标未推进仍通过” | in_progress |
-| BA-06 | 模式编排层（background/focus） | 失败后可提示并升级 focus，保留上下文续跑当前 step | 具备模式概念，但缺完整升级编排 | 升级后无需从头开始；可在会话中续跑 | planned |
-| BA-07 | Planner/Tool 协议层 | tool I/O 增加稳定引用、失败分类、恢复建议 | 部分语义缺失，规划可恢复性有限 | 重试/修复路径可预测，tool_call 抖动下降 | planned |
+| BA-06 | 模式编排层（background/focus） | 失败后可提示并升级 focus，保留上下文续跑当前 step | 已落第一阶段：失败协议可输出 `modeEscalation(background->focus)` + `resume_current_step` | 升级后无需从头开始；可在会话中续跑 | in_progress |
+| BA-07 | Planner/Tool 协议层 | tool I/O 增加稳定引用、失败分类、恢复建议 | 已落第一阶段：`failureClass/modeEscalation/resume/stepRef` 已贯通到 tool failure payload | 重试/修复路径可预测，tool_call 抖动下降 | in_progress |
 | BA-08 | 可证明测试层（BDD + Real Browser） | 默认 mock 稳定 + live 真实能力门禁双层闭环 | 已有双层框架，但真实场景覆盖不足 | 真实场景通过率达标且证据可审计 | planned |
 | BA-09 | Provider/Subagent 协同策略 | 失败升级可走路由/子代理策略，不破坏执行稳定性 | 架构已在，策略闭环不足 | 路由升级链路可观测、可回放 | planned |
 | BA-10 | VFS/Skills 执行边界 | 通过 capability provider 正式接入，不走旁路 | 插件侧 VFS/Skills 控制面未闭环 | Skills 接入后不破坏自动化门禁与可观测性 | planned |
@@ -140,3 +140,14 @@
     - `polls verify within time window until selector condition becomes true`
   - 端到端场景：
     - `tools/brain-e2e.ts` 新增 `fill 支持 monaco-like 受控输入（model.setValue）`，并在 `bun run brain:e2e` 中通过。
+- 2026-02-25：推进 BA-06/BA-07 第一阶段实现（`runtime-loop`）：
+  - 工具失败协议新增 `failureClass + modeEscalation + resume + stepRef`，并统一写入 `tool` 消息（LLM 可消费）。
+  - browser 相关失败默认可给出 `background -> focus` 升级提示，附 `resume_current_step` 续跑语义。
+  - `loop_no_progress` 事件新增 machine-readable repair 结构，重试与 stop 收口都保留同一失败分类语义。
+- 2026-02-25：可证明测试更新：
+  - 单测：`extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts`
+    - 新增 `tool_call browser_action 失败时输出可恢复协议并给出 focus 升级提示`
+    - 增强 `loop_no_progress` 用例，断言 `failureClass/resume` 字段
+  - E2E：`tools/brain-e2e.ts`
+    - 新增 `brain.reliability / background 失败提示切 focus 并续跑当前 step`
+    - `bun run brain:e2e` 最新结果：`passed=37 failed=0`

@@ -7,6 +7,7 @@ import {
 } from "./orchestrator.browser";
 import { SUMMARIZATION_SYSTEM_PROMPT } from "./compaction.browser";
 import {
+  buildCompactionSummaryLlmMessage,
   convertSessionContextMessagesToLlm,
   transformMessagesForLlm,
   type SessionContextMessageLike
@@ -55,6 +56,10 @@ const NO_PROGRESS_BROWSER_PROOF_MISSING_LIMIT = 3;
 const NO_PROGRESS_REPAIR_MAX_ATTEMPTS = 1;
 
 type ToolRetryAction = "auto_replay" | "llm_replan" | "fail_fast";
+type FailureReason = "failed_execute" | "failed_verify" | "progress_uncertain";
+type FailurePhase = "plan" | "execute" | "verify" | "progress_guard";
+type FailureCategory = "timeout" | "busy" | "missing_target" | "verify_failed" | "focus_required" | "no_progress" | "unknown";
+type ResumeStrategy = "retry_same_args" | "retry_with_fresh_snapshot" | "replan";
 
 interface ToolCallItem {
   id: string;
@@ -416,6 +421,167 @@ function buildToolRetryHint(toolName: string, errorCode: string): string {
   return classifyToolRetryDecision(toolName, errorCode).retryHint;
 }
 
+function normalizeFailureReason(raw: unknown): FailureReason {
+  const reason = String(raw || "").trim().toLowerCase();
+  if (reason === "failed_verify") return "failed_verify";
+  if (reason === "progress_uncertain") return "progress_uncertain";
+  return "failed_execute";
+}
+
+function inferFailurePhase(reason: FailureReason): FailurePhase {
+  if (reason === "failed_verify") return "verify";
+  if (reason === "progress_uncertain") return "progress_guard";
+  return "execute";
+}
+
+function isBrowserToolName(toolName: string): boolean {
+  return ["snapshot", "browser_action", "browser_verify"].includes(String(toolName || "").trim().toLowerCase());
+}
+
+function inferModeEscalationDirective(input: {
+  toolName: string;
+  errorCode: string;
+  errorText: string;
+  retryHint: string;
+  details: unknown;
+  errorReason: FailureReason;
+}): JsonRecord | null {
+  if (!isBrowserToolName(input.toolName)) return null;
+
+  const errorCode = normalizeErrorCode(input.errorCode);
+  const combined = [
+    String(input.errorText || ""),
+    String(input.retryHint || ""),
+    safeStringify(input.details || null, 600)
+  ]
+    .join(" ")
+    .toLowerCase();
+  const browserWriteFailureFallback =
+    ["browser_action", "browser_verify"].includes(String(input.toolName || "").trim().toLowerCase()) &&
+    (input.errorReason === "failed_execute" || input.errorReason === "failed_verify");
+  const hasFocusSignal =
+    errorCode === "E_VERIFY_FAILED" ||
+    errorCode.startsWith("E_CDP_") ||
+    /focus|foreground|background|active tab|user.?gesture|lease|后台/.test(combined) ||
+    browserWriteFailureFallback;
+  if (!hasFocusSignal) return null;
+
+  return {
+    suggested: true,
+    from: "background",
+    to: "focus",
+    trigger: input.errorReason === "failed_verify" ? "verify_unstable" : "focus_required",
+    prompt: "当前步骤疑似受后台执行限制。请切换到 focus 模式并续跑当前 step（无需重开会话）。",
+    errorCode: errorCode || undefined
+  };
+}
+
+function inferFailureCategory(input: {
+  errorCode: string;
+  errorReason: FailureReason;
+  modeEscalation: JsonRecord | null;
+}): FailureCategory {
+  const errorCode = normalizeErrorCode(input.errorCode);
+  if (input.errorReason === "progress_uncertain") return "no_progress";
+  if (input.errorReason === "failed_verify" || errorCode === "E_VERIFY_FAILED") return "verify_failed";
+  if (errorCode === "E_BUSY") return "busy";
+  if (["E_TIMEOUT", "E_CLIENT_TIMEOUT", "E_CDP_TIMEOUT"].includes(errorCode)) return "timeout";
+  if (["E_NO_TAB", "E_CDP_RESOLVE_NODE", "E_CDP_AXTREE_EMPTY", "E_CDP_AXTREE_NO_NODES"].includes(errorCode)) return "missing_target";
+  if (input.modeEscalation) return "focus_required";
+  return "unknown";
+}
+
+function inferResumeStrategy(input: {
+  errorReason: FailureReason;
+  retryAction: ToolRetryAction;
+  modeEscalation: JsonRecord | null;
+  retryable: boolean;
+}): ResumeStrategy {
+  if (input.errorReason === "progress_uncertain") return "retry_with_fresh_snapshot";
+  if (input.modeEscalation) return "retry_same_args";
+  if (input.retryAction === "auto_replay") return "retry_same_args";
+  if (input.retryAction === "llm_replan" && input.retryable) return "retry_with_fresh_snapshot";
+  return "replan";
+}
+
+function attachFailureProtocol(
+  toolName: string,
+  payload: JsonRecord,
+  options: {
+    defaultRetryable?: boolean;
+    errorReason?: FailureReason;
+    phase?: FailurePhase;
+    category?: FailureCategory;
+    modeEscalation?: JsonRecord | null;
+    resumeStrategy?: ResumeStrategy;
+    stepRef?: JsonRecord | null;
+  } = {}
+): JsonRecord {
+  const normalizedToolName = String(toolName || "").trim().toLowerCase();
+  const errorCode = normalizeErrorCode(payload.errorCode);
+  const errorReason = normalizeFailureReason(options.errorReason || payload.errorReason);
+  const retryDecision = classifyToolRetryDecision(normalizedToolName, errorCode);
+  const defaultRetryable = options.defaultRetryable === true;
+  const retryable = payload.retryable === true || defaultRetryable || retryDecision.retryable;
+  const retryHintBase = String(payload.retryHint || buildToolRetryHint(normalizedToolName, errorCode));
+  const modeEscalation =
+    options.modeEscalation !== undefined
+      ? options.modeEscalation
+      : inferModeEscalationDirective({
+          toolName: normalizedToolName,
+          errorCode,
+          errorText: String(payload.error || ""),
+          retryHint: retryHintBase,
+          details: payload.details || payload.errorDetails || null,
+          errorReason
+        });
+  let retryHint = retryHintBase;
+  if (modeEscalation && !/focus|foreground|前台/.test(retryHint.toLowerCase())) {
+    retryHint = `${retryHint} Switch to focus mode and resume the current step without restarting the session.`;
+  }
+  const failureCategory =
+    options.category ||
+    inferFailureCategory({
+      errorCode,
+      errorReason,
+      modeEscalation
+    });
+  const retryAction = errorReason === "progress_uncertain" ? "llm_replan" : retryDecision.action;
+  const resumeStrategy =
+    options.resumeStrategy ||
+    inferResumeStrategy({
+      errorReason,
+      retryAction,
+      modeEscalation,
+      retryable
+    });
+  const failureClass: JsonRecord = {
+    phase: options.phase || inferFailurePhase(errorReason),
+    reason: errorReason,
+    category: failureCategory,
+    retryAction
+  };
+  const resume: JsonRecord = {
+    action: "resume_current_step",
+    strategy: resumeStrategy
+  };
+  if (modeEscalation) resume.mode = "focus";
+
+  const out: JsonRecord = {
+    ...payload,
+    errorCode: errorCode || undefined,
+    errorReason,
+    retryable,
+    retryHint,
+    details: payload.details || payload.errorDetails || null,
+    failureClass,
+    resume
+  };
+  if (modeEscalation) out.modeEscalation = modeEscalation;
+  if (options.stepRef && Object.keys(options.stepRef).length > 0) out.stepRef = options.stepRef;
+  return out;
+}
+
 function normalizeTabIds(input: unknown[]): number[] {
   const seen = new Set<number>();
   const out: number[] = [];
@@ -683,9 +849,45 @@ function buildNoProgressRepairMessage(reason: string): string {
     return "检测到工具调用在两个动作间往返震荡。请先重新观察当前页面，再用不同动作推进目标，避免重复原有往返路径。";
   }
   if (normalized === "browser_proof_missing") {
-    return "尚未形成可验证页面进展。请先执行 browser_action/browser_verify 并给出可验证证据，再继续。";
+    return "尚未形成可验证页面进展。请先执行 browser_action/browser_verify 并给出可验证证据；若后台模式受限，请切换 focus 后续跑当前步骤。";
   }
   return "检测到工具调用连续重复且未推进。请先刷新观察（snapshot/list_tabs），再尝试不同动作而不是重复同一调用。";
+}
+
+function buildNoProgressRepairDirective(input: { reason: string; signature?: string; streak?: number }): JsonRecord {
+  const reason = String(input.reason || "").trim().toLowerCase();
+  const modeEscalation =
+    reason === "browser_proof_missing"
+      ? {
+          suggested: true,
+          from: "background",
+          to: "focus",
+          trigger: "focus_required",
+          prompt: "浏览器步骤未形成可验证进展，建议切 focus 并续跑当前 step。"
+        }
+      : null;
+  const failureClass: JsonRecord = {
+    phase: "progress_guard",
+    reason: "progress_uncertain",
+    category: reason === "browser_proof_missing" ? "focus_required" : "no_progress",
+    retryAction: "llm_replan"
+  };
+  const resume: JsonRecord = {
+    action: "resume_current_step",
+    strategy: reason === "browser_proof_missing" ? "retry_with_fresh_snapshot" : "replan"
+  };
+  if (modeEscalation) resume.mode = "focus";
+  return {
+    failureClass,
+    modeEscalation: modeEscalation || undefined,
+    resume,
+    stepRef: {
+      kind: "loop_no_progress",
+      signature: String(input.signature || ""),
+      reason,
+      streak: Number.isFinite(Number(input.streak)) ? Number(input.streak) : undefined
+    }
+  };
 }
 
 function detectNoProgressPattern(input: {
@@ -812,7 +1014,11 @@ function buildToolFailurePayload(toolCall: ToolCallItem, result: JsonRecord): Js
     target,
     args: args || null,
     rawArgs: args ? undefined : clipText(rawArgs, 1200),
-    details: result.details || null
+    details: result.details || null,
+    failureClass: result.failureClass || undefined,
+    modeEscalation: result.modeEscalation || undefined,
+    resume: result.resume || undefined,
+    stepRef: result.stepRef || undefined
   };
 }
 
@@ -1046,7 +1252,11 @@ function buildTaskProgressSystemMessage(input: {
   ].join("\n");
 }
 
-function buildLlmMessagesFromContext(meta: SessionMeta | null, contextMessages: SessionContextMessageLike[]): JsonRecord[] {
+function buildLlmMessagesFromContext(
+  meta: SessionMeta | null,
+  contextMessages: SessionContextMessageLike[],
+  previousSummary = ""
+): JsonRecord[] {
   const out: JsonRecord[] = [];
   out.push({
     role: "system",
@@ -1066,6 +1276,9 @@ function buildLlmMessagesFromContext(meta: SessionMeta | null, contextMessages: 
       content: sharedTabsContext
     });
   }
+
+  const summaryMessage = buildCompactionSummaryLlmMessage(previousSummary);
+  if (summaryMessage) out.push(summaryMessage);
 
   out.push(...convertSessionContextMessagesToLlm(contextMessages));
 
@@ -1184,19 +1397,22 @@ function buildStepFailureEnvelope(
   retryHint: string,
   options: {
     defaultRetryable?: boolean;
-    errorReason?: "failed_execute" | "failed_verify" | "progress_uncertain";
+    errorReason?: FailureReason;
+    phase?: FailurePhase;
+    category?: FailureCategory;
+    modeEscalation?: JsonRecord | null;
+    resumeStrategy?: ResumeStrategy;
+    stepRef?: JsonRecord | null;
   } = {}
 ): JsonRecord {
-  const errorCode = normalizeErrorCode(out.errorCode);
-  const defaultRetryable = options.defaultRetryable === true;
-  return {
+  return attachFailureProtocol(toolName, {
     error: out.error || fallbackError,
-    errorCode: errorCode || undefined,
+    errorCode: normalizeErrorCode(out.errorCode) || undefined,
     errorReason: options.errorReason || "failed_execute",
-    retryable: out.retryable === true || defaultRetryable || isRetryableToolErrorCode(toolName, errorCode),
+    retryable: out.retryable === true,
     retryHint,
     details: out.errorDetails || null
-  };
+  }, options);
 }
 
 function mapToolErrorReasonToTerminalStatus(rawReason: unknown): "failed_execute" | "failed_verify" | "progress_uncertain" {
@@ -2557,13 +2773,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!tabId) {
           return {
             ok: false,
-            error: {
+            error: attachFailureProtocol("snapshot", {
               error: "snapshot 需要 tabId，当前无可用 tab",
               errorCode: "E_NO_TAB",
               errorReason: "failed_execute",
               retryable: true,
               retryHint: "Call list_tabs and then retry snapshot with a valid tabId."
-            }
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
           };
         }
         return {
@@ -2590,13 +2806,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!tabId) {
           return {
             ok: false,
-            error: {
+            error: attachFailureProtocol("browser_action", {
               error: "browser_action 需要 tabId，当前无可用 tab",
               errorCode: "E_NO_TAB",
               errorReason: "failed_execute",
               retryable: true,
               retryHint: "Call list_tabs and retry browser_action with a valid tabId."
-            }
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
           };
         }
         const kindValue = String(args.kind || "").trim().toLowerCase();
@@ -2625,13 +2841,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!tabId) {
           return {
             ok: false,
-            error: {
+            error: attachFailureProtocol("browser_verify", {
               error: "browser_verify 需要 tabId，当前无可用 tab",
               errorCode: "E_NO_TAB",
               errorReason: "failed_execute",
               retryable: true,
               retryHint: "Call list_tabs and retry browser_verify with a valid tabId."
-            }
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
           };
         }
         return {
@@ -2701,7 +2917,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             out,
             "snapshot 执行失败",
             "Take another snapshot (or list_tabs first) and retry with a valid tab/selector.",
-            { defaultRetryable: true }
+            {
+              defaultRetryable: true,
+              phase: "execute",
+              resumeStrategy: "retry_with_fresh_snapshot"
+            }
           );
         }
         const snapshotData = toRecord(out.data);
@@ -2729,7 +2949,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             out,
             "browser_action 执行失败",
             "Take a fresh snapshot and retry with updated ref/selector.",
-            { defaultRetryable: true }
+            {
+              defaultRetryable: true,
+              phase: "execute",
+              resumeStrategy: "retry_with_fresh_snapshot"
+            }
           );
         }
         const providerAction = toRecord(out.data);
@@ -2740,7 +2964,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const hardFail = !!explicitExpect || plan.kindValue === "navigate";
         if (!verified && hardFail) {
           const errorReason = mapVerifyReasonToFailureReason(verifyReason);
-          return {
+          return attachFailureProtocol("browser_action", {
             error: "browser_action 执行成功但未通过验证",
             errorCode: "E_VERIFY_FAILED",
             errorReason,
@@ -2750,7 +2974,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               verifyReason,
               data: actionData
             }
-          };
+          }, {
+            phase: "verify",
+            resumeStrategy: "retry_with_fresh_snapshot"
+          });
         }
         return buildToolResponseEnvelope("cdp_action", actionData, {
           capabilityUsed: out.capabilityUsed || plan.capability,
@@ -2778,21 +3005,28 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             out,
             "browser_verify 执行失败",
             "Update verify expectation and run browser_verify again.",
-            { defaultRetryable: true }
+            {
+              defaultRetryable: true,
+              phase: "execute",
+              resumeStrategy: "retry_with_fresh_snapshot"
+            }
           );
         }
         const providerVerify = toRecord(out.data);
         const verified = typeof providerVerify.verified === "boolean" ? providerVerify.verified : out.verified;
         const verifyData = providerVerify.data !== undefined ? providerVerify.data : out.data;
         if (!verified) {
-          return {
+          return attachFailureProtocol("browser_verify", {
             error: "browser_verify 未通过",
             errorCode: "E_VERIFY_FAILED",
             errorReason: mapVerifyReasonToFailureReason(out.verifyReason),
             retryable: true,
             retryHint: "Refine expect conditions and re-run browser_verify.",
             details: verifyData
-          };
+          }, {
+            phase: "verify",
+            resumeStrategy: "replan"
+          });
         }
         return buildToolResponseEnvelope("cdp", verifyData, {
           capabilityUsed: out.capabilityUsed || plan.capability,
@@ -2804,12 +3038,70 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
   }
 
+  function getToolPlanTabId(plan: ToolPlan): number | null {
+    if (plan.kind === "step.snapshot" || plan.kind === "step.browser_action" || plan.kind === "step.browser_verify") {
+      return Number.isInteger(plan.tabId) ? Number(plan.tabId) : null;
+    }
+    return null;
+  }
+
+  function mergeStepRef(result: JsonRecord, stepRef: JsonRecord): JsonRecord {
+    const existing = toRecord(result.stepRef);
+    if (Object.keys(existing).length > 0) {
+      return {
+        ...result,
+        stepRef: {
+          ...stepRef,
+          ...existing
+        }
+      };
+    }
+    return {
+      ...result,
+      stepRef
+    };
+  }
+
   async function executeToolCall(sessionId: string, toolCall: ToolCallItem): Promise<JsonRecord> {
+    const requestedTool = String(toolCall.function.name || "").trim();
+    const baseStepRef: JsonRecord = {
+      toolCallId: String(toolCall.id || ""),
+      requestedTool: requestedTool || "unknown",
+      argsSignature: normalizeToolArgsForSignature(toolCall.function.arguments || "")
+    };
+
     const resolved = resolveToolCallContext(toolCall);
-    if (!resolved.ok) return resolved.error;
+    if (!resolved.ok) {
+      return mergeStepRef(resolved.error, {
+        ...baseStepRef,
+        stage: "resolve"
+      });
+    }
+
+    const resolvedStepRef: JsonRecord = {
+      ...baseStepRef,
+      resolvedTool: resolved.value.resolvedTool,
+      executionTool: resolved.value.executionTool
+    };
+
     const planResult = await buildToolPlan(sessionId, resolved.value);
-    if (!planResult.ok) return planResult.error;
-    return await dispatchToolPlan(sessionId, planResult.plan);
+    if (!planResult.ok) {
+      return mergeStepRef(planResult.error, {
+        ...resolvedStepRef,
+        stage: "plan"
+      });
+    }
+
+    const tabId = getToolPlanTabId(planResult.plan);
+    const planStepRef: JsonRecord = {
+      ...resolvedStepRef,
+      stage: "dispatch",
+      planKind: planResult.plan.kind
+    };
+    if (tabId) planStepRef.tabId = tabId;
+
+    const dispatched = await dispatchToolPlan(sessionId, planResult.plan);
+    return mergeStepRef(dispatched, planStepRef);
   }
 
   async function requestLlmWithRetry(input: LlmRequestInput): Promise<JsonRecord> {
@@ -3187,7 +3479,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
     const context = await orchestrator.sessions.buildSessionContext(sessionId);
     const meta = await orchestrator.sessions.getMeta(sessionId);
-    const messages = buildLlmMessagesFromContext(meta, context.messages);
+    const messages = buildLlmMessagesFromContext(meta, context.messages, context.previousSummary);
 
     let llmStep = 0;
     let toolStep = 0;
@@ -3384,6 +3676,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           if (noProgress.reason) {
             const canRepair = noProgressRepairAttempts < NO_PROGRESS_REPAIR_MAX_ATTEMPTS;
             const decision = canRepair ? "retry" : "stop";
+            const repairDirective = buildNoProgressRepairDirective({
+              reason: noProgress.reason,
+              signature,
+              streak: noProgress.reason === "repeat_signature" ? noProgress.sameSignatureStreak : noProgress.pingPongStreak
+            });
             orchestrator.events.emit("loop_no_progress", sessionId, {
               reason: noProgress.reason,
               decision,
@@ -3392,13 +3689,17 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               signature,
               sameSignatureStreak: noProgress.sameSignatureStreak,
               pingPongStreak: noProgress.pingPongStreak,
-              recentSignatures: noProgress.recentSignatures
+              recentSignatures: noProgress.recentSignatures,
+              failureClass: repairDirective.failureClass,
+              modeEscalation: repairDirective.modeEscalation || null,
+              resume: repairDirective.resume,
+              stepRef: repairDirective.stepRef
             });
             if (canRepair) {
               noProgressRepairAttempts += 1;
               messages.push({
                 role: "system",
-                content: buildNoProgressRepairMessage(noProgress.reason)
+                content: `${buildNoProgressRepairMessage(noProgress.reason)}\n[repair]\n${safeStringify(repairDirective, 1500)}`
               });
               continue;
             }
@@ -3409,7 +3710,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             await orchestrator.sessions.appendMessage({
               sessionId,
               role: "assistant",
-              text: noProgressMessage
+              text: `${noProgressMessage}\n${safeStringify({
+                failureClass: repairDirective.failureClass,
+                modeEscalation: repairDirective.modeEscalation || null,
+                resume: repairDirective.resume
+              }, 1200)}`
             });
             finalStatus = "progress_uncertain";
             throw new Error(noProgressMessage);
@@ -3447,18 +3752,26 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             if (browserProofMissingStreak >= NO_PROGRESS_BROWSER_PROOF_MISSING_LIMIT) {
               const canRepair = noProgressRepairAttempts < NO_PROGRESS_REPAIR_MAX_ATTEMPTS;
               const decision = canRepair ? "retry" : "stop";
+              const repairDirective = buildNoProgressRepairDirective({
+                reason: "browser_proof_missing",
+                streak: browserProofMissingStreak
+              });
               orchestrator.events.emit("loop_no_progress", sessionId, {
                 reason: "browser_proof_missing",
                 decision,
                 repairAttempt: noProgressRepairAttempts + (canRepair ? 1 : 0),
                 repairMaxAttempts: NO_PROGRESS_REPAIR_MAX_ATTEMPTS,
-                streak: browserProofMissingStreak
+                streak: browserProofMissingStreak,
+                failureClass: repairDirective.failureClass,
+                modeEscalation: repairDirective.modeEscalation || null,
+                resume: repairDirective.resume,
+                stepRef: repairDirective.stepRef
               });
               if (canRepair) {
                 noProgressRepairAttempts += 1;
                 messages.push({
                   role: "system",
-                  content: buildNoProgressRepairMessage("browser_proof_missing")
+                  content: `${buildNoProgressRepairMessage("browser_proof_missing")}\n[repair]\n${safeStringify(repairDirective, 1500)}`
                 });
                 continue;
               }
@@ -3466,7 +3779,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               await orchestrator.sessions.appendMessage({
                 sessionId,
                 role: "assistant",
-                text: noProgressMessage
+                text: `${noProgressMessage}\n${safeStringify({
+                  failureClass: repairDirective.failureClass,
+                  modeEscalation: repairDirective.modeEscalation || null,
+                  resume: repairDirective.resume
+                }, 1200)}`
               });
               finalStatus = "progress_uncertain";
               throw new Error(noProgressMessage);

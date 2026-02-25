@@ -1262,6 +1262,151 @@ describe("runtime-router.browser", () => {
     expect(String(actionPayload?.errorCode || "")).not.toBe("E_VERIFY_FAILED");
   });
 
+  it("tool_call browser_action 失败时输出可恢复协议并给出 focus 升级提示", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    let providerInvoked = 0;
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.browser.action.fail-protocol",
+        name: "browser-action-fail-protocol",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["browser.action"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "browser.action": {
+            id: "plugin.browser.action.fail-protocol.provider",
+            mode: "script",
+            priority: 70,
+            invoke: async () => {
+              providerInvoked += 1;
+              const error = new Error("backend action failed: element is not typable") as Error & {
+                code?: string;
+                retryable?: boolean;
+              };
+              error.code = "E_CDP_BACKEND_ACTION";
+              error.retryable = true;
+              throw error;
+            }
+          }
+        }
+      }
+    });
+
+    const capturedBodies: Array<Record<string, unknown>> = [];
+    let llmCall = 0;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      llmCall += 1;
+      capturedBodies.push(JSON.parse(String(init?.body || "{}")) as Record<string, unknown>);
+      if (llmCall === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_action_fail_1",
+                      type: "function",
+                      function: {
+                        name: "browser_action",
+                        arguments: JSON.stringify({
+                          tabId: 1,
+                          kind: "fill",
+                          selector: "#missing"
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "done"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test",
+        autoTitleInterval: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "触发 browser_action 失败协议"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    expect(providerInvoked).toBe(1);
+    expect(fetchSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    const secondBody = capturedBodies[1] || {};
+    const secondMessages = Array.isArray(secondBody.messages) ? (secondBody.messages as Array<Record<string, unknown>>) : [];
+    const toolMessageToLlm = secondMessages.find(
+      (entry) => String(entry.role || "") === "tool" && String(entry.tool_call_id || "") === "call_action_fail_1"
+    );
+    expect(toolMessageToLlm).toBeDefined();
+    const toolPayloadToLlm = JSON.parse(String(toolMessageToLlm?.content || "{}")) as Record<string, unknown>;
+    expect(String(toolPayloadToLlm.errorReason || "")).toBe("failed_execute");
+    expect(String(toolPayloadToLlm.retryHint || "")).toContain("focus");
+    expect(String(((toolPayloadToLlm.failureClass || {}) as Record<string, unknown>).phase || "")).toBe("execute");
+    expect(String(((toolPayloadToLlm.modeEscalation || {}) as Record<string, unknown>).to || "")).toBe("focus");
+    expect(String(((toolPayloadToLlm.resume || {}) as Record<string, unknown>).action || "")).toBe("resume_current_step");
+    expect(String(((toolPayloadToLlm.stepRef || {}) as Record<string, unknown>).toolCallId || "")).toBe("call_action_fail_1");
+
+    const viewed = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(viewed.ok).toBe(true);
+    const messages = readConversationMessages(viewed);
+    const persistedToolMessage = messages.find(
+      (entry) => String(entry.role || "") === "tool" && String(entry.toolCallId || "") === "call_action_fail_1"
+    );
+    expect(persistedToolMessage).toBeDefined();
+    const persistedPayload = JSON.parse(String(persistedToolMessage?.content || "{}")) as Record<string, unknown>;
+    expect(String(((persistedPayload.modeEscalation || {}) as Record<string, unknown>).to || "")).toBe("focus");
+    expect(String(((persistedPayload.resume || {}) as Record<string, unknown>).strategy || "")).toBe("retry_with_fresh_snapshot");
+  });
+
   it("strict verify 不可判定时应以 progress_uncertain 收口", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -1444,6 +1589,12 @@ describe("runtime-router.browser", () => {
     expect(String(noProgressPayload.reason || "")).toBe("repeat_signature");
     expect(String(noProgressPayload.signature || "")).toContain("read_file");
     expect(Number(noProgressPayload.sameSignatureStreak || 0)).toBeGreaterThanOrEqual(3);
+    const noProgressFailureClass = (noProgressPayload.failureClass || {}) as Record<string, unknown>;
+    expect(String(noProgressFailureClass.phase || "")).toBe("progress_guard");
+    expect(String(noProgressFailureClass.reason || "")).toBe("progress_uncertain");
+    const noProgressResume = (noProgressPayload.resume || {}) as Record<string, unknown>;
+    expect(String(noProgressResume.action || "")).toBe("resume_current_step");
+    expect(String(noProgressResume.strategy || "")).toBe("replan");
   });
 
   it("loop_no_progress 应先给出 retry 决策，超预算后 stop 收口", async () => {
@@ -1537,6 +1688,8 @@ describe("runtime-router.browser", () => {
     expect(String(firstPayload.decision || "")).toBe("retry");
     expect(String(lastPayload.decision || "")).toBe("stop");
     expect(Number(firstPayload.repairMaxAttempts || 0)).toBeGreaterThanOrEqual(1);
+    expect(String(((firstPayload.resume || {}) as Record<string, unknown>).action || "")).toBe("resume_current_step");
+    expect(String(((lastPayload.failureClass || {}) as Record<string, unknown>).phase || "")).toBe("progress_guard");
   });
 
   it("同一会话二轮请求会保留历史 tool role 并补齐 assistant/tool_call 配对", async () => {

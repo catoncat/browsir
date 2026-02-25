@@ -779,6 +779,86 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
         ]);
       }
 
+      if (userText.includes("#LLM_RELIABILITY_FOCUS_RESUME")) {
+        const tabIdMatch = /TABID=(\d+)/.exec(userText);
+        const tabId = tabIdMatch ? Number(tabIdMatch[1]) : 0;
+
+        if (!hasToolResult) {
+          return buildSseResponse([
+            {
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: "call_focus_resume_1",
+                        type: "function",
+                        function: {
+                          name: "browser_action",
+                          arguments: JSON.stringify({
+                            tabId,
+                            kind: "navigate",
+                            url: "about:blank#focus-resume-fail",
+                            expect: {
+                              textIncludes: "__FOCUS_RESUME_EXPECT_MISS__"
+                            }
+                          })
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            "[DONE]"
+          ]);
+        }
+
+        if (toolMessages.length < 2) {
+          return buildSseResponse([
+            {
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: "call_focus_resume_2",
+                        type: "function",
+                        function: {
+                          name: "browser_verify",
+                          arguments: JSON.stringify({
+                            tabId,
+                            expect: {
+                              urlContains: "#focus-resume-fail"
+                            }
+                          })
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            "[DONE]"
+          ]);
+        }
+
+        return buildSseResponse([
+          {
+            choices: [
+              {
+                delta: {
+                  content: "LLM_RELIABILITY_FOCUS_RESUME_DONE"
+                }
+              }
+            ]
+          },
+          "[DONE]"
+        ]);
+      }
+
       if (userText.includes("#LLM_RELIABILITY_MAX_STEPS")) {
         return buildSseResponse([
           {
@@ -3174,6 +3254,82 @@ async function main() {
       assert(stoppedDump.ok === true, "读取 stopped trace 失败");
       const stoppedStream = Array.isArray(stoppedDump.data?.stepStream) ? stoppedDump.data.stepStream : [];
       assert(!stoppedStream.some((item: any) => item?.type === "auto_retry_start"), "stopped 场景不应触发 auto_retry");
+    });
+
+    await runCase("brain.reliability", "background 失败提示切 focus 并续跑当前 step", async () => {
+      mockLlm?.clearRequests();
+      const saveConfig = await sendBgMessage(sidepanelClient!, {
+        type: "config.save",
+        payload: {
+          bridgeUrl: `ws://${BRIDGE_HOST}:${bridgePort}/ws`,
+          bridgeToken,
+          llmApiBase: mockLlm!.baseUrl,
+          llmApiKey: "mock-key",
+          llmModel: "gpt-5.3-codex",
+          llmRetryMaxAttempts: 1,
+          maxSteps: 10
+        }
+      });
+      assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
+
+      const started = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        prompt: `#LLM_RELIABILITY_FOCUS_RESUME TABID=${testTabId}`
+      });
+      assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
+      const sessionId = String(started.data?.sessionId || "");
+      assert(sessionId.length > 0, "sessionId 为空");
+
+      const dump = await waitFor(
+        "reliability focus resume trace",
+        async () => {
+          const out = await sendBgMessage(sidepanelClient!, {
+            type: "brain.debug.dump",
+            sessionId,
+            maxEvents: 5_000,
+            maxBytes: 4 * 1024 * 1024
+          });
+          if (!out.ok) return null;
+          const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
+          if (!stream.some((item: any) => item?.type === "loop_done")) return null;
+          return out.data;
+        },
+        45_000,
+        250
+      );
+      const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
+      const loopDone = stream.find((item: any) => item?.type === "loop_done");
+      assert(String(loopDone?.payload?.status || "") === "done", "focus 续跑场景最终应 done");
+      const failedToolSteps = stream.filter(
+        (item: any) => item?.type === "step_finished" && item?.payload?.mode === "tool_call" && item?.payload?.ok === false
+      ).length;
+      assert(failedToolSteps >= 1, "focus 续跑场景应先出现失败工具步骤");
+
+      const viewed = await sendBgMessage(sidepanelClient!, {
+        type: "brain.session.view",
+        sessionId
+      });
+      assert(viewed.ok === true, "读取会话失败");
+      const messages = Array.isArray(viewed.data?.conversationView?.messages) ? viewed.data.conversationView.messages : [];
+      const userMessages = messages.filter((item: any) => String(item?.role || "") === "user");
+      assert(userMessages.length === 1, `应在同一会话续跑当前 step，不应新增用户轮次，实际=${userMessages.length}`);
+
+      const requests = mockLlm!.getRequests().filter((req) => req.userText.includes("#LLM_RELIABILITY_FOCUS_RESUME"));
+      assert(requests.length >= 2, `focus 续跑场景至少应有 2 次 LLM 请求，实际=${requests.length}`);
+      const requestWithToolContext = requests.find((req) => req.hasToolResult);
+      assert(Boolean(requestWithToolContext), "应存在携带 tool 失败上下文的后续 LLM 请求");
+      const toolMessagesJoined = (requestWithToolContext?.toolMessages || []).join("\n");
+      assert(toolMessagesJoined.includes('"tool":"browser_action"'), "tool payload 应标识 browser_action");
+      assert(
+        toolMessagesJoined.includes('"errorReason":"failed_execute"') || toolMessagesJoined.includes('"errorReason":"failed_verify"'),
+        "tool payload 应包含失败分类"
+      );
+      assert(
+        toolMessagesJoined.includes('"modeEscalation"') && toolMessagesJoined.includes('"to":"focus"'),
+        "tool payload 应包含 background->focus 升级建议"
+      );
+      assert(toolMessagesJoined.includes('"resume_current_step"'), "tool payload 应包含续跑当前 step 指令");
+      assert(toolMessagesJoined.includes('"toolCallId":"call_focus_resume_1"'), "tool payload 应包含稳定 stepRef/toolCallId");
     });
 
     await runCase("brain.reliability", "no-progress 守卫：重复失败触发熔断并终止", async () => {
