@@ -519,19 +519,19 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
                     tool_calls: [
                       {
                         index: 0,
-                        id: "call_tabs_list_1",
+                        id: "call_tabs_get_all_1",
                         type: "function",
                         function: {
-                          name: "list_tabs",
+                          name: "get_all_tabs",
                           arguments: JSON.stringify({})
                         }
                       },
                       {
                         index: 1,
-                        id: "call_tabs_open_1",
+                        id: "call_tabs_create_new_1",
                         type: "function",
                         function: {
-                          name: "open_tab",
+                          name: "create_new_tab",
                           arguments: JSON.stringify({ url: tabUrl, active: false })
                         }
                       }
@@ -835,10 +835,9 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
                         id: "call_focus_resume_click_1",
                         type: "function",
                         function: {
-                          name: "browser_action",
+                          name: "click",
                           arguments: JSON.stringify({
                             tabId,
-                            kind: "click",
                             uid: "e0",
                             requireFocus: true
                           })
@@ -3293,7 +3292,7 @@ async function main() {
       const loopDone = stream.find((item: any) => item?.type === "loop_done");
       const status = String(loopDone?.payload?.status || "");
       assert(
-        status === "failed_verify" || status === "failed_execute" || status === "progress_uncertain",
+        status === "failed_verify" || status === "failed_execute" || status === "progress_uncertain" || status === "max_steps",
         `verify 失败场景状态异常，实际=${status || "unknown"}`
       );
       assert(status !== "done", "verify 失败场景不应出现 done");
@@ -3452,11 +3451,11 @@ async function main() {
         const requestWithToolContext = requests.find((req) => req.hasToolResult);
         assert(Boolean(requestWithToolContext), "应存在携带 tool 上下文的后续 LLM 请求");
         const requestWithBrowserAction = requests.find((req) =>
-          (req.toolMessages || []).some((msg) => msg.includes('"tool":"browser_action"'))
+          (req.toolMessages || []).some((msg) => msg.includes('"tool":"click"'))
         );
-        assert(Boolean(requestWithBrowserAction), "tool payload 应包含 browser_action");
+        assert(Boolean(requestWithBrowserAction), "tool payload 应包含 click");
         const toolMessagesJoined = (requestWithBrowserAction?.toolMessages || []).join("\n");
-        assert(toolMessagesJoined.includes('"tool":"browser_action"'), "tool payload 应标识 browser_action");
+        assert(toolMessagesJoined.includes('"tool":"click"'), "tool payload 应标识 click");
         assert(
           toolMessagesJoined.includes('"modeEscalation"') && toolMessagesJoined.includes('"to":"focus"'),
           "tool payload 应包含 background->focus 升级建议"
@@ -3468,7 +3467,7 @@ async function main() {
       }
     });
 
-    await runCase("brain.reliability", "no-progress 守卫：重复失败触发熔断并终止", async () => {
+    await runCase("brain.reliability", "PI 对齐：重复失败不触发 no-progress 守卫，按 max_steps 收口", async () => {
       mockLlm?.clearRequests();
       const saveConfig = await sendBgMessage(sidepanelClient!, {
         type: "config.save",
@@ -3518,15 +3517,13 @@ async function main() {
         (item: any) => item?.type === "step_finished" && item?.payload?.mode === "tool_call" && item?.payload?.ok === false
       ).length;
       assert(
-        hasGuardEvent || failedToolSteps >= 3,
-        `重复失败应出现守卫信号或至少 3 次失败工具步骤，guard=${hasGuardEvent} failedSteps=${failedToolSteps}`
+        failedToolSteps >= 3,
+        `重复失败应至少出现 3 次失败工具步骤，实际=${failedToolSteps}`
       );
+      assert(hasGuardEvent === false, "PI 对齐后不应再出现 no-progress/retry-circuit 守卫事件");
       const loopDone = stream.find((item: any) => item?.type === "loop_done");
       const status = String(loopDone?.payload?.status || "");
-      assert(
-        status === "failed_verify" || status === "failed_execute" || status === "progress_uncertain",
-        `守卫终止后的状态异常: ${status || "unknown"}`
-      );
+      assert(status === "max_steps", `PI 对齐后应以 max_steps 收口，实际=${status || "unknown"}`);
     });
 
     await runCase("brain.reliability", "tab sticky：active tab 漂移后仍命中 primaryTab", async () => {
@@ -4611,7 +4608,7 @@ async function main() {
       );
     });
 
-    await runCase("brain.runtime", "重复可恢复工具失败应触发熔断并停止循环", async () => {
+    await runCase("brain.runtime", "PI 对齐：重复可恢复工具失败不熔断，按 max_steps 收口", async () => {
       mockLlm?.clearRequests();
       const saveConfig = await sendBgMessage(sidepanelClient!, {
         type: "config.save",
@@ -4661,16 +4658,13 @@ async function main() {
         (item: any) => item?.type === "step_finished" && item?.payload?.mode === "tool_call" && item?.payload?.ok === false
       ).length;
       assert(
-        hasGuardEvent || failedToolSteps >= 3,
-        `应出现重试守卫信号或至少 3 次失败工具步骤，guard=${hasGuardEvent} failedSteps=${failedToolSteps}`
+        failedToolSteps >= 3,
+        `应至少出现 3 次失败工具步骤，实际=${failedToolSteps}`
       );
+      assert(hasGuardEvent === false, "PI 对齐后不应再出现 retry_circuit/loop_no_progress 守卫事件");
       assert(
-        stream.some(
-          (item: any) =>
-            item?.type === "loop_done" &&
-            (item?.payload?.status === "failed_execute" || item?.payload?.status === "progress_uncertain")
-        ),
-        "熔断后应以 failed_execute/progress_uncertain 收口"
+        stream.some((item: any) => item?.type === "loop_done" && item?.payload?.status === "max_steps"),
+        "PI 对齐后重复可恢复失败应以 max_steps 收口"
       );
     });
 

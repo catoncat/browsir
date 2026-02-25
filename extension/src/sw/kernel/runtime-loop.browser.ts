@@ -24,6 +24,12 @@ import { writeSessionMeta } from "./session-store.browser";
 import { type BridgeConfig, type RuntimeInfraHandler } from "./runtime-infra.browser";
 import { type CapabilityExecutionPolicy, type StepVerifyPolicy } from "./capability-policy";
 import type { SkillMetadata } from "./skill-registry";
+import {
+  frameMatchesVirtualCapability,
+  invokeVirtualFrame,
+  isVirtualUri,
+  shouldRouteFrameToBrowserVfs
+} from "./virtual-fs.browser";
 import { nowIso, type SessionEntry, type SessionMeta, type StreamingBehavior } from "./types";
 
 type JsonRecord = Record<string, unknown>;
@@ -119,6 +125,10 @@ const TOOL_CAPABILITIES = {
   search_elements: "browser.snapshot",
   click: "browser.action",
   fill_element_by_uid: "browser.action",
+  select_option_by_uid: "browser.action",
+  press_key: "browser.action",
+  scroll_page: "browser.action",
+  navigate_tab: "browser.action",
   fill_form: "browser.action",
   browser_verify: "browser.verify"
 } as const;
@@ -139,6 +149,25 @@ const BUILTIN_BRIDGE_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability
   {
     capability: TOOL_CAPABILITIES.edit_file,
     providerId: "runtime.builtin.capability.fs.edit.bridge"
+  }
+];
+
+const BUILTIN_VIRTUAL_FS_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [
+  {
+    capability: TOOL_CAPABILITIES.bash,
+    providerId: "runtime.builtin.capability.process.exec.vfs"
+  },
+  {
+    capability: TOOL_CAPABILITIES.read_file,
+    providerId: "runtime.builtin.capability.fs.read.vfs"
+  },
+  {
+    capability: TOOL_CAPABILITIES.write_file,
+    providerId: "runtime.builtin.capability.fs.write.vfs"
+  },
+  {
+    capability: TOOL_CAPABILITIES.edit_file,
+    providerId: "runtime.builtin.capability.fs.edit.vfs"
   }
 ];
 
@@ -168,6 +197,10 @@ const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
   "search_elements",
   "click",
   "fill_element_by_uid",
+  "select_option_by_uid",
+  "press_key",
+  "scroll_page",
+  "navigate_tab",
   "fill_form",
   "browser_verify"
 ]);
@@ -198,6 +231,13 @@ function safeJsonParse(raw: unknown): unknown {
   } catch {
     return null;
   }
+}
+
+function normalizeRuntimeHint(raw: unknown): "browser" | "local" | undefined {
+  const value = String(raw || "").trim().toLowerCase();
+  if (value === "browser") return "browser";
+  if (value === "local") return "local";
+  return undefined;
 }
 
 function estimateJsonBytes(value: unknown): number {
@@ -341,6 +381,10 @@ function isSideEffectingToolName(toolName: string): boolean {
     "edit_file",
     "click",
     "fill_element_by_uid",
+    "select_option_by_uid",
+    "press_key",
+    "scroll_page",
+    "navigate_tab",
     "fill_form",
     "create_new_tab"
   ].includes(normalized);
@@ -638,18 +682,6 @@ function extractTabIdsFromPrompt(prompt: string): number[] {
   return ids;
 }
 
-function shouldRequireBrowserProof(prompt: string): boolean {
-  const text = String(prompt || "");
-  const hasTabId = /tabid\s*[:=]\s*\d+/i.test(text);
-  const hasActionHint = /(fill|click|type|navigate|verify|selector|ref|browser_verify|输入|点击|填写|打开|访问|跳转|搜索|分享|提交|验证)/i.test(text);
-  const isSyntheticMarkerOnly = /#LLM_[A-Z0-9_]+/.test(text) && !hasActionHint;
-  if (hasTabId && !isSyntheticMarkerOnly) return true;
-  if (/(browser_verify|selector|ref)/i.test(text)) return true;
-  const hasBrowserContext = /(https?:\/\/|网页|页面|网站|浏览器|tab|界面|书签|地址栏|链接|url)/i.test(text);
-  const hasBrowserAction = /(fill|click|type|navigate|verify|输入|点击|填写|打开|访问|跳转|搜索|分享|提交|验证)/i.test(text);
-  return hasBrowserContext && hasBrowserAction;
-}
-
 function normalizeSessionTitle(value: unknown, fallback = ""): string {
   const compact = String(value || "")
     .replace(/[`*_>#\[\]\(\)]/g, " ")
@@ -861,128 +893,6 @@ function normalizeToolArgsForSignature(rawArgs: unknown): string {
   return clipText(text.replace(/\s+/g, " "), 1200);
 }
 
-function buildNoProgressSignature(toolCalls: ToolCallItem[]): string {
-  if (!Array.isArray(toolCalls) || toolCalls.length === 0) return "";
-  const segments = toolCalls.map((call) => {
-    const name = String(call.function?.name || "").trim().toLowerCase() || "unknown";
-    const args = normalizeToolArgsForSignature(call.function?.arguments);
-    return `${name}:${args}`;
-  });
-  return clipText(segments.join("||"), 3600);
-}
-
-function buildNoProgressRepairMessage(reason: string): string {
-  const normalized = String(reason || "").trim().toLowerCase();
-  if (normalized === "ping_pong") {
-    return "检测到工具调用在两个动作间往返震荡。请先重新观察当前页面，再用不同动作推进目标，避免重复原有往返路径。";
-  }
-  if (normalized === "browser_proof_missing") {
-    return "尚未形成可验证页面进展。请先执行 search_elements + click/fill_element_by_uid/fill_form + browser_verify 并给出证据；若后台模式受限，请切换 focus 后续跑当前步骤。";
-  }
-  return "检测到工具调用连续重复且未推进。请先刷新观察（get_all_tabs/search_elements），再尝试不同动作而不是重复同一调用。";
-}
-
-function buildNoProgressRepairDirective(input: { reason: string; signature?: string; streak?: number }): JsonRecord {
-  const reason = String(input.reason || "").trim().toLowerCase();
-  const modeEscalation =
-    reason === "browser_proof_missing"
-      ? {
-          suggested: true,
-          from: "background",
-          to: "focus",
-          trigger: "focus_required",
-          prompt: "浏览器步骤未形成可验证进展，建议切 focus 并续跑当前 step。"
-        }
-      : null;
-  const failureClass: JsonRecord = {
-    phase: "progress_guard",
-    reason: "progress_uncertain",
-    category: reason === "browser_proof_missing" ? "focus_required" : "no_progress",
-    retryAction: "llm_replan"
-  };
-  const resume: JsonRecord = {
-    action: "resume_current_step",
-    strategy: reason === "browser_proof_missing" ? "retry_with_fresh_snapshot" : "replan"
-  };
-  if (modeEscalation) resume.mode = "focus";
-  return {
-    failureClass,
-    modeEscalation: modeEscalation || undefined,
-    resume,
-    stepRef: {
-      kind: "loop_no_progress",
-      signature: String(input.signature || ""),
-      reason,
-      streak: Number.isFinite(Number(input.streak)) ? Number(input.streak) : undefined
-    }
-  };
-}
-
-function detectNoProgressPattern(input: {
-  recentSignatures: string[];
-  signature: string;
-  sameSignatureStreak: number;
-  pingPongStreak: number;
-}): {
-  recentSignatures: string[];
-  sameSignatureStreak: number;
-  pingPongStreak: number;
-  reason: "repeat_signature" | "ping_pong" | null;
-} {
-  const signature = String(input.signature || "").trim();
-  const prevRecent = Array.isArray(input.recentSignatures) ? input.recentSignatures : [];
-  if (!signature) {
-    return {
-      recentSignatures: prevRecent.slice(0),
-      sameSignatureStreak: 0,
-      pingPongStreak: 0,
-      reason: null
-    };
-  }
-
-  const last = prevRecent.length > 0 ? prevRecent[prevRecent.length - 1] : "";
-  const sameSignatureStreak = last && last === signature ? input.sameSignatureStreak + 1 : 1;
-  const recentSignatures = [...prevRecent, signature];
-  if (recentSignatures.length > NO_PROGRESS_SIGNATURE_WINDOW) {
-    recentSignatures.splice(0, recentSignatures.length - NO_PROGRESS_SIGNATURE_WINDOW);
-  }
-
-  let pingPongStreak = 0;
-  if (recentSignatures.length >= 4) {
-    const n = recentSignatures.length;
-    const a = recentSignatures[n - 4];
-    const b = recentSignatures[n - 3];
-    const c = recentSignatures[n - 2];
-    const d = recentSignatures[n - 1];
-    if (a === c && b === d && c !== d) {
-      pingPongStreak = input.pingPongStreak + 1;
-    }
-  }
-
-  if (sameSignatureStreak >= NO_PROGRESS_REPEAT_SIGNATURE_LIMIT) {
-    return {
-      recentSignatures,
-      sameSignatureStreak,
-      pingPongStreak,
-      reason: "repeat_signature"
-    };
-  }
-  if (pingPongStreak >= NO_PROGRESS_PING_PONG_LIMIT) {
-    return {
-      recentSignatures,
-      sameSignatureStreak,
-      pingPongStreak,
-      reason: "ping_pong"
-    };
-  }
-  return {
-    recentSignatures,
-    sameSignatureStreak,
-    pingPongStreak,
-    reason: null
-  };
-}
-
 function parseToolCallArgs(raw: string): JsonRecord | null {
   const text = String(raw || "").trim();
   if (!text) return null;
@@ -1005,6 +915,10 @@ function buildFocusEscalationToolCall(toolCall: ToolCallItem): ToolCallItem | nu
     ![
       "click",
       "fill_element_by_uid",
+      "select_option_by_uid",
+      "press_key",
+      "scroll_page",
+      "navigate_tab",
       "fill_form"
     ].includes(normalized)
   ) {
@@ -1065,6 +979,24 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
     const target = pick("uid") || pick("ref") || pick("selector");
     return target ? `填写 · ${clipText(target, 180)}` : "填写";
   }
+  if (normalized === "select_option_by_uid") {
+    const target = pick("uid") || pick("ref") || pick("selector");
+    const value = pick("value");
+    if (target && value) return `选择选项 · ${clipText(target, 120)} = ${clipText(value, 120)}`;
+    return target ? `选择选项 · ${clipText(target, 180)}` : "选择选项";
+  }
+  if (normalized === "press_key") {
+    const key = pick("key") || pick("value");
+    return key ? `按键 · ${clipText(key, 120)}` : "按键";
+  }
+  if (normalized === "scroll_page") {
+    const delta = pick("deltaY") || pick("value");
+    return delta ? `滚动页面 · ${clipText(delta, 120)}` : "滚动页面";
+  }
+  if (normalized === "navigate_tab") {
+    const url = pick("url");
+    return url ? `导航 · ${clipText(url, 220)}` : "导航";
+  }
   if (normalized === "fill_form") {
     const elements = Array.isArray(args?.elements) ? args?.elements : [];
     return `批量填表：${elements.length} 项`;
@@ -1074,6 +1006,77 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
   if (normalized === "get_current_tab") return "读取当前标签页";
   if (raw) return `参数：${clipText(raw, 220)}`;
   return "";
+}
+
+function scoreSearchNode(node: JsonRecord, needles: string[]): { score: number; matchedNeedles: number } {
+  if (needles.length === 0) return { score: 0, matchedNeedles: 0 };
+  const role = String(node.role || "").toLowerCase();
+  const tag = String(node.tag || "").toLowerCase();
+  const name = String(node.name || "").toLowerCase();
+  const value = String(node.value || "").toLowerCase();
+  const placeholder = String(node.placeholder || "").toLowerCase();
+  const ariaLabel = String(node.ariaLabel || "").toLowerCase();
+  const selector = String(node.selector || "").toLowerCase();
+  const haystack = [role, tag, name, value, placeholder, ariaLabel, selector].join(" ");
+
+  let score = 0;
+  let matchedNeedles = 0;
+  for (const needle of needles) {
+    if (!needle) continue;
+    let hit = false;
+
+    const exactInPrimary = [placeholder, ariaLabel, name].some((item) => item === needle);
+    if (exactInPrimary) {
+      score += 42;
+      hit = true;
+    }
+
+    const startsInPrimary = [placeholder, ariaLabel, name].some((item) => item.startsWith(needle));
+    if (startsInPrimary) {
+      score += 24;
+      hit = true;
+    }
+
+    const containsInPrimary = [placeholder, ariaLabel, name].some((item) => item.includes(needle));
+    if (containsInPrimary) {
+      score += 16;
+      hit = true;
+    }
+
+    if (selector.includes(needle)) {
+      score += 12;
+      hit = true;
+    }
+
+    if (role === needle || tag === needle) {
+      score += 16;
+      hit = true;
+    } else if (role.includes(needle) || tag.includes(needle)) {
+      score += 8;
+      hit = true;
+    }
+
+    if (value.includes(needle)) {
+      score += 6;
+      hit = true;
+    }
+
+    if (!hit && haystack.includes(needle)) {
+      score += 3;
+      hit = true;
+    }
+
+    if (hit) matchedNeedles += 1;
+  }
+
+  if (["input", "textarea", "button", "a", "select"].includes(tag)) score += 6;
+  if (["textbox", "searchbox", "button", "link", "combobox"].includes(role)) score += 6;
+  if (node.focused === true) score += 2;
+  if (node.disabled === true) score -= 20;
+  if (selector.includes("[data-testid=") || selector.includes("[aria-label=") || selector.includes("[placeholder=")) {
+    score += 2;
+  }
+  return { score, matchedNeedles };
 }
 
 function buildToolFailurePayload(toolCall: ToolCallItem, result: JsonRecord): JsonRecord {
@@ -1348,6 +1351,135 @@ function buildAvailableSkillsSystemMessage(skills: SkillMetadata[]): string {
   ].join("\n");
 }
 
+const EXTENSION_AGENT_PROMPT_TOOL_ORDER = [
+  "read_file",
+  "write_file",
+  "edit_file",
+  "bash",
+  "get_current_tab",
+  "get_all_tabs",
+  "create_new_tab",
+  "search_elements",
+  "click",
+  "fill_element_by_uid",
+  "select_option_by_uid",
+  "press_key",
+  "scroll_page",
+  "navigate_tab",
+  "fill_form",
+  "browser_verify"
+] as const;
+
+const EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS: Record<string, string> = {
+  read_file: "Read file contents from local FS or browser virtual FS (mem://, vfs://).",
+  write_file: "Create or overwrite files on local FS or browser virtual FS.",
+  edit_file: "Patch files with exact oldText/newText replacement.",
+  bash: "Execute shell commands through bridge bash.exec (supports runtime + timeoutMs).",
+  get_current_tab: "Get the active browser tab context.",
+  get_all_tabs: "List currently open browser tabs.",
+  create_new_tab: "Open a new browser tab when task flow requires it.",
+  search_elements:
+    "Capture accessibility-first page snapshot to discover actionable targets. Query should describe user-visible semantics (placeholder/aria/name/text).",
+  click: "Click a specific page element by uid/ref/backendNodeId.",
+  fill_element_by_uid: "Type/fill a specific page element by uid/ref/backendNodeId.",
+  select_option_by_uid: "Select/set value on a selectable page element by uid/ref/backendNodeId.",
+  press_key: "Press a keyboard key on active element (e.g. Enter/Escape/ArrowDown).",
+  scroll_page: "Scroll page by deltaY pixels (positive=down, negative=up).",
+  navigate_tab: "Navigate tab to target URL.",
+  fill_form: "Fill multiple form fields in one structured call.",
+  browser_verify: "Assert URL/title/text/selector to confirm the task actually progressed."
+};
+
+const EXTENSION_AGENT_PROMPT_BASE_GUIDELINES = [
+  "Use tools instead of guessing. Ground decisions in tool outputs.",
+  "For file tasks, read_file before edit_file/write_file.",
+  "Prefer edit_file for surgical changes; use write_file for new files or full rewrites.",
+  "For browser tasks, prefer search_elements -> action -> browser_verify.",
+  "Use user-visible query words in search_elements (placeholder/label/text), avoid implementation-only query text.",
+  "For click/fill/select, prefer uid/ref/backendNodeId from latest search_elements; selector is fallback only.",
+  "For state-changing actions (click/fill/select/press/navigate), include expect whenever you can define success criteria.",
+  "Never claim done when verify failed, verify skipped, or verify has empty checks.",
+  "Avoid repeating the same search_elements query+selector pair without changing strategy.",
+  "For toggle-like controls (like/follow/bookmark), read current label/state first to avoid accidental flip.",
+  "Do not invent selectors, URLs, tab state, or command output; re-observe when uncertain.",
+  "Use mem:// or vfs:// paths (or runtime=browser) for browser virtual files; use regular paths (or runtime=local) for local files.",
+  "When tab context is ambiguous, query get_current_tab/get_all_tabs before acting.",
+  "Be concise. Show key file paths, tab context, and blockers clearly."
+];
+
+const EXTENSION_AGENT_PROMPT_PROFILES = {
+  balanced: {
+    label: "平衡",
+    guidelines: ["Balance coding and browser operations based on the user's current task context."]
+  },
+  coding: {
+    label: "编码优先",
+    guidelines: [
+      "Prefer local file and shell workflows first; use browser tools only when the task explicitly depends on web interaction.",
+      "When touching code, report concrete file paths and exact changes succinctly."
+    ]
+  },
+  browser: {
+    label: "浏览器操作优先",
+    guidelines: [
+      "For web tasks, prioritize browser observation and in-page actions over speculative planning.",
+      "Prefer small verified browser steps and keep tab context explicit in progress updates."
+    ]
+  },
+  strict_verify: {
+    label: "严格验证优先",
+    guidelines: [
+      "Do not claim task completion until browser_verify (or equivalent evidence) confirms target progress.",
+      "If verification is uncertain or fails, state the blocker clearly and continue with evidence-driven recovery."
+    ]
+  }
+} as const;
+
+type ExtensionPromptProfileId = keyof typeof EXTENSION_AGENT_PROMPT_PROFILES;
+
+function normalizeExtensionPromptProfile(raw: unknown): ExtensionPromptProfileId {
+  const value = String(raw || "balanced").trim().toLowerCase();
+  if (value in EXTENSION_AGENT_PROMPT_PROFILES) {
+    return value as ExtensionPromptProfileId;
+  }
+  return "balanced";
+}
+
+function buildBrowserAgentSystemPrompt(config: BridgeConfig): string {
+  const tools = EXTENSION_AGENT_PROMPT_TOOL_ORDER
+    .map((name) => `- ${name}: ${EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS[name] || "Use when needed."}`)
+    .join("\n");
+  const profileId = normalizeExtensionPromptProfile(config.llmSystemPromptProfile);
+  const profile = EXTENSION_AGENT_PROMPT_PROFILES[profileId];
+  const guidelines = [...EXTENSION_AGENT_PROMPT_BASE_GUIDELINES, ...profile.guidelines]
+    .map((line) => `- ${line}`)
+    .join("\n");
+  const customPrompt = String(config.llmSystemPromptCustom || "");
+  const customPromptSection = customPrompt.trim()
+    ? ["", "Custom system instructions (user-defined):", customPrompt]
+    : [];
+  return [
+    "You are an expert coding assistant operating inside Browser Brain Loop, a browser-extension agent harness.",
+    "You help users by reading files, executing commands, editing code, writing files, and operating browser tabs.",
+    "",
+    "Environment:",
+    "- Planner + loop engine run in Chrome extension sidepanel/service worker.",
+    "- Local WebSocket bridge is execution-only (file/shell proxy), not task planner.",
+    "- You can operate live browser tabs via browser tools.",
+    `- Prompt profile: ${profileId} (${profile.label}).`,
+    "",
+    "Available tools:",
+    tools,
+    "",
+    "Guidelines:",
+    guidelines,
+    ...customPromptSection,
+    "",
+    `Current date and time: ${nowIso()}`,
+    "Runtime: Browser extension agent (Chrome MV3)."
+  ].join("\n");
+}
+
 function buildTaskProgressSystemMessage(input: {
   llmStep: number;
   maxLoopSteps: number;
@@ -1370,6 +1502,7 @@ function buildTaskProgressSystemMessage(input: {
 }
 
 function buildLlmMessagesFromContext(
+  config: BridgeConfig,
   meta: SessionMeta | null,
   contextMessages: SessionContextMessageLike[],
   previousSummary = "",
@@ -1378,15 +1511,19 @@ function buildLlmMessagesFromContext(
   const out: JsonRecord[] = [];
   out.push({
     role: "system",
+    content: buildBrowserAgentSystemPrompt(config)
+  });
+  out.push({
+    role: "system",
     content: [
       "Tool retry policy:",
       "1) For transient tool errors (retryable=true), retry the same goal with adjusted parameters.",
       "2) bash supports optional timeoutMs (milliseconds). Increase timeoutMs when timeout-related failures happen.",
       "3) For non-retryable errors, stop retrying and explain the blocker clearly.",
       "4) A short task progress note will be provided each round via system message.",
-      "5) For browser tasks, this is a recommended path (not mandatory): get_current_tab or get_all_tabs only when needed -> search_elements when target is unclear -> click/fill_element_by_uid/fill_form -> browser_verify.",
-      "6) Do not invent site selectors/URLs. Use only current tab context plus observed snapshot evidence.",
-      "7) Before claiming completion on browser tasks, provide browser_verify-grade evidence.",
+      "5) For browser tasks, prefer actions grounded in observed page state and tool results.",
+      "6) Do not invent site selectors/URLs; re-observe when uncertain.",
+      "7) File runtime routing policy: use mem:// or vfs:// path (or runtime=browser) for browser virtual files; use regular/absolute paths (or runtime=local) for local files.",
       "8) Temporary policy: do NOT run tests (e.g., bun test/pnpm test/npm test/pytest/go test) unless the user explicitly requests tests."
     ].join("\n")
   });
@@ -1638,6 +1775,8 @@ function extractLlmConfig(raw: JsonRecord): BridgeConfig {
     llmProfiles: raw.llmProfiles,
     llmProfileChains: raw.llmProfileChains,
     llmEscalationPolicy: String(raw.llmEscalationPolicy || "upgrade_only"),
+    llmSystemPromptProfile: String(raw.llmSystemPromptProfile || "balanced"),
+    llmSystemPromptCustom: String(raw.llmSystemPromptCustom || ""),
     maxSteps: normalizeIntInRange(raw.maxSteps, 100, 1, 500),
     autoTitleInterval: normalizeIntInRange(raw.autoTitleInterval, 10, 0, 100),
     bridgeInvokeTimeoutMs: normalizeIntInRange(raw.bridgeInvokeTimeoutMs, DEFAULT_BASH_TIMEOUT_MS, 1_000, MAX_BASH_TIMEOUT_MS),
@@ -2012,6 +2151,32 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     };
   };
 
+  const virtualFsCapabilityInvoker = async (input: {
+    sessionId: string;
+    capability: ExecuteCapability;
+    args: JsonRecord;
+  }): Promise<JsonRecord> => {
+    const frame = (() => {
+      const rawFrame = toRecord(input.args.frame);
+      if (Object.keys(rawFrame).length === 0) {
+        throw new Error(`virtual fs capability provider 需要 args.frame: ${input.capability}`);
+      }
+      return { ...rawFrame };
+    })();
+    if (!String(frame.tool || "").trim()) {
+      throw new Error(`virtual fs capability provider 缺少 frame.tool: ${input.capability}`);
+    }
+    if (!frame.sessionId) frame.sessionId = input.sessionId;
+    const data = await invokeVirtualFrame(frame);
+    return {
+      type: "invoke",
+      response: {
+        ok: true,
+        data
+      }
+    };
+  };
+
   const ensureBuiltinBridgeCapabilityProviders = (): void => {
     for (const item of BUILTIN_BRIDGE_CAPABILITY_PROVIDERS) {
       const existed = orchestrator.getCapabilityProviders(item.capability).some((provider) => provider.id === item.providerId);
@@ -2022,10 +2187,35 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         priority: -100,
         canHandle: (stepInput) => {
           const frame = toRecord(stepInput.args?.frame);
-          return String(frame.tool || "").trim().length > 0;
+          if (String(frame.tool || "").trim().length === 0) return false;
+          return !shouldRouteFrameToBrowserVfs(frame);
         },
         invoke: async (stepInput) =>
           bridgeCapabilityInvoker({
+            sessionId: stepInput.sessionId,
+            capability: item.capability,
+            args: toRecord(stepInput.args)
+          })
+      });
+    }
+  };
+
+  const ensureBuiltinVirtualFsCapabilityProviders = (): void => {
+    for (const item of BUILTIN_VIRTUAL_FS_CAPABILITY_PROVIDERS) {
+      const existed = orchestrator.getCapabilityProviders(item.capability).some((provider) => provider.id === item.providerId);
+      if (existed) continue;
+      orchestrator.registerCapabilityProvider(item.capability, {
+        id: item.providerId,
+        mode: "script",
+        priority: -80,
+        canHandle: (stepInput) => {
+          const frame = toRecord(stepInput.args?.frame);
+          if (String(frame.tool || "").trim().length === 0) return false;
+          if (!shouldRouteFrameToBrowserVfs(frame)) return false;
+          return frameMatchesVirtualCapability(frame, String(item.capability || ""));
+        },
+        invoke: async (stepInput) =>
+          virtualFsCapabilityInvoker({
             sessionId: stepInput.sessionId,
             capability: item.capability,
             args: toRecord(stepInput.args)
@@ -2283,6 +2473,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
   };
 
   ensureBuiltinBridgeCapabilityProviders();
+  ensureBuiltinVirtualFsCapabilityProviders();
   ensureBuiltinBrowserCapabilityProviders();
 
   async function executeStep(input: {
@@ -2638,6 +2829,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const rootData = toRecord(root.data);
     const rootResponse = toRecord(root.response);
     const rootResponseData = toRecord(rootResponse.data);
+    const rootResponseInnerData = toRecord(rootResponseData.data);
     const rootResult = toRecord(root.result);
     const candidates: unknown[] = [
       data,
@@ -2649,6 +2841,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       rootResponse.text,
       rootResponseData.content,
       rootResponseData.text,
+      rootResponseInnerData.content,
+      rootResponseInnerData.text,
       rootResult.content,
       rootResult.text
     ];
@@ -2663,18 +2857,27 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     if (!sessionId) {
       throw new Error("skill.resolve 需要 sessionId 以绑定当前会话 capability");
     }
+    const location = String(input.location || "").trim();
+    const runtime = isVirtualUri(location) ? "browser" : undefined;
     const readCapability = String(input.capability || TOOL_CAPABILITIES.read_file).trim() || TOOL_CAPABILITIES.read_file;
     const result = await executeStep({
       sessionId,
       capability: readCapability as ExecuteCapability,
-      action: "read_file",
+      action: "invoke",
       args: {
-        path: String(input.location || "").trim()
+        path: location,
+        frame: {
+          tool: "read",
+          args: {
+            path: location,
+            ...(runtime ? { runtime } : {})
+          }
+        }
       },
       verifyPolicy: "off"
     });
     if (!result.ok) {
-      throw new Error(result.error || `read_file 失败: ${String(input.location || "")}`);
+      throw new Error(result.error || `read_file 失败: ${location}`);
     }
     return extractSkillReadContent(result.data);
   });
@@ -2770,7 +2973,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       }
     | {
         kind: "step.element_action";
-        toolName: "click" | "fill_element_by_uid";
+        toolName:
+          | "click"
+          | "fill_element_by_uid"
+          | "select_option_by_uid"
+          | "press_key"
+          | "scroll_page"
+          | "navigate_tab";
         capability: ExecuteCapability;
         tabId: number;
         kindValue: string;
@@ -2865,7 +3074,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const args = context.args;
     const buildUidActionPlan = async (
       toolName: string,
-      kindValue: "click" | "fill"
+      kindValue: "click" | "fill" | "select",
+      options: {
+        requireValue?: boolean;
+      } = {}
     ): Promise<{ ok: true; plan: ToolPlan } | { ok: false; error: JsonRecord }> => {
       const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
       if (!tabId) {
@@ -2896,11 +3108,24 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
         };
       }
+      const value = args.value == null ? "" : String(args.value);
+      if (options.requireValue === true && !value.trim()) {
+        return {
+          ok: false,
+          error: attachFailureProtocol(toolName, {
+            error: `${toolName} 需要非空 value`,
+            errorCode: "E_ARGS",
+            errorReason: "failed_execute",
+            retryable: false,
+            retryHint: `Provide value and retry ${toolName}.`
+          }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+        };
+      }
       return {
         ok: true,
         plan: {
           kind: "step.element_action",
-          toolName: toolName as "click" | "fill_element_by_uid",
+          toolName: toolName as "click" | "fill_element_by_uid" | "select_option_by_uid",
           capability: TOOL_CAPABILITIES.click,
           tabId,
           kindValue,
@@ -2910,7 +3135,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             ref: ref || uid || undefined,
             selector: selector || undefined,
             backendNodeId: backendNodeId || undefined,
-            value: args.value,
+            value,
             expect: args.expect,
             forceFocus: args.forceFocus === true,
             requireFocus: args.requireFocus === true
@@ -2919,10 +3144,86 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         }
       };
     };
+
+    const buildTabActionPlan = async (
+      toolName: "press_key" | "scroll_page" | "navigate_tab",
+      kindValue: "press" | "scroll" | "navigate"
+    ): Promise<{ ok: true; plan: ToolPlan } | { ok: false; error: JsonRecord }> => {
+      const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
+      if (!tabId) {
+        return {
+          ok: false,
+          error: attachFailureProtocol(toolName, {
+            error: `${toolName} 需要 tabId，当前无可用 tab`,
+            errorCode: "E_NO_TAB",
+            errorReason: "failed_execute",
+            retryable: true,
+            retryHint: `Call get_all_tabs and retry ${toolName} with a valid tabId.`
+          }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+        };
+      }
+
+      const action: JsonRecord = {
+        kind: kindValue,
+        expect: args.expect,
+        forceFocus: args.forceFocus === true,
+        requireFocus: args.requireFocus === true
+      };
+
+      if (kindValue === "press") {
+        const key = String(args.key || args.value || "").trim();
+        if (!key) {
+          return {
+            ok: false,
+            error: attachFailureProtocol(toolName, {
+              error: "press_key 需要 key",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide key (e.g. Enter) and retry press_key."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+          };
+        }
+        action.key = key;
+        action.value = key;
+      } else if (kindValue === "scroll") {
+        const delta = Number(args.deltaY ?? args.value ?? args.y ?? 600);
+        action.value = Number.isFinite(delta) ? delta : 600;
+      } else if (kindValue === "navigate") {
+        const url = String(args.url || "").trim();
+        if (!url) {
+          return {
+            ok: false,
+            error: attachFailureProtocol(toolName, {
+              error: "navigate_tab 需要 url",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide url and retry navigate_tab."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+          };
+        }
+        action.url = url;
+      }
+
+      return {
+        ok: true,
+        plan: {
+          kind: "step.element_action",
+          toolName,
+          capability: TOOL_CAPABILITIES.click,
+          tabId,
+          kindValue,
+          action,
+          expect: args.expect
+        }
+      };
+    };
     switch (context.executionTool) {
       case "bash": {
         const command = String(args.command || "").trim();
         if (!command) return { ok: false, error: { error: "bash 需要 command" } };
+        const runtimeHint = normalizeRuntimeHint(args.runtime);
         const timeoutMs =
           args.timeoutMs == null
             ? undefined
@@ -2938,6 +3239,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               args: {
                 cmdId: "bash.exec",
                 args: [command],
+                ...(runtimeHint ? { runtime: runtimeHint } : {}),
                 ...(timeoutMs == null ? {} : { timeoutMs })
               }
             }
@@ -2948,8 +3250,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const path = String(args.path || "").trim();
         if (!path) return { ok: false, error: { error: "read_file 需要 path" } };
         const invokeArgs: JsonRecord = { path };
+        const runtimeHint = normalizeRuntimeHint(args.runtime);
         if (args.offset != null) invokeArgs.offset = args.offset;
         if (args.limit != null) invokeArgs.limit = args.limit;
+        if (runtimeHint) invokeArgs.runtime = runtimeHint;
         return {
           ok: true,
           plan: {
@@ -2966,6 +3270,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       case "write_file": {
         const path = String(args.path || "").trim();
         if (!path) return { ok: false, error: { error: "write_file 需要 path" } };
+        const runtimeHint = normalizeRuntimeHint(args.runtime);
         return {
           ok: true,
           plan: {
@@ -2977,7 +3282,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               args: {
                 path,
                 content: String(args.content || ""),
-                mode: String(args.mode || "overwrite")
+                mode: String(args.mode || "overwrite"),
+                ...(runtimeHint ? { runtime: runtimeHint } : {})
               }
             }
           }
@@ -2986,6 +3292,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       case "edit_file": {
         const path = String(args.path || "").trim();
         if (!path) return { ok: false, error: { error: "edit_file 需要 path" } };
+        const runtimeHint = normalizeRuntimeHint(args.runtime);
         return {
           ok: true,
           plan: {
@@ -2996,7 +3303,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               tool: "edit",
               args: {
                 path,
-                edits: Array.isArray(args.edits) ? args.edits : []
+                edits: Array.isArray(args.edits) ? args.edits : [],
+                ...(runtimeHint ? { runtime: runtimeHint } : {})
               }
             }
           }
@@ -3061,6 +3369,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         return await buildUidActionPlan("click", "click");
       case "fill_element_by_uid":
         return await buildUidActionPlan("fill_element_by_uid", "fill");
+      case "select_option_by_uid":
+        return await buildUidActionPlan("select_option_by_uid", "select", { requireValue: true });
+      case "press_key":
+        return await buildTabActionPlan("press_key", "press");
+      case "scroll_page":
+        return await buildTabActionPlan("scroll_page", "scroll");
+      case "navigate_tab":
+        return await buildTabActionPlan("navigate_tab", "navigate");
       case "fill_form": {
         const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
         if (!tabId) {
@@ -3228,28 +3544,33 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             ref
           };
         });
-        const filteredNodes = needles.length
-          ? normalizedNodes.filter((node) => {
-              const haystack = [
-                String(node.role || ""),
-                String(node.name || ""),
-                String(node.value || ""),
-                String(node.placeholder || ""),
-                String(node.ariaLabel || ""),
-                String(node.selector || ""),
-                String(node.tag || "")
-              ]
-                .join(" ")
-                .toLowerCase();
-              return needles.every((needle) => haystack.includes(needle));
+        const rankedNodes = normalizedNodes.map((node, index) => {
+          const ranked = scoreSearchNode(node, needles);
+          return {
+            node,
+            index,
+            score: ranked.score,
+            matchedNeedles: ranked.matchedNeedles
+          };
+        });
+        const filteredRanked = needles.length
+          ? rankedNodes.filter((item) => item.matchedNeedles > 0)
+          : rankedNodes;
+        const sortedRanked = needles.length
+          ? filteredRanked.sort((a, b) => {
+              const aFullMatch = a.matchedNeedles >= needles.length;
+              const bFullMatch = b.matchedNeedles >= needles.length;
+              if (aFullMatch !== bFullMatch) return bFullMatch ? 1 : -1;
+              if (a.score !== b.score) return b.score - a.score;
+              return a.index - b.index;
             })
-          : normalizedNodes;
-        const nodes = filteredNodes.slice(0, plan.maxResults);
+          : filteredRanked;
+        const nodes = sortedRanked.slice(0, plan.maxResults).map((item) => item.node);
         return buildToolResponseEnvelope("search_elements", {
           query: plan.query,
           tabId: plan.tabId,
           count: nodes.length,
-          total: filteredNodes.length,
+          total: sortedRanked.length,
           nodes,
           snapshotId: String(snapshotData.snapshotId || ""),
           url: String(snapshotData.url || ""),
@@ -3953,17 +4274,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     let llmStep = 0;
     let toolStep = 0;
     let finalStatus = "done";
-    const requireBrowserProof = shouldRequireBrowserProof(prompt);
-    let browserProofSatisfied = false;
-    let browserProofMissingStreak = 0;
     const llmFailureBySignature = new Map<string, number>();
-    const retryableFailureBySignature = new Map<string, number>();
-    let retryableFailureTotal = 0;
-    let noProgressSameSignatureStreak = 0;
-    let noProgressPingPongStreak = 0;
-    let noProgressSignatures: string[] = [];
-    let noProgressRepairAttempts = 0;
-    let noProgressObserved = false;
     const focusEscalationReplayKeys = new Set<string>();
 
     try {
@@ -3977,7 +4288,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       } catch {
         availableSkillsPrompt = "";
       }
-      const messages = buildLlmMessagesFromContext(meta, context.messages, context.previousSummary, availableSkillsPrompt);
+      const messages = buildLlmMessagesFromContext(config, meta, context.messages, context.previousSummary, availableSkillsPrompt);
 
       while (llmStep < maxLoopSteps) {
         let state = orchestrator.getRunState(sessionId);

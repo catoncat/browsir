@@ -1016,6 +1016,70 @@ describe("runtime-router.browser", () => {
     });
   });
 
+  it("supports builtin browser vfs provider for mem:// files", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "builtin browser vfs provider",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const wrote = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.write",
+      action: "invoke",
+      args: {
+        frame: {
+          tool: "write",
+          args: {
+            path: "mem://notes/demo.md",
+            content: "hello-browser-vfs",
+            mode: "overwrite",
+            runtime: "browser"
+          }
+        }
+      },
+      verifyPolicy: "off"
+    });
+    expect(wrote.ok).toBe(true);
+    const writeResult = (wrote.data || {}) as Record<string, unknown>;
+    expect(writeResult.ok).toBe(true);
+    expect(String(writeResult.modeUsed || "")).toBe("script");
+    expect(String(writeResult.capabilityUsed || "")).toBe("fs.write");
+
+    const read = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.read",
+      action: "invoke",
+      args: {
+        frame: {
+          tool: "read",
+          args: {
+            path: "mem://notes/demo.md"
+          }
+        }
+      },
+      verifyPolicy: "off"
+    });
+    expect(read.ok).toBe(true);
+    const readResult = (read.data || {}) as Record<string, unknown>;
+    expect(readResult.ok).toBe(true);
+    expect(String(readResult.modeUsed || "")).toBe("script");
+    expect(String(readResult.capabilityUsed || "")).toBe("fs.read");
+
+    const invokePayload = ((readResult.data || {}) as Record<string, unknown>) || {};
+    const response = ((invokePayload.response || {}) as Record<string, unknown>) || {};
+    const responseData = ((response.data || {}) as Record<string, unknown>) || {};
+    expect(String(responseData.content || "")).toContain("hello-browser-vfs");
+  });
+
   it("routes capability providers by canHandle in brain.step.execute", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -2091,7 +2155,7 @@ describe("runtime-router.browser", () => {
     expect(String(toolMessage?.content || "")).toContain('"modeEscalated":true');
   });
 
-  it("strict verify 不可判定时应以 progress_uncertain 收口", async () => {
+  it("strict verify 不可判定时应以 max_steps 收口（不做 no_progress 早停）", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
 
@@ -2182,10 +2246,10 @@ describe("runtime-router.browser", () => {
     const stream = await waitForLoopDone(sessionId);
     const done = stream.find((item) => String(item.type || "") === "loop_done") as Record<string, unknown> | undefined;
     const donePayload = (done?.payload || {}) as Record<string, unknown>;
-    expect(String(donePayload.status || "")).toBe("progress_uncertain");
+    expect(String(donePayload.status || "")).toBe("max_steps");
   });
 
-  it("重复同签名 tool_calls 时应触发 loop_no_progress 并 progress_uncertain 收口", async () => {
+  it("重复同签名 tool_calls 时不再触发 loop_no_progress，改为 max_steps 收口", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
     orchestrator.registerPlugin({
@@ -2267,23 +2331,13 @@ describe("runtime-router.browser", () => {
     const stream = await waitForLoopDone(sessionId, 5000);
     const done = stream.find((item) => String(item.type || "") === "loop_done") as Record<string, unknown> | undefined;
     const donePayload = (done?.payload || {}) as Record<string, unknown>;
-    expect(String(donePayload.status || "")).toBe("progress_uncertain");
+    expect(String(donePayload.status || "")).toBe("max_steps");
 
-    const noProgress = stream.find((item) => String(item.type || "") === "loop_no_progress") as Record<string, unknown> | undefined;
-    expect(noProgress).toBeDefined();
-    const noProgressPayload = (noProgress?.payload || {}) as Record<string, unknown>;
-    expect(String(noProgressPayload.reason || "")).toBe("repeat_signature");
-    expect(String(noProgressPayload.signature || "")).toContain("read_file");
-    expect(Number(noProgressPayload.sameSignatureStreak || 0)).toBeGreaterThanOrEqual(3);
-    const noProgressFailureClass = (noProgressPayload.failureClass || {}) as Record<string, unknown>;
-    expect(String(noProgressFailureClass.phase || "")).toBe("progress_guard");
-    expect(String(noProgressFailureClass.reason || "")).toBe("progress_uncertain");
-    const noProgressResume = (noProgressPayload.resume || {}) as Record<string, unknown>;
-    expect(String(noProgressResume.action || "")).toBe("resume_current_step");
-    expect(String(noProgressResume.strategy || "")).toBe("replan");
+    const noProgress = stream.find((item) => String(item.type || "") === "loop_no_progress");
+    expect(noProgress).toBeUndefined();
   });
 
-  it("loop_no_progress 应先给出 retry 决策，超预算后 continue 并保持 guard 信号", async () => {
+  it("PI 对齐后不再发 loop_no_progress 事件，重复调用由 max_steps 收口", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
     orchestrator.registerPlugin({
@@ -2365,15 +2419,10 @@ describe("runtime-router.browser", () => {
     const stream = await waitForLoopDone(sessionId, 5000);
     const done = stream.find((item) => String(item.type || "") === "loop_done") as Record<string, unknown> | undefined;
     const donePayload = (done?.payload || {}) as Record<string, unknown>;
-    expect(String(donePayload.status || "")).toBe("progress_uncertain");
+    expect(String(donePayload.status || "")).toBe("max_steps");
 
     const noProgressEvents = stream.filter((item) => String(item.type || "") === "loop_no_progress");
-    expect(noProgressEvents.length).toBeGreaterThanOrEqual(1);
-    const firstPayload = (noProgressEvents[0]?.payload || {}) as Record<string, unknown>;
-    const lastPayload = (noProgressEvents[noProgressEvents.length - 1]?.payload || {}) as Record<string, unknown>;
-    expect(["retry", "continue"]).toContain(String(firstPayload.decision || ""));
-    expect(String(lastPayload.decision || "")).toBe("continue");
-    expect(String(((lastPayload.failureClass || {}) as Record<string, unknown>).phase || "")).toBe("progress_guard");
+    expect(noProgressEvents.length).toBe(0);
   });
 
   it("同一会话二轮请求会保留历史 tool role 并补齐 assistant/tool_call 配对", async () => {
@@ -2834,7 +2883,7 @@ describe("runtime-router.browser", () => {
     expect(String(skippedPayload.reason || "")).toBe("missing_llm_config");
   });
 
-  it("浏览器任务未显式给 tabId 时也应要求可验证 browser proof", async () => {
+  it("浏览器任务未显式给 tabId 时不再强制 browser proof 守卫", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
 
@@ -2881,10 +2930,11 @@ describe("runtime-router.browser", () => {
     expect(fetchSpy).toHaveBeenCalled();
     const done = stream.find((item) => String(item.type || "") === "loop_done") as Record<string, unknown> | undefined;
     const donePayload = (done?.payload || {}) as Record<string, unknown>;
-    expect(String(donePayload.status || "")).toBe("progress_uncertain");
+    expect(String(donePayload.status || "")).toBe("done");
     const guardCount = stream.filter((item) => String(item.type || "") === "loop_guard_browser_progress_missing").length;
     const noProgressCount = stream.filter((item) => String(item.type || "") === "loop_no_progress").length;
-    expect(guardCount > 0 || noProgressCount > 0).toBe(true);
+    expect(guardCount).toBe(0);
+    expect(noProgressCount).toBe(0);
   });
 
   it("LLM 抛出字符串错误时应稳定收口，避免 details 写入字符串导致二次异常", async () => {
@@ -3395,11 +3445,74 @@ describe("runtime-router.browser", () => {
       .filter((item) => String(item.role || "") === "system")
       .map((item) => String(item.content || ""))
       .join("\n");
+    expect(systemText).toContain("You are an expert coding assistant operating inside Browser Brain Loop");
     expect(systemText).toContain("<available_skills>");
     expect(systemText).toContain('name="Visible Skill"');
     expect(systemText).toContain('location="mem://skills/visible/SKILL.md"');
     expect(systemText).not.toContain("skill.hidden");
     expect(systemText).not.toContain("mem://skills/hidden/SKILL.md");
+  });
+
+  it("brain.run.start 会根据配置注入 prompt profile 与自定义 system prompt", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const capturedBodies: Array<Record<string, unknown>> = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const bodyText = String(init?.body || "");
+      const body = (JSON.parse(bodyText || "{}") || {}) as Record<string, unknown>;
+      capturedBodies.push(body);
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "profile-prompt-ok"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test",
+        llmSystemPromptProfile: "coding",
+        llmSystemPromptCustom: "Always report changed file paths in the final response."
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "检查项目并修复一个 bug"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    expect(fetchSpy).toHaveBeenCalled();
+    const runBody = capturedBodies.find((item) => item.stream === true) || {};
+    const runMessages = Array.isArray(runBody.messages) ? (runBody.messages as Array<Record<string, unknown>>) : [];
+    const systemText = runMessages
+      .filter((item) => String(item.role || "") === "system")
+      .map((item) => String(item.content || ""))
+      .join("\n");
+
+    expect(systemText).toContain("Prompt profile: coding");
+    expect(systemText).toContain("Prefer local file and shell workflows first");
+    expect(systemText).toContain("Always report changed file paths in the final response.");
   });
 
   it("brain.run.start 支持 /skill:<id> 显式展开并注入 skill block + args", async () => {
