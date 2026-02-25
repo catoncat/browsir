@@ -70,12 +70,32 @@ function normalizeRuntimeState(raw: RuntimeStateView | null | undefined): Runtim
   };
 }
 
+export interface PanelLlmProfile {
+  id: string;
+  provider: string;
+  llmApiBase: string;
+  llmApiKey: string;
+  llmModel: string;
+  role: string;
+  llmTimeoutMs: number;
+  llmRetryMaxAttempts: number;
+  llmMaxRetryDelayMs: number;
+}
+
+export interface PanelLlmProfileChains {
+  [role: string]: string[];
+}
+
 interface PanelConfig {
   bridgeUrl: string;
   bridgeToken: string;
   llmApiBase: string;
   llmApiKey: string;
   llmModel: string;
+  llmDefaultProfile: string;
+  llmProfiles: PanelLlmProfile[];
+  llmProfileChains: PanelLlmProfileChains;
+  llmEscalationPolicy: "upgrade_only" | "disabled";
   llmSystemPromptCustom: string;
   maxSteps: number;
   autoTitleInterval: number;
@@ -186,6 +206,95 @@ function toRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
 
+function toIntInRange(raw: unknown, fallback: number, min: number, max: number): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  const rounded = Math.floor(n);
+  if (rounded < min) return min;
+  if (rounded > max) return max;
+  return rounded;
+}
+
+function normalizeEscalationPolicy(raw: unknown): "upgrade_only" | "disabled" {
+  return String(raw || "").trim().toLowerCase() === "disabled" ? "disabled" : "upgrade_only";
+}
+
+interface LlmProfileFallback {
+  id: string;
+  llmApiBase: string;
+  llmApiKey: string;
+  llmModel: string;
+  llmTimeoutMs: number;
+  llmRetryMaxAttempts: number;
+  llmMaxRetryDelayMs: number;
+}
+
+function normalizeSingleLlmProfile(raw: Record<string, unknown>, fallback: LlmProfileFallback): PanelLlmProfile {
+  const id = String(raw.id || raw.profile || fallback.id || "default").trim() || "default";
+  return {
+    id,
+    provider: String(raw.provider || raw.providerId || "openai_compatible").trim() || "openai_compatible",
+    llmApiBase: String(raw.llmApiBase || raw.base || fallback.llmApiBase || "").trim(),
+    llmApiKey: String(raw.llmApiKey ?? raw.key ?? fallback.llmApiKey ?? ""),
+    llmModel: String(raw.llmModel || raw.model || fallback.llmModel || "gpt-5.3-codex").trim() || "gpt-5.3-codex",
+    role: String(raw.role || "worker").trim() || "worker",
+    llmTimeoutMs: toIntInRange(raw.llmTimeoutMs, fallback.llmTimeoutMs, 1_000, 300_000),
+    llmRetryMaxAttempts: toIntInRange(raw.llmRetryMaxAttempts, fallback.llmRetryMaxAttempts, 0, 6),
+    llmMaxRetryDelayMs: toIntInRange(raw.llmMaxRetryDelayMs, fallback.llmMaxRetryDelayMs, 0, 300_000)
+  };
+}
+
+function normalizeLlmProfiles(raw: unknown, fallback: LlmProfileFallback): PanelLlmProfile[] {
+  const out: PanelLlmProfile[] = [];
+  const dedup = new Set<string>();
+
+  const pushProfile = (value: unknown, fallbackId?: string) => {
+    const row = toRecord(value);
+    const profile = normalizeSingleLlmProfile(row, {
+      ...fallback,
+      id: String(fallbackId || fallback.id || "default").trim() || "default"
+    });
+    if (dedup.has(profile.id)) return;
+    dedup.add(profile.id);
+    out.push(profile);
+  };
+
+  if (Array.isArray(raw)) {
+    for (const item of raw) pushProfile(item);
+  } else {
+    const map = toRecord(raw);
+    for (const [key, value] of Object.entries(map)) {
+      pushProfile(value, key);
+    }
+  }
+
+  if (out.length === 0) {
+    pushProfile({}, fallback.id || "default");
+  }
+
+  return out;
+}
+
+function normalizeLlmProfileChains(raw: unknown, validProfileIds: Set<string>): PanelLlmProfileChains {
+  const input = toRecord(raw);
+  const out: PanelLlmProfileChains = {};
+  for (const [roleRaw, listRaw] of Object.entries(input)) {
+    const role = String(roleRaw || "").trim();
+    if (!role || !Array.isArray(listRaw)) continue;
+    const dedup = new Set<string>();
+    const ids: string[] = [];
+    for (const item of listRaw) {
+      const id = String(item || "").trim();
+      if (!id || dedup.has(id)) continue;
+      if (validProfileIds.size > 0 && !validProfileIds.has(id)) continue;
+      dedup.add(id);
+      ids.push(id);
+    }
+    if (ids.length > 0) out[role] = ids;
+  }
+  return out;
+}
+
 function extractContentFromStepExecuteResult(value: unknown): string {
   const root = toRecord(value);
   const rootData = toRecord(root.data);
@@ -223,21 +332,47 @@ function extractContentFromStepExecuteResult(value: unknown): string {
 }
 
 function normalizeConfig(raw: Record<string, unknown> | null | undefined): PanelConfig {
+  const bridgeUrl = String(raw?.bridgeUrl || "ws://127.0.0.1:8787/ws");
+  const bridgeToken = String(raw?.bridgeToken || "");
+  const llmApiBase = String(raw?.llmApiBase || "https://ai.chen.rs/v1").trim();
+  const llmApiKey = String(raw?.llmApiKey || "");
+  const llmModel = String(raw?.llmModel || "gpt-5.3-codex").trim() || "gpt-5.3-codex";
+  const llmTimeoutMs = toIntInRange(raw?.llmTimeoutMs, 120000, 1_000, 300_000);
+  const llmRetryMaxAttempts = toIntInRange(raw?.llmRetryMaxAttempts, 2, 0, 6);
+  const llmMaxRetryDelayMs = toIntInRange(raw?.llmMaxRetryDelayMs, 60000, 0, 300_000);
+  const defaultProfile = String(raw?.llmDefaultProfile || "default").trim() || "default";
+
+  const llmProfiles = normalizeLlmProfiles(raw?.llmProfiles, {
+    id: defaultProfile,
+    llmApiBase,
+    llmApiKey,
+    llmModel,
+    llmTimeoutMs,
+    llmRetryMaxAttempts,
+    llmMaxRetryDelayMs
+  });
+  const validProfileIds = new Set(llmProfiles.map((item) => item.id));
+  const llmDefaultProfile = validProfileIds.has(defaultProfile) ? defaultProfile : llmProfiles[0]?.id || "default";
+
   return {
-    bridgeUrl: String(raw?.bridgeUrl || "ws://127.0.0.1:8787/ws"),
-    bridgeToken: String(raw?.bridgeToken || ""),
-    llmApiBase: String(raw?.llmApiBase || "https://ai.chen.rs/v1"),
-    llmApiKey: String(raw?.llmApiKey || ""),
-    llmModel: String(raw?.llmModel || "gpt-5.3-codex"),
+    bridgeUrl,
+    bridgeToken,
+    llmApiBase,
+    llmApiKey,
+    llmModel,
+    llmDefaultProfile,
+    llmProfiles,
+    llmProfileChains: normalizeLlmProfileChains(raw?.llmProfileChains, validProfileIds),
+    llmEscalationPolicy: normalizeEscalationPolicy(raw?.llmEscalationPolicy),
     llmSystemPromptCustom: String(raw?.llmSystemPromptCustom || ""),
-    maxSteps: Number.isFinite(Number(raw?.maxSteps)) ? Number(raw?.maxSteps) : 100,
-    autoTitleInterval: Number.isFinite(Number(raw?.autoTitleInterval)) ? Number(raw?.autoTitleInterval) : 10,
-    bridgeInvokeTimeoutMs: Number.isFinite(Number(raw?.bridgeInvokeTimeoutMs)) ? Number(raw?.bridgeInvokeTimeoutMs) : 120000,
-    llmTimeoutMs: Number.isFinite(Number(raw?.llmTimeoutMs)) ? Number(raw?.llmTimeoutMs) : 120000,
-    llmRetryMaxAttempts: Number.isFinite(Number(raw?.llmRetryMaxAttempts)) ? Number(raw?.llmRetryMaxAttempts) : 2,
-    llmMaxRetryDelayMs: Number.isFinite(Number(raw?.llmMaxRetryDelayMs)) ? Number(raw?.llmMaxRetryDelayMs) : 60000,
+    maxSteps: toIntInRange(raw?.maxSteps, 100, 1, 500),
+    autoTitleInterval: toIntInRange(raw?.autoTitleInterval, 10, 0, 100),
+    bridgeInvokeTimeoutMs: toIntInRange(raw?.bridgeInvokeTimeoutMs, 120000, 1_000, 300_000),
+    llmTimeoutMs,
+    llmRetryMaxAttempts,
+    llmMaxRetryDelayMs,
     devAutoReload: raw?.devAutoReload !== false,
-    devReloadIntervalMs: Number.isFinite(Number(raw?.devReloadIntervalMs)) ? Number(raw?.devReloadIntervalMs) : 1500
+    devReloadIntervalMs: toIntInRange(raw?.devReloadIntervalMs, 1500, 500, 30000)
   };
 }
 
@@ -732,20 +867,53 @@ export const useRuntimeStore = defineStore("runtime", () => {
     savingConfig.value = true;
     error.value = "";
     try {
+      const llmApiBase = config.value.llmApiBase.trim();
+      const llmApiKey = config.value.llmApiKey;
+      const llmModel = config.value.llmModel.trim() || "gpt-5.3-codex";
+      const llmTimeoutMs = Math.max(1000, Number(config.value.llmTimeoutMs || 120000));
+      const llmRetryMaxAttempts = Math.max(0, Math.min(6, Number(config.value.llmRetryMaxAttempts || 2)));
+      const llmMaxRetryDelayMs = Math.max(0, Number(config.value.llmMaxRetryDelayMs || 60000));
+
+      const llmProfiles = normalizeLlmProfiles(config.value.llmProfiles, {
+        id: String(config.value.llmDefaultProfile || "default").trim() || "default",
+        llmApiBase,
+        llmApiKey,
+        llmModel,
+        llmTimeoutMs,
+        llmRetryMaxAttempts,
+        llmMaxRetryDelayMs
+      });
+      const profileIds = new Set(llmProfiles.map((item) => item.id));
+      const llmDefaultProfileRaw = String(config.value.llmDefaultProfile || "").trim();
+      const llmDefaultProfile = profileIds.has(llmDefaultProfileRaw)
+        ? llmDefaultProfileRaw
+        : (llmProfiles[0]?.id || "default");
+      const llmProfileChains = normalizeLlmProfileChains(config.value.llmProfileChains, profileIds);
+      const llmEscalationPolicy = normalizeEscalationPolicy(config.value.llmEscalationPolicy);
+
+      config.value.llmProfiles = llmProfiles;
+      config.value.llmDefaultProfile = llmDefaultProfile;
+      config.value.llmProfileChains = llmProfileChains;
+      config.value.llmEscalationPolicy = llmEscalationPolicy;
+
       await sendMessage("config.save", {
         payload: {
           bridgeUrl: config.value.bridgeUrl.trim(),
           bridgeToken: config.value.bridgeToken,
-          llmApiBase: config.value.llmApiBase.trim(),
-          llmApiKey: config.value.llmApiKey,
-          llmModel: config.value.llmModel.trim(),
+          llmApiBase,
+          llmApiKey,
+          llmModel,
+          llmDefaultProfile,
+          llmProfiles,
+          llmProfileChains,
+          llmEscalationPolicy,
           llmSystemPromptCustom: config.value.llmSystemPromptCustom,
           maxSteps: Math.max(1, Number(config.value.maxSteps || 100)),
           autoTitleInterval: Math.max(0, Number(config.value.autoTitleInterval ?? 10)),
           bridgeInvokeTimeoutMs: Math.max(1000, Number(config.value.bridgeInvokeTimeoutMs || 120000)),
-          llmTimeoutMs: Math.max(1000, Number(config.value.llmTimeoutMs || 120000)),
-          llmRetryMaxAttempts: Math.max(0, Math.min(6, Number(config.value.llmRetryMaxAttempts || 2))),
-          llmMaxRetryDelayMs: Math.max(0, Number(config.value.llmMaxRetryDelayMs || 60000)),
+          llmTimeoutMs,
+          llmRetryMaxAttempts,
+          llmMaxRetryDelayMs,
           devAutoReload: config.value.devAutoReload,
           devReloadIntervalMs: Math.max(500, Number(config.value.devReloadIntervalMs || 1500))
         }

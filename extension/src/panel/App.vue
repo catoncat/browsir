@@ -11,9 +11,10 @@ import ChatMessage from "./components/ChatMessage.vue";
 import StreamingDraftContainer from "./components/StreamingDraftContainer.vue";
 import ChatInput from "./components/ChatInput.vue";
 import SettingsView from "./components/SettingsView.vue";
+import ProviderSettingsView from "./components/ProviderSettingsView.vue";
 import DebugView from "./components/DebugView.vue";
 import SkillsView from "./components/SkillsView.vue";
-import { Loader2, Plus, Settings, Bug, Activity, History, MoreVertical, FileText, Download, ExternalLink, Copy, GitBranch, RefreshCcw, Wrench } from "lucide-vue-next";
+import { Loader2, Plus, Settings, Bug, Activity, History, MoreVertical, FileText, Download, ExternalLink, Copy, GitBranch, RefreshCcw, Wrench, Server } from "lucide-vue-next";
 import { onClickOutside } from "@vueuse/core";
 
 const store = useRuntimeStore();
@@ -23,6 +24,7 @@ const prompt = ref("");
 const scrollContainer = ref<HTMLElement | null>(null);
 const listOpen = ref(false);
 const showSettings = ref(false);
+const showProviderSettings = ref(false);
 const showDebug = ref(false);
 const showSkills = ref(false);
 const showMoreMenu = ref(false);
@@ -2052,6 +2054,7 @@ onUnmounted(() => {
     />
 
     <SettingsView v-if="showSettings" @close="showSettings = false" />
+    <ProviderSettingsView v-if="showProviderSettings" @close="showProviderSettings = false" />
     <SkillsView v-if="showSkills" @close="showSkills = false" />
     <DebugView v-if="showDebug" @close="showDebug = false" />
 
@@ -2190,13 +2193,16 @@ onUnmounted(() => {
               <button role="menuitem" @click="showToolHistory = !showToolHistory; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
                 <Activity :size="14" aria-hidden="true" /> {{ toolHistoryToggleLabel }}
               </button>
-              <button role="menuitem" @click="showDebug = true; showSettings = false; showSkills = false; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
+              <button role="menuitem" @click="showDebug = true; showSettings = false; showProviderSettings = false; showSkills = false; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
                 <Bug :size="14" aria-hidden="true" /> 运行调试
               </button>
-              <button role="menuitem" @click="showSkills = true; showSettings = false; showDebug = false; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
+              <button role="menuitem" @click="showSkills = true; showSettings = false; showProviderSettings = false; showDebug = false; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
                 <Wrench :size="14" aria-hidden="true" /> Skills 管理
               </button>
-              <button role="menuitem" @click="showSettings = true; showSkills = false; showDebug = false; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
+              <button role="menuitem" @click="showProviderSettings = true; showSkills = false; showSettings = false; showDebug = false; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
+                <Server :size="14" aria-hidden="true" /> Provider 设置
+              </button>
+              <button role="menuitem" @click="showSettings = true; showProviderSettings = false; showSkills = false; showDebug = false; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
                 <Settings :size="14" aria-hidden="true" /> 系统设置
               </button>
             </div>
