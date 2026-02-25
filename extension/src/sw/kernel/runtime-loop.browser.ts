@@ -3607,7 +3607,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           role: "assistant",
           text: `执行失败：${message}`
         });
-        finalStatus = "failed_execute";
+        if (finalStatus === "done") {
+          finalStatus = "failed_execute";
+        }
       }
       orchestrator.events.emit("loop_error", sessionId, {
         message
@@ -3674,6 +3676,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
   async function startLoopIfNeeded(sessionId: string, prompt: string, restartReason: string): Promise<RuntimeView> {
     const state = orchestrator.getRunState(sessionId);
+    if (state.running) {
+      orchestrator.events.emit("loop_enqueue_skipped", sessionId, {
+        reason: state.stopped ? "stop_in_progress" : "already_running"
+      });
+      return orchestrator.getRunState(sessionId);
+    }
+
     if (state.stopped) {
       orchestrator.restart(sessionId);
       orchestrator.events.emit("loop_restart", sessionId, {
@@ -3681,22 +3690,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       });
     }
 
-    if (!orchestrator.getRunState(sessionId).running) {
-      orchestrator.setRunning(sessionId, true);
-      void runAgentLoop(sessionId, prompt)
-        .catch((error) => {
-          orchestrator.events.emit("loop_internal_error", sessionId, {
-            error: error instanceof Error ? error.message : String(error)
-          });
-        })
-        .finally(() => {
-          orchestrator.setRunning(sessionId, false);
+    orchestrator.setRunning(sessionId, true);
+    void runAgentLoop(sessionId, prompt)
+      .catch((error) => {
+        orchestrator.events.emit("loop_internal_error", sessionId, {
+          error: error instanceof Error ? error.message : String(error)
         });
-    } else {
-      orchestrator.events.emit("loop_enqueue_skipped", sessionId, {
-        reason: "already_running"
+      })
+      .finally(() => {
+        orchestrator.setRunning(sessionId, false);
       });
-    }
 
     return orchestrator.getRunState(sessionId);
   }
