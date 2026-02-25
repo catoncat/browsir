@@ -2228,6 +2228,151 @@ describe("runtime-router.browser", () => {
     expect(String(toolPayload.error || "")).toContain("active_element_not_typable");
   });
 
+  it("tool_call computer(type) 应使用 React 受控输入兼容表达式", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    let capturedComputerExpression = "";
+    (chrome as unknown as { debugger: any }).debugger = {
+      attach: async () => {},
+      detach: async () => {},
+      sendCommand: async (_target: any, method: string, params: any = {}) => {
+        if (method === "Runtime.evaluate") {
+          const expression = String(params.expression || "");
+          if (expression.includes("active_element_not_typable") && expression.includes("const text =")) {
+            capturedComputerExpression = expression;
+            return {
+              result: {
+                value: {
+                  success: true,
+                  action: "type",
+                  typed: 4,
+                  via: "value-setter"
+                }
+              }
+            };
+          }
+          return {
+            result: {
+              value: {
+                url: "https://example.com",
+                title: "Example",
+                readyState: "complete",
+                textLength: 120,
+                nodeCount: 24
+              }
+            }
+          };
+        }
+        if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+        if (method === "DOM.querySelector") return { nodeId: 0 };
+        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "frame-1" }, childFrames: [] } };
+        if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+        return {};
+      },
+      onEvent: {
+        addListener: () => {}
+      },
+      onDetach: {
+        addListener: () => {}
+      }
+    };
+
+    let llmCall = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
+      if (llmCall === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_computer_type_react_1",
+                      type: "function",
+                      function: {
+                        name: "computer",
+                        arguments: JSON.stringify({
+                          tabId: 1,
+                          action: "type",
+                          text: "good"
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "done"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test",
+        autoTitleInterval: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "触发 computer type react 受控输入路径"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+
+    expect(capturedComputerExpression).toContain("_valueTracker");
+    expect(capturedComputerExpression).toContain("findTypableNear");
+    expect(capturedComputerExpression).toContain("Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')");
+    expect(capturedComputerExpression).toContain("beforeinput");
+
+    const viewed = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(viewed.ok).toBe(true);
+    const messages = readConversationMessages(viewed);
+    const toolPayload = messages
+      .filter((entry) => String(entry.role || "") === "tool" && String(entry.toolCallId || "") === "call_computer_type_react_1")
+      .map((entry) => JSON.parse(String(entry.content || "{}")) as Record<string, unknown>)[0];
+    expect(toolPayload).toBeDefined();
+    expect(Boolean(toolPayload.success)).toBe(true);
+    expect(Number(toolPayload.typed || 0)).toBe(4);
+  });
+
   it("tool_call fill_element_by_uid 失败时输出可恢复协议并给出 focus 升级提示", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);

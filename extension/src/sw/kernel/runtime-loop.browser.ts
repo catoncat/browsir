@@ -5335,15 +5335,102 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           const text = String(plan.text || "");
           const expression = `(() => {
             const text = ${JSON.stringify(text)};
-            const target = document.activeElement || document.body;
+            const TYPABLE_SELECTOR = "input,textarea,[contenteditable='true'],[role='textbox'],[role='searchbox'],[role='combobox']";
+            const isTypableElement = (el) => {
+              if (!el || el.nodeType !== 1) return false;
+              if ('disabled' in el && !!el.disabled) return false;
+              if ('readOnly' in el && !!el.readOnly) return false;
+              if ('value' in el) return true;
+              if (el.isContentEditable) return true;
+              const role = String(el.getAttribute?.('role') || '').trim().toLowerCase();
+              return role === 'textbox' || role === 'searchbox' || role === 'combobox';
+            };
+            const findTypableNear = (origin) => {
+              if (!origin || origin.nodeType !== 1) return null;
+              const resolveByIdAttr = (attrValue) => {
+                const id = String(attrValue || '').trim();
+                if (!id) return null;
+                const found = document.getElementById(id);
+                return isTypableElement(found) ? found : null;
+              };
+              const byAriaControls = resolveByIdAttr(origin.getAttribute?.('aria-controls'));
+              if (byAriaControls) return byAriaControls;
+              const byFor = resolveByIdAttr(origin.getAttribute?.('for'));
+              if (byFor) return byFor;
+              const directDesc = origin.querySelector?.(TYPABLE_SELECTOR);
+              if (isTypableElement(directDesc)) return directDesc;
+              const labelDesc = origin.closest?.('label')?.querySelector?.(TYPABLE_SELECTOR);
+              if (isTypableElement(labelDesc)) return labelDesc;
+              let cur = origin;
+              for (let i = 0; i < 3 && cur; i += 1) {
+                const inParent = cur.parentElement?.querySelector?.(TYPABLE_SELECTOR);
+                if (isTypableElement(inParent)) return inParent;
+                cur = cur.parentElement;
+              }
+              return null;
+            };
+            const syncReactValueTracker = (target, previousValue) => {
+              try {
+                const tracker = target?._valueTracker;
+                if (tracker && typeof tracker.setValue === 'function') {
+                  tracker.setValue(String(previousValue ?? ''));
+                }
+              } catch {
+                // ignore react tracker mismatch
+              }
+            };
+            const dispatchInputLikeEvents = (target, nextText, mode = 'type') => {
+              try {
+                target.dispatchEvent(new InputEvent('beforeinput', {
+                  bubbles: true,
+                  cancelable: true,
+                  data: nextText,
+                  inputType: 'insertText'
+                }));
+              } catch {
+                // ignore unsupported InputEvent ctor
+              }
+              let sent = false;
+              try {
+                target.dispatchEvent(new InputEvent('input', {
+                  bubbles: true,
+                  data: nextText,
+                  inputType: 'insertText'
+                }));
+                sent = true;
+              } catch {
+                // fallback below
+              }
+              if (!sent) target.dispatchEvent(new Event('input', { bubbles: true }));
+              if (mode === 'fill' || mode === 'type') target.dispatchEvent(new Event('change', { bubbles: true }));
+              target.dispatchEvent(new Event('keyup', { bubbles: true }));
+            };
+            let target = document.activeElement || document.body;
             if (!target) return { success: false, error: 'no_active_element' };
-            if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
-              target.value = text;
-              target.dispatchEvent(new Event('input', { bubbles: true }));
-              target.dispatchEvent(new Event('change', { bubbles: true }));
-              return { success: true, action: 'type', typed: text.length };
+            if (!isTypableElement(target)) {
+              const fallback = findTypableNear(target);
+              if (fallback) target = fallback;
             }
-            if (target.isContentEditable) {
+            if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+              const previousValue = String(target.value ?? '');
+              let setter = null;
+              try {
+                const proto = Object.getPrototypeOf(target);
+                setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set
+                  || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+                  || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+                  || null;
+              } catch {
+                setter = null;
+              }
+              if (setter) setter.call(target, text);
+              else target.value = text;
+              syncReactValueTracker(target, previousValue);
+              dispatchInputLikeEvents(target, text, 'type');
+              return { success: true, action: 'type', typed: text.length, via: 'value-setter' };
+            }
+            const role = String(target.getAttribute?.('role') || '').trim().toLowerCase();
+            if (target.isContentEditable || role === 'textbox' || role === 'searchbox' || role === 'combobox') {
               let usedInsertText = false;
               try {
                 if (typeof document.execCommand === 'function') {
