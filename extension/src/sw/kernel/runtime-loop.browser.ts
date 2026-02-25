@@ -23,6 +23,7 @@ import { resolveLlmRoute } from "./llm-profile-resolver";
 import { writeSessionMeta } from "./session-store.browser";
 import { type BridgeConfig, type RuntimeInfraHandler } from "./runtime-infra.browser";
 import { type CapabilityExecutionPolicy, type StepVerifyPolicy } from "./capability-policy";
+import type { SkillMetadata } from "./skill-registry";
 import { nowIso, type SessionEntry, type SessionMeta, type StreamingBehavior } from "./types";
 
 type JsonRecord = Record<string, unknown>;
@@ -47,13 +48,7 @@ const MIN_LLM_MAX_RETRY_DELAY_MS = 0;
 const MAX_LLM_MAX_RETRY_DELAY_MS = 300_000;
 const LLM_TRACE_BODY_PREVIEW_MAX_CHARS = 1_200;
 const LLM_TRACE_USER_SNIPPET_MAX_CHARS = 420;
-const TOOL_RETRYABLE_FAILURE_MAX_TOTAL = 8;
-const TOOL_RETRYABLE_FAILURE_MAX_PER_SIGNATURE = 3;
-const NO_PROGRESS_REPEAT_SIGNATURE_LIMIT = 3;
-const NO_PROGRESS_PING_PONG_LIMIT = 2;
-const NO_PROGRESS_SIGNATURE_WINDOW = 6;
-const NO_PROGRESS_BROWSER_PROOF_MISSING_LIMIT = 3;
-const NO_PROGRESS_REPAIR_MAX_ATTEMPTS = 1;
+const MAX_PROMPT_SKILL_ITEMS = 64;
 
 type ToolRetryAction = "auto_replay" | "llm_replan" | "fail_fast";
 type FailureReason = "failed_execute" | "failed_verify" | "progress_uncertain";
@@ -121,8 +116,10 @@ const TOOL_CAPABILITIES = {
   read_file: "fs.read",
   write_file: "fs.write",
   edit_file: "fs.edit",
-  snapshot: "browser.snapshot",
-  browser_action: "browser.action",
+  search_elements: "browser.snapshot",
+  click: "browser.action",
+  fill_element_by_uid: "browser.action",
+  fill_form: "browser.action",
   browser_verify: "browser.verify"
 } as const;
 
@@ -147,11 +144,11 @@ const BUILTIN_BRIDGE_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability
 
 const BUILTIN_BROWSER_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [
   {
-    capability: TOOL_CAPABILITIES.snapshot,
+    capability: TOOL_CAPABILITIES.search_elements,
     providerId: "runtime.builtin.capability.browser.snapshot.cdp"
   },
   {
-    capability: TOOL_CAPABILITIES.browser_action,
+    capability: TOOL_CAPABILITIES.click,
     providerId: "runtime.builtin.capability.browser.action.cdp"
   },
   {
@@ -165,10 +162,13 @@ const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
   "read_file",
   "write_file",
   "edit_file",
-  "list_tabs",
-  "open_tab",
-  "snapshot",
-  "browser_action",
+  "get_all_tabs",
+  "get_current_tab",
+  "create_new_tab",
+  "search_elements",
+  "click",
+  "fill_element_by_uid",
+  "fill_form",
   "browser_verify"
 ]);
 
@@ -336,7 +336,14 @@ function normalizeErrorCode(code: unknown): string {
 
 function isSideEffectingToolName(toolName: string): boolean {
   const normalized = String(toolName || "").trim().toLowerCase();
-  return ["write_file", "edit_file", "browser_action", "open_tab"].includes(normalized);
+  return [
+    "write_file",
+    "edit_file",
+    "click",
+    "fill_element_by_uid",
+    "fill_form",
+    "create_new_tab"
+  ].includes(normalized);
 }
 
 function classifyToolRetryDecision(toolName: string, errorCode: string): {
@@ -389,11 +396,11 @@ function classifyToolRetryDecision(toolName: string, errorCode: string): {
     };
   }
 
-  if (normalizedCode === "E_NO_TAB" || normalizedCode === "E_VERIFY_FAILED") {
+  if (normalizedCode === "E_NO_TAB" || normalizedCode === "E_REF_REQUIRED" || normalizedCode === "E_VERIFY_FAILED") {
     return {
       action: "llm_replan",
       retryable: true,
-      retryHint: "Refresh context (list_tabs/snapshot) and retry with updated target."
+      retryHint: "Refresh context (get_all_tabs/search_elements) and retry with updated target."
     };
   }
 
@@ -435,7 +442,15 @@ function inferFailurePhase(reason: FailureReason): FailurePhase {
 }
 
 function isBrowserToolName(toolName: string): boolean {
-  return ["snapshot", "browser_action", "browser_verify"].includes(String(toolName || "").trim().toLowerCase());
+  return [
+    "search_elements",
+    "click",
+    "fill_element_by_uid",
+    "fill_form",
+    "browser_verify"
+  ].includes(
+    String(toolName || "").trim().toLowerCase()
+  );
 }
 
 function inferModeEscalationDirective(input: {
@@ -457,7 +472,12 @@ function inferModeEscalationDirective(input: {
     .join(" ")
     .toLowerCase();
   const browserWriteFailureFallback =
-    ["browser_action", "browser_verify"].includes(String(input.toolName || "").trim().toLowerCase()) &&
+    [
+      "click",
+      "fill_element_by_uid",
+      "fill_form",
+      "browser_verify"
+    ].includes(String(input.toolName || "").trim().toLowerCase()) &&
     (input.errorReason === "failed_execute" || input.errorReason === "failed_verify");
   const hasFocusSignal =
     errorCode === "E_VERIFY_FAILED" ||
@@ -486,7 +506,9 @@ function inferFailureCategory(input: {
   if (input.errorReason === "failed_verify" || errorCode === "E_VERIFY_FAILED") return "verify_failed";
   if (errorCode === "E_BUSY") return "busy";
   if (["E_TIMEOUT", "E_CLIENT_TIMEOUT", "E_CDP_TIMEOUT"].includes(errorCode)) return "timeout";
-  if (["E_NO_TAB", "E_CDP_RESOLVE_NODE", "E_CDP_AXTREE_EMPTY", "E_CDP_AXTREE_NO_NODES"].includes(errorCode)) return "missing_target";
+  if (["E_NO_TAB", "E_REF_REQUIRED", "E_CDP_RESOLVE_NODE", "E_CDP_AXTREE_EMPTY", "E_CDP_AXTREE_NO_NODES"].includes(errorCode)) {
+    return "missing_target";
+  }
   if (input.modeEscalation) return "focus_required";
   return "unknown";
 }
@@ -618,8 +640,14 @@ function extractTabIdsFromPrompt(prompt: string): number[] {
 
 function shouldRequireBrowserProof(prompt: string): boolean {
   const text = String(prompt || "");
-  if (!/tabid\s*[:=]\s*\d+/i.test(text)) return false;
-  return /(fill|click|type|navigate|verify|selector|browser_action|browser_verify|页面|填写|点击|输入|验证)/i.test(text);
+  const hasTabId = /tabid\s*[:=]\s*\d+/i.test(text);
+  const hasActionHint = /(fill|click|type|navigate|verify|selector|ref|browser_verify|输入|点击|填写|打开|访问|跳转|搜索|分享|提交|验证)/i.test(text);
+  const isSyntheticMarkerOnly = /#LLM_[A-Z0-9_]+/.test(text) && !hasActionHint;
+  if (hasTabId && !isSyntheticMarkerOnly) return true;
+  if (/(browser_verify|selector|ref)/i.test(text)) return true;
+  const hasBrowserContext = /(https?:\/\/|网页|页面|网站|浏览器|tab|界面|书签|地址栏|链接|url)/i.test(text);
+  const hasBrowserAction = /(fill|click|type|navigate|verify|输入|点击|填写|打开|访问|跳转|搜索|分享|提交|验证)/i.test(text);
+  return hasBrowserContext && hasBrowserAction;
 }
 
 function normalizeSessionTitle(value: unknown, fallback = ""): string {
@@ -849,9 +877,9 @@ function buildNoProgressRepairMessage(reason: string): string {
     return "检测到工具调用在两个动作间往返震荡。请先重新观察当前页面，再用不同动作推进目标，避免重复原有往返路径。";
   }
   if (normalized === "browser_proof_missing") {
-    return "尚未形成可验证页面进展。请先执行 browser_action/browser_verify 并给出可验证证据；若后台模式受限，请切换 focus 后续跑当前步骤。";
+    return "尚未形成可验证页面进展。请先执行 search_elements + click/fill_element_by_uid/fill_form + browser_verify 并给出证据；若后台模式受限，请切换 focus 后续跑当前步骤。";
   }
-  return "检测到工具调用连续重复且未推进。请先刷新观察（snapshot/list_tabs），再尝试不同动作而不是重复同一调用。";
+  return "检测到工具调用连续重复且未推进。请先刷新观察（get_all_tabs/search_elements），再尝试不同动作而不是重复同一调用。";
 }
 
 function buildNoProgressRepairDirective(input: { reason: string; signature?: string; streak?: number }): JsonRecord {
@@ -963,6 +991,47 @@ function parseToolCallArgs(raw: string): JsonRecord | null {
   return parsed as JsonRecord;
 }
 
+function stringifyToolCallArgs(args: JsonRecord): string {
+  try {
+    return JSON.stringify(args);
+  } catch {
+    return "{}";
+  }
+}
+
+function buildFocusEscalationToolCall(toolCall: ToolCallItem): ToolCallItem | null {
+  const normalized = String(toolCall.function.name || "").trim().toLowerCase();
+  if (
+    ![
+      "click",
+      "fill_element_by_uid",
+      "fill_form"
+    ].includes(normalized)
+  ) {
+    return null;
+  }
+  const args = parseToolCallArgs(toolCall.function.arguments || "");
+  if (!args) return null;
+  const nextArgs: JsonRecord = {
+    ...args,
+    forceFocus: true
+  };
+  const nestedAction = toRecord(nextArgs.action);
+  if (Object.keys(nestedAction).length > 0) {
+    nextArgs.action = {
+      ...nestedAction,
+      forceFocus: true
+    };
+  }
+  return {
+    ...toolCall,
+    function: {
+      ...toolCall.function,
+      arguments: stringifyToolCallArgs(nextArgs)
+    }
+  };
+}
+
 function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs: string): string {
   const normalized = String(toolName || "").trim().toLowerCase();
   const raw = String(rawArgs || "").trim();
@@ -972,7 +1041,7 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
     const command = pick("command") || raw;
     return command ? `命令：${clipText(command, 220)}` : "";
   }
-  if (normalized === "open_tab") {
+  if (normalized === "create_new_tab") {
     const url = pick("url");
     return url ? `目标：${clipText(url, 220)}` : "";
   }
@@ -980,19 +1049,29 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
     const path = pick("path");
     return path ? `路径：${clipText(path, 220)}` : "";
   }
-  if (normalized === "snapshot") {
-    const mode = pick("mode") || "interactive";
+  if (normalized === "search_elements") {
+    const query = pick("query");
     const selector = pick("selector");
-    return selector ? `模式：${mode} · 选择器：${clipText(selector, 120)}` : `模式：${mode}`;
+    if (query && selector) return `元素检索：${clipText(query, 120)} · 作用域：${clipText(selector, 120)}`;
+    if (query) return `元素检索：${clipText(query, 120)}`;
+    if (selector) return `元素检索作用域：${clipText(selector, 120)}`;
+    return "元素检索";
   }
-  if (normalized === "browser_action") {
-    const kind = pick("kind");
-    const target = pick("url") || pick("ref") || pick("selector");
-    if (kind && target) return `${kind} · ${clipText(target, 180)}`;
-    if (kind) return `动作：${kind}`;
+  if (normalized === "click") {
+    const target = pick("uid") || pick("ref") || pick("selector");
+    return target ? `点击 · ${clipText(target, 180)}` : "点击";
+  }
+  if (normalized === "fill_element_by_uid") {
+    const target = pick("uid") || pick("ref") || pick("selector");
+    return target ? `填写 · ${clipText(target, 180)}` : "填写";
+  }
+  if (normalized === "fill_form") {
+    const elements = Array.isArray(args?.elements) ? args?.elements : [];
+    return `批量填表：${elements.length} 项`;
   }
   if (normalized === "browser_verify") return "页面验证";
-  if (normalized === "list_tabs") return "读取标签页列表";
+  if (normalized === "get_all_tabs") return "读取标签页列表";
+  if (normalized === "get_current_tab") return "读取当前标签页";
   if (raw) return `参数：${clipText(raw, 220)}`;
   return "";
 }
@@ -1226,8 +1305,46 @@ function buildSharedTabsContextMessage(sharedTabs: unknown): string {
   return [
     "Shared tabs context (user-selected):",
     ...lines,
-    "Use this context directly before deciding whether to call list_tabs/open_tab.",
+    "Use this context directly before deciding whether to call get_all_tabs/create_new_tab.",
     "For browser tasks, do not claim done until browser actions are verified."
+  ].join("\n");
+}
+
+function escapeXmlAttributeForPrompt(input: unknown): string {
+  return String(input || "")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function buildAvailableSkillsSystemMessage(skills: SkillMetadata[]): string {
+  const visible = (Array.isArray(skills) ? skills : []).filter(
+    (item) => item && item.enabled && item.disableModelInvocation !== true
+  );
+  if (!visible.length) return "";
+
+  const sorted = [...visible].sort((a, b) => {
+    const byName = String(a.name || "").localeCompare(String(b.name || ""));
+    if (byName !== 0) return byName;
+    return String(a.id || "").localeCompare(String(b.id || ""));
+  });
+  const limited = sorted.slice(0, MAX_PROMPT_SKILL_ITEMS);
+  const lines = limited.map((skill) => {
+    return `  <skill name="${escapeXmlAttributeForPrompt(skill.name)}" description="${escapeXmlAttributeForPrompt(
+      skill.description
+    )}" location="${escapeXmlAttributeForPrompt(skill.location)}" source="${escapeXmlAttributeForPrompt(skill.source)}" />`;
+  });
+  if (sorted.length > limited.length) {
+    lines.push(`  <!-- truncated ${sorted.length - limited.length} more skills -->`);
+  }
+
+  return [
+    "Available skills are instruction resources (not executable sandboxes).",
+    "When a skill is relevant, use read_file with its location to load SKILL.md.",
+    "<available_skills>",
+    ...lines,
+    "</available_skills>"
   ].join("\n");
 }
 
@@ -1255,7 +1372,8 @@ function buildTaskProgressSystemMessage(input: {
 function buildLlmMessagesFromContext(
   meta: SessionMeta | null,
   contextMessages: SessionContextMessageLike[],
-  previousSummary = ""
+  previousSummary = "",
+  availableSkillsPrompt = ""
 ): JsonRecord[] {
   const out: JsonRecord[] = [];
   out.push({
@@ -1265,7 +1383,11 @@ function buildLlmMessagesFromContext(
       "1) For transient tool errors (retryable=true), retry the same goal with adjusted parameters.",
       "2) bash supports optional timeoutMs (milliseconds). Increase timeoutMs when timeout-related failures happen.",
       "3) For non-retryable errors, stop retrying and explain the blocker clearly.",
-      "4) A short task progress note will be provided each round via system message."
+      "4) A short task progress note will be provided each round via system message.",
+      "5) For browser tasks, this is a recommended path (not mandatory): get_current_tab or get_all_tabs only when needed -> search_elements when target is unclear -> click/fill_element_by_uid/fill_form -> browser_verify.",
+      "6) Do not invent site selectors/URLs. Use only current tab context plus observed snapshot evidence.",
+      "7) Before claiming completion on browser tasks, provide browser_verify-grade evidence.",
+      "8) Temporary policy: do NOT run tests (e.g., bun test/pnpm test/npm test/pytest/go test) unless the user explicitly requests tests."
     ].join("\n")
   });
   const metadata = toRecord(meta?.header?.metadata);
@@ -1274,6 +1396,12 @@ function buildLlmMessagesFromContext(
     out.push({
       role: "system",
       content: sharedTabsContext
+    });
+  }
+  if (availableSkillsPrompt) {
+    out.push({
+      role: "system",
+      content: availableSkillsPrompt
     });
   }
 
@@ -1293,7 +1421,7 @@ function shouldVerifyStep(action: string, verifyPolicy: unknown): boolean {
   const policy = String(verifyPolicy || "on_critical");
   if (policy === "off") return false;
   if (policy === "always") return true;
-  const critical = ["click", "type", "fill", "press", "scroll", "select", "navigate", "browser_action", "action"];
+  const critical = ["click", "type", "fill", "press", "scroll", "select", "navigate", "action"];
   return critical.includes(String(action || "").trim().toLowerCase());
 }
 
@@ -2142,10 +2270,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             verifyPolicy: stepInput.verifyPolicy,
             capability: stepInput.capability
           };
-          if (item.capability === TOOL_CAPABILITIES.snapshot) {
+          if (item.capability === TOOL_CAPABILITIES.search_elements) {
             return await invokeBrowserSnapshotCapability(input);
           }
-          if (item.capability === TOOL_CAPABILITIES.browser_action) {
+          if (item.capability === TOOL_CAPABILITIES.click) {
             return await invokeBrowserActionCapability(input);
           }
           return await invokeBrowserVerifyCapability(input);
@@ -2505,6 +2633,52 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     return result;
   }
 
+  function extractSkillReadContent(data: unknown): string {
+    const root = toRecord(data);
+    const rootData = toRecord(root.data);
+    const rootResponse = toRecord(root.response);
+    const rootResponseData = toRecord(rootResponse.data);
+    const rootResult = toRecord(root.result);
+    const candidates: unknown[] = [
+      data,
+      root.content,
+      root.text,
+      rootData.content,
+      rootData.text,
+      rootResponse.content,
+      rootResponse.text,
+      rootResponseData.content,
+      rootResponseData.text,
+      rootResult.content,
+      rootResult.text
+    ];
+    for (const item of candidates) {
+      if (typeof item === "string") return item;
+    }
+    throw new Error(`read_file 未返回 content 文本: ${safeStringify(data, 1200)}`);
+  }
+
+  orchestrator.setSkillContentReader(async (input) => {
+    const sessionId = String(input.sessionId || "").trim();
+    if (!sessionId) {
+      throw new Error("skill.resolve 需要 sessionId 以绑定当前会话 capability");
+    }
+    const readCapability = String(input.capability || TOOL_CAPABILITIES.read_file).trim() || TOOL_CAPABILITIES.read_file;
+    const result = await executeStep({
+      sessionId,
+      capability: readCapability as ExecuteCapability,
+      action: "read_file",
+      args: {
+        path: String(input.location || "").trim()
+      },
+      verifyPolicy: "off"
+    });
+    if (!result.ok) {
+      throw new Error(result.error || `read_file 失败: ${String(input.location || "")}`);
+    }
+    return extractSkillReadContent(result.data);
+  });
+
   async function invokeBridgeFrameWithRetry(
     sessionId: string,
     toolName: string,
@@ -2577,25 +2751,45 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         frame: JsonRecord;
       }
     | {
-        kind: "local.list_tabs";
+        kind: "local.get_all_tabs";
       }
     | {
-        kind: "local.open_tab";
+        kind: "local.current_tab";
+      }
+    | {
+        kind: "local.create_new_tab";
         args: JsonRecord;
       }
     | {
-        kind: "step.snapshot";
+        kind: "step.search_elements";
         capability: ExecuteCapability;
         tabId: number;
         options: JsonRecord;
+        query: string;
+        maxResults: number;
       }
     | {
-        kind: "step.browser_action";
+        kind: "step.element_action";
+        toolName: "click" | "fill_element_by_uid";
         capability: ExecuteCapability;
         tabId: number;
         kindValue: string;
         action: JsonRecord;
         expect: unknown;
+      }
+    | {
+        kind: "step.fill_form";
+        capability: ExecuteCapability;
+        tabId: number;
+        elements: Array<{
+          uid: string;
+          ref: string;
+          selector: string;
+          backendNodeId: number | null;
+          value: string;
+        }>;
+        submit: JsonRecord | null;
+        expect: JsonRecord;
       }
     | {
         kind: "step.browser_verify";
@@ -2669,6 +2863,62 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     context: ResolvedToolCallContext
   ): Promise<{ ok: true; plan: ToolPlan } | { ok: false; error: JsonRecord }> {
     const args = context.args;
+    const buildUidActionPlan = async (
+      toolName: string,
+      kindValue: "click" | "fill"
+    ): Promise<{ ok: true; plan: ToolPlan } | { ok: false; error: JsonRecord }> => {
+      const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
+      if (!tabId) {
+        return {
+          ok: false,
+          error: attachFailureProtocol(toolName, {
+            error: `${toolName} 需要 tabId，当前无可用 tab`,
+            errorCode: "E_NO_TAB",
+            errorReason: "failed_execute",
+            retryable: true,
+            retryHint: `Call get_all_tabs and retry ${toolName} with a valid tabId.`
+          }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+        };
+      }
+      const uid = String(args.uid || "").trim();
+      const ref = String(args.ref || "").trim();
+      const selector = String(args.selector || "").trim();
+      const backendNodeId = parsePositiveInt(args.backendNodeId);
+      if (!uid && !ref && !backendNodeId) {
+        return {
+          ok: false,
+          error: attachFailureProtocol(toolName, {
+            error: "元素交互动作需要 uid/ref/backendNodeId。请先调用 search_elements，再用返回的 uid 执行。",
+            errorCode: "E_REF_REQUIRED",
+            errorReason: "failed_execute",
+            retryable: true,
+            retryHint: `Call search_elements first, then retry ${toolName} using uid/ref.`
+          }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+        };
+      }
+      return {
+        ok: true,
+        plan: {
+          kind: "step.element_action",
+          toolName: toolName as "click" | "fill_element_by_uid",
+          capability: TOOL_CAPABILITIES.click,
+          tabId,
+          kindValue,
+          action: {
+            kind: kindValue,
+            uid: uid || undefined,
+            ref: ref || uid || undefined,
+            selector: selector || undefined,
+            backendNodeId: backendNodeId || undefined,
+            value: args.value,
+            expect: args.expect,
+            forceFocus: args.forceFocus === true,
+            requireFocus: args.requireFocus === true
+          },
+          expect: args.expect
+        }
+      };
+    };
     switch (context.executionTool) {
       case "bash": {
         const command = String(args.command || "").trim();
@@ -2752,15 +3002,17 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           }
         };
       }
-      case "list_tabs":
-        return { ok: true, plan: { kind: "local.list_tabs" } };
-      case "open_tab": {
+      case "get_all_tabs":
+        return { ok: true, plan: { kind: "local.get_all_tabs" } };
+      case "get_current_tab":
+        return { ok: true, plan: { kind: "local.current_tab" } };
+      case "create_new_tab": {
         const rawUrl = String(args.url || "").trim();
-        if (!rawUrl) return { ok: false, error: { error: "open_tab 需要 url" } };
+        if (!rawUrl) return { ok: false, error: { error: "create_new_tab 需要 url" } };
         return {
           ok: true,
           plan: {
-            kind: "local.open_tab",
+            kind: "local.create_new_tab",
             args: {
               url: rawUrl,
               active: args.active
@@ -2768,32 +3020,36 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           }
         };
       }
-      case "snapshot": {
+      case "search_elements": {
         const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
         if (!tabId) {
           return {
             ok: false,
-            error: attachFailureProtocol("snapshot", {
-              error: "snapshot 需要 tabId，当前无可用 tab",
+            error: attachFailureProtocol("search_elements", {
+              error: "search_elements 需要 tabId，当前无可用 tab",
               errorCode: "E_NO_TAB",
               errorReason: "failed_execute",
               retryable: true,
-              retryHint: "Call list_tabs and then retry snapshot with a valid tabId."
+              retryHint: "Call get_all_tabs and retry search_elements with a valid tabId."
             }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
           };
         }
+        const maxResultsRaw = Number(args.maxResults);
+        const maxResults = Number.isFinite(maxResultsRaw) ? Math.max(1, Math.min(120, Math.floor(maxResultsRaw))) : 20;
         return {
           ok: true,
           plan: {
-            kind: "step.snapshot",
-            capability: TOOL_CAPABILITIES.snapshot,
+            kind: "step.search_elements",
+            capability: TOOL_CAPABILITIES.search_elements,
             tabId,
+            query: String(args.query || "").trim(),
+            maxResults,
             options: {
-              mode: args.mode || "interactive",
-              selector: args.selector || "",
-              filter: args.filter || "interactive",
-              format: args.format === "json" ? "json" : "compact",
-              diff: args.diff !== false,
+              mode: "interactive",
+              selector: String(args.selector || ""),
+              filter: "all",
+              format: "json",
+              diff: args.diff === true,
               maxTokens: args.maxTokens,
               depth: args.depth,
               noAnimations: args.noAnimations === true
@@ -2801,38 +3057,65 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           }
         };
       }
-      case "browser_action": {
+      case "click":
+        return await buildUidActionPlan("click", "click");
+      case "fill_element_by_uid":
+        return await buildUidActionPlan("fill_element_by_uid", "fill");
+      case "fill_form": {
         const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
         if (!tabId) {
           return {
             ok: false,
-            error: attachFailureProtocol("browser_action", {
-              error: "browser_action 需要 tabId，当前无可用 tab",
+            error: attachFailureProtocol("fill_form", {
+              error: "fill_form 需要 tabId，当前无可用 tab",
               errorCode: "E_NO_TAB",
               errorReason: "failed_execute",
               retryable: true,
-              retryHint: "Call list_tabs and retry browser_action with a valid tabId."
+              retryHint: "Call get_all_tabs and retry fill_form with a valid tabId."
             }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
           };
         }
-        const kindValue = String(args.kind || "").trim().toLowerCase();
+        const rawElements = Array.isArray(args.elements) ? (args.elements as unknown[]) : [];
+        const elements = rawElements
+          .map((item) => toRecord(item))
+          .map((item) => ({
+            uid: String(item.uid || "").trim(),
+            ref: String(item.ref || "").trim(),
+            selector: String(item.selector || "").trim(),
+            backendNodeId: parsePositiveInt(item.backendNodeId),
+            value: String(item.value || "")
+          }))
+          .filter((item) => item.value.length > 0);
+        if (elements.length === 0) {
+          return {
+            ok: false,
+            error: {
+              error: "fill_form 需要 elements 且每项至少包含 value",
+              errorCode: "E_ARGS"
+            }
+          };
+        }
+        if (elements.some((item) => !item.uid && !item.ref && !item.backendNodeId && !item.selector)) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("fill_form", {
+              error: "fill_form 每个字段都需要 uid/ref/backendNodeId（或 selector 兜底）。请先调用 search_elements。",
+              errorCode: "E_REF_REQUIRED",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint: "Call search_elements and map each field to uid/ref before fill_form."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+          };
+        }
         return {
           ok: true,
           plan: {
-            kind: "step.browser_action",
-            capability: TOOL_CAPABILITIES.browser_action,
+            kind: "step.fill_form",
+            capability: TOOL_CAPABILITIES.fill_form,
             tabId,
-            kindValue,
-            action: {
-              kind: kindValue,
-              ref: args.ref,
-              selector: args.selector,
-              key: args.key || (kindValue === "press" ? args.value : undefined),
-              value: args.value,
-              url: args.url || (kindValue === "navigate" ? args.value : undefined),
-              expect: args.expect
-            },
-            expect: args.expect
+            elements,
+            submit: Object.keys(toRecord(args.submit)).length > 0 ? toRecord(args.submit) : null,
+            expect: normalizeVerifyExpect(args.expect || {}) || {}
           }
         };
       }
@@ -2846,7 +3129,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               errorCode: "E_NO_TAB",
               errorReason: "failed_execute",
               retryable: true,
-              retryHint: "Call list_tabs and retry browser_verify with a valid tabId."
+              retryHint: "Call get_all_tabs and retry browser_verify with a valid tabId."
             }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
           };
         }
@@ -2876,7 +3159,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     switch (plan.kind) {
       case "bridge":
         return await invokeBridgeFrameWithRetry(sessionId, plan.toolName, plan.frame, plan.capability);
-      case "local.list_tabs": {
+      case "local.get_all_tabs": {
         const tabs = await queryAllTabsForRuntime();
         const activeTabId = await getActiveTabIdForRuntime();
         return buildToolResponseEnvelope("tabs", {
@@ -2885,7 +3168,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           tabs
         });
       }
-      case "local.open_tab": {
+      case "local.current_tab": {
+        const tabs = await queryAllTabsForRuntime();
+        const activeTabId = await getActiveTabIdForRuntime();
+        const tab = tabs.find((item) => Number(item.id) === Number(activeTabId)) || null;
+        return buildToolResponseEnvelope("tabs", {
+          activeTabId,
+          tab
+        });
+      }
+      case "local.create_new_tab": {
         const created = await chrome.tabs.create({
           url: String(plan.args.url || ""),
           active: plan.args.active !== false
@@ -2901,7 +3193,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           }
         });
       }
-      case "step.snapshot": {
+      case "step.search_elements": {
         const out = await executeStep({
           sessionId,
           capability: plan.capability,
@@ -2913,10 +3205,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         });
         if (!out.ok) {
           return buildStepFailureEnvelope(
-            "snapshot",
+            "search_elements",
             out,
-            "snapshot 执行失败",
-            "Take another snapshot (or list_tabs first) and retry with a valid tab/selector.",
+            "search_elements 执行失败",
+            "Take a fresh snapshot and retry search_elements with a valid scope.",
             {
               defaultRetryable: true,
               phase: "execute",
@@ -2925,14 +3217,49 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           );
         }
         const snapshotData = toRecord(out.data);
-        return buildToolResponseEnvelope("snapshot", out.data, {
+        const rawNodes = Array.isArray(snapshotData.nodes) ? (snapshotData.nodes as JsonRecord[]) : [];
+        const query = String(plan.query || "").trim().toLowerCase();
+        const needles = query.split(/\s+/).map((item) => item.trim()).filter(Boolean);
+        const normalizedNodes = rawNodes.map((node) => {
+          const ref = String(node.ref || "");
+          return {
+            ...node,
+            uid: String(node.uid || ref),
+            ref
+          };
+        });
+        const filteredNodes = needles.length
+          ? normalizedNodes.filter((node) => {
+              const haystack = [
+                String(node.role || ""),
+                String(node.name || ""),
+                String(node.value || ""),
+                String(node.placeholder || ""),
+                String(node.ariaLabel || ""),
+                String(node.selector || ""),
+                String(node.tag || "")
+              ]
+                .join(" ")
+                .toLowerCase();
+              return needles.every((needle) => haystack.includes(needle));
+            })
+          : normalizedNodes;
+        const nodes = filteredNodes.slice(0, plan.maxResults);
+        return buildToolResponseEnvelope("search_elements", {
+          query: plan.query,
+          tabId: plan.tabId,
+          count: nodes.length,
+          total: filteredNodes.length,
+          nodes,
+          snapshotId: String(snapshotData.snapshotId || ""),
+          url: String(snapshotData.url || ""),
+          title: String(snapshotData.title || "")
+        }, {
           capabilityUsed: out.capabilityUsed || plan.capability,
-          modeUsed: out.modeUsed,
-          verified: typeof snapshotData.verified === "boolean" ? snapshotData.verified : out.verified,
-          verifyReason: String(snapshotData.verifyReason || out.verifyReason || "")
+          modeUsed: out.modeUsed
         });
       }
-      case "step.browser_action": {
+      case "step.element_action": {
         const out = await executeStep({
           sessionId,
           capability: plan.capability,
@@ -2945,9 +3272,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         });
         if (!out.ok) {
           return buildStepFailureEnvelope(
-            "browser_action",
+            plan.toolName,
             out,
-            "browser_action 执行失败",
+            `${plan.toolName} 执行失败`,
             "Take a fresh snapshot and retry with updated ref/selector.",
             {
               defaultRetryable: true,
@@ -2961,11 +3288,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const verifyReason = String(providerAction.verifyReason || out.verifyReason || "");
         const actionData = providerAction.data !== undefined ? providerAction.data : out.data;
         const explicitExpect = normalizeVerifyExpect(plan.expect || null);
-        const hardFail = !!explicitExpect || plan.kindValue === "navigate";
+        const hardFail = !!explicitExpect;
         if (!verified && hardFail) {
           const errorReason = mapVerifyReasonToFailureReason(verifyReason);
-          return attachFailureProtocol("browser_action", {
-            error: "browser_action 执行成功但未通过验证",
+          return attachFailureProtocol(plan.toolName, {
+            error: `${plan.toolName} 执行成功但未通过验证`,
             errorCode: "E_VERIFY_FAILED",
             errorReason,
             retryable: true,
@@ -2979,11 +3306,142 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             resumeStrategy: "retry_with_fresh_snapshot"
           });
         }
-        return buildToolResponseEnvelope("cdp_action", actionData, {
+        return buildToolResponseEnvelope(plan.toolName, actionData, {
           capabilityUsed: out.capabilityUsed || plan.capability,
           modeUsed: out.modeUsed,
           verifyReason,
           verified
+        });
+      }
+      case "step.fill_form": {
+        const itemResults: JsonRecord[] = [];
+        for (let i = 0; i < plan.elements.length; i += 1) {
+          const item = plan.elements[i];
+          const out = await executeStep({
+            sessionId,
+            capability: plan.capability,
+            action: "action",
+            args: {
+              tabId: plan.tabId,
+              action: {
+                kind: "fill",
+                uid: item.uid || undefined,
+                ref: item.ref || item.uid || undefined,
+                selector: item.selector || undefined,
+                backendNodeId: item.backendNodeId || undefined,
+                value: item.value
+              }
+            }
+          });
+          if (!out.ok) {
+            return attachFailureProtocol("fill_form", {
+              error: `fill_form 第 ${i + 1} 项填写失败`,
+              errorCode: normalizeErrorCode(out.errorCode) || undefined,
+              errorReason: "failed_execute",
+              retryable: out.retryable === true,
+              retryHint: "Refresh elements with search_elements and retry fill_form.",
+              details: {
+                index: i,
+                item,
+                error: out.error || "",
+                errorCode: out.errorCode || "",
+                errorDetails: out.errorDetails || null
+              }
+            }, {
+              phase: "execute",
+              resumeStrategy: "retry_with_fresh_snapshot"
+            });
+          }
+          const payload = toRecord(out.data);
+          itemResults.push({
+            index: i,
+            uid: item.uid || item.ref || "",
+            ok: true,
+            result: payload.data !== undefined ? payload.data : out.data
+          });
+        }
+
+        if (plan.submit && Object.keys(plan.submit).length > 0) {
+          const submitKind = String(plan.submit.kind || "").trim().toLowerCase() || "click";
+          const submitOut = await executeStep({
+            sessionId,
+            capability: plan.capability,
+            action: "action",
+            args: {
+              tabId: plan.tabId,
+              action: {
+                kind: submitKind,
+                uid: String(plan.submit.uid || "").trim() || undefined,
+                ref: String(plan.submit.ref || "").trim() || undefined,
+                selector: String(plan.submit.selector || "").trim() || undefined,
+                key: String(plan.submit.key || "").trim() || undefined
+              }
+            }
+          });
+          if (!submitOut.ok) {
+            return attachFailureProtocol("fill_form", {
+              error: "fill_form 提交动作失败",
+              errorCode: normalizeErrorCode(submitOut.errorCode) || undefined,
+              errorReason: "failed_execute",
+              retryable: submitOut.retryable === true,
+              retryHint: "Retry submit action after refreshing element refs.",
+              details: {
+                submit: plan.submit,
+                error: submitOut.error || "",
+                errorCode: submitOut.errorCode || ""
+              }
+            }, {
+              phase: "execute",
+              resumeStrategy: "retry_with_fresh_snapshot"
+            });
+          }
+          itemResults.push({
+            index: itemResults.length,
+            submit: true,
+            ok: true,
+            result: submitOut.data
+          });
+        }
+
+        if (Object.keys(plan.expect || {}).length > 0) {
+          const verifyOut = await executeStep({
+            sessionId,
+            capability: TOOL_CAPABILITIES.browser_verify,
+            action: "verify",
+            args: {
+              tabId: plan.tabId,
+              action: {
+                expect: plan.expect
+              }
+            },
+            verifyPolicy: "off"
+          });
+          if (!verifyOut.ok || verifyOut.verified !== true) {
+            return attachFailureProtocol("fill_form", {
+              error: "fill_form 后置验证失败",
+              errorCode: normalizeErrorCode(verifyOut.errorCode) || "E_VERIFY_FAILED",
+              errorReason: mapVerifyReasonToFailureReason(verifyOut.verifyReason),
+              retryable: true,
+              retryHint: "Refresh page state and retry fill_form with updated refs.",
+              details: {
+                expect: plan.expect,
+                verifyReason: verifyOut.verifyReason || "",
+                verifyError: verifyOut.error || ""
+              }
+            }, {
+              phase: "verify",
+              resumeStrategy: "retry_with_fresh_snapshot"
+            });
+          }
+        }
+
+        return buildToolResponseEnvelope("fill_form", {
+          tabId: plan.tabId,
+          filled: plan.elements.length,
+          results: itemResults
+        }, {
+          capabilityUsed: plan.capability,
+          modeUsed: "cdp"
         });
       }
       case "step.browser_verify": {
@@ -3039,7 +3497,12 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
   }
 
   function getToolPlanTabId(plan: ToolPlan): number | null {
-    if (plan.kind === "step.snapshot" || plan.kind === "step.browser_action" || plan.kind === "step.browser_verify") {
+    if (
+      plan.kind === "step.search_elements" ||
+      plan.kind === "step.element_action" ||
+      plan.kind === "step.fill_form" ||
+      plan.kind === "step.browser_verify"
+    ) {
       return Number.isInteger(plan.tabId) ? Number(plan.tabId) : null;
     }
     return null;
@@ -3138,7 +3601,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       let rawBody = "";
       let contentType = "";
       try {
-        const browserOnlyTools = new Set(["list_tabs", "open_tab", "snapshot", "browser_action", "browser_verify"]);
+        const browserOnlyTools = new Set([
+          "get_all_tabs",
+          "get_current_tab",
+          "create_new_tab",
+          "search_elements",
+          "click",
+          "fill_element_by_uid",
+          "fill_form",
+          "browser_verify"
+        ]);
         const llmToolDefs = orchestrator
           .listLlmToolDefinitions({ includeAliases: true })
           .filter((definition) => {
@@ -3330,8 +3802,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
         return message;
       } catch (error) {
-        lastError = error;
-        const err = error as RuntimeErrorWithMeta;
+        const err = asRuntimeErrorWithMeta(error);
+        lastError = err;
         const errText = error instanceof Error ? error.message : String(error);
         const statusCode = Number(err?.status || status || 0);
         const signalReason = String(ctrl.signal.reason || "");
@@ -3359,7 +3831,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             });
           }
           orchestrator.resetRetryState(sessionId);
-          throw error;
+          throw err;
         }
 
         const delayMs = computeRetryDelayMs(attempt);
@@ -3395,6 +3867,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
   async function runAgentLoop(sessionId: string, prompt: string): Promise<void> {
     const stateAtStart = orchestrator.getRunState(sessionId);
     if (stateAtStart.stopped) {
+      orchestrator.setRunning(sessionId, false);
       orchestrator.events.emit("loop_skip_stopped", sessionId, {
         reason: "stopped_before_run"
       });
@@ -3477,10 +3950,6 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       }
     }
 
-    const context = await orchestrator.sessions.buildSessionContext(sessionId);
-    const meta = await orchestrator.sessions.getMeta(sessionId);
-    const messages = buildLlmMessagesFromContext(meta, context.messages, context.previousSummary);
-
     let llmStep = 0;
     let toolStep = 0;
     let finalStatus = "done";
@@ -3494,8 +3963,22 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     let noProgressPingPongStreak = 0;
     let noProgressSignatures: string[] = [];
     let noProgressRepairAttempts = 0;
+    let noProgressObserved = false;
+    const focusEscalationReplayKeys = new Set<string>();
 
     try {
+      await orchestrator.preSendCompactionCheck(sessionId);
+      const context = await orchestrator.sessions.buildSessionContext(sessionId);
+      const meta = await orchestrator.sessions.getMeta(sessionId);
+      let availableSkillsPrompt = "";
+      try {
+        const skills = await orchestrator.listSkills();
+        availableSkillsPrompt = buildAvailableSkillsSystemMessage(skills);
+      } catch {
+        availableSkillsPrompt = "";
+      }
+      const messages = buildLlmMessagesFromContext(meta, context.messages, context.previousSummary, availableSkillsPrompt);
+
       while (llmStep < maxLoopSteps) {
         let state = orchestrator.getRunState(sessionId);
         if (state.stopped) {
@@ -3513,23 +3996,24 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
         const dequeuedSteers = orchestrator.dequeueQueuedPrompts(sessionId, "steer");
         for (const steer of dequeuedSteers) {
-          await orchestrator.appendUserMessage(sessionId, steer.text);
+          const steerText = await expandSkillSlashPrompt(sessionId, steer.text);
+          await orchestrator.appendUserMessage(sessionId, steerText);
           await orchestrator.preSendCompactionCheck(sessionId);
           messages.push({
             role: "user",
-            content: steer.text
+            content: steerText
           });
           const runtimeAfterDequeue = orchestrator.getRunState(sessionId);
           orchestrator.events.emit("message.dequeued", sessionId, {
             behavior: "steer",
             id: steer.id,
-            text: clipText(steer.text, 3000),
+            text: clipText(steerText, 3000),
             total: runtimeAfterDequeue.queue.total,
             steer: runtimeAfterDequeue.queue.steer,
             followUp: runtimeAfterDequeue.queue.followUp
           });
           orchestrator.events.emit("input.steer", sessionId, {
-            text: clipText(steer.text, 3000),
+            text: clipText(steerText, 3000),
             id: steer.id
           });
         }
@@ -3674,8 +4158,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           noProgressSameSignatureStreak = noProgress.sameSignatureStreak;
           noProgressPingPongStreak = noProgress.pingPongStreak;
           if (noProgress.reason) {
+            noProgressObserved = true;
             const canRepair = noProgressRepairAttempts < NO_PROGRESS_REPAIR_MAX_ATTEMPTS;
-            const decision = canRepair ? "retry" : "stop";
+            const decision = canRepair ? "retry" : "continue";
             const repairDirective = buildNoProgressRepairDirective({
               reason: noProgress.reason,
               signature,
@@ -3705,8 +4190,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             }
             const noProgressMessage =
               noProgress.reason === "ping_pong"
-                ? "工具调用出现往返震荡（ping-pong），已提前结束本轮。"
-                : "工具调用连续重复且无进展，已提前结束本轮。";
+                ? "工具调用出现往返震荡（ping-pong），已触发进展保护并继续重规划。"
+                : "工具调用连续重复且无进展，已触发进展保护并继续重规划。";
             await orchestrator.sessions.appendMessage({
               sessionId,
               role: "assistant",
@@ -3716,8 +4201,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 resume: repairDirective.resume
               }, 1200)}`
             });
-            finalStatus = "progress_uncertain";
-            throw new Error(noProgressMessage);
+            messages.push({
+              role: "system",
+              content: `${buildNoProgressRepairMessage(noProgress.reason)}\n[guard]\n${safeStringify(repairDirective, 1500)}`
+            });
+            continue;
           }
         } else {
           noProgressSameSignatureStreak = 0;
@@ -3750,8 +4238,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           if (requireBrowserProof && !browserProofSatisfied) {
             browserProofMissingStreak += 1;
             if (browserProofMissingStreak >= NO_PROGRESS_BROWSER_PROOF_MISSING_LIMIT) {
+              noProgressObserved = true;
               const canRepair = noProgressRepairAttempts < NO_PROGRESS_REPAIR_MAX_ATTEMPTS;
-              const decision = canRepair ? "retry" : "stop";
+              const decision = canRepair ? "retry" : "continue";
               const repairDirective = buildNoProgressRepairDirective({
                 reason: "browser_proof_missing",
                 streak: browserProofMissingStreak
@@ -3775,7 +4264,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 });
                 continue;
               }
-              const noProgressMessage = "工具调用未产生可验证页面进展，已提前结束本轮。";
+              const noProgressMessage = "工具调用未产生可验证页面进展，已触发进展保护并继续重规划。";
               await orchestrator.sessions.appendMessage({
                 sessionId,
                 role: "assistant",
@@ -3785,13 +4274,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                   resume: repairDirective.resume
                 }, 1200)}`
               });
-              finalStatus = "progress_uncertain";
-              throw new Error(noProgressMessage);
+              messages.push({
+                role: "system",
+                content: `${buildNoProgressRepairMessage("browser_proof_missing")}\n[guard]\n${safeStringify(repairDirective, 1500)}`
+              });
+              continue;
             }
             messages.push({
               role: "system",
               content:
-                "尚未完成可验证页面操作。请调用 browser_action/browser_verify 完成目标并验证后，再给出完成结论。"
+                "尚未完成可验证页面操作。请先 search_elements，再用 click/fill_element_by_uid/fill_form，最后 browser_verify 后再给出完成结论。"
             });
             orchestrator.events.emit("loop_guard_browser_progress_missing", sessionId, {
               step: llmStep
@@ -3808,10 +4300,26 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           break;
         }
 
-        let shouldContinueAfterToolFailure = false;
         let skipRemainingToolCallsBySteer = false;
         for (let toolCallIndex = 0; toolCallIndex < toolCalls.length; toolCallIndex += 1) {
+          if (orchestrator.getRunState(sessionId).stopped) {
+            finalStatus = "stopped";
+            break;
+          }
           const tc = toolCalls[toolCallIndex];
+          if (orchestrator.hasQueuedPrompt(sessionId, "steer")) {
+            const skippedCount = toolCalls.length - toolCallIndex;
+            skipRemainingToolCallsBySteer = true;
+            orchestrator.events.emit("tool.skipped_due_to_steer", sessionId, {
+              beforeTool: tc.function.name,
+              beforeToolCallId: tc.id,
+              skippedCount
+            });
+            break;
+          }
+          const canonicalToolName = String(orchestrator.resolveToolContract(tc.function.name)?.name || tc.function.name)
+            .trim()
+            .toLowerCase();
           toolStep += 1;
           orchestrator.events.emit("step_planned", sessionId, {
             step: toolStep,
@@ -3820,10 +4328,96 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             arguments: clipText(tc.function.arguments, 500)
           });
 
-          const result = await executeToolCall(sessionId, tc);
+          let result = await executeToolCall(sessionId, tc);
           if (result.error) {
+            const modeEscalation = toRecord(result.modeEscalation);
+            const focusEscalationKey = `${String(tc.id || "")}|${String(tc.function.name || "").trim().toLowerCase()}`;
+            const canAutoEscalateToFocus =
+              ["click", "fill_element_by_uid", "fill_form"].includes(canonicalToolName) &&
+              result.retryable === true &&
+              normalizeFailureReason(result.errorReason) === "failed_execute" &&
+              modeEscalation.suggested === true &&
+              String(modeEscalation.to || "").trim().toLowerCase() === "focus" &&
+              !focusEscalationReplayKeys.has(focusEscalationKey);
+            if (canAutoEscalateToFocus) {
+              const escalatedToolCall = buildFocusEscalationToolCall(tc);
+              if (escalatedToolCall) {
+                focusEscalationReplayKeys.add(focusEscalationKey);
+                orchestrator.events.emit("tool.mode_escalation", sessionId, {
+                  step: toolStep,
+                  tool: tc.function.name,
+                  toolCallId: tc.id,
+                  from: String(modeEscalation.from || "background"),
+                  to: "focus",
+                  status: "retrying"
+                });
+                const escalatedResult = await executeToolCall(sessionId, escalatedToolCall);
+                if (!escalatedResult.error) {
+                  const escalatedResponse = toRecord(escalatedResult.response);
+                  const escalatedData = escalatedResponse.data;
+                  if (escalatedData && typeof escalatedData === "object" && !Array.isArray(escalatedData)) {
+                    escalatedResponse.data = {
+                      ...(escalatedData as JsonRecord),
+                      modeEscalated: true,
+                      modeEscalation: {
+                        from: String(modeEscalation.from || "background"),
+                        to: "focus",
+                        auto: true
+                      }
+                    };
+                  }
+                  result = {
+                    ...escalatedResult,
+                    response: escalatedResponse
+                  };
+                  orchestrator.events.emit("tool.mode_escalation", sessionId, {
+                    step: toolStep,
+                    tool: tc.function.name,
+                    toolCallId: tc.id,
+                    from: String(modeEscalation.from || "background"),
+                    to: "focus",
+                    status: "recovered"
+                  });
+                } else {
+                  result = escalatedResult;
+                  orchestrator.events.emit("tool.mode_escalation", sessionId, {
+                    step: toolStep,
+                    tool: tc.function.name,
+                    toolCallId: tc.id,
+                    from: String(modeEscalation.from || "background"),
+                    to: "focus",
+                    status: "failed",
+                    error: String(escalatedResult.error || "unknown")
+                  });
+                }
+              }
+            }
+          }
+
+          if (result.error) {
+            const errorCode = normalizeErrorCode(result.errorCode);
+            const interruptedBySteer =
+              errorCode === "E_BRIDGE_INTERRUPTED" &&
+              orchestrator.hasQueuedPrompt(sessionId, "steer");
+            if (interruptedBySteer) {
+              const skippedCount = toolCalls.length - toolCallIndex - 1;
+              orchestrator.events.emit("tool.interrupted_by_steer", sessionId, {
+                step: toolStep,
+                action: tc.function.name,
+                toolCallId: tc.id,
+                skippedCount
+              });
+              orchestrator.events.emit("step_finished", sessionId, {
+                step: toolStep,
+                ok: false,
+                mode: "tool_call",
+                action: tc.function.name,
+                error: "interrupted_by_steer"
+              });
+              skipRemainingToolCallsBySteer = true;
+              break;
+            }
             const failurePayload = buildToolFailurePayload(tc, result);
-            const failureText = `工具 ${tc.function.name} 失败: ${String(result.error)}`;
             messages.push({
               role: "tool",
               tool_call_id: tc.id,
@@ -3888,26 +4482,21 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 finalStatus = mapToolErrorReasonToTerminalStatus(result.errorReason);
                 throw new Error(budgetMessage);
               }
-
-              shouldContinueAfterToolFailure = true;
-              break;
             }
-
-            await orchestrator.sessions.appendMessage({
-              sessionId,
-              role: "assistant",
-              text: failureText
-            });
-            finalStatus = mapToolErrorReasonToTerminalStatus(result.errorReason);
-            throw new Error(failureText);
+            // PI 对齐：工具失败写入 tool_result 后继续当前 loop，由后续 LLM 结合失败结果重规划。
+            continue;
           }
 
           const responsePayload = toRecord(result.response);
           const rawToolData = responsePayload.data ?? result;
-          const toolName = String(tc.function.name || "").trim().toLowerCase();
-          if (toolName === "browser_action" || toolName === "browser_verify") {
+          const toolName = canonicalToolName;
+          if (
+            ["click", "fill_element_by_uid", "browser_verify", "fill_form"].includes(
+              toolName
+            )
+          ) {
             const verified = result.verified === true || String(result.verifyReason || "").trim() === "verified";
-            if (verified || toolName === "browser_verify") {
+            if (verified || toolName === "browser_verify" || toolName === "fill_form") {
               browserProofSatisfied = true;
               browserProofMissingStreak = 0;
             }
@@ -3946,8 +4535,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           }
         }
 
-        if (shouldContinueAfterToolFailure) {
-          continue;
+        if (finalStatus === "stopped") {
+          break;
         }
         if (skipRemainingToolCallsBySteer) {
           continue;
@@ -3955,7 +4544,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       }
 
       if (llmStep >= maxLoopSteps) {
-        finalStatus = requireBrowserProof && !browserProofSatisfied ? "progress_uncertain" : "max_steps";
+        finalStatus = requireBrowserProof && !browserProofSatisfied
+          ? "progress_uncertain"
+          : noProgressObserved
+            ? "progress_uncertain"
+            : "max_steps";
         await orchestrator.sessions.appendMessage({
           sessionId,
           role: "assistant",
@@ -3963,20 +4556,27 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         });
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!String(message || "").includes("工具")) {
-        await orchestrator.sessions.appendMessage({
-          sessionId,
-          role: "assistant",
-          text: `执行失败：${message}`
-        });
-        if (finalStatus === "done") {
-          finalStatus = "failed_execute";
+      const runtimeError = asRuntimeErrorWithMeta(error);
+      const message = runtimeError.message || String(error);
+      const errorCode = normalizeErrorCode(runtimeError.code);
+      const stoppedByUser = orchestrator.getRunState(sessionId).stopped || errorCode === "E_BRIDGE_ABORTED";
+      if (stoppedByUser) {
+        finalStatus = "stopped";
+      } else {
+        if (!String(message || "").includes("工具")) {
+          await orchestrator.sessions.appendMessage({
+            sessionId,
+            role: "assistant",
+            text: `执行失败：${message}`
+          });
+          if (finalStatus === "done") {
+            finalStatus = "failed_execute";
+          }
         }
+        orchestrator.events.emit("loop_error", sessionId, {
+          message
+        });
       }
-      orchestrator.events.emit("loop_error", sessionId, {
-        message
-      });
     } finally {
       try {
         await refreshSessionTitleAuto(orchestrator, sessionId, infra, llmProviders);
@@ -4067,6 +4667,58 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     });
   }
 
+  function parseSkillSlashPrompt(prompt: string): { skillId: string; argsText: string } | null {
+    const text = String(prompt || "").trim();
+    if (!text.startsWith("/skill:")) return null;
+    const rest = text.slice("/skill:".length).trim();
+    if (!rest) {
+      throw new Error("skill 命令格式错误：请使用 /skill:<skillId> [args]");
+    }
+    const firstSpace = rest.search(/\s/);
+    if (firstSpace < 0) {
+      return {
+        skillId: rest,
+        argsText: ""
+      };
+    }
+    return {
+      skillId: rest.slice(0, firstSpace).trim(),
+      argsText: rest.slice(firstSpace + 1).trim()
+    };
+  }
+
+  function buildSkillCommandPrompt(input: {
+    promptBlock: string;
+    argsText: string;
+    skillId: string;
+    skillName: string;
+  }): string {
+    const parts = [
+      "以下是通过 /skill 显式选择的技能，请先阅读并严格按技能流程执行：",
+      input.promptBlock
+    ];
+    if (input.argsText) {
+      parts.push(`<skill_args>\n${input.argsText}\n</skill_args>`);
+    }
+    parts.push(`说明：你当前执行的技能是 ${input.skillName}（id=${input.skillId}）。`);
+    return parts.join("\n\n");
+  }
+
+  async function expandSkillSlashPrompt(sessionId: string, prompt: string): Promise<string> {
+    const parsed = parseSkillSlashPrompt(prompt);
+    if (!parsed) return String(prompt || "");
+    const resolved = await orchestrator.resolveSkillContent(parsed.skillId, {
+      sessionId,
+      capability: TOOL_CAPABILITIES.read_file
+    });
+    return buildSkillCommandPrompt({
+      promptBlock: resolved.promptBlock,
+      argsText: parsed.argsText,
+      skillId: resolved.skill.id,
+      skillName: resolved.skill.name
+    });
+  }
+
   async function startLoopIfNeeded(sessionId: string, prompt: string, restartReason: string): Promise<RuntimeView> {
     const state = orchestrator.getRunState(sessionId);
     if (state.running) {
@@ -4122,13 +4774,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       }
     }
 
-    const prompt = String(input.prompt || "").trim();
-    if (!prompt) {
+    const rawPrompt = String(input.prompt || "").trim();
+    if (!rawPrompt) {
       return {
         sessionId,
         runtime: orchestrator.getRunState(sessionId)
       };
     }
+    const prompt = await expandSkillSlashPrompt(sessionId, rawPrompt);
 
     const behavior = normalizeStreamingBehavior(input.streamingBehavior);
     const state = orchestrator.getRunState(sessionId);
@@ -4157,7 +4810,6 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
 
     await orchestrator.appendUserMessage(sessionId, prompt);
-    await orchestrator.preSendCompactionCheck(sessionId);
     orchestrator.events.emit("input.user", sessionId, {
       text: clipText(prompt, 3000)
     });

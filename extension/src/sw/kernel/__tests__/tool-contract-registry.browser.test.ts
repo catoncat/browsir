@@ -13,11 +13,14 @@ describe("tool-contract-registry", () => {
     expect(names).toContain("read_file");
     expect(names).toContain("write_file");
     expect(names).toContain("edit_file");
-    expect(names).toContain("snapshot");
-    expect(names).toContain("browser_action");
+    expect(names).toContain("search_elements");
+    expect(names).toContain("click");
+    expect(names).toContain("fill_element_by_uid");
+    expect(names).toContain("fill_form");
     expect(names).toContain("browser_verify");
-    expect(names).toContain("list_tabs");
-    expect(names).toContain("open_tab");
+    expect(names).toContain("get_all_tabs");
+    expect(names).toContain("get_current_tab");
+    expect(names).toContain("create_new_tab");
   });
 
   it("supports override register/unregister for existing contract", () => {
@@ -80,4 +83,3 @@ describe("tool-contract-registry", () => {
     expect(defs.some((item) => item.function.name === "bash.run")).toBe(true);
   });
 });
-

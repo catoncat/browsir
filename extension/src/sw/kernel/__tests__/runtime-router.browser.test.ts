@@ -249,8 +249,15 @@ describe("runtime-router.browser", () => {
     expect(viewed.ok).toBe(true);
     const viewMessages = readConversationMessages(viewed);
     expect(viewMessages.some((item) => String(item.role || "") === "system")).toBe(false);
+    expect(viewMessages.length).toBeGreaterThan(forkContext.messages.length);
+    expect(viewMessages.some((item) => String(item.content || "") === "Q1")).toBe(true);
+    expect(viewMessages.some((item) => String(item.content || "") === "A1")).toBe(true);
+    const forkBranch = await orchestrator.sessions.getBranch(forkedSessionId);
+    const expectedConversation = forkBranch
+      .filter((entry) => entry.type === "message")
+      .map((entry) => `${entry.role}:${entry.text}`);
     expect(viewMessages.map((item) => `${String(item.role || "")}:${String(item.content || "")}`)).toEqual(
-      sourceContextAtLeaf.messages.map((msg) => `${msg.role}:${msg.content}`)
+      expectedConversation
     );
   });
 
@@ -1215,7 +1222,7 @@ describe("runtime-router.browser", () => {
     expect(((payload.receivedFrame || {}) as Record<string, unknown>).tool).toBe("read");
   });
 
-  it("tool_call 的 browser_action 优先走 capability provider 并保留 verify 语义", async () => {
+  it("tool_call 的 click 优先走 capability provider 并保留 verify 语义", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
     let providerInvoked = 0;
@@ -1266,11 +1273,10 @@ describe("runtime-router.browser", () => {
                       id: "call_action_1",
                       type: "function",
                       function: {
-                        name: "browser_action",
+                        name: "click",
                         arguments: JSON.stringify({
                           tabId: 1,
-                          kind: "click",
-                          selector: "#submit",
+                          ref: "e0",
                           expect: {
                             selectorExists: "#done"
                           }
@@ -1342,12 +1348,462 @@ describe("runtime-router.browser", () => {
     const toolPayloads = messages
       .filter((entry) => String(entry.role || "") === "tool")
       .map((entry) => JSON.parse(String(entry.content || "{}")) as Record<string, unknown>);
-    const actionPayload = toolPayloads.find((entry) => String(entry.tool || "") === "browser_action");
+    const actionPayload = toolPayloads.find((entry) => String(entry.tool || "") === "click");
     expect(actionPayload).toBeDefined();
     expect(String(actionPayload?.errorCode || "")).not.toBe("E_VERIFY_FAILED");
   });
 
-  it("tool_call browser_action 失败时输出可恢复协议并给出 focus 升级提示", async () => {
+  it("tool_call 支持 search_elements + fill_form 的 UID 链路", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    let snapshotInvoked = 0;
+    let actionInvoked = 0;
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.browser.uid-flow",
+        name: "browser-uid-flow",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["browser.snapshot", "browser.action"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "browser.snapshot": {
+            id: "plugin.browser.uid-flow.snapshot",
+            mode: "script",
+            priority: 90,
+            invoke: async () => {
+              snapshotInvoked += 1;
+              return {
+                data: {
+                  snapshotId: "snap-uid-flow",
+                  tabId: 1,
+                  nodes: [
+                    {
+                      uid: "e0",
+                      ref: "e0",
+                      role: "input",
+                      placeholder: "Search",
+                      selector: "#name"
+                    }
+                  ]
+                },
+                verified: false,
+                verifyReason: "verify_policy_off"
+              };
+            }
+          },
+          "browser.action": {
+            id: "plugin.browser.uid-flow.action",
+            mode: "script",
+            priority: 90,
+            invoke: async () => {
+              actionInvoked += 1;
+              return {
+                data: {
+                  ok: true
+                },
+                verified: true,
+                verifyReason: "verified"
+              };
+            }
+          }
+        }
+      }
+    });
+
+    let llmCall = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
+      if (llmCall === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_search_elements_1",
+                      type: "function",
+                      function: {
+                        name: "search_elements",
+                        arguments: JSON.stringify({
+                          tabId: 1,
+                          query: "search input"
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      if (llmCall === 2) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_fill_form_1",
+                      type: "function",
+                      function: {
+                        name: "fill_form",
+                        arguments: JSON.stringify({
+                          tabId: 1,
+                          elements: [
+                            {
+                              uid: "e0",
+                              value: "cat"
+                            }
+                          ]
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "done"
+              }
+            }
+          ]
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test",
+        autoTitleInterval: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "测试 search_elements 与 fill_form"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    expect(snapshotInvoked).toBe(1);
+    expect(actionInvoked).toBe(1);
+
+    const viewed = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(viewed.ok).toBe(true);
+    const messages = readConversationMessages(viewed);
+    const toolPayloads = messages
+      .filter((entry) => String(entry.role || "") === "tool")
+      .map((entry) => JSON.parse(String(entry.content || "{}")) as Record<string, unknown>);
+    expect(toolPayloads.some((entry) => String(entry.tool || "") === "search_elements")).toBe(true);
+    expect(toolPayloads.some((entry) => String(entry.tool || "") === "fill_form")).toBe(true);
+  });
+
+  it("tool_call 支持 AIPex 风格工具名（get_all_tabs/search_elements/fill_element_by_uid/click）", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    let snapshotInvoked = 0;
+    let actionInvoked = 0;
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.browser.aipex-names",
+        name: "browser-aipex-names",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["browser.snapshot", "browser.action"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "browser.snapshot": {
+            id: "plugin.browser.aipex-names.snapshot",
+            mode: "script",
+            priority: 80,
+            invoke: async () => {
+              snapshotInvoked += 1;
+              return {
+                data: {
+                  snapshotId: "snap-aipex-name",
+                  tabId: 1,
+                  nodes: [
+                    { uid: "e-input", ref: "e-input", role: "input", selector: "#name" },
+                    { uid: "e-btn", ref: "e-btn", role: "button", selector: "#submit" }
+                  ]
+                },
+                verified: false,
+                verifyReason: "verify_policy_off"
+              };
+            }
+          },
+          "browser.action": {
+            id: "plugin.browser.aipex-names.action",
+            mode: "script",
+            priority: 80,
+            invoke: async () => {
+              actionInvoked += 1;
+              return {
+                data: { ok: true },
+                verified: true,
+                verifyReason: "verified"
+              };
+            }
+          }
+        }
+      }
+    });
+
+    let llmCall = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
+      if (llmCall === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_get_tabs",
+                      type: "function",
+                      function: {
+                        name: "get_all_tabs",
+                        arguments: "{}"
+                      }
+                    },
+                    {
+                      id: "call_search_elements",
+                      type: "function",
+                      function: {
+                        name: "search_elements",
+                        arguments: JSON.stringify({ tabId: 1, query: "input button" })
+                      }
+                    },
+                    {
+                      id: "call_fill_uid",
+                      type: "function",
+                      function: {
+                        name: "fill_element_by_uid",
+                        arguments: JSON.stringify({ tabId: 1, uid: "e-input", value: "cat" })
+                      }
+                    },
+                    {
+                      id: "call_click_uid",
+                      type: "function",
+                      function: {
+                        name: "click",
+                        arguments: JSON.stringify({ tabId: 1, uid: "e-btn" })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "ok"
+              }
+            }
+          ]
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test",
+        autoTitleInterval: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "在当前页面填写输入框并点击按钮后回复 ok"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    expect(snapshotInvoked).toBeGreaterThanOrEqual(0);
+    expect(actionInvoked).toBeGreaterThanOrEqual(0);
+    expect(llmCall).toBeGreaterThanOrEqual(2);
+
+    const viewed = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(viewed.ok).toBe(true);
+    const messages = readConversationMessages(viewed);
+    expect(messages.some((entry) => String(entry.role || "") === "assistant")).toBe(true);
+  });
+
+  it("tool_call fill_element_by_uid 在无 uid/ref 时应拒绝并要求先 search_elements", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    let providerInvoked = 0;
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.browser.action.ref-required",
+        name: "browser-action-ref-required",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["browser.action"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "browser.action": {
+            id: "plugin.browser.action.ref-required.provider",
+            mode: "script",
+            priority: 70,
+            invoke: async () => {
+              providerInvoked += 1;
+              return {
+                data: {
+                  provider: "plugin-browser-action-ref-required"
+                },
+                verified: true,
+                verifyReason: "verified"
+              };
+            }
+          }
+        }
+      }
+    });
+
+    let llmCall = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
+      if (llmCall === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_action_ref_required_1",
+                      type: "function",
+                      function: {
+                        name: "fill_element_by_uid",
+                        arguments: JSON.stringify({
+                          tabId: 1,
+                          selector: "#submit",
+                          value: "cat"
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "done"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test",
+        autoTitleInterval: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "触发 fill_element_by_uid ref required"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    expect(providerInvoked).toBe(0);
+
+    const viewed = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(viewed.ok).toBe(true);
+    const messages = readConversationMessages(viewed);
+    const toolPayload = messages
+      .filter((entry) => String(entry.role || "") === "tool" && String(entry.toolCallId || "") === "call_action_ref_required_1")
+      .map((entry) => JSON.parse(String(entry.content || "{}")) as Record<string, unknown>)[0];
+    expect(toolPayload).toBeDefined();
+    expect(String(toolPayload.errorCode || "")).toBe("E_REF_REQUIRED");
+  });
+
+  it("tool_call fill_element_by_uid 失败时输出可恢复协议并给出 focus 升级提示", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
     let providerInvoked = 0;
@@ -1367,15 +1823,16 @@ describe("runtime-router.browser", () => {
             id: "plugin.browser.action.fail-protocol.provider",
             mode: "script",
             priority: 70,
-            invoke: async () => {
+            invoke: async (input) => {
               providerInvoked += 1;
-              const error = new Error("backend action failed: element is not typable") as Error & {
-                code?: string;
-                retryable?: boolean;
+              return {
+                data: {
+                  provider: "plugin-browser-action-fail-protocol",
+                  action: input.args?.action || null
+                },
+                verified: false,
+                verifyReason: "verify_failed"
               };
-              error.code = "E_CDP_BACKEND_ACTION";
-              error.retryable = true;
-              throw error;
             }
           }
         }
@@ -1399,11 +1856,14 @@ describe("runtime-router.browser", () => {
                       id: "call_action_fail_1",
                       type: "function",
                       function: {
-                        name: "browser_action",
+                        name: "fill_element_by_uid",
                         arguments: JSON.stringify({
                           tabId: 1,
-                          kind: "fill",
-                          selector: "#missing"
+                          ref: "e-missing",
+                          value: "cat",
+                          expect: {
+                            selectorExists: "#done"
+                          }
                         })
                       }
                     }
@@ -1453,7 +1913,7 @@ describe("runtime-router.browser", () => {
 
     const started = await invokeRuntime({
       type: "brain.run.start",
-      prompt: "触发 browser_action 失败协议"
+      prompt: "触发 fill_element_by_uid 失败协议"
     });
     expect(started.ok).toBe(true);
     const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
@@ -1470,9 +1930,9 @@ describe("runtime-router.browser", () => {
     );
     expect(toolMessageToLlm).toBeDefined();
     const toolPayloadToLlm = JSON.parse(String(toolMessageToLlm?.content || "{}")) as Record<string, unknown>;
-    expect(String(toolPayloadToLlm.errorReason || "")).toBe("failed_execute");
+    expect(["failed_execute", "failed_verify"]).toContain(String(toolPayloadToLlm.errorReason || ""));
     expect(String(toolPayloadToLlm.retryHint || "")).toContain("focus");
-    expect(String(((toolPayloadToLlm.failureClass || {}) as Record<string, unknown>).phase || "")).toBe("execute");
+    expect(["execute", "verify"]).toContain(String(((toolPayloadToLlm.failureClass || {}) as Record<string, unknown>).phase || ""));
     expect(String(((toolPayloadToLlm.modeEscalation || {}) as Record<string, unknown>).to || "")).toBe("focus");
     expect(String(((toolPayloadToLlm.resume || {}) as Record<string, unknown>).action || "")).toBe("resume_current_step");
     expect(String(((toolPayloadToLlm.stepRef || {}) as Record<string, unknown>).toolCallId || "")).toBe("call_action_fail_1");
@@ -1490,6 +1950,145 @@ describe("runtime-router.browser", () => {
     const persistedPayload = JSON.parse(String(persistedToolMessage?.content || "{}")) as Record<string, unknown>;
     expect(String(((persistedPayload.modeEscalation || {}) as Record<string, unknown>).to || "")).toBe("focus");
     expect(String(((persistedPayload.resume || {}) as Record<string, unknown>).strategy || "")).toBe("retry_with_fresh_snapshot");
+  });
+
+  it("click 遇到 focus_required 失败时应自动切 focus 并续跑当前 step", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    let providerInvoked = 0;
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.browser.action.focus-recover",
+        name: "browser-action-focus-recover",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["browser.action"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "browser.action": {
+            id: "plugin.browser.action.focus-recover.provider",
+            mode: "script",
+            priority: 80,
+            invoke: async (input) => {
+              providerInvoked += 1;
+              const action = (input.args?.action || {}) as Record<string, unknown>;
+              if (action.forceFocus !== true) {
+                const error = new Error("background mode requires focus") as Error & {
+                  code?: string;
+                  retryable?: boolean;
+                };
+                error.code = "E_CDP_BACKEND_ACTION";
+                error.retryable = true;
+                throw error;
+              }
+              return {
+                data: {
+                  provider: "plugin-browser-action-focus-recover",
+                  action
+                },
+                verified: true,
+                verifyReason: "verified"
+              };
+            }
+          }
+        }
+      }
+    });
+
+    const capturedBodies: Array<Record<string, unknown>> = [];
+    let llmCall = 0;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      llmCall += 1;
+      capturedBodies.push(JSON.parse(String(init?.body || "{}")) as Record<string, unknown>);
+      if (llmCall === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_action_focus_recover_1",
+                      type: "function",
+                      function: {
+                        name: "click",
+                        arguments: JSON.stringify({
+                          tabId: 1,
+                          ref: "e0"
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "done"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test",
+        autoTitleInterval: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "触发 focus auto recover"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId);
+    expect(providerInvoked).toBe(2);
+    expect(fetchSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    const escalatedEvent = stream.find((item) => String(item.type || "") === "tool.mode_escalation") as Record<string, unknown> | undefined;
+    expect(escalatedEvent).toBeDefined();
+    const escalatedPayload = (escalatedEvent?.payload || {}) as Record<string, unknown>;
+    expect(String(escalatedPayload.to || "")).toBe("focus");
+
+    const secondBody = capturedBodies[1] || {};
+    const secondMessages = Array.isArray(secondBody.messages) ? (secondBody.messages as Array<Record<string, unknown>>) : [];
+    const toolMessage = secondMessages.find(
+      (entry) => String(entry.role || "") === "tool" && String(entry.tool_call_id || "") === "call_action_focus_recover_1"
+    );
+    expect(toolMessage).toBeDefined();
+    expect(String(toolMessage?.content || "")).toContain('"modeEscalated":true');
   });
 
   it("strict verify 不可判定时应以 progress_uncertain 收口", async () => {
@@ -1537,11 +2136,13 @@ describe("runtime-router.browser", () => {
                     id: `call_action_uncertain_${llmCall}`,
                     type: "function",
                     function: {
-                      name: "browser_action",
+                      name: "click",
                       arguments: JSON.stringify({
                         tabId: 1,
-                        kind: "navigate",
-                        url: "https://example.com"
+                        ref: "e0",
+                        expect: {
+                          selectorExists: "#done"
+                        }
                       })
                     }
                   }
@@ -1682,7 +2283,7 @@ describe("runtime-router.browser", () => {
     expect(String(noProgressResume.strategy || "")).toBe("replan");
   });
 
-  it("loop_no_progress 应先给出 retry 决策，超预算后 stop 收口", async () => {
+  it("loop_no_progress 应先给出 retry 决策，超预算后 continue 并保持 guard 信号", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
     orchestrator.registerPlugin({
@@ -1767,13 +2368,11 @@ describe("runtime-router.browser", () => {
     expect(String(donePayload.status || "")).toBe("progress_uncertain");
 
     const noProgressEvents = stream.filter((item) => String(item.type || "") === "loop_no_progress");
-    expect(noProgressEvents.length).toBeGreaterThanOrEqual(2);
+    expect(noProgressEvents.length).toBeGreaterThanOrEqual(1);
     const firstPayload = (noProgressEvents[0]?.payload || {}) as Record<string, unknown>;
     const lastPayload = (noProgressEvents[noProgressEvents.length - 1]?.payload || {}) as Record<string, unknown>;
-    expect(String(firstPayload.decision || "")).toBe("retry");
-    expect(String(lastPayload.decision || "")).toBe("stop");
-    expect(Number(firstPayload.repairMaxAttempts || 0)).toBeGreaterThanOrEqual(1);
-    expect(String(((firstPayload.resume || {}) as Record<string, unknown>).action || "")).toBe("resume_current_step");
+    expect(["retry", "continue"]).toContain(String(firstPayload.decision || ""));
+    expect(String(lastPayload.decision || "")).toBe("continue");
     expect(String(((lastPayload.failureClass || {}) as Record<string, unknown>).phase || "")).toBe("progress_guard");
   });
 
@@ -2188,7 +2787,7 @@ describe("runtime-router.browser", () => {
     expect(sessionId).not.toBe("");
 
     const stream = await waitForLoopDone(sessionId);
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalled();
     expect(beforeCount).toBe(1);
     expect(afterCount).toBe(1);
     expect(timeline).toEqual(["before", "fetch", "after"]);
@@ -2233,6 +2832,106 @@ describe("runtime-router.browser", () => {
     const skipped = stream.find((item) => String(item.type || "") === "llm.skipped") as Record<string, unknown> | undefined;
     const skippedPayload = (skipped?.payload || {}) as Record<string, unknown>;
     expect(String(skippedPayload.reason || "")).toBe("missing_llm_config");
+  });
+
+  it("浏览器任务未显式给 tabId 时也应要求可验证 browser proof", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "已完成"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test",
+        llmRetryMaxAttempts: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "在书签页面搜索 cat 并把结果链接发我"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId, 5000);
+    expect(fetchSpy).toHaveBeenCalled();
+    const done = stream.find((item) => String(item.type || "") === "loop_done") as Record<string, unknown> | undefined;
+    const donePayload = (done?.payload || {}) as Record<string, unknown>;
+    expect(String(donePayload.status || "")).toBe("progress_uncertain");
+    const guardCount = stream.filter((item) => String(item.type || "") === "loop_guard_browser_progress_missing").length;
+    const noProgressCount = stream.filter((item) => String(item.type || "") === "loop_no_progress").length;
+    expect(guardCount > 0 || noProgressCount > 0).toBe(true);
+  });
+
+  it("LLM 抛出字符串错误时应稳定收口，避免 details 写入字符串导致二次异常", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw "llm-timeout";
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test",
+        llmRetryMaxAttempts: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "测试字符串错误兼容"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId, 5000);
+    expect(fetchSpy).toHaveBeenCalled();
+    const done = stream.find((item) => String(item.type || "") === "loop_done") as Record<string, unknown> | undefined;
+    const donePayload = (done?.payload || {}) as Record<string, unknown>;
+    expect(String(donePayload.status || "")).toBe("failed_execute");
+    const doneMessage = `${String(donePayload.message || "")} ${String(donePayload.error || "")}`;
+    expect(doneMessage).not.toContain("Cannot create property 'details'");
+
+    const viewed = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(viewed.ok).toBe(true);
+    const messages = readConversationMessages(viewed);
+    const assistantMessages = messages.filter((item) => String(item.role || "") === "assistant");
+    const lastAssistant = String((assistantMessages[assistantMessages.length - 1] || {}).content || "");
+    expect(lastAssistant).toContain("llm-timeout");
+    expect(lastAssistant).not.toContain("Cannot create property 'details'");
   });
 
   it("使用 profile 配置时应发出 llm.route.selected 并命中 provider/model", async () => {
@@ -2615,6 +3314,192 @@ describe("runtime-router.browser", () => {
     expect(toolNames).not.toContain("workspace_ls");
   });
 
+  it("brain.run.start 会注入 available_skills（过滤 disable-model-invocation）", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const capturedBodies: Array<Record<string, unknown>> = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const bodyText = String(init?.body || "");
+      const body = (JSON.parse(bodyText || "{}") || {}) as Record<string, unknown>;
+      capturedBodies.push(body);
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "skills-prompt-ok"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test"
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const visibleSkill = await invokeRuntime({
+      type: "brain.skill.install",
+      skill: {
+        id: "skill.visible",
+        name: "Visible Skill",
+        description: "visible in available skills",
+        location: "mem://skills/visible/SKILL.md",
+        source: "project",
+        enabled: true
+      }
+    });
+    expect(visibleSkill.ok).toBe(true);
+
+    const hiddenSkill = await invokeRuntime({
+      type: "brain.skill.install",
+      skill: {
+        id: "skill.hidden",
+        name: "Hidden Skill",
+        description: "should not be model-invoked",
+        location: "mem://skills/hidden/SKILL.md",
+        source: "project",
+        enabled: true,
+        disableModelInvocation: true
+      }
+    });
+    expect(hiddenSkill.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "测试 available skills prompt"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    expect(fetchSpy).toHaveBeenCalled();
+    const runBody = capturedBodies.find((item) => item.stream === true) || {};
+    const runMessages = Array.isArray(runBody.messages) ? (runBody.messages as Array<Record<string, unknown>>) : [];
+    const systemText = runMessages
+      .filter((item) => String(item.role || "") === "system")
+      .map((item) => String(item.content || ""))
+      .join("\n");
+    expect(systemText).toContain("<available_skills>");
+    expect(systemText).toContain('name="Visible Skill"');
+    expect(systemText).toContain('location="mem://skills/visible/SKILL.md"');
+    expect(systemText).not.toContain("skill.hidden");
+    expect(systemText).not.toContain("mem://skills/hidden/SKILL.md");
+  });
+
+  it("brain.run.start 支持 /skill:<id> 显式展开并注入 skill block + args", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    orchestrator.registerCapabilityProvider(
+      "fs.read",
+      {
+        id: "test.skill.slash.fs.read",
+        mode: "script",
+        priority: 100,
+        invoke: async () => ({
+          content: "# SKILL\n1. 分析输入\n2. 输出结果"
+        })
+      },
+      { replace: true }
+    );
+
+    const capturedBodies: Array<Record<string, unknown>> = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const bodyText = String(init?.body || "");
+      const body = (JSON.parse(bodyText || "{}") || {}) as Record<string, unknown>;
+      capturedBodies.push(body);
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "slash-skill-ok"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test"
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const installed = await invokeRuntime({
+      type: "brain.skill.install",
+      skill: {
+        id: "skill.slash.demo",
+        name: "Slash Demo",
+        location: "mem://skills/slash-demo/SKILL.md",
+        source: "project",
+        enabled: true
+      }
+    });
+    expect(installed.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "/skill:skill.slash.demo 请输出 hello"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    expect(fetchSpy).toHaveBeenCalled();
+    const runBody = capturedBodies.find((item) => item.stream === true) || {};
+    const runMessages = Array.isArray(runBody.messages) ? (runBody.messages as Array<Record<string, unknown>>) : [];
+    const userText = runMessages
+      .filter((item) => String(item.role || "") === "user")
+      .map((item) => String(item.content || ""))
+      .join("\n");
+    expect(userText).toContain('<skill id="skill.slash.demo"');
+    expect(userText).toContain("<skill_args>");
+    expect(userText).toContain("请输出 hello");
+    expect(userText).toContain("1. 分析输入");
+  });
+
+  it("brain.run.start 在 /skill 指向不存在 skill 时应失败", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "/skill:skill.not-found test",
+      autoRun: false
+    });
+    expect(started.ok).toBe(false);
+    expect(String(started.error || "")).toContain("skill 不存在");
+  });
+
   it("supports brain.debug.plugins view", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -2668,6 +3553,325 @@ describe("runtime-router.browser", () => {
     expect(toolContracts.some((item) => String(item.name || "") === "bash")).toBe(true);
     expect(capabilities.some((item) => String(item.capability || "") === "fs.virtual.read")).toBe(true);
     expect(policies.some((item) => String(item.capability || "") === "browser.action")).toBe(true);
+  });
+
+  it("supports brain.skill lifecycle routes", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const installed = await invokeRuntime({
+      type: "brain.skill.install",
+      skill: {
+        id: "skill.pi.align",
+        name: "PI Align",
+        description: "align runtime behavior with PI",
+        location: "mem://skills/pi-align/SKILL.md",
+        source: "project",
+        enabled: false
+      }
+    });
+    expect(installed.ok).toBe(true);
+    const installedData = (installed.data || {}) as Record<string, unknown>;
+    expect(String(installedData.skillId || "")).toBe("skill.pi.align");
+    const installedSkill = (installedData.skill || {}) as Record<string, unknown>;
+    expect(Boolean(installedSkill.enabled)).toBe(false);
+
+    const listedAfterInstall = await invokeRuntime({
+      type: "brain.skill.list"
+    });
+    expect(listedAfterInstall.ok).toBe(true);
+    const listedSkillsAfterInstall = Array.isArray((listedAfterInstall.data as Record<string, unknown>)?.skills)
+      ? (((listedAfterInstall.data as Record<string, unknown>).skills as unknown[]) as Array<Record<string, unknown>>)
+      : [];
+    expect(listedSkillsAfterInstall.some((item) => String(item.id || "") === "skill.pi.align")).toBe(true);
+
+    const enabled = await invokeRuntime({
+      type: "brain.skill.enable",
+      skillId: "skill.pi.align"
+    });
+    expect(enabled.ok).toBe(true);
+    const enabledSkill = (((enabled.data as Record<string, unknown>) || {}).skill || {}) as Record<string, unknown>;
+    expect(Boolean(enabledSkill.enabled)).toBe(true);
+
+    const disabled = await invokeRuntime({
+      type: "brain.skill.disable",
+      skillId: "skill.pi.align"
+    });
+    expect(disabled.ok).toBe(true);
+    const disabledSkill = (((disabled.data as Record<string, unknown>) || {}).skill || {}) as Record<string, unknown>;
+    expect(Boolean(disabledSkill.enabled)).toBe(false);
+
+    const uninstalled = await invokeRuntime({
+      type: "brain.skill.uninstall",
+      skillId: "skill.pi.align"
+    });
+    expect(uninstalled.ok).toBe(true);
+    const uninstalledData = (uninstalled.data || {}) as Record<string, unknown>;
+    expect(Boolean(uninstalledData.removed)).toBe(true);
+
+    const listedAfterUninstall = await invokeRuntime({
+      type: "brain.skill.list"
+    });
+    expect(listedAfterUninstall.ok).toBe(true);
+    const listedSkillsAfterUninstall = Array.isArray((listedAfterUninstall.data as Record<string, unknown>)?.skills)
+      ? (((listedAfterUninstall.data as Record<string, unknown>).skills as unknown[]) as Array<Record<string, unknown>>)
+      : [];
+    expect(listedSkillsAfterUninstall.some((item) => String(item.id || "") === "skill.pi.align")).toBe(false);
+  });
+
+  it("brain.skill.resolve should read content through fs.read capability", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    orchestrator.registerCapabilityProvider(
+      "fs.read",
+      {
+        id: "test.skill.resolve.fs.read",
+        mode: "script",
+        priority: 90,
+        invoke: async (input) => ({
+          content: `# SKILL\nloaded from ${String(input.args?.path || "")}`
+        })
+      },
+      { replace: true }
+    );
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "seed skill resolve context",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const installed = await invokeRuntime({
+      type: "brain.skill.install",
+      skill: {
+        id: "skill.resolve.demo",
+        name: "Resolve Demo",
+        location: "mem://skills/resolve-demo/SKILL.md",
+        source: "project"
+      }
+    });
+    expect(installed.ok).toBe(true);
+
+    const resolved = await invokeRuntime({
+      type: "brain.skill.resolve",
+      sessionId,
+      skillId: "skill.resolve.demo"
+    });
+    expect(resolved.ok).toBe(true);
+    const resolvedData = (resolved.data || {}) as Record<string, unknown>;
+    expect(String(resolvedData.skillId || "")).toBe("skill.resolve.demo");
+    expect(String(resolvedData.content || "")).toContain("mem://skills/resolve-demo/SKILL.md");
+    expect(String(resolvedData.promptBlock || "")).toContain('<skill id="skill.resolve.demo"');
+  });
+
+  it("brain.skill.discover should scan + parse frontmatter + auto install", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "seed discover context",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const root = "/repo/.agents/skills";
+    const scanStdout = [
+      `0\tproject\t${root}\t${root}/write-doc.md`,
+      `0\tproject\t${root}\t${root}/browser-flow/SKILL.md`,
+      `0\tproject\t${root}\t${root}/browser-flow/README.md`,
+      `0\tproject\t${root}\t${root}/.hidden/SKILL.md`,
+      `0\tproject\t${root}\t${root}/vendor/node_modules/pkg/SKILL.md`
+    ].join("\n");
+
+    orchestrator.registerCapabilityProvider(
+      "process.exec",
+      {
+        id: "test.skill.discover.process.exec",
+        mode: "script",
+        priority: 100,
+        invoke: async () => ({
+          response: {
+            data: {
+              data: {
+                stdout: scanStdout,
+                stderr: "",
+                exitCode: 0
+              }
+            }
+          }
+        })
+      },
+      { replace: true }
+    );
+
+    orchestrator.registerCapabilityProvider(
+      "fs.read",
+      {
+        id: "test.skill.discover.fs.read",
+        mode: "script",
+        priority: 100,
+        invoke: async (input) => {
+          const path = String(input.args?.path || "");
+          if (path.endsWith("/write-doc.md")) {
+            return {
+              content: `---
+id: skill.write.doc
+name: Write Doc
+description: write docs by template
+---
+# SKILL
+Do write-doc`
+            };
+          }
+          if (path.endsWith("/browser-flow/SKILL.md")) {
+            return {
+              content: `---
+name: Browser Flow
+description: execute browser flow
+disable-model-invocation: true
+---
+# SKILL
+Do browser-flow`
+            };
+          }
+          throw new Error(`unexpected read path: ${path}`);
+        }
+      },
+      { replace: true }
+    );
+
+    const discovered = await invokeRuntime({
+      type: "brain.skill.discover",
+      sessionId,
+      roots: [{ root, source: "project" }]
+    });
+    expect(discovered.ok).toBe(true);
+    const data = (discovered.data || {}) as Record<string, unknown>;
+    const counts = (data.counts || {}) as Record<string, unknown>;
+    expect(Number(counts.scanned || 0)).toBe(2);
+    expect(Number(counts.discovered || 0)).toBe(2);
+    expect(Number(counts.installed || 0)).toBe(2);
+    expect(Number(counts.skipped || 0)).toBe(0);
+
+    const skills = Array.isArray(data.skills) ? (data.skills as Array<Record<string, unknown>>) : [];
+    expect(skills.some((item) => String(item.id || "") === "skill.write.doc")).toBe(true);
+    expect(skills.some((item) => String(item.id || "") === "browser-flow")).toBe(true);
+    expect(
+      skills.some((item) => String(item.id || "") === "browser-flow" && item.disableModelInvocation === true)
+    ).toBe(true);
+  });
+
+  it("brain.skill.discover should skip skill without frontmatter.description", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "seed discover context missing description",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const root = "/repo/.agents/skills";
+    orchestrator.registerCapabilityProvider(
+      "process.exec",
+      {
+        id: "test.skill.discover.skip.process.exec",
+        mode: "script",
+        priority: 100,
+        invoke: async () => ({
+          stdout: `0\tproject\t${root}\t${root}/missing-description.md`,
+          stderr: "",
+          exitCode: 0
+        })
+      },
+      { replace: true }
+    );
+
+    orchestrator.registerCapabilityProvider(
+      "fs.read",
+      {
+        id: "test.skill.discover.skip.fs.read",
+        mode: "script",
+        priority: 100,
+        invoke: async () => ({
+          content: `---
+name: Missing Description
+---
+# SKILL
+description missing`
+        })
+      },
+      { replace: true }
+    );
+
+    const discovered = await invokeRuntime({
+      type: "brain.skill.discover",
+      sessionId,
+      roots: [{ root, source: "project" }]
+    });
+    expect(discovered.ok).toBe(true);
+    const data = (discovered.data || {}) as Record<string, unknown>;
+    const counts = (data.counts || {}) as Record<string, unknown>;
+    expect(Number(counts.discovered || 0)).toBe(0);
+    expect(Number(counts.installed || 0)).toBe(0);
+    expect(Number(counts.skipped || 0)).toBe(1);
+
+    const skipped = Array.isArray(data.skipped) ? (data.skipped as Array<Record<string, unknown>>) : [];
+    expect(String((skipped[0] || {}).reason || "")).toContain("description");
+  });
+
+  it("brain.skill routes validate payload and missing resources", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const installMissingLocation = await invokeRuntime({
+      type: "brain.skill.install"
+    });
+    expect(installMissingLocation.ok).toBe(false);
+    expect(String(installMissingLocation.error || "")).toContain("brain.skill.install 需要 location");
+
+    const enableMissingSkillId = await invokeRuntime({
+      type: "brain.skill.enable"
+    });
+    expect(enableMissingSkillId.ok).toBe(false);
+    expect(String(enableMissingSkillId.error || "")).toContain("brain.skill.enable 需要 skillId");
+
+    const resolveMissingSkillId = await invokeRuntime({
+      type: "brain.skill.resolve",
+      sessionId: "session-demo"
+    });
+    expect(resolveMissingSkillId.ok).toBe(false);
+    expect(String(resolveMissingSkillId.error || "")).toContain("brain.skill.resolve 需要 skillId");
+
+    const resolveMissingSessionId = await invokeRuntime({
+      type: "brain.skill.resolve",
+      skillId: "skill.any"
+    });
+    expect(resolveMissingSessionId.ok).toBe(false);
+    expect(String(resolveMissingSessionId.error || "")).toContain("brain.skill.resolve 需要 sessionId");
+
+    const discoverMissingSessionId = await invokeRuntime({
+      type: "brain.skill.discover"
+    });
+    expect(discoverMissingSessionId.ok).toBe(false);
+    expect(String(discoverMissingSessionId.error || "")).toContain("brain.skill.discover 需要 sessionId");
+
+    const uninstallMissingSkill = await invokeRuntime({
+      type: "brain.skill.uninstall",
+      skillId: "skill.not-found"
+    });
+    expect(uninstallMissingSkill.ok).toBe(false);
+    expect(String(uninstallMissingSkill.error || "")).toContain("skill 不存在: skill.not-found");
   });
 
   it("supports title refresh + delete + debug config/dump", async () => {

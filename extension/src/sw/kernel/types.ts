@@ -167,6 +167,7 @@ export interface RunQueueState {
 export interface RunState {
   sessionId: string;
   running: boolean;
+  compacting: boolean;
   paused: boolean;
   stopped: boolean;
   retry: RetryState;

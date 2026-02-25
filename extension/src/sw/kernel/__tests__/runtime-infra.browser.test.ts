@@ -398,6 +398,76 @@ describe("runtime infra handler", () => {
     expect(inner.echoedTool).toBe("read");
   });
 
+  it("supports abortBridgeInvokesBySession for in-flight bridge.invoke", async () => {
+    const infra = createRuntimeInfraHandler();
+    const connected = await infra.handleMessage({ type: "bridge.connect" });
+    expect(connected?.ok).toBe(true);
+
+    const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+    expect(ws).toBeTruthy();
+
+    ws.send = (_data: string) => {
+      // keep invoke pending until abortBridgeInvokesBySession is called
+    };
+
+    const pendingInvoke = infra.handleMessage({
+      type: "bridge.invoke",
+      payload: {
+        tool: "read",
+        args: { path: "/tmp/abort-by-session.txt" },
+        sessionId: "session-stop-1"
+      }
+    });
+
+    await flushMicrotasks();
+    expect(infra.abortBridgeInvokesBySession("session-stop-1")).toBe(1);
+    expect(infra.abortBridgeInvokesBySession("session-stop-1")).toBe(0);
+
+    await expect(pendingInvoke).rejects.toMatchObject({
+      code: "E_BRIDGE_ABORTED",
+      retryable: false,
+      details: {
+        sessionId: "session-stop-1",
+        reason: "stop"
+      }
+    });
+  });
+
+  it("supports steer_preempt interruption for in-flight bridge.invoke", async () => {
+    const infra = createRuntimeInfraHandler();
+    const connected = await infra.handleMessage({ type: "bridge.connect" });
+    expect(connected?.ok).toBe(true);
+
+    const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+    expect(ws).toBeTruthy();
+
+    ws.send = (_data: string) => {
+      // keep invoke pending until abortBridgeInvokesBySession is called
+    };
+
+    const pendingInvoke = infra.handleMessage({
+      type: "bridge.invoke",
+      payload: {
+        tool: "read",
+        args: { path: "/tmp/abort-by-steer.txt" },
+        sessionId: "session-steer-1"
+      }
+    });
+
+    await flushMicrotasks();
+    expect(infra.abortBridgeInvokesBySession("session-steer-1", "steer_preempt")).toBe(1);
+    expect(infra.abortBridgeInvokesBySession("session-steer-1", "steer_preempt")).toBe(0);
+
+    await expect(pendingInvoke).rejects.toMatchObject({
+      code: "E_BRIDGE_INTERRUPTED",
+      retryable: false,
+      details: {
+        sessionId: "session-steer-1",
+        reason: "steer_preempt"
+      }
+    });
+  });
+
   it("supports cdp.observe/snapshot/action/verify with lease guard", async () => {
     const infra = createRuntimeInfraHandler();
     const tabId = 7;
@@ -422,7 +492,9 @@ describe("runtime infra handler", () => {
     const snapData = (snapped.data ?? {}) as Record<string, unknown>;
     const nodes = Array.isArray(snapData.nodes) ? (snapData.nodes as Array<Record<string, unknown>>) : [];
     expect(nodes.length).toBeGreaterThan(0);
-    expect(nodes[0].ref).toBe("e0");
+    const firstRef = String(nodes[0].ref || "");
+    expect(firstRef).toMatch(/^(bn-\d+|dom-[a-f0-9]+)$/);
+    expect(nodes[0].uid).toBe(firstRef);
 
     const acquired = await infra.handleMessage({
       type: "lease.acquire",
@@ -437,7 +509,7 @@ describe("runtime infra handler", () => {
       owner: "runner-1",
       action: {
         kind: "click",
-        ref: "e0"
+        ref: firstRef
       }
     });
     expect(acted?.ok).toBe(true);
@@ -645,6 +717,12 @@ describe("runtime infra handler", () => {
       options: { mode: "interactive" }
     });
     expect(snapped?.ok).toBe(true);
+    if (!snapped || snapped.ok !== true) return;
+    const snapData = (snapped.data ?? {}) as Record<string, unknown>;
+    const snapNodes = Array.isArray(snapData.nodes) ? (snapData.nodes as Array<Record<string, unknown>>) : [];
+    expect(snapNodes.length).toBeGreaterThan(0);
+    const firstRef = String(snapNodes[0].ref || "");
+    expect(firstRef).toBe("bn-301");
 
     const acquired = await infra.handleMessage({
       type: "lease.acquire",
@@ -659,7 +737,7 @@ describe("runtime infra handler", () => {
       owner: "runner-ax",
       action: {
         kind: "click",
-        ref: "e0"
+        ref: firstRef
       }
     });
     expect(acted?.ok).toBe(true);

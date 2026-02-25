@@ -25,6 +25,13 @@ import {
 import { ToolProviderRegistry, type RegisterProviderOptions, type StepToolProvider } from "./tool-provider-registry";
 import { PluginRuntime, type AgentPluginDefinition, type PluginRuntimeView } from "./plugin-runtime";
 import {
+  SkillContentResolver,
+  type ResolveSkillContentOptions,
+  type ResolvedSkillContent,
+  type SkillContentReader
+} from "./skill-content-resolver";
+import { SkillRegistry, type SkillInstallInput, type SkillMetadata } from "./skill-registry";
+import {
   ToolContractRegistry,
   type RegisterToolContractOptions,
   type ToolContract,
@@ -35,6 +42,8 @@ import {
 export type { ExecuteCapability, ExecuteMode, ExecuteStepInput, ExecuteStepResult } from "./types";
 export type { CapabilityExecutionPolicy, RegisterCapabilityPolicyOptions } from "./capability-policy";
 export type { RegisterToolContractOptions, ToolContract, ToolContractView, ToolDefinition } from "./tool-contract-registry";
+export type { SkillMetadata, SkillInstallInput } from "./skill-registry";
+export type { SkillContentReader, ResolvedSkillContent, ResolveSkillContentOptions } from "./skill-content-resolver";
 
 export interface OrchestratorOptions {
   retryMaxAttempts?: number;
@@ -45,6 +54,8 @@ export interface OrchestratorOptions {
   splitTurn?: boolean;
   traceChunkSize?: number;
   verifyAdapter?: (input: ExecuteStepInput, result: unknown) => Promise<{ verified: boolean; reason?: string }>;
+  skillRegistry?: SkillRegistry;
+  skillContentReader?: SkillContentReader;
 }
 
 export interface AgentEndInput {
@@ -63,6 +74,7 @@ export interface AgentEndDecision {
 export interface RuntimeView {
   sessionId: string;
   running: boolean;
+  compacting: boolean;
   paused: boolean;
   stopped: boolean;
   retry: RunState["retry"];
@@ -114,12 +126,22 @@ class HookBlockError extends Error {
 export class BrainOrchestrator {
   readonly sessions = new BrowserSessionManager();
   readonly events = new BrainEventBus();
-  private readonly options: Required<OrchestratorOptions>;
+  private readonly options: {
+    retryMaxAttempts: number;
+    retryBaseDelayMs: number;
+    retryCapDelayMs: number;
+    thresholdTokens: number;
+    keepTail: number;
+    splitTurn: boolean;
+    traceChunkSize: number;
+  };
   private readonly verifyAdapter?: (input: ExecuteStepInput, result: unknown) => Promise<{ verified: boolean; reason?: string }>;
   private readonly hooks = new HookRunner<OrchestratorHookMap>();
   private readonly toolProviders = new ToolProviderRegistry();
   private readonly toolContracts = new ToolContractRegistry();
   private readonly capabilityPolicies = new CapabilityPolicyRegistry();
+  private readonly skills: SkillRegistry;
+  private readonly skillResolver: SkillContentResolver;
   private readonly plugins = new PluginRuntime({
     onHook: (hook, handler, options) => this.onHook(hook, handler, options),
     registerToolProvider: (mode, provider, options) => this.registerToolProvider(mode, provider, options),
@@ -153,6 +175,7 @@ export class BrainOrchestrator {
     return {
       sessionId,
       running: false,
+      compacting: false,
       paused: false,
       stopped: false,
       retry: {
@@ -176,6 +199,10 @@ export class BrainOrchestrator {
       traceChunkSize: toPositiveInt(options.traceChunkSize, 80)
     };
     this.verifyAdapter = options.verifyAdapter;
+    this.skills = options.skillRegistry ?? new SkillRegistry();
+    this.skillResolver = new SkillContentResolver(this.skills, {
+      readText: options.skillContentReader
+    });
 
     this.events.subscribe((event) => {
       this.schedulePersistEvent(event);
@@ -305,6 +332,38 @@ export class BrainOrchestrator {
     return this.plugins.list();
   }
 
+  setSkillContentReader(readText: SkillContentReader): void {
+    this.skillResolver.setReader(readText);
+  }
+
+  async listSkills(): Promise<SkillMetadata[]> {
+    return this.skills.list();
+  }
+
+  async getSkill(skillId: string): Promise<SkillMetadata | null> {
+    return this.skills.get(skillId);
+  }
+
+  async installSkill(input: SkillInstallInput, options: { replace?: boolean } = {}): Promise<SkillMetadata> {
+    return this.skills.install(input, options);
+  }
+
+  async enableSkill(skillId: string): Promise<SkillMetadata> {
+    return this.skills.enable(skillId);
+  }
+
+  async disableSkill(skillId: string): Promise<SkillMetadata> {
+    return this.skills.disable(skillId);
+  }
+
+  async uninstallSkill(skillId: string): Promise<boolean> {
+    return this.skills.uninstall(skillId);
+  }
+
+  async resolveSkillContent(skillId: string, options: ResolveSkillContentOptions = {}): Promise<ResolvedSkillContent> {
+    return this.skillResolver.resolveById(skillId, options);
+  }
+
   onHook<K extends keyof OrchestratorHookMap & string>(
     hook: K,
     handler: HookHandler<OrchestratorHookMap[K]>,
@@ -374,6 +433,7 @@ export class BrainOrchestrator {
         return {
           sessionId,
           running: current.running,
+          compacting: current.compacting,
           paused: current.paused,
           stopped: current.stopped,
           retry: { ...current.retry },
@@ -389,6 +449,7 @@ export class BrainOrchestrator {
     return {
       sessionId,
       running: false,
+      compacting: false,
       paused: false,
       stopped: false,
       retry: {
@@ -437,6 +498,15 @@ export class BrainOrchestrator {
   setRunning(sessionId: string, running: boolean): RuntimeView {
     const state = this.ensureRunState(sessionId);
     state.running = running;
+    if (!running) {
+      state.compacting = false;
+    }
+    return this.getRunState(sessionId);
+  }
+
+  setCompacting(sessionId: string, compacting: boolean): RuntimeView {
+    const state = this.ensureRunState(sessionId);
+    state.compacting = compacting;
     return this.getRunState(sessionId);
   }
 
@@ -460,6 +530,41 @@ export class BrainOrchestrator {
       state.queue.steer.push(item);
     } else {
       state.queue.followUp.push(item);
+    }
+    return this.getRunState(sessionId);
+  }
+
+  promoteQueuedPrompt(
+    sessionId: string,
+    queuedPromptId: string,
+    targetBehavior: StreamingBehavior = "steer"
+  ): RuntimeView {
+    const state = this.ensureRunState(sessionId);
+    const id = String(queuedPromptId || "").trim();
+    if (!id) return this.getRunState(sessionId);
+
+    const pickFromQueue = (queue: QueuedRuntimePrompt[]): QueuedRuntimePrompt | null => {
+      const idx = queue.findIndex((item) => String(item.id || "") === id);
+      if (idx < 0) return null;
+      const [picked] = queue.splice(idx, 1);
+      return picked || null;
+    };
+
+    const item = pickFromQueue(state.queue.followUp) || pickFromQueue(state.queue.steer);
+    if (!item) return this.getRunState(sessionId);
+
+    const nextBehavior: StreamingBehavior = targetBehavior === "followUp" ? "followUp" : "steer";
+    const nextItem: QueuedRuntimePrompt = {
+      ...item,
+      behavior: nextBehavior,
+      timestamp: nowIso()
+    };
+
+    if (nextBehavior === "steer") {
+      // “直接插入”语义：优先于既有 steer 队列。
+      state.queue.steer.unshift(nextItem);
+    } else {
+      state.queue.followUp.push(nextItem);
     }
     return this.getRunState(sessionId);
   }
@@ -874,6 +979,7 @@ export class BrainOrchestrator {
     if (beforeHook.blocked) return;
     const nextReason = beforeHook.value.reason;
     const nextWillRetry = beforeHook.value.willRetry;
+    this.setCompacting(sessionId, true);
 
     this.events.emit("auto_compaction_start", sessionId, {
       reason: nextReason,
@@ -949,6 +1055,8 @@ export class BrainOrchestrator {
         errorMessage
       });
       throw error;
+    } finally {
+      this.setCompacting(sessionId, false);
     }
   }
 }

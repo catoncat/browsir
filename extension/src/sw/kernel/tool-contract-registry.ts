@@ -92,17 +92,16 @@ const DEFAULT_TOOL_CONTRACTS: ToolContract[] = [
     }
   },
   {
-    name: "snapshot",
-    description: "Take an accessibility-first snapshot of the current browser tab",
+    name: "search_elements",
+    description:
+      "Search interactive elements from the latest accessibility snapshot and return uid(ref)-addressable nodes",
     parameters: {
       type: "object",
       properties: {
         tabId: { type: "number" },
-        mode: { type: "string", enum: ["text", "interactive", "full"] },
+        query: { type: "string" },
         selector: { type: "string" },
-        filter: { type: "string", enum: ["interactive", "all"] },
-        format: { type: "string", enum: ["compact", "json"] },
-        diff: { type: "boolean" },
+        maxResults: { type: "number" },
         maxTokens: { type: "number" },
         depth: { type: "number" },
         noAnimations: { type: "boolean" }
@@ -111,21 +110,72 @@ const DEFAULT_TOOL_CONTRACTS: ToolContract[] = [
     }
   },
   {
-    name: "browser_action",
-    description: "Perform a browser action (click, type, fill, press, scroll, select, navigate)",
+    name: "click",
+    description: "Click an element using uid/ref from search_elements",
     parameters: {
       type: "object",
       properties: {
         tabId: { type: "number" },
-        kind: { type: "string", enum: ["click", "type", "fill", "press", "scroll", "select", "navigate"] },
+        uid: { type: "string" },
         ref: { type: "string" },
+        backendNodeId: { type: "number" },
         selector: { type: "string" },
-        key: { type: "string" },
-        value: { type: "string" },
-        url: { type: "string" },
         expect: { type: "object" }
       },
-      required: ["kind"]
+      required: ["uid"]
+    }
+  },
+  {
+    name: "fill_element_by_uid",
+    description: "Fill an input element using uid/ref from search_elements",
+    parameters: {
+      type: "object",
+      properties: {
+        tabId: { type: "number" },
+        uid: { type: "string" },
+        ref: { type: "string" },
+        backendNodeId: { type: "number" },
+        selector: { type: "string" },
+        value: { type: "string" },
+        expect: { type: "object" }
+      },
+      required: ["uid", "value"]
+    }
+  },
+  {
+    name: "fill_form",
+    description: "Fill multiple form fields in one step using uid/ref from search_elements",
+    parameters: {
+      type: "object",
+      properties: {
+        tabId: { type: "number" },
+        elements: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              uid: { type: "string" },
+              ref: { type: "string" },
+              backendNodeId: { type: "number" },
+              selector: { type: "string" },
+              value: { type: "string" }
+            },
+            required: ["value"]
+          }
+        },
+        submit: {
+          type: "object",
+          properties: {
+            kind: { type: "string", enum: ["click", "press"] },
+            uid: { type: "string" },
+            ref: { type: "string" },
+            selector: { type: "string" },
+            key: { type: "string" }
+          }
+        },
+        expect: { type: "object" }
+      },
+      required: ["elements"]
     }
   },
   {
@@ -141,8 +191,8 @@ const DEFAULT_TOOL_CONTRACTS: ToolContract[] = [
     }
   },
   {
-    name: "list_tabs",
-    description: "List available browser tabs",
+    name: "get_all_tabs",
+    description: "Get all open tabs across all windows with metadata",
     parameters: {
       type: "object",
       properties: {},
@@ -150,8 +200,17 @@ const DEFAULT_TOOL_CONTRACTS: ToolContract[] = [
     }
   },
   {
-    name: "open_tab",
-    description: "Open a new browser tab",
+    name: "get_current_tab",
+    description: "Get information about the currently active tab",
+    parameters: {
+      type: "object",
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: "create_new_tab",
+    description: "Create a new browser tab with the provided URL",
     parameters: {
       type: "object",
       properties: {
@@ -329,4 +388,3 @@ export class ToolContractRegistry {
     return out;
   }
 }
-

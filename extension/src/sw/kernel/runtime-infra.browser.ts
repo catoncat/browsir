@@ -55,6 +55,10 @@ export type RuntimeInfraResult<T = unknown> = RuntimeOk<T> | RuntimeErr;
 export interface RuntimeInfraHandler {
   handleMessage(message: unknown): Promise<RuntimeInfraResult | null>;
   disconnectBridge(): void;
+  abortBridgeInvokesBySession(
+    sessionId: string,
+    reason?: "stop" | "steer_preempt"
+  ): number;
 }
 
 interface LeaseState {
@@ -70,6 +74,7 @@ interface PendingInvoke {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
+  sessionId: string;
 }
 
 interface PendingCdpCommand {
@@ -105,6 +110,49 @@ function hashText(input: unknown): string {
     h = Math.imul(h, 16777619);
   }
   return (h >>> 0).toString(16);
+}
+
+function buildStableRef(node: JsonRecord, sourcePrefix: string): string {
+  const backendNodeId = toPositiveInteger(node.backendNodeId);
+  if (backendNodeId) return `bn-${backendNodeId}`;
+  const fingerprint = [
+    String(node.selector || ""),
+    String(node.tag || ""),
+    String(node.role || ""),
+    String(node.name || ""),
+    String(node.placeholder || ""),
+    String(node.ariaLabel || "")
+  ].join("|");
+  const hash = hashText(fingerprint || JSON.stringify(node));
+  return `${sourcePrefix}-${hash}`;
+}
+
+function enrichSnapshotNodes(
+  state: SnapshotState,
+  nodes: JsonRecord[],
+  key: string,
+  snapshotId: string,
+  sourcePrefix: string
+): JsonRecord[] {
+  const nextRefMap = new Map(state.refMap);
+  const seen = new Map<string, number>();
+  const enrichedNodes = nodes.map((node) => {
+    const baseRef = buildStableRef(node, sourcePrefix);
+    const nextCount = (seen.get(baseRef) || 0) + 1;
+    seen.set(baseRef, nextCount);
+    const ref = nextCount > 1 ? `${baseRef}-${nextCount}` : baseRef;
+    const enriched: JsonRecord = {
+      ...node,
+      uid: ref,
+      ref,
+      key,
+      snapshotId
+    };
+    nextRefMap.set(ref, enriched);
+    return enriched;
+  });
+  state.refMap = nextRefMap;
+  return enrichedNodes;
 }
 
 function toValidTabId(raw: unknown): number | null {
@@ -425,6 +473,39 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     pendingInvokes.clear();
   }
 
+  function abortBridgeInvokesBySession(
+    rawSessionId: unknown,
+    rawReason: unknown = "stop"
+  ): number {
+    const sessionId = String(rawSessionId || "").trim();
+    if (!sessionId) return 0;
+    const reason =
+      String(rawReason || "").trim().toLowerCase() === "steer_preempt"
+        ? "steer_preempt"
+        : "stop";
+    let aborted = 0;
+    for (const [id, pending] of pendingInvokes.entries()) {
+      if (pending.sessionId !== sessionId) continue;
+      pendingInvokes.delete(id);
+      clearTimeout(pending.timeout);
+      const interruptedBySteer = reason === "steer_preempt";
+      pending.reject(
+        asBridgeInvokeError(
+          interruptedBySteer
+            ? "Bridge invoke interrupted by steer promote request"
+            : "Bridge invoke aborted by stop request",
+          {
+            code: interruptedBySteer ? "E_BRIDGE_INTERRUPTED" : "E_BRIDGE_ABORTED",
+            details: { sessionId, reason },
+            retryable: false
+          }
+        )
+      );
+      aborted += 1;
+    }
+    return aborted;
+  }
+
   function onBridgeMessage(raw: MessageEvent): void {
     let message: JsonRecord | null = null;
     try {
@@ -636,6 +717,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       agentId: payloadFrame.agentId
     };
     return await new Promise((resolve, reject) => {
+      const pendingSessionId = String(payload.sessionId || "").trim();
       const timeout = setTimeout(() => {
         pendingInvokes.delete(id);
         reject(
@@ -650,7 +732,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           })
         );
       }, timeoutMs);
-      pendingInvokes.set(id, { resolve, reject, timeout });
+      pendingInvokes.set(id, { resolve, reject, timeout, sessionId: pendingSessionId });
       ws.send(JSON.stringify(payload));
     });
   }
@@ -1206,18 +1288,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       });
     }
 
-    state.refMap = new Map();
-    const nodes = enrichedNodes.map((node, index) => {
-      const ref = `e${index}`;
-      const enriched: JsonRecord = {
-        ...node,
-        ref,
-        key,
-        snapshotId
-      };
-      state.refMap.set(ref, enriched);
-      return enriched;
-    });
+    const nodes = enrichSnapshotNodes(state, enrichedNodes, key, snapshotId, "ax");
 
     return {
       ...base,
@@ -1335,20 +1406,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       throw new Error(`cdp.snapshot failed: ${String(value.error || "interactive evaluate failed")}`);
     }
     const rawNodes = Array.isArray(value.nodes) ? (value.nodes as JsonRecord[]) : [];
-    state.refMap = new Map();
-    const nodes = rawNodes.map((node, index) => {
-      const ref = `e${index}`;
-      const enriched: JsonRecord = {
-        ...node,
-        ref,
-        key,
-        snapshotId,
-        nodeId: Number(index + 1),
-        backendNodeId: Number(index + 1)
-      };
-      state.refMap.set(ref, enriched);
-      return enriched;
-    });
+    const nodes = enrichSnapshotNodes(state, rawNodes, key, snapshotId, "dom");
     return {
       ...base,
       url: String(value.url || ""),
@@ -1468,8 +1526,43 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
   function resolveRefEntry(tabId: number, ref: string): JsonRecord {
     const state = getSnapshotState(tabId);
     const node = state.refMap.get(ref);
-    if (!node) throw new Error(`ref ${ref} not found, take /cdp.snapshot first`);
-    return node;
+    if (node) return node;
+
+    const legacyMatch = /^e(\d+)$/i.exec(ref);
+    if (legacyMatch) {
+      const index = Number(legacyMatch[1]);
+      if (Number.isInteger(index) && index >= 0) {
+        const snapshots = Array.from(state.byKey.values());
+        if (state.lastSnapshotId) {
+          const exact = snapshots.find((snapshot) => String(snapshot.snapshotId || "") === state.lastSnapshotId);
+          if (exact) {
+            const nodes = Array.isArray(exact.nodes) ? (exact.nodes as JsonRecord[]) : [];
+            const picked = nodes[index];
+            if (picked && typeof picked === "object") return picked;
+          }
+        }
+        for (let i = snapshots.length - 1; i >= 0; i -= 1) {
+          const snapshot = snapshots[i];
+          const nodes = Array.isArray(snapshot.nodes) ? (snapshot.nodes as JsonRecord[]) : [];
+          const picked = nodes[index];
+          if (picked && typeof picked === "object") return picked;
+        }
+      }
+    }
+
+    const backendRefMatch = /^bn-(\d+)$/i.exec(ref);
+    if (backendRefMatch) {
+      const backendNodeId = Number(backendRefMatch[1]);
+      if (Number.isInteger(backendNodeId) && backendNodeId > 0) {
+        return {
+          uid: ref,
+          ref,
+          backendNodeId
+        };
+      }
+    }
+
+    throw new Error(`ref ${ref} not found, take /cdp.snapshot first`);
   }
 
   async function executeActionByBackendNode(
@@ -1681,7 +1774,8 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       };
     }
 
-    const ref = typeof rawAction.ref === "string" ? rawAction.ref.trim() : "";
+    const refRaw = typeof rawAction.ref === "string" ? rawAction.ref : typeof rawAction.uid === "string" ? rawAction.uid : "";
+    const ref = String(refRaw || "").trim();
     const explicitSelector = typeof rawAction.selector === "string" ? rawAction.selector.trim() : "";
     const fromRef = ref ? resolveRefEntry(tabId, ref) : {};
     const selector = String(explicitSelector || fromRef.selector || "").trim();
@@ -1705,6 +1799,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         return {
           tabId,
           kind,
+          uid: ref || undefined,
           ref: ref || undefined,
           selector: selector || undefined,
           backendNodeId,
@@ -1713,6 +1808,25 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       } catch {
         // fallback to selector flow below
       }
+    }
+
+    if (!selector && kind === "scroll") {
+      const delta = Number(rawAction.value ?? rawAction.y ?? 0);
+      const top = Number.isFinite(delta) ? delta : 0;
+      const out = (await sendCdpCommand(tabId, "Runtime.evaluate", {
+        expression: `(() => {
+          const top = Number(${JSON.stringify(top)});
+          window.scrollBy({ top: Number.isFinite(top) ? top : 0, left: 0, behavior: "auto" });
+          return { ok: true, scrolled: true, top: Number.isFinite(top) ? top : 0, url: location.href, title: document.title };
+        })()`,
+        returnByValue: true,
+        awaitPromise: true
+      })) as JsonRecord;
+      return {
+        tabId,
+        kind,
+        result: asRecord(asRecord(out.result).value)
+      };
     }
 
     if (!selector) throw new Error("action target not found by ref/selector/backendNodeId");
@@ -1731,13 +1845,21 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       })};
       const allTypables = () => Array.from(
         document.querySelectorAll("input,textarea,[contenteditable='true'],[role='textbox']")
-      );
+      ).filter((cand) => {
+        if (!cand) return false;
+        if ("disabled" in cand && !!cand.disabled) return false;
+        if ("readOnly" in cand && !!cand.readOnly) return false;
+        const rect = cand.getBoundingClientRect?.();
+        return !!rect && rect.width > 0 && rect.height > 0;
+      });
       const pickByHint = () => {
+        const candidates = allTypables();
+        if (candidates.length === 1) return candidates[0];
         const nameNeedle = String(hint.name || "").trim().toLowerCase();
         const placeholderNeedle = String(hint.placeholder || "").trim().toLowerCase();
         const ariaNeedle = String(hint.ariaLabel || "").trim().toLowerCase();
         const tagNeedle = String(hint.tag || "").trim().toLowerCase();
-        for (const cand of allTypables()) {
+        for (const cand of candidates) {
           if (tagNeedle && String(cand.tagName || "").toLowerCase() !== tagNeedle) continue;
           const cText = String(cand.textContent || "").replace(/\\s+/g, " ").trim().toLowerCase();
           const cPlaceholder = String(cand.getAttribute?.("placeholder") || "").trim().toLowerCase();
@@ -1894,6 +2016,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     return {
       tabId,
       kind,
+      uid: ref || undefined,
       ref: ref || undefined,
       selector,
       backendNodeId: backendNodeId || undefined,
@@ -2045,8 +2168,21 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     enabledDomainsByTab.delete(tabId);
   }
 
+  async function focusTabBeforeAction(tabId: number): Promise<void> {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (Number.isInteger(tab?.windowId) && Number(tab.windowId) > 0) {
+        await chrome.windows.update(Number(tab.windowId), { focused: true }).catch(() => {});
+      }
+      await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+    } catch {
+      // best-effort focus; do not fail action pipeline on focus hint failure
+    }
+  }
+
   return {
     disconnectBridge: resetBridgeSocket,
+    abortBridgeInvokesBySession,
     async handleMessage(message: unknown): Promise<RuntimeInfraResult | null> {
       const msg = asRecord(message);
       const type = String(msg.type || "");
@@ -2101,6 +2237,18 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         const tabId = toValidTabId(msg.tabId);
         if (!tabId) return fail("cdp.action 需要有效 tabId");
         const action = asRecord(msg.action);
+        if (action.requireFocus === true && action.forceFocus !== true) {
+          return fail(
+            toRuntimeError("action requires focused tab", {
+              code: "E_CDP_FOCUS_REQUIRED",
+              retryable: true,
+              details: { tabId }
+            })
+          );
+        }
+        if (action.forceFocus === true) {
+          await focusTabBeforeAction(tabId);
+        }
         const kind = normalizeActionKind(action.kind);
         if (actionRequiresLease(kind)) {
           ensureLeaseForWrite(tabId, resolveOwnerFromMessage(msg));

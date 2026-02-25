@@ -143,6 +143,80 @@ describe("runtime-router interruption boundary", () => {
 
   });
 
+  it("stop 夹在 setRunning 与 runAgentLoop 之间时应复位 running", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const originalSetRunning = orchestrator.setRunning.bind(orchestrator);
+    vi.spyOn(orchestrator, "setRunning").mockImplementation((sessionId: string, running: boolean) => {
+      originalSetRunning(sessionId, running);
+      if (running) {
+        orchestrator.stop(sessionId);
+      }
+    });
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "race-stop-before-loop"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const deadline = Date.now() + 3000;
+    let sawLoopSkip = false;
+    while (Date.now() < deadline) {
+      const out = await invokeRuntime({
+        type: "brain.step.stream",
+        sessionId
+      });
+      const stream = Array.isArray((out.data as Record<string, unknown>)?.stream)
+        ? (((out.data as Record<string, unknown>).stream as unknown[]) as Array<Record<string, unknown>>)
+        : [];
+      sawLoopSkip = stream.some((event) => String(event.type || "") === "loop_skip_stopped");
+      if (sawLoopSkip) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    expect(sawLoopSkip).toBe(true);
+
+    const view = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(view.ok).toBe(true);
+    const runtime = ((((view.data as Record<string, unknown>) || {}).conversationView as Record<string, unknown>)
+      ?.lastStatus || {}) as Record<string, unknown>;
+    expect(Boolean(runtime.stopped)).toBe(true);
+    expect(Boolean(runtime.running)).toBe(false);
+  });
+
+  it("pre_send compaction 检查不应阻塞 brain.run.start 返回", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const artificialDelayMs = 320;
+    orchestrator.onHook("compaction.check.before", async (payload) => {
+      if (payload.source !== "pre_send") {
+        return { action: "continue" };
+      }
+      await new Promise((resolve) => setTimeout(resolve, artificialDelayMs));
+      return { action: "continue" };
+    });
+
+    const startedAt = Date.now();
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "slow-pre-send-compaction"
+    });
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(started.ok).toBe(true);
+    const runtime = ((started.data as Record<string, unknown>)?.runtime || {}) as Record<string, unknown>;
+    expect(Boolean(runtime.running)).toBe(true);
+    expect(elapsedMs).toBeLessThan(artificialDelayMs);
+  });
+
   it("running 时普通 prompt 必须显式声明 streamingBehavior", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -248,6 +322,54 @@ describe("runtime-router interruption boundary", () => {
     const followQueue = (((follow.data as Record<string, unknown>)?.runtime as Record<string, unknown>)?.queue ||
       {}) as Record<string, unknown>;
     expect(Number(followQueue.followUp || 0)).toBe(1);
+  });
+
+  it("running 时可把 followUp 队列项直接插入为 steer", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "seed",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    orchestrator.setRunning(sessionId, true);
+
+    const queued = await invokeRuntime({
+      type: "brain.run.start",
+      sessionId,
+      prompt: "follow-insert",
+      streamingBehavior: "followUp"
+    });
+    expect(queued.ok).toBe(true);
+    const queuedRuntime = ((queued.data as Record<string, unknown>)?.runtime || {}) as Record<string, unknown>;
+    const queuedQueue = (queuedRuntime.queue || {}) as Record<string, unknown>;
+    const queuedItems = Array.isArray(queuedQueue.items)
+      ? (queuedQueue.items as Array<Record<string, unknown>>)
+      : [];
+    const queuedPromptId = String((queuedItems[0] || {}).id || "");
+    expect(queuedPromptId).not.toBe("");
+    expect(Number(queuedQueue.followUp || 0)).toBe(1);
+
+    const promoted = await invokeRuntime({
+      type: "brain.run.queue.promote",
+      sessionId,
+      queuedPromptId
+    });
+    expect(promoted.ok).toBe(true);
+    const promotedRuntime = (promoted.data || {}) as Record<string, unknown>;
+    const promotedQueue = (promotedRuntime.queue || {}) as Record<string, unknown>;
+    expect(Number(promotedQueue.followUp || 0)).toBe(0);
+    expect(Number(promotedQueue.steer || 0)).toBe(1);
+    const promotedItems = Array.isArray(promotedQueue.items)
+      ? (promotedQueue.items as Array<Record<string, unknown>>)
+      : [];
+    const promotedItem = promotedItems.find((item) => String(item.id || "") === queuedPromptId) || {};
+    expect(String((promotedItem as Record<string, unknown>).behavior || "")).toBe("steer");
   });
 
   it("followUp 会在当前 loop_done 后自动启动下一轮", async () => {

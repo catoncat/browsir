@@ -15,6 +15,8 @@ export * from "./llm-openai-compatible-provider";
 export * from "./llm-profile-resolver";
 export * from "./tool-contract-registry";
 export * from "./plugin-runtime";
+export * from "./skill-registry";
+export * from "./skill-content-resolver";
 export * from "./runtime-router";
 export * from "./runtime-infra.browser";
 export * from "./runtime-loop.browser";

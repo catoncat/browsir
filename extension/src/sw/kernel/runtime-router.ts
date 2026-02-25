@@ -37,6 +37,12 @@ const MAX_SUBAGENT_CHAIN_TASKS = 8;
 const DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS = 60_000;
 const MAX_SUBAGENT_WAIT_TIMEOUT_MS = 300_000;
 const CHAIN_PREVIOUS_TOKEN = "{previous}";
+const DEFAULT_SKILL_DISCOVER_MAX_FILES = 256;
+const MAX_SKILL_DISCOVER_MAX_FILES = 4096;
+const DEFAULT_SKILL_DISCOVER_ROOTS: Array<{ root: string; source: string }> = [
+  { root: ".agents/skills", source: "project" },
+  { root: "~/.agents/skills", source: "global" }
+];
 
 function ok<T>(data: T): RuntimeResult<T> {
   return { ok: true, data };
@@ -333,10 +339,19 @@ async function buildConversationView(
 }> {
   const context = await orchestrator.sessions.buildSessionContext(sessionId, leafId ?? undefined);
   const meta = await orchestrator.sessions.getMeta(sessionId);
+  const messages = context.entries
+    .filter((entry): entry is MessageEntry => entry.type === "message")
+    .map((entry) => ({
+      role: entry.role,
+      content: entry.text,
+      entryId: entry.id,
+      toolName: entry.toolName,
+      toolCallId: entry.toolCallId
+    }));
   return {
     sessionId,
-    messageCount: context.messages.length,
-    messages: context.messages,
+    messageCount: messages.length,
+    messages,
     parentSessionId: String(meta?.header?.parentSessionId || ""),
     forkedFrom: readForkedFrom(meta),
     lastStatus: orchestrator.getRunState(sessionId),
@@ -823,6 +838,7 @@ async function handleBrainAgentRun(
 async function handleBrainRun(
   orchestrator: BrainOrchestrator,
   runtimeLoop: ReturnType<typeof createRuntimeLoopController>,
+  infra: RuntimeInfraHandler,
   message: unknown
 ): Promise<RuntimeResult> {
   const payload = toRecord(message);
@@ -1009,12 +1025,30 @@ async function handleBrainRun(
     return ok(orchestrator.pause(requireSessionId(payload)));
   }
 
+  if (action === "brain.run.queue.promote") {
+    const sessionId = requireSessionId(payload);
+    const queuedPromptId = String(payload.queuedPromptId || payload.id || "").trim();
+    if (!queuedPromptId) {
+      return fail("brain.run.queue.promote 需要 queuedPromptId");
+    }
+    const rawTarget = String(payload.targetBehavior || payload.behavior || "steer").trim();
+    const targetBehavior = rawTarget === "followUp" ? "followUp" : "steer";
+    const runtime = orchestrator.promoteQueuedPrompt(sessionId, queuedPromptId, targetBehavior);
+    if (targetBehavior === "steer" && runtime.running === true && runtime.stopped !== true) {
+      infra.abortBridgeInvokesBySession(sessionId, "steer_preempt");
+    }
+    return ok(runtime);
+  }
+
   if (action === "brain.run.resume") {
     return ok(orchestrator.resume(requireSessionId(payload)));
   }
 
   if (action === "brain.run.stop") {
-    return ok(orchestrator.stop(requireSessionId(payload)));
+    const sessionId = requireSessionId(payload);
+    const runtime = orchestrator.stop(sessionId);
+    infra.abortBridgeInvokesBySession(sessionId);
+    return ok(runtime);
   }
 
   return fail(`unsupported brain.run action: ${action}`);
@@ -1215,6 +1249,563 @@ async function handleStorage(message: unknown): Promise<RuntimeResult> {
   return fail(`unsupported storage action: ${action}`);
 }
 
+interface SkillDiscoverRootInput {
+  root: string;
+  source: string;
+}
+
+interface SkillDiscoverScanHit {
+  root: string;
+  source: string;
+  path: string;
+}
+
+interface ParsedSkillFrontmatter {
+  id?: string;
+  name?: string;
+  description?: string;
+  disableModelInvocation?: boolean;
+  warnings: string[];
+}
+
+function sanitizeSkillDiscoverCell(input: unknown, field: string): string {
+  const text = String(input || "").trim();
+  if (!text) return "";
+  if (/[\r\n\t]/.test(text)) {
+    throw new Error(`brain.skill.discover: ${field} 不能包含换行或制表符`);
+  }
+  return text;
+}
+
+function normalizeSkillDiscoverRoots(payload: Record<string, unknown>): SkillDiscoverRootInput[] {
+  const fallbackSource = String(payload.source || "").trim() || "project";
+  const rawRoots = Array.isArray(payload.roots) ? payload.roots : [];
+  const out: SkillDiscoverRootInput[] = [];
+
+  if (rawRoots.length > 0) {
+    for (const item of rawRoots) {
+      if (typeof item === "string") {
+        const root = sanitizeSkillDiscoverCell(item, "root");
+        if (!root) continue;
+        out.push({ root, source: fallbackSource });
+        continue;
+      }
+      const row = toRecord(item);
+      const root = sanitizeSkillDiscoverCell(row.root || row.path || "", "root");
+      if (!root) continue;
+      const source = sanitizeSkillDiscoverCell(row.source || fallbackSource, "source") || fallbackSource;
+      out.push({ root, source });
+    }
+  } else {
+    out.push(...DEFAULT_SKILL_DISCOVER_ROOTS);
+  }
+
+  const dedup = new Set<string>();
+  const normalized: SkillDiscoverRootInput[] = [];
+  for (const item of out) {
+    const key = item.root;
+    if (dedup.has(key)) continue;
+    dedup.add(key);
+    normalized.push(item);
+  }
+  return normalized;
+}
+
+function normalizeSkillPath(input: unknown): string {
+  let text = String(input || "").trim().replace(/\\/g, "/");
+  text = text.replace(/\/+/g, "/");
+  if (text.length > 1) {
+    text = text.replace(/\/+$/g, "");
+  }
+  return text;
+}
+
+function pathBaseName(path: string): string {
+  const normalized = normalizeSkillPath(path);
+  if (!normalized) return "";
+  const lastSlash = normalized.lastIndexOf("/");
+  if (lastSlash < 0) return normalized;
+  return normalized.slice(lastSlash + 1);
+}
+
+function pathParentBaseName(path: string): string {
+  const normalized = normalizeSkillPath(path);
+  if (!normalized) return "";
+  const lastSlash = normalized.lastIndexOf("/");
+  if (lastSlash <= 0) return "";
+  const parent = normalized.slice(0, lastSlash);
+  const parentSlash = parent.lastIndexOf("/");
+  if (parentSlash < 0) return parent;
+  return parent.slice(parentSlash + 1);
+}
+
+function shouldAcceptDiscoveredSkillPath(root: string, path: string): boolean {
+  const normalizedRoot = normalizeSkillPath(root);
+  const normalizedPath = normalizeSkillPath(path);
+  if (!normalizedRoot || !normalizedPath) return false;
+
+  let relative = "";
+  if (normalizedPath === normalizedRoot) {
+    relative = "";
+  } else if (normalizedPath.startsWith(`${normalizedRoot}/`)) {
+    relative = normalizedPath.slice(normalizedRoot.length + 1);
+  } else {
+    return false;
+  }
+  if (!relative) return false;
+
+  const parts = relative.split("/").filter(Boolean);
+  if (parts.length === 0) return false;
+  if (parts.some((item) => item === "node_modules" || item.startsWith("."))) return false;
+  const base = parts[parts.length - 1] || "";
+  if (parts.length === 1) {
+    return /\.md$/i.test(base);
+  }
+  return base === "SKILL.md";
+}
+
+function trimQuotePair(text: string): string {
+  const value = String(text || "").trim();
+  if (!value) return value;
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    return value.slice(1, -1).trim();
+  }
+  return value;
+}
+
+function parseFrontmatterBoolean(raw: string): boolean | undefined {
+  const value = String(raw || "").trim().toLowerCase();
+  if (!value) return undefined;
+  if (["true", "yes", "on", "1"].includes(value)) return true;
+  if (["false", "no", "off", "0"].includes(value)) return false;
+  return undefined;
+}
+
+function parseSkillFrontmatter(content: string): ParsedSkillFrontmatter {
+  const out: ParsedSkillFrontmatter = { warnings: [] };
+  const lines = String(content || "").split(/\r?\n/);
+  if (!lines.length || lines[0].trim() !== "---") return out;
+
+  const fields: Record<string, string> = {};
+  let endLine = -1;
+  for (let i = 1; i < lines.length; i += 1) {
+    const line = String(lines[i] || "");
+    if (line.trim() === "---") {
+      endLine = i;
+      break;
+    }
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const match = /^([a-zA-Z0-9._-]+)\s*:\s*(.*)$/.exec(trimmed);
+    if (!match) continue;
+    fields[match[1].toLowerCase()] = trimQuotePair(match[2]);
+  }
+  if (endLine < 0) {
+    out.warnings.push("frontmatter 未闭合");
+    return out;
+  }
+
+  const id = String(fields.id || "").trim();
+  const name = String(fields.name || "").trim();
+  const description = String(fields.description || "").trim();
+  const disableRaw = String(
+    fields["disable-model-invocation"] || fields["disable_model_invocation"] || fields["disablemodelinvocation"] || ""
+  ).trim();
+
+  if (id) out.id = id;
+  if (name) out.name = name;
+  if (description) out.description = description;
+  if (disableRaw) {
+    const parsed = parseFrontmatterBoolean(disableRaw);
+    if (parsed === undefined) {
+      out.warnings.push("disable-model-invocation 不是布尔值");
+    } else {
+      out.disableModelInvocation = parsed;
+    }
+  }
+  return out;
+}
+
+function deriveSkillNameFromLocation(location: string): string {
+  const base = pathBaseName(location);
+  const seed = base.toUpperCase() === "SKILL.MD" ? pathParentBaseName(location) : base.replace(/\.md$/i, "");
+  const collapsed = String(seed || "")
+    .trim()
+    .replace(/[._-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return collapsed || "skill";
+}
+
+function deriveSkillIdSeedFromLocation(location: string): string {
+  const base = pathBaseName(location);
+  if (base.toUpperCase() === "SKILL.MD") {
+    return pathParentBaseName(location) || location;
+  }
+  return base.replace(/\.md$/i, "") || location;
+}
+
+function extractSkillReadContent(data: unknown): string {
+  const root = toRecord(data);
+  const rootData = toRecord(root.data);
+  const rootResponse = toRecord(root.response);
+  const rootResponseData = toRecord(rootResponse.data);
+  const rootResponseInnerData = toRecord(rootResponseData.data);
+  const rootResult = toRecord(root.result);
+  const candidates: unknown[] = [
+    data,
+    root.content,
+    root.text,
+    rootData.content,
+    rootData.text,
+    rootResponse.content,
+    rootResponse.text,
+    rootResponseData.content,
+    rootResponseData.text,
+    rootResponseInnerData.content,
+    rootResponseInnerData.text,
+    rootResult.content,
+    rootResult.text
+  ];
+  for (const item of candidates) {
+    if (typeof item === "string") return item;
+  }
+  throw new Error("brain.skill.discover: read_file 未返回文本");
+}
+
+function extractBashExecResult(data: unknown): { stdout: string; stderr: string; exitCode: number | null } {
+  const root = toRecord(data);
+  const rootData = toRecord(root.data);
+  const rootResponse = toRecord(root.response);
+  const rootResponseData = toRecord(rootResponse.data);
+  const rootResponseInnerData = toRecord(rootResponseData.data);
+  const rootResult = toRecord(root.result);
+  const candidates = [root, rootData, rootResponse, rootResponseData, rootResponseInnerData, rootResult];
+  for (const item of candidates) {
+    const stdout = item.stdout;
+    if (typeof stdout !== "string") continue;
+    const stderr = typeof item.stderr === "string" ? item.stderr : "";
+    const exitCodeRaw = Number(item.exitCode);
+    return {
+      stdout,
+      stderr,
+      exitCode: Number.isFinite(exitCodeRaw) ? exitCodeRaw : null
+    };
+  }
+  throw new Error("brain.skill.discover 未返回 stdout");
+}
+
+function buildSkillDiscoverScanScript(roots: SkillDiscoverRootInput[], maxFiles: number): string {
+  const marker = `SKILL_DISCOVER_ROOTS_${randomId("scan").replace(/[^a-zA-Z0-9_]+/g, "_")}`;
+  const rootRows = roots.map((item, index) => {
+    const root = sanitizeSkillDiscoverCell(item.root, `roots[${index}]`);
+    const source = sanitizeSkillDiscoverCell(item.source, `roots[${index}].source`) || "project";
+    return `${index}\t${root}\t${source}`;
+  });
+
+  return [
+    "set -euo pipefail",
+    `max_files=${Math.max(1, Math.floor(maxFiles))}`,
+    "count=0",
+    "while IFS=$'\\t' read -r idx root source; do",
+    "  [ -n \"$root\" ] || continue",
+    "  case \"$root\" in",
+    "    '~') root=\"$HOME\" ;;",
+    "    '~/'*) root=\"$HOME/${root#~/}\" ;;",
+    "  esac",
+    "  if [ ! -d \"$root\" ]; then",
+    "    continue",
+    "  fi",
+    "  while IFS= read -r path; do",
+    "    printf '%s\\t%s\\t%s\\t%s\\n' \"$idx\" \"$source\" \"$root\" \"$path\"",
+    "    count=$((count + 1))",
+    "    if [ \"$count\" -ge \"$max_files\" ]; then",
+    "      exit 0",
+    "    fi",
+    "  done < <(find \"$root\" -type f -name '*.md' 2>/dev/null)",
+    `done <<'${marker}'`,
+    ...rootRows,
+    marker
+  ].join("\n");
+}
+
+function parseSkillDiscoverScanOutput(stdout: string): SkillDiscoverScanHit[] {
+  const rows = String(stdout || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const out: SkillDiscoverScanHit[] = [];
+  for (const row of rows) {
+    const parts = row.split("\t");
+    if (parts.length < 4) continue;
+    const source = String(parts[1] || "").trim() || "project";
+    const root = String(parts[2] || "").trim();
+    const path = parts.slice(3).join("\t").trim();
+    if (!root || !path) continue;
+    if (!shouldAcceptDiscoveredSkillPath(root, path)) continue;
+    out.push({ root, source, path });
+  }
+  return out;
+}
+
+async function handleBrainSkill(
+  orchestrator: BrainOrchestrator,
+  runtimeLoop: ReturnType<typeof createRuntimeLoopController>,
+  message: unknown
+): Promise<RuntimeResult> {
+  const payload = toRecord(message);
+  const action = String(payload.type || "");
+
+  if (action === "brain.skill.list") {
+    return ok({
+      skills: await orchestrator.listSkills()
+    });
+  }
+
+  if (action === "brain.skill.install") {
+    const skillPayload = Object.keys(toRecord(payload.skill)).length > 0 ? toRecord(payload.skill) : payload;
+    const location = String(skillPayload.location || "").trim();
+    if (!location) return fail("brain.skill.install 需要 location");
+
+    const skill = await orchestrator.installSkill(
+      {
+        id: String(skillPayload.id || "").trim() || undefined,
+        name: String(skillPayload.name || "").trim() || undefined,
+        description: String(skillPayload.description || "").trim() || undefined,
+        location,
+        source: String(skillPayload.source || "").trim() || undefined,
+        enabled: skillPayload.enabled === undefined ? undefined : skillPayload.enabled !== false,
+        disableModelInvocation:
+          skillPayload.disableModelInvocation === undefined ? undefined : skillPayload.disableModelInvocation === true
+      },
+      {
+        replace: payload.replace === true || skillPayload.replace === true
+      }
+    );
+    return ok({
+      skillId: skill.id,
+      skill
+    });
+  }
+
+  if (action === "brain.skill.resolve") {
+    const skillId = String(payload.skillId || payload.id || "").trim();
+    if (!skillId) return fail("brain.skill.resolve 需要 skillId");
+    const sessionId = String(payload.sessionId || "").trim();
+    if (!sessionId) return fail("brain.skill.resolve 需要 sessionId");
+    const capability = String(payload.capability || "fs.read").trim() || "fs.read";
+    const resolved = await orchestrator.resolveSkillContent(skillId, {
+      allowDisabled: payload.allowDisabled === true,
+      sessionId,
+      capability
+    });
+    return ok({
+      skillId: resolved.skill.id,
+      skill: resolved.skill,
+      content: resolved.content,
+      promptBlock: resolved.promptBlock
+    });
+  }
+
+  if (action === "brain.skill.discover") {
+    const sessionId = String(payload.sessionId || "").trim();
+    if (!sessionId) return fail("brain.skill.discover 需要 sessionId");
+
+    const roots = normalizeSkillDiscoverRoots(payload);
+    if (!roots.length) return fail("brain.skill.discover 需要 roots");
+
+    const discoverCapability = String(payload.discoverCapability || "process.exec").trim() || "process.exec";
+    const readCapability = String(payload.readCapability || "fs.read").trim() || "fs.read";
+    const maxFiles = normalizeIntInRange(
+      payload.maxFiles,
+      DEFAULT_SKILL_DISCOVER_MAX_FILES,
+      1,
+      MAX_SKILL_DISCOVER_MAX_FILES
+    );
+    const timeoutMs = normalizeIntInRange(payload.timeoutMs, 60_000, 5_000, 300_000);
+    const autoInstall = payload.autoInstall !== false;
+    const replace = payload.replace !== false;
+
+    const scanScript = buildSkillDiscoverScanScript(roots, maxFiles);
+    const discoveredStep = await runtimeLoop.executeStep({
+      sessionId,
+      capability: discoverCapability,
+      action: "invoke",
+      args: {
+        frame: {
+          tool: "bash",
+          args: {
+            cmdId: "bash.exec",
+            args: [scanScript],
+            timeoutMs
+          }
+        }
+      },
+      verifyPolicy: "off"
+    });
+    if (!discoveredStep.ok) {
+      return fail(discoveredStep.error || "brain.skill.discover 扫描失败");
+    }
+
+    const scanResult = extractBashExecResult(discoveredStep.data);
+    const hits = parseSkillDiscoverScanOutput(scanResult.stdout);
+    const uniqueHits: SkillDiscoverScanHit[] = [];
+    const seenPaths = new Set<string>();
+    for (const hit of hits) {
+      const normalizedPath = normalizeSkillPath(hit.path);
+      if (!normalizedPath || seenPaths.has(normalizedPath)) continue;
+      seenPaths.add(normalizedPath);
+      uniqueHits.push({
+        ...hit,
+        path: normalizedPath
+      });
+    }
+
+    const skipped: Array<Record<string, unknown>> = [];
+    const discovered: Array<Record<string, unknown>> = [];
+    const installed: unknown[] = [];
+
+    for (const hit of uniqueHits) {
+      let content = "";
+      try {
+        const readOut = await runtimeLoop.executeStep({
+          sessionId,
+          capability: readCapability,
+          action: "read_file",
+          args: {
+            path: hit.path
+          },
+          verifyPolicy: "off"
+        });
+        if (!readOut.ok) {
+          skipped.push({
+            location: hit.path,
+            source: hit.source,
+            reason: readOut.error || "read_file 失败"
+          });
+          continue;
+        }
+        content = extractSkillReadContent(readOut.data);
+      } catch (error) {
+        skipped.push({
+          location: hit.path,
+          source: hit.source,
+          reason: error instanceof Error ? error.message : String(error)
+        });
+        continue;
+      }
+
+      const frontmatter = parseSkillFrontmatter(content);
+      const name = frontmatter.name || deriveSkillNameFromLocation(hit.path);
+      const description = String(frontmatter.description || "").trim();
+      const idSeed = String(frontmatter.id || frontmatter.name || deriveSkillIdSeedFromLocation(hit.path)).trim();
+      if (!description) {
+        skipped.push({
+          location: hit.path,
+          source: hit.source,
+          reason: "frontmatter.description 缺失，按 Pi 规则跳过",
+          warnings: frontmatter.warnings
+        });
+        continue;
+      }
+
+      const candidate = {
+        id: idSeed,
+        name,
+        description,
+        location: hit.path,
+        source: hit.source,
+        enabled: true,
+        disableModelInvocation: frontmatter.disableModelInvocation === true,
+        warnings: frontmatter.warnings
+      };
+      discovered.push(candidate);
+
+      if (!autoInstall) continue;
+      try {
+        const skill = await orchestrator.installSkill(
+          {
+            id: candidate.id,
+            name: candidate.name,
+            description: candidate.description,
+            location: candidate.location,
+            source: candidate.source,
+            enabled: true,
+            disableModelInvocation: candidate.disableModelInvocation
+          },
+          {
+            replace
+          }
+        );
+        installed.push(skill);
+      } catch (error) {
+        skipped.push({
+          location: hit.path,
+          source: hit.source,
+          reason: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
+    return ok({
+      sessionId,
+      roots,
+      scan: {
+        maxFiles,
+        timeoutMs,
+        discoverCapability,
+        readCapability,
+        stdoutBytes: scanResult.stdout.length,
+        stderr: scanResult.stderr,
+        exitCode: scanResult.exitCode
+      },
+      counts: {
+        scanned: uniqueHits.length,
+        discovered: discovered.length,
+        installed: installed.length,
+        skipped: skipped.length
+      },
+      discovered,
+      installed,
+      skipped,
+      skills: autoInstall ? await orchestrator.listSkills() : undefined
+    });
+  }
+
+  if (action === "brain.skill.enable") {
+    const skillId = String(payload.skillId || payload.id || "").trim();
+    if (!skillId) return fail("brain.skill.enable 需要 skillId");
+    const skill = await orchestrator.enableSkill(skillId);
+    return ok({
+      skillId: skill.id,
+      skill
+    });
+  }
+
+  if (action === "brain.skill.disable") {
+    const skillId = String(payload.skillId || payload.id || "").trim();
+    if (!skillId) return fail("brain.skill.disable 需要 skillId");
+    const skill = await orchestrator.disableSkill(skillId);
+    return ok({
+      skillId: skill.id,
+      skill
+    });
+  }
+
+  if (action === "brain.skill.uninstall") {
+    const skillId = String(payload.skillId || payload.id || "").trim();
+    if (!skillId) return fail("brain.skill.uninstall 需要 skillId");
+    const removed = await orchestrator.uninstallSkill(skillId);
+    if (!removed) return fail(`skill 不存在: ${skillId}`);
+    return ok({
+      skillId,
+      removed
+    });
+  }
+
+  return fail(`unsupported brain.skill action: ${action}`);
+}
+
 async function handleBrainDebug(orchestrator: BrainOrchestrator, infra: RuntimeInfraHandler, message: unknown): Promise<RuntimeResult> {
   const payload = toRecord(message);
   const action = String(payload.type || "");
@@ -1317,7 +1908,7 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
         if (infraResult) return await applyAfter(fromInfraResult(infraResult));
 
         if (type.startsWith("brain.run.")) {
-          return await applyAfter(await handleBrainRun(orchestrator, runtimeLoop, routeMessage));
+          return await applyAfter(await handleBrainRun(orchestrator, runtimeLoop, infra, routeMessage));
         }
 
         if (type.startsWith("brain.session.")) {
@@ -1330,6 +1921,10 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
 
         if (type.startsWith("brain.storage.")) {
           return await applyAfter(await handleStorage(routeMessage));
+        }
+
+        if (type.startsWith("brain.skill.")) {
+          return await applyAfter(await handleBrainSkill(orchestrator, runtimeLoop, routeMessage));
         }
 
         if (type.startsWith("brain.debug.")) {
