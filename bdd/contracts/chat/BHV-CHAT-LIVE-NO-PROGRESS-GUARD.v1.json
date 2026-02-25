@@ -1,0 +1,64 @@
+{
+  "id": "BHV-CHAT-LIVE-NO-PROGRESS-GUARD",
+  "intent": "当循环出现重复失败且无净推进时，系统必须触发重试熔断/预算守卫并提前收敛（live profile 对照）",
+  "context": {
+    "surface": "sidepanel.chat.loop",
+    "signals": [
+      "retry_circuit_open",
+      "retry_budget_exhausted"
+    ],
+    "signature_dimensions": [
+      "tool",
+      "kind",
+      "tabId",
+      "target",
+      "expect"
+    ],
+    "gate_profile": "live",
+    "default_contract_id": "BHV-CHAT-NO-PROGRESS-GUARD"
+  },
+  "steps": [
+    "build_action_signature_for_each_step",
+    "count_repeated_failure_signature_hits",
+    "open_retry_circuit_or_exhaust_retry_budget",
+    "emit_convergence_guard_event_and_stop_current_round",
+    "return_non_done_terminal_status"
+  ],
+  "observables": [
+    "repeated_failure_signature_triggers_retry_circuit_open",
+    "budget_exhaustion_triggers_retry_budget_exhausted",
+    "convergence_guard_event_stops_loop_before_unbounded_retry",
+    "guard_termination_status_is_failed_verify_or_failed_execute",
+    "guard_termination_never_reports_done"
+  ],
+  "risk": "high",
+  "allowed_side_effects": [
+    "step_stream_append(signature_and_reason)",
+    "loop_event(retry_circuit_open|retry_budget_exhausted)",
+    "loop_status_transition(failed_verify|failed_execute)"
+  ],
+  "proof_requirements": {
+    "required_layers": [
+      "unit",
+      "integration",
+      "browser-cdp",
+      "e2e"
+    ],
+    "min_layers": 4
+  },
+  "degrade_policy": {
+    "on_convergence_guard_triggered": [
+      "stop_current_round",
+      "ask_for_new_context_or_new_goal_before_next_attempt"
+    ],
+    "on_false_positive_risk": [
+      "require_signal_threshold",
+      "record_signature_trace_for_review"
+    ]
+  },
+  "rollback_or_compensation": [
+    "reset_guard_state_on_new_user_goal",
+    "retain_guard_trace_for_postmortem"
+  ],
+  "version": "1.0.0"
+}

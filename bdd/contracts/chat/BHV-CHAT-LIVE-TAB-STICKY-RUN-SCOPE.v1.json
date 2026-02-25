@@ -1,0 +1,56 @@
+{
+  "id": "BHV-CHAT-LIVE-TAB-STICKY-RUN-SCOPE",
+  "intent": "会话运行期间默认执行目标应粘在 primaryTab，上下文不应随 active tab 漂移，除非显式切换（live profile 对照）",
+  "context": {
+    "surface": "sidepanel.chat.loop",
+    "run_scope": "session_primary_tab",
+    "default_target_policy": "sticky_primary_tab",
+    "switch_policy": "explicit_switch_only",
+    "gate_profile": "live",
+    "default_contract_id": "BHV-CHAT-TAB-STICKY-RUN-SCOPE"
+  },
+  "steps": [
+    "establish_primary_tab_for_run_scope",
+    "execute_actions_without_explicit_tab_on_primary_tab",
+    "ignore_active_tab_changes_during_run",
+    "migrate_primary_tab_only_on_explicit_switch",
+    "continue_followup_actions_on_new_primary_tab_after_switch"
+  ],
+  "observables": [
+    "active_tab_change_does_not_change_execution_target",
+    "action_without_tabid_uses_primary_tab",
+    "explicit_target_switch_updates_primary_tab",
+    "followup_steps_use_updated_primary_tab_after_switch",
+    "run_scope_tab_context_is_visible_in_runtime_status_or_debug"
+  ],
+  "risk": "high",
+  "allowed_side_effects": [
+    "tab_resolution(list_tabs|get_active_tab)",
+    "session_metadata_update(primary_tab)",
+    "browser_action_and_verify_on_primary_tab"
+  ],
+  "proof_requirements": {
+    "required_layers": [
+      "unit",
+      "integration",
+      "browser-cdp",
+      "e2e"
+    ],
+    "min_layers": 4
+  },
+  "degrade_policy": {
+    "on_primary_tab_unavailable": [
+      "fail_explicitly_with_target_missing_error",
+      "request_explicit_switch_or_refresh_tabs"
+    ],
+    "on_explicit_switch": [
+      "rebind_primary_tab",
+      "require_fresh_snapshot_for_new_tab_actions"
+    ]
+  },
+  "rollback_or_compensation": [
+    "do_not_fallback_to_active_tab_silently",
+    "preserve_target_tab_history_for_audit"
+  ],
+  "version": "1.0.0"
+}

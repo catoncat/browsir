@@ -1,0 +1,51 @@
+{
+  "id": "BHV-LLM-PROVIDER-ADAPTER-ROUTING",
+  "intent": "LLM 调用必须经由 Provider Adapter/Registry 路由，显式记录 provider/model 选择并保持失败语义稳定",
+  "context": {
+    "surface": "sidepanel.chat.loop",
+    "runtime_layer": "service-worker.kernel.llm_provider",
+    "routing_signals": ["llm.route.selected", "llm.route.blocked"],
+    "compat_requirements": [
+      "single_model_legacy_config_is_backward_compatible",
+      "provider_selection_is_observable",
+      "provider_missing_has_stable_error"
+    ]
+  },
+  "steps": [
+    "resolve_profile_to_provider_model_binding",
+    "invoke_llm_provider_adapter_through_registry",
+    "emit_llm_route_selected_event_with_profile_provider_model",
+    "return_stable_error_when_provider_missing_or_unavailable"
+  ],
+  "observables": [
+    "llm_request_is_routed_by_provider_registry_not_raw_hardcoded_path",
+    "selected_profile_provider_model_are_observable_in_runtime_events",
+    "provider_unavailable_returns_explicit_failed_execute_or_failed_verify",
+    "provider_failure_never_silently_switches_to_weaker_model"
+  ],
+  "risk": "high",
+  "allowed_side_effects": [
+    "network.llm.provider_chat_completions",
+    "loop_event(llm.route.selected|llm.route.blocked)",
+    "loop_status_transition(done|failed_execute|failed_verify)"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "browser-cdp"],
+    "min_layers": 2
+  },
+  "degrade_policy": {
+    "on_provider_resolution_failure": [
+      "return_stable_error_with_provider_context",
+      "do_not_silent_downgrade"
+    ],
+    "on_legacy_config_detected": [
+      "fallback_to_default_openai_compatible_provider",
+      "preserve_existing_behavior"
+    ]
+  },
+  "rollback_or_compensation": [
+    "disable_new_provider_entries_and_keep_default_provider_only",
+    "preserve_provider_route_trace_for_postmortem"
+  ],
+  "version": "1.0.0"
+}

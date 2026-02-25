@@ -74,6 +74,14 @@
       "category": "protocol"
     },
     {
+      "contractId": "BHV-LLM-PROFILE-ESCALATION",
+      "category": "protocol"
+    },
+    {
+      "contractId": "BHV-LLM-PROVIDER-ADAPTER-ROUTING",
+      "category": "protocol"
+    },
+    {
       "contractId": "BHV-LLM-LIVE-CAPABILITY",
       "category": "protocol"
     },
@@ -112,6 +120,30 @@
     {
       "contractId": "BHV-CHAT-MARKDOWN-LINKS",
       "category": "ux"
+    },
+    {
+      "contractId": "BHV-CDP-LIVE-STRICT-VERIFY-ENFORCEMENT",
+      "category": "protocol"
+    },
+    {
+      "contractId": "BHV-CDP-LIVE-TAB-SNAPSHOT-BINDING",
+      "category": "protocol"
+    },
+    {
+      "contractId": "BHV-CHAT-LIVE-DONE-SEMANTICS-STRICT",
+      "category": "protocol"
+    },
+    {
+      "contractId": "BHV-CHAT-LIVE-AUTO-REPAIR-BOUNDARY",
+      "category": "protocol"
+    },
+    {
+      "contractId": "BHV-CHAT-LIVE-NO-PROGRESS-GUARD",
+      "category": "protocol"
+    },
+    {
+      "contractId": "BHV-CHAT-LIVE-TAB-STICKY-RUN-SCOPE",
+      "category": "protocol"
     }
   ]
 }

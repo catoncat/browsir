@@ -1,12 +1,12 @@
 {
   "version": "1.0.0",
-  "ts": "2026-02-20T13:44:18.530Z",
-  "passed": true,
+  "ts": "2026-02-24T17:03:45.622Z",
+  "passed": false,
   "summary": {
-    "total": 21,
-    "passed": 21,
-    "failed": 0,
-    "durationMs": 50514
+    "total": 35,
+    "passed": 34,
+    "failed": 1,
+    "durationMs": 286148
   },
   "env": {
     "chromeBin": "/Users/envvar/Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
@@ -20,22 +20,40 @@
   },
   "tests": [
     {
+      "group": "panel.vnext",
+      "name": "dist sidepanel 路径可直接加载",
+      "status": "passed",
+      "durationMs": 777
+    },
+    {
       "group": "service-worker API",
       "name": "snapshot interactive 返回 ref/node handles",
       "status": "passed",
-      "durationMs": 11
+      "durationMs": 18
     },
     {
       "group": "service-worker API",
       "name": "lease + cdp_action + verify 闭环",
       "status": "passed",
-      "durationMs": 13
+      "durationMs": 12
+    },
+    {
+      "group": "service-worker API",
+      "name": "fill 支持无 id 文本框（placeholder/path fallback）",
+      "status": "passed",
+      "durationMs": 6
+    },
+    {
+      "group": "service-worker API",
+      "name": "fill 支持动态加载的 vue-like 受控输入",
+      "status": "passed",
+      "durationMs": 4
     },
     {
       "group": "service-worker API",
       "name": "ref 存在但句柄过期时可 fallback",
       "status": "passed",
-      "durationMs": 11
+      "durationMs": 5
     },
     {
       "group": "service-worker API",
@@ -47,116 +65,201 @@
       "group": "service-worker API",
       "name": "ref 过期且 selector 无效时返回稳定错误契约",
       "status": "passed",
-      "durationMs": 29
+      "durationMs": 1581
     },
     {
       "group": "service-worker API",
       "name": "lease 冲突 + release + 过期后可恢复",
       "status": "passed",
-      "durationMs": 2410
+      "durationMs": 2416
     },
     {
       "group": "service-worker API",
       "name": "snapshot 支持 compact/maxTokens/a11y 字段",
       "status": "passed",
-      "durationMs": 7
+      "durationMs": 158
     },
     {
       "group": "service-worker API",
       "name": "cdp.verify 支持 urlChanged 断言",
       "status": "passed",
-      "durationMs": 5
+      "durationMs": 139
     },
     {
-      "group": "tab-ref-default",
-      "name": "新对话自动选中活跃 tab",
+      "group": "brain.runtime",
+      "name": "brain.step.execute 可执行 cdp action + verify",
       "status": "passed",
-      "durationMs": 2
+      "durationMs": 181
     },
     {
-      "group": "tab-ref-default",
-      "name": "点击 chip dismiss 取消引用",
+      "group": "brain.runtime",
+      "name": "BHV-CAPABILITY-PROVIDER-ROUTING: mode 路由与回退语义可验证",
       "status": "passed",
-      "durationMs": 3
+      "durationMs": 155
     },
     {
-      "group": "tab-ref-default",
-      "name": "@ 输入触发 mention popup",
+      "group": "brain.runtime",
+      "name": "BHV-AGENT-HOOK-LIFECYCLE: runtime 路由与步骤生命周期可观测",
       "status": "passed",
-      "durationMs": 603
+      "durationMs": 157
     },
     {
-      "group": "tab-ref-default",
-      "name": "mention popup 多选 tab",
+      "group": "brain.runtime",
+      "name": "brain.run.start 支持 tool_calls 闭环并写入 step stream",
       "status": "passed",
-      "durationMs": 9
+      "durationMs": 531
     },
     {
-      "group": "tab-ref-default",
-      "name": "Escape 关闭 mention popup",
+      "group": "brain.runtime",
+      "name": "同一会话第二轮继续执行不应触发 LLM HTTP 400",
       "status": "passed",
-      "durationMs": 1
+      "durationMs": 820
     },
     {
-      "group": "sidepanel loop",
-      "name": "无 LLM 时 rule planner 正确执行命令",
+      "group": "brain.runtime",
+      "name": "brain.run.start 注入 shared tabs 上下文并每次覆盖",
       "status": "passed",
-      "durationMs": 215
+      "durationMs": 330
     },
     {
-      "group": "sidepanel loop",
-      "name": "rule planner 执行长命令正常返回",
+      "group": "brain.runtime",
+      "name": "brain.debug.dump 可观测 llm 原始调用与工具步骤",
       "status": "passed",
-      "durationMs": 1014
+      "durationMs": 286
     },
     {
-      "group": "sidepanel llm-capability",
-      "name": "LLM 可用时支持 tool_call 闭环",
+      "group": "brain.runtime",
+      "name": "LLM HTTP 失败时应产生 auto_retry 事件并失败收口",
       "status": "passed",
-      "durationMs": 211
+      "durationMs": 1806
     },
     {
-      "group": "sidepanel llm-capability",
-      "name": "LLM 不可用但规则可解析时应降级成功",
+      "group": "brain.runtime",
+      "name": "LLM 工具超时后可按失败信号调整 timeout 重试成功",
       "status": "passed",
-      "durationMs": 208
+      "durationMs": 2383
     },
     {
-      "group": "sidepanel llm-capability",
-      "name": "LLM 不可用且规则不可解析时应失败",
+      "group": "brain.runtime",
+      "name": "CDP 失败后不中断，LLM 可继续推进并完成",
       "status": "passed",
-      "durationMs": 211
+      "durationMs": 291
     },
     {
-      "group": "sidepanel llm-capability",
-      "name": "LLM HTTP 失败时应回退到规则 planner",
+      "group": "brain.reliability",
+      "name": "strict verify 失败不应 done（failed_verify 收口）",
       "status": "passed",
-      "durationMs": 210
+      "durationMs": 354
     },
     {
-      "group": "sidepanel llm-live",
+      "group": "brain.reliability",
+      "name": "tab/snapshot 绑定：过期 ref 不可静默成功",
+      "status": "passed",
+      "durationMs": 1734
+    },
+    {
+      "group": "brain.reliability",
+      "name": "done 语义严格：verify 失败不可 done",
+      "status": "passed",
+      "durationMs": 334
+    },
+    {
+      "group": "brain.reliability",
+      "name": "auto-repair 边界：execute_error 可重试，max_steps/stopped 不续跑",
+      "status": "passed",
+      "durationMs": 2125
+    },
+    {
+      "group": "brain.reliability",
+      "name": "no-progress 守卫：重复失败触发熔断并终止",
+      "status": "passed",
+      "durationMs": 331
+    },
+    {
+      "group": "brain.reliability",
+      "name": "tab sticky：active tab 漂移后仍命中 primaryTab",
+      "status": "passed",
+      "durationMs": 1460
+    },
+    {
+      "group": "panel.vnext",
+      "name": "sidepanel 渲染并支持复制/历史分叉/最后一条重试",
+      "status": "passed",
+      "durationMs": 12025
+    },
+    {
+      "group": "panel.vnext",
+      "name": "user inline 编辑：最后一条重跑，历史消息分叉重跑",
+      "status": "passed",
+      "durationMs": 8017
+    },
+    {
+      "group": "brain.runtime",
+      "name": "LLM Retry-After 超上限时应快速失败且不进入长等待重试",
+      "status": "passed",
+      "durationMs": 279
+    },
+    {
+      "group": "brain.runtime",
+      "name": "重复可恢复工具失败应触发熔断并停止循环",
+      "status": "passed",
+      "durationMs": 4439
+    },
+    {
+      "group": "debug.console",
+      "name": "Live Events 可显示 brain.event",
+      "status": "passed",
+      "durationMs": 32
+    },
+    {
+      "group": "brain.runtime",
+      "name": "brain.run.stop 状态通过 session.view 回显",
+      "status": "passed",
+      "durationMs": 8
+    },
+    {
+      "group": "brain.session",
+      "name": "session 标题生命周期：自动生成 + 菜单重刷 + 列表重命名 + 自动阈值",
+      "status": "passed",
+      "durationMs": 5158
+    },
+    {
+      "group": "brain.runtime llm-live",
       "name": "真实 LLM 在浏览器目标上达到可验证成功率",
-      "status": "passed",
-      "durationMs": 42916
-    },
-    {
-      "group": "sidepanel loop",
-      "name": "stopped 状态文案优先于 memory 回填",
-      "status": "passed",
-      "durationMs": 1
+      "status": "failed",
+      "durationMs": 232598,
+      "error": "真实 LLM 冒烟未达标: passed=1/3, min=2, outcomes=[{\"attempt\":1,\"status\":\"failed_execute\",\"pass\":false,\"verified\":false,\"llmUrl\":\"https://ai.chen.rs/v1/chat/completions\",\"streamEvents\":45,\"lastEventType\":\"loop_done\",\"toolCallsPlanned\":4,\"toolTrail\":[\"snapshot\",\"browser_verify\",\"snapshot\",\"snapshot\"],\"toolFailures\":0,\"lastToolError\":\"\",\"lastAssistantSnippet\":\"执行失败：BodyStreamBuffer was aborted\"},{\"attempt\":2,\"status\":\"timeout_no_loop_done\",\"pass\":false,\"verified\":false,\"waitError\":\"wait timeout: brain live loop_done (90000ms)\",\"llmUrl\":\"https://ai.chen.rs/v1/chat/completions\",\"streamEvents\":90,\"lastEventType\":\"llm.request\",\"toolCallsPlanned\":10,\"toolTrail\":[\"snapshot\",\"browser_action\",\"snapshot\",\"browser_action\",\"browser_action\",\"browser_action\",\"browser_verify\",\"browser_action\"],\"toolFailures\":2,\"lastToolError\":\"cdp.snapshot failed: selector not found\",\"lastAssistantSnippet\":\"\"},{\"attempt\":3,\"status\":\"done\",\"pass\":true,\"verified\":true,\"llmUrl\":\"https://ai.chen.rs/v1/chat/completions\",\"streamEvents\":97,\"lastEventType\":\"loop_done\",\"toolCallsPlanned\":11,\"toolTrail\":[\"snapshot\",\"snapshot\",\"browser_action\",\"browser_action\",\"browser_verify\",\"snapshot\",\"snapshot\",\"snapshot\"],\"toolFailures\":0,\"lastToolError\":\"\",\"lastAssistantSnippet\":\"ok\"}]"
     }
   ],
-  "fatalError": null,
+  "fatalError": "1 个测试失败",
   "debug": {
     "bridgeLogsTail": [
       "$ bun src/index.ts",
-      "[bridge] ws://127.0.0.1:18787/ws  mode=god  maxConcurrency=6  bash.exec=enabled  audit=/Users/envvar/work/repos/browser-brain-loop/bridge/tmp/browser-bridge/audit-2026-02-20.jsonl",
+      "[bridge] ws://127.0.0.1:18787/ws  mode=god  maxConcurrency=6  bash.exec=enabled  audit=/Users/envvar/work/repos/browser-brain-loop/bridge/tmp/browser-bridge/audit-2026-02-24.jsonl",
       "error: script \"start\" was terminated by signal SIGTERM (Polite quit request)"
     ],
     "chromeLogsTail": [
-      "DevTools listening on ws://127.0.0.1:19333/devtools/browser/85afbcad-ac53-4f5f-9b58-3b21e7850085",
-      "[24777:1823688:0220/214332.352736:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT",
-      "[24777:1823688:0220/214354.388498:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT"
+      "DevTools listening on ws://127.0.0.1:19333/devtools/browser/6cb0e499-9da9-4b19-a3a9-44aaeec59d65",
+      "[54685:14119200:0225/005908.033240:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT",
+      "[54685:14119200:0225/005935.633461:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT",
+      "[54685:14119200:0225/010013.257109:ERROR:google_apis/gcm/engine/connection_factory_impl.cc:483] ConnectionHandler failed with net error: -2",
+      "[54685:14119200:0225/010033.063331:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT",
+      "[55483:14130394:0225/010200.346720:ERROR:services/on_device_model/ml/gpu_blocklist.cc:118] Unable to get gpu adapter",
+      "[55483:14130402:0225/010200.347431:ERROR:services/on_device_model/ml/gpu_blocklist.cc:118] Unable to get gpu adapter",
+      "[54685:14119200:0225/010203.667582:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT",
+      "[54685:14119089:0225/010345.035779:ERROR:ui/compositor/compositor_animation_observer.cc:65] CompositorAnimationObserver is active for too long (284.13s) location=Button@ui/views/controls/button/button.cc:668",
+      "[54685:14119089:0225/010345.035804:ERROR:ui/compositor/compositor_animation_observer.cc:65] CompositorAnimationObserver is active for too long (284.13s) location=Button@ui/views/controls/button/button.cc:668",
+      "[54685:14119089:0225/010345.035809:ERROR:ui/compositor/compositor_animation_observer.cc:65] CompositorAnimationObserver is active for too long (284.13s) location=Button@ui/views/controls/button/button.cc:668",
+      "[54685:14119089:0225/010345.035811:ERROR:ui/compositor/compositor_animation_observer.cc:65] CompositorAnimationObserver is active for too long (284.12s) location=AnimationDelegate@ui/views/layout/animating_layout_manager.cc:194",
+      "[54685:14119089:0225/010345.035814:ERROR:ui/compositor/compositor_animation_observer.cc:65] CompositorAnimationObserver is active for too long (283.56s) location=TabIcon@chrome/browser/ui/views/tabs/tab_icon.cc:96",
+      "[54685:14119089:0225/010345.035990:ERROR:ui/compositor/compositor_animation_observer.cc:65] CompositorAnimationObserver is active for too long (282.962s) location=BoundsAnimator@ui/views/animation/bounds_animator.cc:24",
+      "[54685:14119089:0225/010345.035995:ERROR:ui/compositor/compositor_animation_observer.cc:65] CompositorAnimationObserver is active for too long (281.383s) location=TabIcon@chrome/browser/ui/views/tabs/tab_icon.cc:96",
+      "[54685:14119089:0225/010345.035997:ERROR:ui/compositor/compositor_animation_observer.cc:65] CompositorAnimationObserver is active for too long (281.347s) location=TabIcon@chrome/browser/ui/views/tabs/tab_icon.cc:96",
+      "[54685:14119089:0225/010345.036003:ERROR:ui/compositor/compositor_animation_observer.cc:65] CompositorAnimationObserver is active for too long (281.334s) location=TabIcon@chrome/browser/ui/views/tabs/tab_icon.cc:96",
+      "[54685:14119089:0225/010345.036005:ERROR:ui/compositor/compositor_animation_observer.cc:65] CompositorAnimationObserver is active for too long (275.379s) location=TabIcon@chrome/browser/ui/views/tabs/tab_icon.cc:96",
+      "[54685:14119089:0225/010345.036008:ERROR:ui/compositor/compositor_animation_observer.cc:65] CompositorAnimationObserver is active for too long (274.84s) location=TabIcon@chrome/browser/ui/views/tabs/tab_icon.cc:96",
+      "[54685:14119089:0225/010345.036010:ERROR:ui/compositor/compositor_animation_observer.cc:65] CompositorAnimationObserver is active for too long (273.71s) location=TabIcon@chrome/browser/ui/views/tabs/tab_icon.cc:96",
+      "[54685:14119089:0225/010345.036017:ERROR:ui/compositor/compositor_animation_observer.cc:65] CompositorAnimationObserver is active for too long (263.929s) location=TabIcon@chrome/browser/ui/views/tabs/tab_icon.cc:96"
     ]
   }
 }

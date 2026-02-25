@@ -169,6 +169,32 @@
       ]
     },
     {
+      "contractId": "BHV-LLM-PROVIDER-ADAPTER-ROUTING",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/__tests__/tool-provider-registry.browser.test.ts::falls back to capability default provider when strict mode hint has no match + attaches mode and capability metadata when capability provider throws"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/technical/chat/llm-provider-adapter-routing.feature"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-LLM-PROFILE-ESCALATION",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/llm-profile-policy.ts::decideProfileEscalation + extension/src/sw/kernel/__tests__/llm-profile-policy.browser.test.ts::upgrade_only policy branches"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/technical/chat/llm-profile-escalation.feature"
+        }
+      ]
+    },
+    {
       "contractId": "BHV-LLM-LIVE-CAPABILITY",
       "proofs": [
         {
@@ -486,6 +512,132 @@
         {
           "layer": "browser-cdp",
           "target": "bdd/features/business/chat/markdown-links.feature"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-CDP-LIVE-STRICT-VERIFY-ENFORCEMENT",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::shouldVerifyStep + executeToolCall + runAgentLoop"
+        },
+        {
+          "layer": "integration",
+          "target": "extension/src/sw/kernel/runtime-infra.browser.ts::verifyByCDP + handleMessage(cdp.action|cdp.verify)"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/technical/cdp/strict-verify-enforcement-live.feature"
+        },
+        {
+          "layer": "e2e",
+          "target": "bdd/evidence/brain-e2e-live.latest.json::brain.reliability :: strict verify 失败不应 done（failed_verify 收口）"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-CDP-LIVE-TAB-SNAPSHOT-BINDING",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/runtime-infra.browser.ts::takeSnapshot + resolveRefEntry + executeRefActionByCDP"
+        },
+        {
+          "layer": "integration",
+          "target": "extension/src/sw/kernel/__tests__/runtime-infra.browser.test.ts::supports cdp.observe/snapshot/action/verify with lease guard"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/technical/cdp/tab-snapshot-binding-live.feature"
+        },
+        {
+          "layer": "e2e",
+          "target": "bdd/evidence/brain-e2e-live.latest.json::brain.reliability :: tab/snapshot 绑定：过期 ref 不可静默成功"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-CHAT-LIVE-DONE-SEMANTICS-STRICT",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::executeToolCall + runAgentLoop"
+        },
+        {
+          "layer": "integration",
+          "target": "extension/src/sw/kernel/runtime-router.ts::handleBrainRun + brain.run.stop"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/technical/chat/done-semantics-strict-live.feature"
+        },
+        {
+          "layer": "e2e",
+          "target": "bdd/evidence/brain-e2e-live.latest.json::brain.reliability :: done 语义严格：verify 失败不可 done"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-CHAT-LIVE-AUTO-REPAIR-BOUNDARY",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::requestLlmWithRetry + runAgentLoop"
+        },
+        {
+          "layer": "integration",
+          "target": "extension/src/sw/kernel/events.ts::auto_retry_start + auto_retry_end + loop_skip_stopped"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/technical/chat/auto-repair-boundary-live.feature"
+        },
+        {
+          "layer": "e2e",
+          "target": "bdd/evidence/brain-e2e-live.latest.json::brain.reliability :: auto-repair 边界：execute_error 可重试，max_steps/stopped 不续跑"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-CHAT-LIVE-NO-PROGRESS-GUARD",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::runAgentLoop + retry_circuit_open + retry_budget_exhausted"
+        },
+        {
+          "layer": "integration",
+          "target": "extension/src/sw/kernel/events.ts::retry_circuit_open + retry_budget_exhausted"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/technical/chat/no-progress-guard-live.feature"
+        },
+        {
+          "layer": "e2e",
+          "target": "bdd/evidence/brain-e2e-live.latest.json::brain.reliability :: no-progress 守卫：重复失败触发熔断并终止"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-CHAT-LIVE-TAB-STICKY-RUN-SCOPE",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::applySharedTabs + executeToolCall + runAgentLoop"
+        },
+        {
+          "layer": "integration",
+          "target": "extension/src/sw/kernel/runtime-router.ts::handleBrainRun + tabIds payload normalization"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/technical/chat/tab-sticky-run-scope-live.feature"
+        },
+        {
+          "layer": "e2e",
+          "target": "bdd/evidence/brain-e2e-live.latest.json::brain.reliability :: tab sticky：active tab 漂移后仍命中 primaryTab"
         }
       ]
     }

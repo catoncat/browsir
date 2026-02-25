@@ -33,11 +33,20 @@
 ## 双层 LLM 测试策略
 
 1. `BHV-LLM-CAPABILITY-GATE`（默认门禁）
-- 使用 mock LLM，验证编排层正确性：SSE 消费、tool_call 闭环、降级状态语义。
+- 使用 mock LLM，验证编排层正确性：SSE 消费、tool_call 闭环、严格 done 语义。
+- 关键口径：缺少 LLM 配置必须 `failed_execute`，不允许“无 LLM 成功降级”。
 
 2. `BHV-LLM-LIVE-CAPABILITY`（live 门禁）
 - 使用真实 LLM endpoint，验证真实能力：浏览器任务成功率与可验证进展。
 - 该契约 `context.gate_profile=live`，默认 `bdd:gate` 不检查，`bdd:gate:live` 检查。
+
+## 本轮对齐重点契约
+
+- `BHV-CHAT-DONE-SEMANTICS-STRICT`
+- `BHV-CHAT-HISTORY-INCLUDES-TOOL-RESULT`
+- `BHV-SESSION-COMPACTION-STATE-MACHINE`
+- `BHV-LLM-CAPABILITY-GATE`
+- `BHV-LLM-LIVE-CAPABILITY`（仅 `bdd:gate:live`）
 
 ## 命令
 
@@ -56,11 +65,12 @@ bun run bdd:gate:storage
 真实 LLM 门禁（需要外网与 key）：
 
 ```bash
-BRAIN_E2E_LIVE_LLM_BASE="https://ai.chen.rs/v1" \
-BRAIN_E2E_LIVE_LLM_KEY="<key>" \
-BRAIN_E2E_LIVE_LLM_MODEL="gpt-5.3-codex" \
-bun run brain:e2e:live
+# .env.live.local 示例
+# BRAIN_E2E_LIVE_LLM_BASE="https://ai.chen.rs/v1"
+# BRAIN_E2E_LIVE_LLM_KEY="<key>"
+# BRAIN_E2E_LIVE_LLM_MODEL="gpt-5.3-codex"
 
+bun run brain:e2e:live
 bun run bdd:gate:live
 ```
 
@@ -68,6 +78,25 @@ bun run bdd:gate:live
 
 - `BRAIN_E2E_LIVE_ATTEMPTS`（默认 `3`）
 - `BRAIN_E2E_LIVE_MIN_PASS`（默认 `ceil(attempts*0.67)`）
+
+## 视觉回归评审能力（BDD 基础能力）
+
+`brain:e2e` 支持通用的“截图 + LLM 视觉评审”能力，可被任意 case 复用，不绑定单一场景。
+
+开关与配置：
+
+- `BRAIN_E2E_VISUAL_REVIEW_MODE=off|optional|required`
+  - 默认 `optional`：有配置则执行，无配置跳过，不阻塞门禁
+  - `required`：评审缺失或评审失败会导致对应 case 失败
+- `BRAIN_E2E_VISUAL_REVIEW_BASE`（默认回退到 `BRAIN_E2E_LIVE_LLM_BASE`）
+- `BRAIN_E2E_VISUAL_REVIEW_KEY`（默认回退到 `BRAIN_E2E_LIVE_LLM_KEY`）
+- `BRAIN_E2E_VISUAL_REVIEW_MODEL`（默认回退到 `BRAIN_E2E_LIVE_LLM_MODEL`）
+- `BRAIN_E2E_VISUAL_REVIEW_TIMEOUT_MS`（默认 `40000`）
+
+证据落盘：
+
+- 截图路径：`debug.visualScreenshots`
+- 评审结果：`debug.visualReview.results[]`
 
 ## 门禁语义
 

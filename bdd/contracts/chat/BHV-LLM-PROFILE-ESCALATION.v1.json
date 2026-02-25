@@ -1,0 +1,47 @@
+{
+  "id": "BHV-LLM-PROFILE-ESCALATION",
+  "intent": "LLM profile 策略只允许可解释升级，不允许静默降级；升级失败时必须显式收敛",
+  "context": {
+    "surface": "sidepanel.chat.loop",
+    "strategy": "upgrade_only",
+    "scope": "same_role_profile_chain",
+    "routing_signals": ["llm.route.selected", "llm.route.escalated", "llm.route.blocked"]
+  },
+  "steps": [
+    "load_profile_chain_for_current_role",
+    "run_with_primary_profile",
+    "escalate_to_next_profile_on_repeated_failure_signature",
+    "emit_escalation_reason_and_target_profile",
+    "stop_with_explicit_failure_when_no_higher_profile_available"
+  ],
+  "observables": [
+    "escalation_happens_only_upward_in_same_role_chain",
+    "downgrade_to_weaker_profile_never_happens_implicitly",
+    "escalation_events_include_reason_signature",
+    "blocked_escalation_returns_explicit_terminal_status"
+  ],
+  "risk": "high",
+  "allowed_side_effects": [
+    "loop_event(llm.route.selected|llm.route.escalated|llm.route.blocked)",
+    "loop_status_transition(done|failed_execute|failed_verify)"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "browser-cdp"],
+    "min_layers": 2
+  },
+  "degrade_policy": {
+    "on_repeated_retryable_failure": [
+      "allow_upgrade_within_same_role_chain",
+      "record_escalation_reason"
+    ],
+    "on_no_upgrade_target": [
+      "return_explicit_failure",
+      "never_auto_downgrade"
+    ]
+  },
+  "rollback_or_compensation": [
+    "disable_auto_escalation_and_pin_profile_manually",
+    "retain_route_events_for_diagnosis"
+  ],
+  "version": "1.0.0"
+}

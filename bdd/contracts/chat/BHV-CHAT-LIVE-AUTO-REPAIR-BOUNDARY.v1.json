@@ -1,10 +1,19 @@
 {
-  "id": "BHV-CHAT-AUTO-REPAIR-BOUNDARY",
-  "intent": "auto-repair 只在允许的失败类型触发，避免 max_steps/stopped 等终态被错误续跑",
+  "id": "BHV-CHAT-LIVE-AUTO-REPAIR-BOUNDARY",
+  "intent": "auto-repair 只在允许的失败类型触发，避免 max_steps/stopped 等终态被错误续跑（live profile 对照）",
   "context": {
     "surface": "sidepanel.chat.loop",
-    "allowed_triggers": ["execute_error", "failed_verify", "no_progress_signal"],
-    "blocked_triggers": ["max_steps", "stopped"]
+    "allowed_triggers": [
+      "execute_error",
+      "failed_verify",
+      "no_progress_signal"
+    ],
+    "blocked_triggers": [
+      "max_steps",
+      "stopped"
+    ],
+    "gate_profile": "live",
+    "default_contract_id": "BHV-CHAT-AUTO-REPAIR-BOUNDARY"
   },
   "steps": [
     "finish_step_with_terminal_reason",
@@ -27,7 +36,12 @@
     "loop_status_transition"
   ],
   "proof_requirements": {
-    "required_layers": ["unit", "integration", "browser-cdp", "e2e"],
+    "required_layers": [
+      "unit",
+      "integration",
+      "browser-cdp",
+      "e2e"
+    ],
     "min_layers": 4
   },
   "degrade_policy": {

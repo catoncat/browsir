@@ -1,0 +1,64 @@
+{
+  "id": "BHV-CDP-LIVE-TAB-SNAPSHOT-BINDING",
+  "intent": "浏览器动作与验证必须绑定同一 tab 与快照代际，拒绝隐式跨 tab/跨代执行（live profile 对照）",
+  "context": {
+    "surface": "sidepanel.chat.loop",
+    "binding_keys": [
+      "tabId",
+      "snapshotId"
+    ],
+    "reference_sources": [
+      "ref",
+      "selector",
+      "backendNodeId"
+    ],
+    "switch_policy": "explicit_switch_then_rebind_snapshot",
+    "gate_profile": "live",
+    "default_contract_id": "BHV-CDP-TAB-SNAPSHOT-BINDING"
+  },
+  "steps": [
+    "take_snapshot_with_bound_tab_context",
+    "execute_action_with_snapshot_binding",
+    "verify_action_on_same_bound_tab",
+    "reject_stale_or_cross_tab_reference",
+    "allow_execution_after_explicit_switch_and_new_snapshot"
+  ],
+  "observables": [
+    "action_and_verify_tab_must_match_snapshot_tab",
+    "stale_snapshot_or_ref_returns_explicit_error",
+    "cross_tab_reference_without_explicit_switch_is_rejected",
+    "explicit_target_switch_requires_new_snapshot_before_action",
+    "binding_failure_never_returns_done"
+  ],
+  "risk": "high",
+  "allowed_side_effects": [
+    "cdp.snapshot(compact|interactive)",
+    "cdp.action(click|fill|navigate)",
+    "cdp.verify(urlChanged|textIncludes|selectorExists)",
+    "lease.acquire|lease.release"
+  ],
+  "proof_requirements": {
+    "required_layers": [
+      "unit",
+      "integration",
+      "browser-cdp",
+      "e2e"
+    ],
+    "min_layers": 4
+  },
+  "degrade_policy": {
+    "on_stale_binding": [
+      "return_stable_binding_error",
+      "request_new_snapshot"
+    ],
+    "on_cross_tab_attempt": [
+      "reject_action",
+      "require_explicit_target_switch"
+    ]
+  },
+  "rollback_or_compensation": [
+    "release_lease_when_binding_fails",
+    "preserve_binding_error_reason_for_debugging"
+  ],
+  "version": "1.0.0"
+}
