@@ -52,6 +52,7 @@ const NO_PROGRESS_REPEAT_SIGNATURE_LIMIT = 3;
 const NO_PROGRESS_PING_PONG_LIMIT = 2;
 const NO_PROGRESS_SIGNATURE_WINDOW = 6;
 const NO_PROGRESS_BROWSER_PROOF_MISSING_LIMIT = 3;
+const NO_PROGRESS_REPAIR_MAX_ATTEMPTS = 1;
 
 type ToolRetryAction = "auto_replay" | "llm_replan" | "fail_fast";
 
@@ -667,6 +668,17 @@ function buildNoProgressSignature(toolCalls: ToolCallItem[]): string {
     return `${name}:${args}`;
   });
   return clipText(segments.join("||"), 3600);
+}
+
+function buildNoProgressRepairMessage(reason: string): string {
+  const normalized = String(reason || "").trim().toLowerCase();
+  if (normalized === "ping_pong") {
+    return "检测到工具调用在两个动作间往返震荡。请先重新观察当前页面，再用不同动作推进目标，避免重复原有往返路径。";
+  }
+  if (normalized === "browser_proof_missing") {
+    return "尚未形成可验证页面进展。请先执行 browser_action/browser_verify 并给出可验证证据，再继续。";
+  }
+  return "检测到工具调用连续重复且未推进。请先刷新观察（snapshot/list_tabs），再尝试不同动作而不是重复同一调用。";
 }
 
 function detectNoProgressPattern(input: {
@@ -3182,6 +3194,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     let noProgressSameSignatureStreak = 0;
     let noProgressPingPongStreak = 0;
     let noProgressSignatures: string[] = [];
+    let noProgressRepairAttempts = 0;
 
     try {
       while (llmStep < maxLoopSteps) {
@@ -3339,13 +3352,26 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           noProgressSameSignatureStreak = noProgress.sameSignatureStreak;
           noProgressPingPongStreak = noProgress.pingPongStreak;
           if (noProgress.reason) {
+            const canRepair = noProgressRepairAttempts < NO_PROGRESS_REPAIR_MAX_ATTEMPTS;
+            const decision = canRepair ? "retry" : "stop";
             orchestrator.events.emit("loop_no_progress", sessionId, {
               reason: noProgress.reason,
+              decision,
+              repairAttempt: noProgressRepairAttempts + (canRepair ? 1 : 0),
+              repairMaxAttempts: NO_PROGRESS_REPAIR_MAX_ATTEMPTS,
               signature,
               sameSignatureStreak: noProgress.sameSignatureStreak,
               pingPongStreak: noProgress.pingPongStreak,
               recentSignatures: noProgress.recentSignatures
             });
+            if (canRepair) {
+              noProgressRepairAttempts += 1;
+              messages.push({
+                role: "system",
+                content: buildNoProgressRepairMessage(noProgress.reason)
+              });
+              continue;
+            }
             const noProgressMessage =
               noProgress.reason === "ping_pong"
                 ? "工具调用出现往返震荡（ping-pong），已提前结束本轮。"
@@ -3389,11 +3415,24 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           if (requireBrowserProof && !browserProofSatisfied) {
             browserProofMissingStreak += 1;
             if (browserProofMissingStreak >= NO_PROGRESS_BROWSER_PROOF_MISSING_LIMIT) {
-              const noProgressMessage = "工具调用未产生可验证页面进展，已提前结束本轮。";
+              const canRepair = noProgressRepairAttempts < NO_PROGRESS_REPAIR_MAX_ATTEMPTS;
+              const decision = canRepair ? "retry" : "stop";
               orchestrator.events.emit("loop_no_progress", sessionId, {
                 reason: "browser_proof_missing",
+                decision,
+                repairAttempt: noProgressRepairAttempts + (canRepair ? 1 : 0),
+                repairMaxAttempts: NO_PROGRESS_REPAIR_MAX_ATTEMPTS,
                 streak: browserProofMissingStreak
               });
+              if (canRepair) {
+                noProgressRepairAttempts += 1;
+                messages.push({
+                  role: "system",
+                  content: buildNoProgressRepairMessage("browser_proof_missing")
+                });
+                continue;
+              }
+              const noProgressMessage = "工具调用未产生可验证页面进展，已提前结束本轮。";
               await orchestrator.sessions.appendMessage({
                 sessionId,
                 role: "assistant",

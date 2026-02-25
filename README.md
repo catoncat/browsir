@@ -269,7 +269,7 @@ vNext 已切到 `sidepanel.html + service-worker.js` 主路径：
 - LLM 工具入参不再直接喂原始大 snapshot JSON；优先使用 `snapshot.compact + 关键元信息`，避免二次硬截断导致关键信息丢失。
 - 在 strict 策略下，`browser_action` 执行后默认必须通过验证（显式 `expect` 走 `cdp.verify`，否则走前后观测推进校验）。
 - 新增 `no_progress` 检测：当 action 签名连续重复或 ABAB 往返（ping-pong）时提前终止本轮。
-- auto-repair 仅在 `execute_error | failed_verify | no_progress` 时触发；`max_steps | stopped | timeout` 不自动开启下一轮。
+- auto-repair 仅在 `failed_execute | failed_verify | progress_uncertain` 或显式 `loop_no_progress` 信号时触发；`max_steps | stopped | timeout` 不自动开启下一轮。
 - 回复策略中，`stopped/timeout/max_steps/failed_*` 状态文案优先于 memory 回填。
 
 ## 多 Session 与并行子 agents
@@ -291,7 +291,7 @@ vNext 已切到 `sidepanel.html + service-worker.js` 主路径：
 ## 自治修复
 
 - SidePanel 支持 `AUTO_REPAIR_ROUNDS` + `自动修复(on/off)`
-- 仅在 `execute_error/failed_verify/no_progress` 时会把失败摘要写入下一轮 goal 并尝试修复
+- 仅在 `failed_execute/failed_verify/progress_uncertain`（或 `loop_no_progress`）时会把失败摘要写入下一轮 goal 并尝试修复
 - `max_steps/stopped/timeout` 默认不进入下一轮 repair
 - 对“提前 done”有拦截（无成功动作时不允许 done）
 

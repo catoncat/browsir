@@ -145,7 +145,7 @@ Bridge WS 通信使用统一 `invoke` 帧格式：
 - LLM 默认配置：`base=https://ai.chen.rs/v1`、`model=gpt-5.3-codex`（key 由运行时注入）。
 - strict verify 模式下，`browser_action` 默认需要动作后验证；“执行成功”不等于“目标推进成功”。
 - 必须启用 `no_progress` 检测（重复签名 / ping-pong 往返）并提前终止当前轮。
-- auto-repair 仅在 `execute_error/failed_verify/no_progress` 触发；`max_steps/stopped/timeout` 不自动续跑下一轮。
+- auto-repair 仅在 `failed_execute/failed_verify/progress_uncertain` 或 `loop_no_progress` 信号触发；`max_steps/stopped/timeout` 不自动续跑下一轮。
 - `stopped` 回复优先状态文案，不回显 memory 中的大段 snapshot 内容。
 - BDD 必须覆盖 LLM 能力门禁：`tool_call` 闭环成功、无 LLM 的规则降级成功、不可降级时 `failed_execute`、LLM HTTP 失败回退规则 planner。
 - BDD 采用双层：默认 profile 用 mock 保证编排稳定；live profile 用真实 LLM 验证浏览器任务成功率（`brain:e2e:live` + `bdd:gate:live`）。

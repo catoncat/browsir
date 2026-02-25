@@ -4,8 +4,9 @@
   "context": {
     "surface": "sidepanel.chat.loop",
     "allowed_triggers": [
-      "execute_error",
+      "failed_execute",
       "failed_verify",
+      "progress_uncertain",
       "no_progress_signal"
     ],
     "blocked_triggers": [
@@ -23,8 +24,9 @@
     "persist_final_status_without_semantic_drift"
   ],
   "observables": [
-    "execute_error_can_trigger_auto_repair",
+    "failed_execute_can_trigger_auto_repair",
     "failed_verify_can_trigger_auto_repair",
+    "progress_uncertain_can_trigger_auto_repair",
     "no_progress_signal_can_trigger_auto_repair",
     "max_steps_and_stopped_must_not_trigger_auto_repair",
     "auto_repair_decision_is_visible_in_events"
