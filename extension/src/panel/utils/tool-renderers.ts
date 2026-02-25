@@ -25,6 +25,12 @@ function toText(value: unknown): string {
   return String(value || "").trim();
 }
 
+function toScalarText(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+}
+
 function toNumber(value: unknown): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
@@ -38,13 +44,192 @@ function safeParseJson(raw: string): { ok: boolean; value: unknown } {
   }
 }
 
-function formatDetail(raw: string, payload: unknown, parsed: boolean): string {
-  if (!parsed) return raw || "";
-  try {
-    return JSON.stringify(payload, null, 2);
-  } catch {
-    return raw || "";
+function clipText(value: string, max: number): string {
+  const text = String(value || "");
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function sanitizeOutput(value: unknown, max: number): string {
+  const text = toScalarText(value);
+  if (!text) return "";
+  const normalized = text
+    .replace(/\x1B\[[0-9;]*[A-Za-z]/g, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .trim();
+  if (!normalized) return "";
+  return clipText(normalized, max);
+}
+
+function formatRawDetail(raw: string): string {
+  const text = String(raw || "").trim();
+  if (!text) return "";
+  if (text.startsWith("{") || text.startsWith("[")) {
+    return "结构化结果（原始 JSON 已省略）";
   }
+  return clipText(text, 600);
+}
+
+function collectCandidateRecords(root: JsonRecord): JsonRecord[] {
+  const out: JsonRecord[] = [];
+  const queue: Array<{ value: unknown; depth: number }> = [{ value: root, depth: 0 }];
+  const seen = new Set<unknown>();
+  const MAX_DEPTH = 4;
+  const NESTED_KEYS = ["response", "data", "details", "result", "payload", "body"];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || current.depth > MAX_DEPTH) continue;
+    const value = current.value;
+    if (!value || typeof value !== "object") continue;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    const record = value as JsonRecord;
+    out.push(record);
+    for (const key of NESTED_KEYS) {
+      const nested = record[key];
+      if (nested && typeof nested === "object") {
+        queue.push({ value: nested, depth: current.depth + 1 });
+      }
+    }
+  }
+
+  return out;
+}
+
+function pickTextFromRecords(records: JsonRecord[], keys: string[]): string {
+  for (const record of records) {
+    for (const key of keys) {
+      const value = toScalarText(record[key]);
+      if (value) return value;
+    }
+  }
+  return "";
+}
+
+function pickNumberFromRecords(records: JsonRecord[], key: string): number | null {
+  for (const record of records) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim()) {
+      const n = Number(value);
+      if (Number.isFinite(n)) return n;
+    }
+  }
+  return null;
+}
+
+function pickBooleanFromRecords(records: JsonRecord[], key: string): boolean | null {
+  for (const record of records) {
+    const value = record[key];
+    if (typeof value === "boolean") return value;
+    if (typeof value === "string" && value.trim()) {
+      const lower = value.trim().toLowerCase();
+      if (lower === "true") return true;
+      if (lower === "false") return false;
+    }
+  }
+  return null;
+}
+
+function summarizeScalarFields(records: JsonRecord[]): string {
+  const ignoreKeys = new Set([
+    "tool",
+    "target",
+    "args",
+    "rawArgs",
+    "response",
+    "data",
+    "details",
+    "result",
+    "payload",
+    "body",
+    "stdout",
+    "stderr",
+    "content",
+    "text",
+    "preview",
+    "error",
+    "errorCode",
+    "verifyReason",
+    "verified"
+  ]);
+  const items: string[] = [];
+  const seen = new Set<string>();
+  const MAX_ITEMS = 6;
+
+  for (const record of records) {
+    for (const [key, value] of Object.entries(record)) {
+      if (items.length >= MAX_ITEMS) return items.join(" · ");
+      if (ignoreKeys.has(key)) continue;
+      const text = toScalarText(value);
+      if (!text) continue;
+      const normalized = clipText(text, 96);
+      const token = `${key}:${normalized}`;
+      if (seen.has(token)) continue;
+      seen.add(token);
+      items.push(`${key}=${normalized}`);
+    }
+  }
+
+  return items.join(" · ");
+}
+
+function formatDetail(raw: string, payload: unknown, parsed: boolean, toolName: string): string {
+  if (!parsed) return formatRawDetail(raw);
+  const record = asRecord(payload);
+  if (!Object.keys(record).length) return formatRawDetail(raw);
+
+  const records = collectCandidateRecords(record);
+  const sections: string[] = [];
+  const target = toText(record.target) || pickTextFromRecords(records, ["target"]);
+  if (target) sections.push(target);
+
+  const metrics: string[] = [];
+  const exitCode = pickNumberFromRecords(records, "exitCode");
+  if (exitCode !== null) metrics.push(`exitCode=${exitCode}`);
+  const durationMs = pickNumberFromRecords(records, "durationMs");
+  if (durationMs !== null) metrics.push(`duration=${durationMs}ms`);
+  const bytesWritten = pickNumberFromRecords(records, "bytesWritten");
+  if (bytesWritten !== null) metrics.push(`bytesWritten=${bytesWritten}`);
+  const hunks = pickNumberFromRecords(records, "hunks");
+  if (hunks !== null) metrics.push(`hunks=${hunks}`);
+  const replacements = pickNumberFromRecords(records, "replacements");
+  if (replacements !== null) metrics.push(`replacements=${replacements}`);
+  const truncated = pickBooleanFromRecords(records, "truncated");
+  if (truncated === true) metrics.push("输出已截断");
+  const verified = pickBooleanFromRecords(records, "verified");
+  if (verified === true) metrics.push("verified=true");
+  if (verified === false && ["browser_action", "browser_verify"].includes(String(toolName || "").trim().toLowerCase())) {
+    metrics.push("verified=false");
+  }
+  if (metrics.length) sections.push(metrics.join(" · "));
+
+  const verifyReason = sanitizeOutput(pickTextFromRecords(records, ["verifyReason"]), 280);
+  if (verifyReason) sections.push(`verify\n${verifyReason}`);
+
+  const errorCode = sanitizeOutput(pickTextFromRecords(records, ["errorCode"]), 120);
+  if (errorCode) sections.push(`errorCode\n${errorCode}`);
+  const errorText = sanitizeOutput(pickTextFromRecords(records, ["error"]), 480);
+  if (errorText) sections.push(`error\n${errorText}`);
+
+  const stdout = sanitizeOutput(pickTextFromRecords(records, ["stdout"]), 1200);
+  const stderr = sanitizeOutput(pickTextFromRecords(records, ["stderr"]), 1000);
+  const content = sanitizeOutput(pickTextFromRecords(records, ["content"]), 1200);
+  const textOut = sanitizeOutput(pickTextFromRecords(records, ["text", "preview"]), 1200);
+
+  if (stdout) sections.push(`stdout\n${stdout}`);
+  if (stderr) sections.push(`stderr\n${stderr}`);
+  if (!stdout && !stderr && content) sections.push(`output\n${content}`);
+  if (!stdout && !stderr && !content && textOut) sections.push(`output\n${textOut}`);
+
+  if (!sections.length) {
+    const scalarSummary = summarizeScalarFields(records);
+    if (scalarSummary) sections.push(scalarSummary);
+  }
+  if (!sections.length) sections.push("结构化结果（已省略原始 payload）");
+
+  return clipText(sections.join("\n\n"), 2200);
 }
 
 function shortHost(url: string): string {
@@ -178,9 +363,11 @@ function renderInvoke(toolName: string, callId: string, payload: JsonRecord, det
 
   const bridgeResponse = asRecord(payload.response);
   const invokeResult = asRecord(bridgeResponse.response);
-  const bridgeTool = toText(asRecord(invokeResult.data).echoedTool);
+  const bridgeResponseData = asRecord(bridgeResponse.data);
+  const bridgeResponseInner = asRecord(bridgeResponseData.data);
+  const bridgeTool = toText(asRecord(invokeResult.data).echoedTool) || toText(bridgeResponseInner.echoedTool);
   const toolLabel = toolName || bridgeTool || "invoke";
-  const invokeId = toText(invokeResult.id) || callId;
+  const invokeId = toText(invokeResult.id) || toText(bridgeResponseData.id) || callId;
   const target = renderToolTarget(toolLabel, payload);
 
   return {
@@ -241,7 +428,7 @@ export function resolveToolRender(input: ResolveToolRenderInput): ToolRenderResu
   const parsed = safeParseJson(content);
   const payload = asRecord(parsed.value);
   const toolName = inferToolName(toText(input.toolName).toLowerCase(), payload);
-  const detail = formatDetail(content, payload, parsed.ok);
+  const detail = formatDetail(content, payload, parsed.ok, toolName);
 
   if (toolName === "snapshot") return renderSnapshot(payload, detail);
   if (toolName === "list_tabs") return renderListTabs(payload, detail);

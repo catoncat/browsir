@@ -25,6 +25,7 @@ const showSettings = ref(false);
 const showDebug = ref(false);
 const showMoreMenu = ref(false);
 const showExportMenu = ref(false);
+const showToolHistory = ref(true);
 const creatingSession = ref(false);
 const moreMenuRef = ref(null);
 const exportMenuRef = ref(null);
@@ -81,9 +82,6 @@ interface DisplayMessage extends PanelMessageLike {
     line: string;
     logs: string[];
   }>;
-  busyPlaceholder?: boolean;
-  busyMode?: "retry" | "fork";
-  busySourceEntryId?: string;
 }
 
 interface StepTraceRecord {
@@ -462,6 +460,24 @@ function clipText(text: string, max = 96): string {
   const value = String(text || "").trim();
   if (!value) return "";
   return value.length > max ? `${value.slice(0, max)}…` : value;
+}
+
+function shouldAlwaysShowToolMessage(message: PanelMessageLike): boolean {
+  if (String(message?.role || "") !== "tool") return false;
+  const content = String(message?.content || "").trim();
+  if (!content) return false;
+  try {
+    const parsed = JSON.parse(content);
+    const row = toRecord(parsed);
+    if (typeof row.error === "string" && String(row.error).trim()) return true;
+    if (row.ok === false) return true;
+    const response = toRecord(row.response);
+    const bridgeResult = toRecord(response.response);
+    if (bridgeResult.ok === false) return true;
+    return false;
+  } catch {
+    return /error|failed|失败|异常/i.test(content);
+  }
 }
 
 function pushRecentRuntimeEvent(source: "brain" | "bridge", event: unknown) {
@@ -1062,7 +1078,9 @@ function applyRuntimeEventToolRun(event: unknown) {
     if (activeToolRun.value && activeToolRun.value.step === step) {
       activeToolRun.value = null;
     }
-    runPhase.value = "tool_running";
+    if (!activeToolRun.value) {
+      runPhase.value = "llm";
+    }
     setLlmRunHint("继续推理", "正在处理工具结果");
     return;
   }
@@ -1147,8 +1165,7 @@ async function syncActiveToolRun(sessionId: string) {
   activeToolRun.value = latest;
   if (
     latest ||
-    toolPendingStepStates.value.some((item) => item.status === "running") ||
-    toolPendingStepStates.value.length > 0
+    toolPendingStepStates.value.some((item) => item.status === "running")
   ) {
     runPhase.value = "tool_running";
   } else {
@@ -1179,10 +1196,6 @@ const runningStatus = computed(() => {
   }
   return null;
 });
-
-const toolPendingStepLines = computed(() =>
-  toolPendingStepStates.value.map((item) => formatToolPendingStepLine(item))
-);
 
 const latestToolPendingStepState = computed(() => {
   const list = toolPendingStepStates.value;
@@ -1278,9 +1291,8 @@ const shouldShowStreamingDraft = computed(() => {
 
 const shouldShowToolPendingCard = computed(() => {
   if (!isRunning.value) return false;
-  if (runPhase.value === "tool_handoff_leaving") return true;
-  if (runPhase.value === "tool_running") return hasToolPendingActivity.value;
-  return false;
+  if (runPhase.value !== "tool_running") return false;
+  return Boolean(activeToolRun.value || runningToolPendingStepState.value);
 });
 
 const toolPendingCardAction = computed(() => {
@@ -1298,8 +1310,54 @@ const toolPendingCardDetail = computed(() => {
   return String(primaryToolPendingStepState.value?.detail || "").trim();
 });
 
+const toolPendingCardStepsData = computed(() => {
+  const active = activeToolRun.value;
+  const fallback = runningToolPendingStepState.value || latestToolPendingStepState.value;
+  const fromState = active
+    ? toolPendingStepStates.value.find((item) => item.step === active.step) || null
+    : null;
+  const source = fromState || fallback;
+
+  if (!source && !active) return [];
+
+  if (!source && active) {
+    const line = formatToolPendingStepLine({
+      step: active.step,
+      action: active.action,
+      detail: formatToolPendingDetail(active.action, active.arguments),
+      status: "running",
+      error: "",
+      logs: []
+    });
+    return [{
+      step: active.step,
+      status: "running" as const,
+      line,
+      logs: []
+    }];
+  }
+
+  if (!source) return [];
+  return [{
+    step: source.step,
+    status: source.status,
+    line: formatToolPendingStepLine(source),
+    logs: Array.isArray(source.logs) ? source.logs.slice(-TOOL_STEP_LOG_MAX_LINES) : []
+  }];
+});
+
+const toolHistoryToggleLabel = computed(() =>
+  showToolHistory.value ? "隐藏工具轨迹" : "显示工具轨迹"
+);
+
 const stableMessages = computed<DisplayMessage[]>(() => {
-  const rendered = (messages.value || [])
+  return (messages.value || [])
+    .filter((item) => {
+      const role = String(item?.role || "");
+      if (role !== "tool") return true;
+      if (showToolHistory.value) return true;
+      return shouldAlwaysShowToolMessage(item);
+    })
     .map((item) => ({
       role: String(item?.role || ""),
       content: String(item?.content || ""),
@@ -1307,44 +1365,6 @@ const stableMessages = computed<DisplayMessage[]>(() => {
       toolName: String(item?.toolName || ""),
       toolCallId: String(item?.toolCallId || "")
     }));
-  const pending = pendingRegenerate.value || userPendingRegenerate.value;
-  const showRegeneratePlaceholder = Boolean(
-    pending &&
-    (
-      !isRunning.value ||
-      (!shouldShowStreamingDraft.value && !shouldShowToolPendingCard.value)
-    )
-  );
-  if (pending && showRegeneratePlaceholder) {
-    const placeholder: DisplayMessage = {
-      role: "assistant_placeholder",
-      content: "正在重新生成回复…",
-      entryId: `__regen_placeholder__${pending.mode}__${pending.sourceEntryId}`,
-      busyPlaceholder: true,
-      busyMode: pending.mode,
-      busySourceEntryId: pending.sourceEntryId
-    };
-
-    const replaceMode = pending.strategy ? pending.strategy === "replace" : pending.mode === "retry";
-    if (replaceMode) {
-      const targetIndex = rendered.findIndex(
-        (item) => item.role === "assistant" && item.entryId === pending.sourceEntryId
-      );
-      if (targetIndex >= 0) {
-        rendered.splice(targetIndex, 1, placeholder);
-      } else {
-        rendered.push(placeholder);
-      }
-    } else {
-      const anchorIndex = rendered.findIndex((item) => item.entryId === pending.insertAfterUserEntryId);
-      if (anchorIndex >= 0) {
-        rendered.splice(anchorIndex + 1, 0, placeholder);
-      } else {
-        rendered.push(placeholder);
-      }
-    }
-  }
-  return rendered;
 });
 
 const hasVisibleConversation = computed(() =>
@@ -2039,6 +2059,9 @@ onUnmounted(() => {
               <button role="menuitem" @click="handleRefreshSession(activeSessionId); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
                 <RefreshCcw :size="14" aria-hidden="true" /> 重新生成标题
               </button>
+              <button role="menuitem" @click="showToolHistory = !showToolHistory; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
+                <Activity :size="14" aria-hidden="true" /> {{ toolHistoryToggleLabel }}
+              </button>
               <button role="menuitem" @click="showDebug = true; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
                 <Bug :size="14" aria-hidden="true" /> 运行调试
               </button>
@@ -2078,7 +2101,7 @@ onUnmounted(() => {
         aria-label="对话历史记录"
       >
         <div class="w-full px-5 pt-6 pb-8">
-          <div v-if="hasVisibleConversation" class="space-y-8" role="list">
+          <div v-if="hasVisibleConversation" class="space-y-2" role="list">
             <ChatMessage
               v-for="(msg, index) in stableMessages"
               :key="msg.entryId"
@@ -2087,9 +2110,6 @@ onUnmounted(() => {
               :entry-id="msg.entryId"
               :tool-name="msg.toolName"
               :tool-call-id="msg.toolCallId"
-              :busy-placeholder="msg.busyPlaceholder"
-                :busy-mode="msg.busyMode"
-                :busy-source-entry-id="msg.busySourceEntryId"
                 :edit-disabled="loading || isRunning"
                 :copied="copiedEntryId === msg.entryId"
                 :retrying="retryingEntryId === msg.entryId"
@@ -2125,20 +2145,14 @@ onUnmounted(() => {
               role="tool_pending"
               content=""
               :entry-id="`__tool_pending__${String(activeSessionId || '__global__')}__${activeRunToken}`"
-              :tool-name="activeToolRun?.action || 'llm'"
+              :tool-name="activeToolRun?.action || toolPendingCardAction || 'llm'"
               :tool-pending="true"
               :tool-pending-leaving="toolPendingCardLeaving"
               :tool-pending-status="toolPendingCardStatus"
               :tool-pending-headline="toolPendingCardHeadline"
               :tool-pending-action="toolPendingCardAction"
               :tool-pending-detail="toolPendingCardDetail"
-              :tool-pending-steps="toolPendingStepLines"
-              :tool-pending-steps-data="toolPendingStepStates.map((item) => ({
-                step: item.step,
-                status: item.status,
-                line: formatToolPendingStepLine(item),
-                logs: Array.isArray(item.logs) ? [...item.logs] : []
-              }))"
+              :tool-pending-steps-data="toolPendingCardStepsData"
             />
           </div>
 

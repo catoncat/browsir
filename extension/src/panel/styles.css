@@ -28,6 +28,15 @@
   --incremark-color-interactive-link: #1a73e8;
   --incremark-color-interactive-link-hover: #1557b0;
   --incremark-border-radius-lg: 10px;
+
+  /* Code Block: GitHub Light */
+  --incremark-color-code-inline-background: #f6f8fa;
+  --incremark-color-code-inline-text: #24292f;
+  --incremark-color-code-block-background: #f6f8fa;
+  --incremark-color-code-header-background: #f6f8fa;
+  --incremark-color-code-block-text: #24292f;
+  --incremark-color-border-strong: #d0d7de;
+  --incremark-color-text-tertiary: #57606a;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -48,7 +57,47 @@
     --incremark-color-border-subtle: var(--border) !important;
     --incremark-color-interactive-link: #8ab4f8;
     --incremark-color-interactive-link-hover: #aecbfa;
+
+    /* Code Block: Neutral Dark Base */
+    --incremark-color-code-inline-background: #25282b;
+    --incremark-color-code-inline-text: #e6ebf1;
+    --incremark-color-code-block-background: #25282b;
+    --incremark-color-code-header-background: #25282b;
+    --incremark-color-code-block-text: #e6ebf1;
+    --incremark-color-border-strong: #30363d;
+    --incremark-color-text-tertiary: #a8b0ba;
   }
+}
+
+/* 显式主题优先级高于系统偏好，避免首屏或切换期变量漂移 */
+:root[data-theme="light"],
+:root.theme-light,
+html.light,
+body[data-theme="light"],
+body.theme-light,
+body.light {
+  --incremark-color-code-inline-background: #f6f8fa;
+  --incremark-color-code-inline-text: #24292f;
+  --incremark-color-code-block-background: #f6f8fa;
+  --incremark-color-code-header-background: #f6f8fa;
+  --incremark-color-code-block-text: #24292f;
+  --incremark-color-border-strong: #d0d7de;
+  --incremark-color-text-tertiary: #57606a;
+}
+
+:root[data-theme="dark"],
+:root.theme-dark,
+html.dark,
+body[data-theme="dark"],
+body.theme-dark,
+body.dark {
+  --incremark-color-code-inline-background: #25282b;
+  --incremark-color-code-inline-text: #e6ebf1;
+  --incremark-color-code-block-background: #25282b;
+  --incremark-color-code-header-background: #25282b;
+  --incremark-color-code-block-text: #e6ebf1;
+  --incremark-color-border-strong: #30363d;
+  --incremark-color-text-tertiary: #a8b0ba;
 }
 
 @layer base {
@@ -85,11 +134,81 @@
   /* 代码块容器样式微调 */
   .incremark-code {
     @apply border border-ui-border/40 shadow-sm transition-all;
+    margin: 10px 0 !important;
+    border-radius: 8px !important;
+  }
+
+  .incremark-code .code-header {
+    padding: 6px 10px !important;
+    min-height: 30px !important;
+  }
+
+  .incremark-code .code-header .language {
+    font-size: 11px !important;
+    letter-spacing: 0.25px !important;
+  }
+
+  .incremark-code .code-btn {
+    width: 20px !important;
+    height: 20px !important;
+    font-size: 13px !important;
+  }
+
+  .incremark-code .code-btn:hover:not(:disabled) {
+    background-color: rgba(15, 23, 42, 0.08);
   }
 
   .shiki-wrapper pre,
   .shiki-wrapper .shiki {
     background: transparent !important;
+    padding: 10px 12px !important;
+  }
+
+  .shiki-wrapper code,
+  .shiki-wrapper .shiki code,
+  .code-fallback code {
+    font-size: 13px !important;
+    line-height: 1.55 !important;
+  }
+
+  /* 行内代码：独立于代码块，单独设定亮/暗配色 */
+  .incremark .incremark-inline-code,
+  .incremark :not(pre) > code {
+    padding: 1px 6px !important;
+    border-radius: 6px !important;
+    border: 1px solid var(--incremark-color-border-strong) !important;
+    background: var(--incremark-color-code-block-background) !important;
+    color: var(--incremark-color-code-block-text) !important;
+    line-height: 1.35 !important;
+  }
+
+  /* 代码块暗色主题：Codex 风格中性灰，不走偏蓝底 */
+  .incremark-theme-provider[data-theme="dark"] .incremark-code,
+  .incremark-theme-provider.theme-dark .incremark-code {
+    background: #25282b !important;
+    color: #e6ebf1 !important;
+    border-color: #3c4043 !important;
+  }
+
+  .incremark-theme-provider[data-theme="dark"] .incremark-code .code-header,
+  .incremark-theme-provider.theme-dark .incremark-code .code-header {
+    background: #25282b !important;
+    border-bottom-color: #3c4043 !important;
+  }
+
+  .incremark-theme-provider[data-theme="dark"] .incremark-code .code-header .language,
+  .incremark-theme-provider.theme-dark .incremark-code .code-header .language {
+    color: #a8b0ba !important;
+  }
+
+  .incremark-theme-provider[data-theme="dark"] .incremark-code .code-btn,
+  .incremark-theme-provider.theme-dark .incremark-code .code-btn {
+    color: #cfd6df !important;
+  }
+
+  .incremark-theme-provider[data-theme="dark"] .incremark-code .code-btn:hover:not(:disabled),
+  .incremark-theme-provider.theme-dark .incremark-code .code-btn:hover:not(:disabled) {
+    background-color: rgba(255, 255, 255, 0.1) !important;
   }
 
   /* 彻底解决深色模式下引用背景变白的问题 */

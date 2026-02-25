@@ -1,15 +1,15 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { usePreferredDark } from "@vueuse/core";
 import { IncremarkContent, ThemeProvider } from "@incremark/vue";
 import IncremarkCodeBlock from "./IncremarkCodeBlock.vue";
+import { usePanelDarkMode } from "../utils/use-panel-dark-mode";
 
 const props = defineProps<{
   content: string;
   active: boolean;
 }>();
 
-const isDark = usePreferredDark();
+const isDark = usePanelDarkMode();
 const incremarkTheme = computed(() => (isDark.value ? "dark" : "default"));
 const hasContent = computed(() => String(props.content || "").trim().length > 0);
 

@@ -7,12 +7,12 @@ import langPython from "@shikijs/langs/python";
 import langTsx from "@shikijs/langs/tsx";
 import langTypeScript from "@shikijs/langs/typescript";
 import langYaml from "@shikijs/langs/yaml";
-import themeGithubDark from "@shikijs/themes/github-dark";
 import themeGithubLight from "@shikijs/themes/github-light";
+import themeMinDark from "@shikijs/themes/min-dark";
 import { createHighlighterCore } from "shiki/core";
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
 
-export type ShikiTheme = "github-light" | "github-dark";
+export type ShikiTheme = "github-light" | "min-dark";
 
 type HighlighterCoreInstance = Awaited<ReturnType<typeof createHighlighterCore>>;
 type HighlightLanguage = string | "text";
@@ -81,7 +81,7 @@ async function getHighlighter(): Promise<HighlighterCoreInstance> {
   if (!highlighterPromise) {
     highlighterPromise = createHighlighterCore({
       engine: createJavaScriptRegexEngine(),
-      themes: [themeGithubLight, themeGithubDark],
+      themes: [themeGithubLight, themeMinDark],
       langs: PRELOADED_LANGUAGE_MODULES
     });
   }

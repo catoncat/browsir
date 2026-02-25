@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from "vue";
-import { usePreferredDark } from "@vueuse/core";
 import {
   Sparkles,
   ChevronDown,
@@ -20,6 +19,7 @@ import {
 import { resolveToolRender } from "../utils/tool-renderers";
 import { IncremarkContent, ThemeProvider } from "@incremark/vue";
 import IncremarkCodeBlock from "./IncremarkCodeBlock.vue";
+import { usePanelDarkMode } from "../utils/use-panel-dark-mode";
 
 interface ToolPendingStepData {
   step: number;
@@ -43,9 +43,6 @@ const props = defineProps<{
   toolPendingDetail?: string;
   toolPendingSteps?: string[];
   toolPendingStepsData?: ToolPendingStepData[];
-  busyPlaceholder?: boolean;
-  busyMode?: "retry" | "fork";
-  busySourceEntryId?: string;
   copied?: boolean;
   retrying?: boolean;
   forking?: boolean;
@@ -78,7 +75,6 @@ const isAssistant = computed(() => props.role === "assistant");
 const isAssistantStreaming = computed(() => props.role === "assistant_streaming");
 const isAssistantLike = computed(() => isAssistant.value || isAssistantStreaming.value);
 const isStreamingPlainText = computed(() => isAssistantStreaming.value && props.streamingMode === "plain");
-const isAssistantPlaceholder = computed(() => props.role === "assistant_placeholder" || props.busyPlaceholder === true);
 const isTool = computed(() => props.role === "tool");
 const isToolPending = computed(() => props.role === "tool_pending" || props.toolPending === true);
 
@@ -86,7 +82,7 @@ const incremarkComponents = {
   code: IncremarkCodeBlock
 };
 
-const isDark = usePreferredDark();
+const isDark = usePanelDarkMode();
 const incremarkTheme = computed(() => isDark.value ? "dark" : "default");
 
 const isFinished = computed(() => props.role !== "assistant_streaming");
@@ -95,9 +91,8 @@ const showThinking = ref(false);
 const showSystemSummary = ref(false);
 const inlineTextarea = ref<HTMLTextAreaElement | null>(null);
 const pendingActivityViewport = ref<HTMLElement | null>(null);
-const pendingCardExpanded = ref(false);
 const pendingCardStickToBottom = ref(true);
-const STEP_LOG_PREVIEW_LINES = 4;
+const TOOL_COMPACT_LINE_MAX = 120;
 
 const toolRender = computed(() =>
   resolveToolRender({
@@ -132,14 +127,75 @@ const messageAriaPreview = computed(() => {
   if (isTool.value) return toolRender.value.title;
   return props.content.slice(0, 50);
 });
+
+function clipInlineText(text: string, max = TOOL_COMPACT_LINE_MAX): string {
+  const value = String(text || "").trim();
+  if (!value) return "";
+  return value.length > max ? `${value.slice(0, max)}…` : value;
+}
+
+function normalizeToolHeadline(title: string): string {
+  let value = String(title || "").trim();
+  if (!value) return "工具调用";
+  value = value.replace(/^已执行工具[:：]\s*/u, "");
+  value = value.replace(/^已执行工具调用$/u, "工具调用");
+  value = value.replace(/^已读取页面快照$/u, "snapshot");
+  value = value.replace(/^已读取页面[:：]\s*/u, "snapshot · ");
+  value = value.replace(/^已打开标签页$/u, "open_tab");
+  value = value.replace(/^已获取\s*(\d+)\s*个标签页$/u, "tabs · $1");
+  value = value.replace(/^浏览器动作已执行并通过验证$/u, "browser_action · verified");
+  value = value.replace(/^浏览器动作已执行$/u, "browser_action");
+  value = value.replace(/^工具调用失败[:：]\s*/u, "失败 · ");
+  value = value.replace(/^工具失败[:：]\s*/u, "失败 · ");
+  return value || "工具调用";
+}
+
+function normalizeToolSubtitle(subtitle: string): string {
+  let value = String(subtitle || "").trim();
+  if (!value) return "";
+  value = value.replace(/\s*[·|]\s*调用\s*ID[:：][^·|]+/giu, "");
+  value = value.replace(/调用\s*ID[:：][^·|]+/giu, "");
+  value = value.replace(/^命令[:：]\s*/u, "");
+  value = value.replace(/^路径[:：]\s*/u, "");
+  value = value.replace(/^目标[:：]\s*/u, "");
+  return value.trim();
+}
+
+const toolCompactLine = computed(() => {
+  if (!isTool.value) return "";
+  const head = normalizeToolHeadline(toolRender.value.title);
+  const tail = normalizeToolSubtitle(toolRender.value.subtitle);
+  return clipInlineText(tail ? `${head} · ${tail}` : head);
+});
+
+const toolToggleAriaLabel = computed(() =>
+  showThinking.value ? "收起运行详情" : "展开运行详情"
+);
+const pendingToneClass = computed(() =>
+  props.toolPendingStatus === "failed" ? "bg-rose-100/40 dark:bg-rose-900/20" : "bg-ui-surface/45"
+);
+const pendingToneTextClass = computed(() =>
+  props.toolPendingStatus === "failed" ? "text-rose-700/90 dark:text-rose-300/90" : "text-ui-text"
+);
+const pendingCompactLine = computed(() => {
+  const action = String(props.toolPendingAction || props.toolName || "tool").trim();
+  const detail = normalizeToolSubtitle(String(props.toolPendingDetail || ""));
+  const status = props.toolPendingStatus === "failed"
+    ? "失败"
+    : props.toolPendingStatus === "done"
+      ? "完成"
+      : "执行中";
+  const base = [status, action].filter(Boolean).join(" · ");
+  return clipInlineText(detail ? `${base} · ${detail}` : base);
+});
 const toolToneClass = computed(() => {
-  if (toolRender.value.tone === "error") return "border-rose-300/80 bg-rose-50/60";
-  if (toolRender.value.tone === "success") return "border-emerald-300/70 bg-emerald-50/40";
-  return "border-ui-border bg-ui-surface/60";
+  if (toolRender.value.tone === "error") return "bg-rose-100/40 dark:bg-rose-900/20";
+  if (toolRender.value.tone === "success") return "bg-ui-surface/45";
+  return "bg-ui-surface/45";
 });
 const toolToneTextClass = computed(() => {
-  if (toolRender.value.tone === "error") return "text-rose-700";
-  if (toolRender.value.tone === "success") return "text-emerald-700";
+  if (toolRender.value.tone === "error") return "text-rose-700/90 dark:text-rose-300/90";
+  if (toolRender.value.tone === "success") return "text-ui-text";
   return "text-ui-text";
 });
 const toolIcon = computed(() => {
@@ -171,19 +227,12 @@ const pendingStepItems = computed(() => {
     logs: []
   }));
 });
-const pendingTotalLogLines = computed(() =>
-  pendingStepItems.value.reduce((total, item) => total + item.logs.length, 0)
+const currentPendingStepItem = computed(() =>
+  pendingStepItems.value.length ? pendingStepItems.value[pendingStepItems.value.length - 1] : null
 );
-const pendingLineCount = computed(() =>
-  pendingStepItems.value.reduce((total, item) => total + 1 + item.logs.length, 0)
+const currentPendingLogs = computed(() =>
+  Array.isArray(currentPendingStepItem.value?.logs) ? currentPendingStepItem.value?.logs || [] : []
 );
-const pendingCardExpandable = computed(() => pendingLineCount.value > 10);
-
-function visibleLogsForStep(logs: string[]) {
-  if (pendingCardExpanded.value) return logs;
-  if (logs.length <= STEP_LOG_PREVIEW_LINES) return logs;
-  return logs.slice(-STEP_LOG_PREVIEW_LINES);
-}
 
 function toggleThinking() {
   showThinking.value = !showThinking.value;
@@ -191,10 +240,6 @@ function toggleThinking() {
 
 function toggleSystemSummary() {
   showSystemSummary.value = !showSystemSummary.value;
-}
-
-function togglePendingCardExpand() {
-  pendingCardExpanded.value = !pendingCardExpanded.value;
 }
 
 function handleCopy() {
@@ -271,24 +316,15 @@ watch(
 watch(
   () => props.entryId,
   () => {
-    pendingCardExpanded.value = false;
     pendingCardStickToBottom.value = true;
   }
 );
 
 watch(
-  () => pendingLineCount.value,
+  () => pendingStepItems.value.map((item) => `${item.step}:${item.status}:${item.logs.length}`).join("|"),
   async () => {
     await nextTick();
     syncPendingActivityScroll();
-  }
-);
-
-watch(
-  () => pendingCardExpanded.value,
-  async () => {
-    await nextTick();
-    syncPendingActivityScroll(true);
   }
 );
 
@@ -303,9 +339,10 @@ watch(
 
 <template>
   <div 
-    class="flex flex-col mb-6 animate-in fade-in duration-300 group"
+    class="flex flex-col animate-in fade-in duration-300 group"
+    :class="isTool || isToolPending ? 'mb-1' : 'mb-2.5'"
     role="listitem"
-    :aria-label="`${isUser ? '用户' : isSystem ? '系统' : (isAssistantLike || isAssistantPlaceholder) ? '助手' : '工具'}消息: ${messageAriaPreview}...`"
+    :aria-label="`${isUser ? '用户' : isSystem ? '系统' : isAssistantLike ? '助手' : '工具'}消息: ${messageAriaPreview}...`"
   >
     <!-- User Message: Rounded Bubble -->
     <div
@@ -525,24 +562,6 @@ watch(
       </div>
     </div>
 
-    <!-- Regenerate Placeholder -->
-    <div
-      v-else-if="isAssistantPlaceholder"
-      class="flex flex-col gap-2 pr-2 transition-all duration-200"
-      :class="props.busyMode === 'fork' ? 'translate-y-0.5 opacity-95' : ''"
-      data-testid="regenerate-placeholder"
-      role="status"
-      aria-live="polite"
-      aria-busy="true"
-      :data-mode="props.busyMode || 'retry'"
-      :data-source-entry-id="props.busySourceEntryId || ''"
-    >
-      <div class="flex items-center gap-2 text-ui-accent">
-        <Loader2 :size="14" class="animate-spin" data-testid="regenerate-spinner" />
-        <span class="text-[13px] font-semibold animate-pulse">正在重新生成回复…</span>
-      </div>
-    </div>
-
     <!-- Tool Pending Placeholder -->
     <div
       v-else-if="isToolPending"
@@ -554,102 +573,99 @@ watch(
       data-testid="tool-running-placeholder"
       :data-tool-action="props.toolPendingAction || props.toolName || ''"
     >
-      <div class="tool-running-pill rounded-lg border border-ui-accent/25 px-3 py-2.5">
-        <div class="flex items-center gap-2">
-          <Loader2 v-if="props.toolPendingStatus !== 'done' && props.toolPendingStatus !== 'failed'" :size="13" class="animate-spin text-ui-accent" aria-hidden="true" />
-          <Check v-else-if="props.toolPendingStatus === 'done'" :size="13" class="text-emerald-600" aria-hidden="true" />
-          <X v-else :size="13" class="text-rose-600" aria-hidden="true" />
-          <span
-            class="text-[12px] font-semibold"
-            :class="props.toolPendingStatus === 'failed'
-              ? 'text-rose-700'
-              : props.toolPendingStatus === 'done'
-                ? 'text-emerald-700'
-                : 'text-ui-accent'"
+      <div class="tool-running-pill rounded-md px-2.5 py-2" :class="pendingToneClass">
+        <div class="flex items-center gap-2 min-w-0">
+          <div class="h-5 w-5 shrink-0 rounded-md bg-ui-bg/85 text-ui-text-muted flex items-center justify-center">
+            <Loader2
+              v-if="props.toolPendingStatus !== 'done' && props.toolPendingStatus !== 'failed'"
+              :size="12"
+              class="animate-spin"
+              aria-hidden="true"
+            />
+            <Check
+              v-else-if="props.toolPendingStatus === 'done'"
+              :size="12"
+              aria-hidden="true"
+            />
+            <X
+              v-else
+              :size="12"
+              aria-hidden="true"
+            />
+          </div>
+          <p
+            class="min-w-0 flex-1 truncate text-[12px] font-semibold leading-snug"
+            :class="pendingToneTextClass"
+            :title="props.toolPendingHeadline || pendingCompactLine"
           >
-            {{ props.toolPendingHeadline || `正在执行：${props.toolPendingAction || props.toolName || "工具调用"}` }}
-          </span>
+            {{ props.toolPendingHeadline || pendingCompactLine }}
+          </p>
         </div>
         <p
           v-if="props.toolPendingDetail"
-          class="mt-1.5 text-[11px] leading-snug text-ui-text-muted break-all pl-5"
+          class="mt-1.5 text-[11px] leading-snug text-ui-text-muted break-all pl-7"
         >
           {{ props.toolPendingDetail }}
         </p>
         <div
-          v-if="pendingStepItems.length"
+          v-if="currentPendingStepItem"
           ref="pendingActivityViewport"
-          class="tool-activity-viewport mt-2.5 overflow-y-auto border-t border-ui-accent/20 pt-2 font-mono text-[11px] leading-snug"
-          :class="pendingCardExpanded ? 'max-h-72' : 'max-h-44'"
+          class="tool-activity-viewport mt-2.5 max-h-40 overflow-y-auto rounded-md bg-ui-bg/70 px-2 py-1.5 font-mono text-[11px] leading-snug"
+          role="log"
+          aria-live="polite"
           @scroll="handlePendingActivityScroll"
         >
           <div
-            v-for="(item, idx) in pendingStepItems"
-            :key="item.step"
-            class="py-1.5"
-            :class="idx > 0 ? 'border-t border-ui-accent/10' : ''"
+            class="py-1"
           >
-            <p
-              class="break-all whitespace-pre-wrap"
-              :class="item.status === 'failed' ? 'text-rose-700' : item.status === 'done' ? 'text-ui-text' : 'text-ui-text'"
-            >
-              {{ item.line }}
-            </p>
-            <div v-if="item.logs.length" class="mt-1 pl-3">
+            <div v-if="currentPendingLogs.length" class="pl-2">
               <p
-                v-for="(log, logIdx) in visibleLogsForStep(item.logs)"
-                :key="`${item.step}-log-${logIdx}-${log}`"
+                v-for="(log, logIdx) in currentPendingLogs"
+                :key="`${currentPendingStepItem.step}-log-${logIdx}-${log}`"
                 class="break-all whitespace-pre-wrap text-ui-text-muted"
               >
-                <span class="text-ui-accent/80">› </span>{{ log }}
-              </p>
-              <p
-                v-if="!pendingCardExpanded && item.logs.length > STEP_LOG_PREVIEW_LINES"
-                class="text-[10px] text-ui-text-muted/90"
-              >
-                … 还有 {{ item.logs.length - STEP_LOG_PREVIEW_LINES }} 行输出
+                <span class="text-ui-text-muted/70">› </span>{{ log }}
               </p>
             </div>
+            <p
+              v-else
+              class="pl-2 text-ui-text-muted/80"
+            >
+              等待输出…
+            </p>
           </div>
-        </div>
-        <div class="mt-2 flex items-center justify-between text-[10px] text-ui-text-muted">
-          <span>{{ pendingStepItems.length }} 步 · 输出 {{ pendingTotalLogLines }} 行</span>
-          <button
-            v-if="pendingCardExpandable"
-            type="button"
-            class="rounded px-1.5 py-0.5 font-semibold text-ui-accent hover:bg-ui-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-            :aria-label="pendingCardExpanded ? '收起执行卡片' : '展开执行卡片'"
-            @click="togglePendingCardExpand"
-          >
-            {{ pendingCardExpanded ? "收起" : "展开" }}
-          </button>
         </div>
       </div>
     </div>
 
     <!-- Tool/Thinking Message: Collapsible (No buttons) -->
-    <div v-else-if="isTool" class="flex flex-col" role="group" aria-label="工具调用结果">
-      <div class="rounded-lg border p-2.5" :class="toolToneClass">
-        <div class="flex items-start gap-2.5">
-          <div class="mt-0.5 h-5 w-5 shrink-0 rounded-md bg-white/70 text-ui-accent flex items-center justify-center border border-ui-border/60">
+    <div v-else-if="isTool" class="flex flex-col group/tool" role="group" aria-label="工具调用结果">
+      <div class="rounded-md px-2 py-1.5" :class="toolToneClass">
+        <div class="flex items-center gap-1.5 min-w-0">
+          <div class="h-4.5 w-4.5 shrink-0 rounded-sm bg-ui-bg/80 text-ui-text-muted flex items-center justify-center">
             <component :is="toolIcon" :size="12" aria-hidden="true" />
           </div>
-          <div class="min-w-0 flex-1">
-            <p class="text-[12px] font-semibold leading-snug" :class="toolToneTextClass">{{ toolRender.title }}</p>
-            <p v-if="toolRender.subtitle" class="mt-1 text-[11px] leading-snug text-ui-text-muted break-all">{{ toolRender.subtitle }}</p>
-          </div>
+          <p
+            class="min-w-0 flex-1 truncate text-[11px] font-semibold leading-snug"
+            :class="toolToneTextClass"
+            :title="toolRender.subtitle ? `${toolRender.title} · ${toolRender.subtitle}` : toolRender.title"
+          >
+            {{ toolCompactLine }}
+          </p>
+          <button
+            type="button"
+            class="shrink-0 rounded-sm p-1 text-ui-text-muted transition-opacity hover:bg-ui-bg/60 hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-text-muted"
+            :class="showThinking ? 'opacity-100' : 'opacity-0 group-hover/tool:opacity-100 group-focus-within/tool:opacity-100'"
+            :aria-label="toolToggleAriaLabel"
+            :title="toolToggleAriaLabel"
+            :aria-expanded="showThinking"
+            aria-controls="thinking-content"
+            @click="toggleThinking"
+          >
+            <ChevronUp v-if="showThinking" :size="12" aria-hidden="true" />
+            <ChevronDown v-else :size="12" aria-hidden="true" />
+          </button>
         </div>
-        <button
-          type="button"
-          class="mt-2 flex w-fit items-center gap-2 py-1 text-[11px] font-bold text-ui-accent cursor-pointer select-none hover:opacity-80 transition-opacity rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-          :aria-expanded="showThinking"
-          aria-controls="thinking-content"
-          @click="toggleThinking"
-        >
-          <span class="uppercase tracking-wider">{{ showThinking ? "隐藏运行详情" : "查看运行详情" }}</span>
-          <ChevronUp v-if="showThinking" :size="12" aria-hidden="true" />
-          <ChevronDown v-else :size="12" aria-hidden="true" />
-        </button>
       </div>
       <div
         v-if="showThinking"
@@ -658,7 +674,7 @@ watch(
         role="region"
         aria-label="工具详细数据"
       >
-        <pre class="text-[11px] bg-ui-surface p-2.5 rounded-md border border-ui-border overflow-x-auto my-1.5 font-mono"><code>{{ toolTextContent }}</code></pre>
+        <pre class="text-[11px] bg-ui-bg/70 p-2 rounded-md overflow-x-auto my-1 font-mono text-ui-text-muted"><code>{{ toolTextContent }}</code></pre>
       </div>
     </div>
   </div>
@@ -675,12 +691,15 @@ watch(
 }
 
 .tool-running-pill {
-  position: relative;
-  overflow: hidden;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  background: linear-gradient(155deg, rgba(30, 41, 59, 0.08) 0%, rgba(37, 99, 235, 0.08) 100%);
-  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.12);
+  background: rgba(15, 23, 42, 0.04);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+@media (prefers-color-scheme: dark) {
+  .tool-running-pill {
+    background: rgba(148, 163, 184, 0.12);
+  }
 }
 
 .tool-activity-viewport {

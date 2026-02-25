@@ -1,18 +1,18 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { usePreferredDark } from "@vueuse/core";
 import { Check, Copy } from "lucide-vue-next";
 import type { Code } from "mdast";
 import { highlightCodeToHtml, normalizeCodeLanguage, type ShikiTheme } from "../utils/shiki-highlighter";
+import { usePanelDarkMode } from "../utils/use-panel-dark-mode";
 
 const props = defineProps<{
   node: Code;
 }>();
 
-const isDark = usePreferredDark();
+const isDark = usePanelDarkMode();
 const code = computed(() => String(props.node?.value || ""));
 const languageLabel = computed(() => normalizeCodeLanguage(props.node?.lang));
-const shikiTheme = computed<ShikiTheme>(() => (isDark.value ? "github-dark" : "github-light"));
+const shikiTheme = computed<ShikiTheme>(() => (isDark.value ? "min-dark" : "github-light"));
 
 const highlightedHtml = ref("");
 const copied = ref(false);
