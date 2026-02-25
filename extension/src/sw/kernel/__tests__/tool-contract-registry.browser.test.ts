@@ -106,6 +106,7 @@ describe("tool-contract-registry", () => {
       press_key: ["key"],
       navigate_tab: ["url"],
       fill_form: ["elements"],
+      browser_verify: ["expect"],
       computer: ["action"],
       download_image: ["imageData"],
       download_chat_images: ["messages"],

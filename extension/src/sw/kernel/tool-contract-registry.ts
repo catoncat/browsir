@@ -385,7 +385,7 @@ const BROWSER_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "browser_verify",
     description:
-      "Run explicit browser verification checks. Use after state-changing actions. Never claim task done when verify fails or checks are empty.",
+      "Run explicit browser verification checks. Always provide expect with at least one concrete assertion; empty-check verify is invalid.",
     parameters: {
       type: "object",
       properties: {
@@ -395,7 +395,7 @@ const BROWSER_TOOL_CONTRACTS: ToolContract[] = [
           description: "At least one check: expectUrlContains/titleContains/urlChanged/textIncludes/selectorExists."
         }
       },
-      required: []
+      required: ["expect"]
     }
   },
   {

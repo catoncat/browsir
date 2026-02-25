@@ -2001,6 +2001,233 @@ describe("runtime-router.browser", () => {
     expect(String(toolPayload.errorCode || "")).toBe("E_REF_REQUIRED");
   });
 
+  it("tool_call browser_verify 无 expect 时应拒绝并返回 E_ARGS", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    let llmCall = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
+      if (llmCall === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_verify_args_1",
+                      type: "function",
+                      function: {
+                        name: "browser_verify",
+                        arguments: JSON.stringify({
+                          tabId: 1
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "done"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test",
+        autoTitleInterval: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "触发 browser_verify 参数校验"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+
+    const viewed = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(viewed.ok).toBe(true);
+    const messages = readConversationMessages(viewed);
+    const toolPayload = messages
+      .filter((entry) => String(entry.role || "") === "tool" && String(entry.toolCallId || "") === "call_verify_args_1")
+      .map((entry) => JSON.parse(String(entry.content || "{}")) as Record<string, unknown>)[0];
+    expect(toolPayload).toBeDefined();
+    expect(String(toolPayload.errorCode || "")).toBe("E_ARGS");
+    expect(String(toolPayload.error || "")).toContain("expect");
+  });
+
+  it("tool_call computer(type) 返回 success=false 时应按失败协议收口", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    (chrome as unknown as { debugger: any }).debugger = {
+      attach: async () => {},
+      detach: async () => {},
+      sendCommand: async (_target: any, method: string, params: any = {}) => {
+        if (method === "Runtime.evaluate" && String(params.expression || "").includes("active_element_not_typable")) {
+          return {
+            result: {
+              value: {
+                success: false,
+                error: "active_element_not_typable"
+              }
+            }
+          };
+        }
+        if (method === "Runtime.evaluate") {
+          return {
+            result: {
+              value: {
+                url: "https://example.com",
+                title: "Example",
+                readyState: "complete",
+                textLength: 100,
+                nodeCount: 20
+              }
+            }
+          };
+        }
+        if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+        if (method === "DOM.querySelector") return { nodeId: 0 };
+        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "frame-1" }, childFrames: [] } };
+        if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+        return {};
+      },
+      onEvent: {
+        addListener: () => {}
+      },
+      onDetach: {
+        addListener: () => {}
+      }
+    };
+
+    let llmCall = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
+      if (llmCall === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_computer_type_1",
+                      type: "function",
+                      function: {
+                        name: "computer",
+                        arguments: JSON.stringify({
+                          tabId: 1,
+                          action: "type",
+                          text: "good"
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "done"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test",
+        autoTitleInterval: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "触发 computer type 失败协议"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+
+    const viewed = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(viewed.ok).toBe(true);
+    const messages = readConversationMessages(viewed);
+    const toolPayload = messages
+      .filter((entry) => String(entry.role || "") === "tool" && String(entry.toolCallId || "") === "call_computer_type_1")
+      .map((entry) => JSON.parse(String(entry.content || "{}")) as Record<string, unknown>)[0];
+    expect(toolPayload).toBeDefined();
+    expect(String(toolPayload.errorReason || "")).toBe("failed_execute");
+    expect(String(toolPayload.error || "")).toContain("active_element_not_typable");
+  });
+
   it("tool_call fill_element_by_uid 失败时输出可恢复协议并给出 focus 升级提示", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);

@@ -1163,6 +1163,12 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           String(this.getAttribute("role") || "")
             .trim()
             .toLowerCase() || String(this.tagName || "node").toLowerCase();
+        const editable =
+          this.isContentEditable === true ||
+          ("value" in this) ||
+          role === "textbox" ||
+          role === "searchbox" ||
+          role === "combobox";
         const text = String(this.textContent || "").replace(/\\s+/g, " ").trim();
         const value = "value" in this ? String(this.value || "") : "";
         return {
@@ -1174,6 +1180,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           value: value.slice(0, 180),
           placeholder: String(this.getAttribute("placeholder") || "").slice(0, 180),
           ariaLabel: String(this.getAttribute("aria-label") || "").slice(0, 180),
+          editable,
           selector: makeSelector(this),
           disabled: !!this.disabled,
           focused: document.activeElement === this
@@ -1383,12 +1390,19 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           const value = "value" in el ? String(el.value || "") : "";
           const placeholder = String(el.getAttribute("placeholder") || "");
           const ariaLabel = String(el.getAttribute("aria-label") || "");
+          const editable =
+            el.isContentEditable === true ||
+            ("value" in el) ||
+            role === "textbox" ||
+            role === "searchbox" ||
+            role === "combobox";
           return {
             role,
             name: text.slice(0, 180),
             value: value.slice(0, 180),
             placeholder: placeholder.slice(0, 180),
             ariaLabel: ariaLabel.slice(0, 180),
+            editable,
             selector: makeSelector(el),
             disabled: !!el.disabled,
             focused: document.activeElement === el,
@@ -1726,6 +1740,42 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           }
           return { ok: false, error: "element is not typable" };
         };
+        const TYPABLE_SELECTOR = "input,textarea,[contenteditable='true'],[role='textbox'],[role='searchbox'],[role='combobox']";
+        const isTypableElement = (target) => {
+          if (!target || target.nodeType !== 1) return false;
+          if ("disabled" in target && !!target.disabled) return false;
+          if ("readOnly" in target && !!target.readOnly) return false;
+          if ("value" in target) return true;
+          if (target.isContentEditable === true) return true;
+          const role = String(target.getAttribute?.("role") || "").trim().toLowerCase();
+          return role === "textbox" || role === "searchbox" || role === "combobox";
+        };
+        const findTypableNear = (origin) => {
+          if (!origin || origin.nodeType !== 1) return null;
+          const resolveByIdAttr = (attrValue) => {
+            const id = String(attrValue || "").trim();
+            if (!id) return null;
+            const el = document.getElementById(id);
+            return isTypableElement(el) ? el : null;
+          };
+          const byAriaControls = resolveByIdAttr(origin.getAttribute?.("aria-controls"));
+          if (byAriaControls) return byAriaControls;
+          const byFor = resolveByIdAttr(origin.getAttribute?.("for"));
+          if (byFor) return byFor;
+          const directDesc = origin.querySelector?.(TYPABLE_SELECTOR);
+          if (isTypableElement(directDesc)) return directDesc;
+          const labelDesc = origin.closest?.("label")?.querySelector?.(TYPABLE_SELECTOR);
+          if (isTypableElement(labelDesc)) return labelDesc;
+          let cur = origin;
+          for (let i = 0; i < 3 && cur; i += 1) {
+            const inParent = cur.parentElement?.querySelector?.(TYPABLE_SELECTOR);
+            if (isTypableElement(inParent)) return inParent;
+            cur = cur.parentElement;
+          }
+          const active = document.activeElement;
+          if (isTypableElement(active)) return active;
+          return null;
+        };
         el.scrollIntoView?.({ block: "center", inline: "nearest" });
         if (kind === "hover") {
           try {
@@ -1742,7 +1792,9 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           return { ok: true, clicked: true, via: "backend-node", url: location.href, title: document.title };
         }
         if (kind === "type" || kind === "fill") {
-          return applyTextToElement(el, value, kind);
+          const target = isTypableElement(el) ? el : findTypableNear(el);
+          if (!target) return { ok: false, error: "element is not typable" };
+          return applyTextToElement(target, value, kind);
         }
         if (kind === "select") {
           if (!("value" in el)) return { ok: false, error: "element is not selectable" };
@@ -1752,14 +1804,16 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           return { ok: true, selected: value, via: "backend-node", url: location.href, title: document.title };
         }
         if (kind === "read") {
-          if ("value" in el) {
-            return { ok: true, value: String(el.value ?? ""), length: String(el.value ?? "").length, via: "backend-node-value", url: location.href, title: document.title };
+          const target = isTypableElement(el) ? el : findTypableNear(el) || el;
+          if ("value" in target) {
+            const val = String(target.value ?? "");
+            return { ok: true, value: val, length: val.length, via: target === el ? "backend-node-value" : "backend-node-associated-value", url: location.href, title: document.title };
           }
-          if (el.isContentEditable) {
-            const text = String(el.textContent || "");
-            return { ok: true, value: text, length: text.length, via: "backend-node-contenteditable", url: location.href, title: document.title };
+          if (target.isContentEditable) {
+            const text = String(target.textContent || "");
+            return { ok: true, value: text, length: text.length, via: target === el ? "backend-node-contenteditable" : "backend-node-associated-contenteditable", url: location.href, title: document.title };
           }
-          const text = String(el.textContent || "");
+          const text = String(target.textContent || "");
           return { ok: true, value: text, length: text.length, via: "backend-node-text", url: location.href, title: document.title };
         }
         return { ok: false, error: "unsupported backend action", kind };
@@ -1899,8 +1953,9 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         placeholder: String(fromRef.placeholder || ""),
         ariaLabel: String(fromRef.ariaLabel || "")
       })};
+      const TYPABLE_SELECTOR = "input,textarea,[contenteditable='true'],[role='textbox'],[role='searchbox'],[role='combobox']";
       const allTypables = () => Array.from(
-        document.querySelectorAll("input,textarea,[contenteditable='true'],[role='textbox']")
+        document.querySelectorAll(TYPABLE_SELECTOR)
       ).filter((cand) => {
         if (!cand) return false;
         if ("disabled" in cand && !!cand.disabled) return false;
@@ -1908,6 +1963,43 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         const rect = cand.getBoundingClientRect?.();
         return !!rect && rect.width > 0 && rect.height > 0;
       });
+      const isTypableElement = (el) => {
+        if (!el || el.nodeType !== 1) return false;
+        if ("disabled" in el && !!el.disabled) return false;
+        if ("readOnly" in el && !!el.readOnly) return false;
+        if ("value" in el) return true;
+        if (el.isContentEditable === true) return true;
+        const role = String(el.getAttribute?.("role") || "").trim().toLowerCase();
+        return role === "textbox" || role === "searchbox" || role === "combobox";
+      };
+      const findTypableNear = (origin) => {
+        if (!origin || origin.nodeType !== 1) return null;
+        const resolveByIdAttr = (attrValue) => {
+          const id = String(attrValue || "").trim();
+          if (!id) return null;
+          const found = document.getElementById(id);
+          return isTypableElement(found) ? found : null;
+        };
+        const byAriaControls = resolveByIdAttr(origin.getAttribute?.("aria-controls"));
+        if (byAriaControls) return byAriaControls;
+        const byFor = resolveByIdAttr(origin.getAttribute?.("for"));
+        if (byFor) return byFor;
+        const directDesc = origin.querySelector?.(TYPABLE_SELECTOR);
+        if (isTypableElement(directDesc)) return directDesc;
+        const labelDesc = origin.closest?.("label")?.querySelector?.(TYPABLE_SELECTOR);
+        if (isTypableElement(labelDesc)) return labelDesc;
+        let cur = origin;
+        for (let i = 0; i < 3 && cur; i += 1) {
+          const inParent = cur.parentElement?.querySelector?.(TYPABLE_SELECTOR);
+          if (isTypableElement(inParent)) return inParent;
+          cur = cur.parentElement;
+        }
+        const hinted = pickByHint();
+        if (isTypableElement(hinted)) return hinted;
+        const active = document.activeElement;
+        if (isTypableElement(active)) return active;
+        return null;
+      };
       const pickByHint = () => {
         const candidates = allTypables();
         if (candidates.length === 1) return candidates[0];
@@ -2022,7 +2114,13 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       };
       const resolveElement = () => {
         const fromSelector = selector ? document.querySelector(selector) : null;
-        if (fromSelector) return fromSelector;
+        if (fromSelector) {
+          if (kind === "type" || kind === "fill" || kind === "read") {
+            const typedTarget = isTypableElement(fromSelector) ? fromSelector : findTypableNear(fromSelector);
+            if (typedTarget) return typedTarget;
+          }
+          return fromSelector;
+        }
         if (kind === "type" || kind === "fill") return pickByHint();
         return null;
       };
@@ -2063,15 +2161,16 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         return { ok: true, selected: value, url: location.href, title: document.title };
       }
       if (kind === "read") {
-        if ("value" in el) {
-          const val = String(el.value ?? "");
-          return { ok: true, value: val, length: val.length, url: location.href, title: document.title, via: "selector-value" };
+        const readTarget = isTypableElement(el) ? el : findTypableNear(el) || el;
+        if ("value" in readTarget) {
+          const val = String(readTarget.value ?? "");
+          return { ok: true, value: val, length: val.length, url: location.href, title: document.title, via: readTarget === el ? "selector-value" : "selector-associated-value" };
         }
-        if (el.isContentEditable) {
-          const text = String(el.textContent || "");
-          return { ok: true, value: text, length: text.length, url: location.href, title: document.title, via: "selector-contenteditable" };
+        if (readTarget.isContentEditable) {
+          const text = String(readTarget.textContent || "");
+          return { ok: true, value: text, length: text.length, url: location.href, title: document.title, via: readTarget === el ? "selector-contenteditable" : "selector-associated-contenteditable" };
         }
-        const text = String(el.textContent || "");
+        const text = String(readTarget.textContent || "");
         return { ok: true, value: text, length: text.length, url: location.href, title: document.title, via: "selector-text" };
       }
       if (kind === "scroll") {

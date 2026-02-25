@@ -1276,6 +1276,23 @@ function scoreSearchNode(node: JsonRecord, needles: string[]): { score: number; 
   if (selector.includes("[data-testid=") || selector.includes("[aria-label=") || selector.includes("[placeholder=")) {
     score += 2;
   }
+  const editable = node.editable === true;
+  const typingIntent = needles.some((needle) =>
+    ["input", "textarea", "textbox", "text", "type", "fill", "write", "compose", "edit", "输入", "文本", "回复", "comment"].some(
+      (token) => needle.includes(token) || token.includes(needle)
+    )
+  );
+  if (typingIntent) {
+    const looksTypable =
+      editable ||
+      ["input", "textarea"].includes(tag) ||
+      ["textbox", "searchbox", "combobox"].includes(role) ||
+      selector.includes("contenteditable");
+    if (looksTypable) score += 28;
+    if ((role === "div" || !role) && tag === "div") score -= 18;
+    if (selector.includes("_label") || selector.includes("label")) score -= 18;
+    if (role === "button") score -= 12;
+  }
   return { score, matchedNeedles };
 }
 
@@ -1647,8 +1664,10 @@ const EXTENSION_AGENT_PROMPT_BASE_GUIDELINES = [
   "For browser tasks, enforce: semantic search -> action -> browser_verify.",
   "Use user-visible query words in search_elements (placeholder/label/text), avoid implementation-only query text.",
   "For click/fill/select/hover/get_editor_value/scroll_to/highlight, prefer uid/ref/backendNodeId from latest search_elements; selector is fallback only.",
+  "When goal is typing text, prioritize editable targets only (input/textarea/contenteditable/role=textbox). Avoid label/toolBar/container nodes even if text matches.",
   "For state-changing actions (click/fill/select/press/navigate/fill_form/computer/download/intervention), include expect whenever success criteria is clear.",
   "Never claim done when verify failed, verify skipped, or verify has empty checks.",
+  "If fill/type says target is not typable, stop repeating same uid/selector; re-search with typing intent (textbox/input/contenteditable) and switch target.",
   "Avoid blind repeat: do not run identical search_elements query+selector multiple times without strategy change.",
   "Avoid blind click: never click toggle-like controls before reading current state label/count.",
   "For toggle-like controls (like/follow/bookmark), read current label/state first to avoid accidental flip.",
@@ -4552,13 +4571,26 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
           };
         }
+        const verifyExpect = normalizeVerifyExpect(args.expect || args) || {};
+        if (Object.keys(verifyExpect).length === 0) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("browser_verify", {
+              error: "browser_verify 需要明确 expect（如 url/title/text/selector/urlChanged）",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide explicit expect and retry browser_verify."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+          };
+        }
         return {
           ok: true,
           plan: {
             kind: "step.browser_verify",
             capability: TOOL_CAPABILITIES.browser_verify,
             tabId,
-            verifyExpect: normalizeVerifyExpect(args.expect || args) || {}
+            verifyExpect
           }
         };
       }
@@ -5312,9 +5344,18 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               return { success: true, action: 'type', typed: text.length };
             }
             if (target.isContentEditable) {
-              target.textContent = text;
+              let usedInsertText = false;
+              try {
+                if (typeof document.execCommand === 'function') {
+                  try { document.execCommand('selectAll', false); } catch {}
+                  usedInsertText = document.execCommand('insertText', false, text) === true;
+                }
+              } catch {
+                usedInsertText = false;
+              }
+              if (!usedInsertText) target.textContent = text;
               target.dispatchEvent(new Event('input', { bubbles: true }));
-              return { success: true, action: 'type', typed: text.length };
+              return { success: true, action: 'type', typed: text.length, via: usedInsertText ? 'execCommand' : 'textContent' };
             }
             return { success: false, error: 'active_element_not_typable' };
           })()`;
@@ -5327,7 +5368,20 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               returnByValue: true
             }
           });
-          return buildToolResponseEnvelope("computer", toRecord(toRecord(out).result).value || out);
+          const result = toRecord(toRecord(out).result).value || out;
+          const payload = toRecord(result);
+          const success = payload.success === true || payload.ok === true;
+          if (!success) {
+            return attachFailureProtocol("computer", {
+              error: String(payload.error || "computer(type) 执行失败"),
+              errorCode: "E_TOOL_EXECUTE",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint: "Focus an editable target (input/textarea/contenteditable) and retry computer(type).",
+              details: payload
+            }, { phase: "execute", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" });
+          }
+          return buildToolResponseEnvelope("computer", result);
         }
         if (action === "key") {
           const keys = String(plan.text || "")
