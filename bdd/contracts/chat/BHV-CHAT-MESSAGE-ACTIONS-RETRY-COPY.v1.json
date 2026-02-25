@@ -1,6 +1,6 @@
 {
   "id": "BHV-CHAT-MESSAGE-ACTIONS-RETRY-COPY",
-  "intent": "assistant 消息必须提供复制/分叉/重试三个 icon 操作，user 消息需提供 inline 编辑并重跑入口；编辑最后一条 user 需在当前会话原地重跑，编辑历史 user 需创建分叉会话并重跑；历史 assistant 点击分叉需创建新会话并保留来源信息并自动触发重生成；最后一条 assistant 点击重试需在当前会话执行且不新建会话；重生成阶段必须展示占位文案与动画语义；clipboard 不可用时降级提示可见且不影响会话继续",
+  "intent": "assistant 消息必须提供复制/分叉/重试三个 icon 操作，user 消息需提供 inline 编辑并重跑入口；编辑最后一条 user 需在当前会话原地重跑，编辑历史 user 需创建分叉会话并重跑；历史 assistant 点击分叉需创建新会话并保留来源信息并自动触发重生成；最后一条 assistant 点击重试需在当前会话执行且不新建会话；重生成阶段必须展示统一运行态反馈（tool pending 或 assistant streaming）且不出现空白等待；clipboard 不可用时降级提示可见且不影响会话继续",
   "context": {
     "surface": "sidepanel.chat",
     "messageRole": "assistant",
@@ -18,7 +18,7 @@
     "trigger_fork_action_from_historical_assistant_entry",
     "create_fork_session_with_source_metadata",
     "auto_regenerate_after_fork_in_new_session",
-    "show_regenerate_placeholder_with_busy_state",
+    "show_regenerate_running_indicator",
     "trigger_retry_action_from_latest_assistant_entry",
     "retry_latest_assistant_in_current_session"
   ],
@@ -29,15 +29,15 @@
     "user_message_shows_edit_rerun_icon",
     "edit_rerun_opens_inline_editor_and_focuses_inline_input",
     "edit_latest_user_rerun_keeps_session_count",
-    "edit_latest_user_rerun_shows_regenerate_placeholder",
+    "edit_latest_user_rerun_shows_running_indicator",
     "edit_historical_user_rerun_creates_fork_session",
-    "edit_historical_user_rerun_switches_to_fork_and_shows_placeholder",
+    "edit_historical_user_rerun_switches_to_fork_and_shows_running_indicator",
     "copy_success_feedback_is_visible",
     "fork_from_history_creates_new_session",
     "fork_session_exposes_source_metadata",
     "fork_session_auto_enters_regenerate_state",
-    "regenerate_placeholder_visible_with_text_and_animation",
-    "regenerate_placeholder_has_aria_busy_semantics",
+    "regenerate_running_indicator_visible",
+    "regenerate_running_indicator_uses_unified_runtime_ui",
     "retry_latest_creates_new_assistant_reply",
     "retry_latest_keeps_session_count",
     "clipboard_failure_shows_degrade_hint_without_interrupting_session"
