@@ -239,6 +239,58 @@ function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" ? (value as JsonRecord) : {};
 }
 
+const FORBIDDEN_TOP_LEVEL_TOOL_SCHEMA_KEYS = ["oneOf", "anyOf", "allOf", "enum", "not"] as const;
+
+function normalizeSchemaRequiredList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const dedup = new Set<string>();
+  const out: string[] = [];
+  for (const item of raw) {
+    const value = String(item || "").trim();
+    if (!value || dedup.has(value)) continue;
+    dedup.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
+function sanitizeTopLevelToolSchemaForProvider(parameters: unknown, providerId: string): JsonRecord {
+  const schema = toRecord(parameters);
+  const provider = String(providerId || "").trim().toLowerCase();
+  if (provider !== "openai_compatible") {
+    return {
+      ...schema
+    };
+  }
+
+  const sanitized: JsonRecord = {
+    ...schema,
+    type: "object",
+    properties: toRecord(schema.properties),
+    required: normalizeSchemaRequiredList(schema.required)
+  };
+
+  for (const key of FORBIDDEN_TOP_LEVEL_TOOL_SCHEMA_KEYS) {
+    delete sanitized[key];
+  }
+  return sanitized;
+}
+
+function sanitizeLlmToolDefinitionForProvider(definition: unknown, providerId: string): JsonRecord {
+  const def = toRecord(definition);
+  const fn = toRecord(def.function);
+  return {
+    ...def,
+    type: "function",
+    function: {
+      ...fn,
+      name: String(fn.name || "").trim(),
+      description: String(fn.description || ""),
+      parameters: sanitizeTopLevelToolSchemaForProvider(fn.parameters, providerId)
+    }
+  };
+}
+
 function clipText(input: unknown, maxChars = MAX_DEBUG_CHARS): string {
   const text = String(input || "");
   if (text.length <= maxChars) return text;
@@ -3468,7 +3520,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
   }
 
   function shellQuote(input: string): string {
-    return `'${String(input || "").replace(/'/g, `'\"'\"'`)}'`;
+    return `'${String(input || "").replace(/'/g, "'\"'\"'")}'`;
   }
 
   function toCoordinatePair(raw: unknown): [number, number] | null {
@@ -5776,7 +5828,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             const contract = orchestrator.resolveToolContract(toolName);
             const canonical = String(contract?.name || toolName).trim();
             return browserOnlyTools.has(canonical);
-          });
+          })
+          .map((definition) => sanitizeLlmToolDefinitionForProvider(definition, route.provider));
         const basePayload: JsonRecord = {
           model: llmModel,
           messages,

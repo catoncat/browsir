@@ -4,7 +4,6 @@ export interface ToolContract {
   name: string;
   description: string;
   parameters: JsonRecord;
-  aliases?: string[];
 }
 
 export interface RegisterToolContractOptions {
@@ -14,7 +13,6 @@ export interface RegisterToolContractOptions {
 export interface ToolContractView {
   name: string;
   description: string;
-  aliases: string[];
   source: "builtin" | "override";
 }
 
@@ -742,27 +740,11 @@ function cloneRecord(input: JsonRecord): JsonRecord {
   return JSON.parse(JSON.stringify(input));
 }
 
-function normalizeAliasList(input: unknown, canonicalName: string): string[] {
-  if (!Array.isArray(input)) return [];
-  const dedup = new Set<string>();
-  const out: string[] = [];
-  for (const raw of input) {
-    const alias = normalizeName(raw);
-    if (!alias) continue;
-    if (alias === canonicalName) continue;
-    if (dedup.has(alias)) continue;
-    dedup.add(alias);
-    out.push(alias);
-  }
-  return out;
-}
-
 function cloneContract(contract: ToolContract): ToolContract {
   return {
     name: contract.name,
     description: contract.description,
-    parameters: cloneRecord(contract.parameters),
-    aliases: Array.isArray(contract.aliases) ? [...contract.aliases] : []
+    parameters: cloneRecord(contract.parameters)
   };
 }
 
@@ -775,12 +757,10 @@ function validateContract(contract: ToolContract): ToolContract {
   if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) {
     throw new Error(`tool contract parameters 必须是 object: ${name}`);
   }
-  const aliases = normalizeAliasList(contract.aliases, name);
   return {
     name,
     description,
-    parameters: cloneRecord(parameters),
-    aliases
+    parameters: cloneRecord(parameters)
   };
 }
 
@@ -815,53 +795,12 @@ export class ToolContractRegistry {
     return out;
   }
 
-  private resolveAliasOwner(nameOrAlias: string): ToolContract | null {
-    const key = normalizeName(nameOrAlias);
-    if (!key) return null;
-
-    const directOverride = this.overrides.get(key);
-    if (directOverride) return directOverride;
-    const directBuiltin = this.builtins.get(key);
-    if (directBuiltin) return directBuiltin;
-
-    const effective = this.listEffectiveContracts();
-    for (const entry of effective) {
-      const aliases = Array.isArray(entry.contract.aliases) ? entry.contract.aliases : [];
-      if (aliases.includes(key)) return entry.contract;
-    }
-    return null;
-  }
-
-  private assertAliasConflicts(contract: ToolContract, replacingName?: string): void {
-    const aliases = Array.isArray(contract.aliases) ? contract.aliases : [];
-    if (!aliases.length) return;
-
-    const effective = this.listEffectiveContracts();
-    const occupied = new Set<string>();
-
-    for (const entry of effective) {
-      const current = entry.contract;
-      if (replacingName && current.name === replacingName) continue;
-      occupied.add(current.name);
-      for (const alias of current.aliases || []) {
-        occupied.add(alias);
-      }
-    }
-
-    for (const alias of aliases) {
-      if (occupied.has(alias)) {
-        throw new Error(`tool contract alias already registered: ${alias}`);
-      }
-    }
-  }
-
   register(contract: ToolContract, options: RegisterToolContractOptions = {}): void {
     const normalized = validateContract(contract);
     const exists = this.overrides.has(normalized.name) || this.builtins.has(normalized.name);
     if (exists && !options.replace) {
       throw new Error(`tool contract already registered: ${normalized.name}`);
     }
-    this.assertAliasConflicts(normalized, exists ? normalized.name : undefined);
     this.overrides.set(normalized.name, normalized);
   }
 
@@ -871,48 +810,38 @@ export class ToolContractRegistry {
     return this.overrides.delete(normalizedName);
   }
 
-  resolve(nameOrAlias: string): ToolContract | null {
-    const resolved = this.resolveAliasOwner(nameOrAlias);
-    if (!resolved) return null;
-    return cloneContract(resolved);
+  resolve(name: string): ToolContract | null {
+    const normalized = normalizeName(name);
+    if (!normalized) return null;
+    const resolved = this.overrides.get(normalized) || this.builtins.get(normalized);
+    return resolved ? cloneContract(resolved) : null;
   }
 
   listContracts(): ToolContractView[] {
     return this.listEffectiveContracts().map((entry) => ({
       name: entry.contract.name,
       description: entry.contract.description,
-      aliases: [...(entry.contract.aliases || [])],
       source: entry.source
     }));
   }
 
-  listLlmToolDefinitions(options: { includeAliases?: boolean } = {}): ToolDefinition[] {
-    const includeAliases = options.includeAliases === true;
+  listLlmToolDefinitions(): ToolDefinition[] {
     const out: ToolDefinition[] = [];
-    const exported = new Set<string>();
+    const exportedNames = new Set<string>();
 
     for (const entry of this.listContracts()) {
       const resolved = this.resolve(entry.name);
       if (!resolved) continue;
-      const addDefinition = (name: string): void => {
-        if (!name || exported.has(name)) return;
-        exported.add(name);
-        out.push({
-          type: "function",
-          function: {
-            name,
-            description: resolved.description,
-            parameters: cloneRecord(resolved.parameters)
-          }
-        });
-      };
-
-      addDefinition(resolved.name);
-      if (includeAliases) {
-        for (const alias of resolved.aliases || []) {
-          addDefinition(alias);
+      if (!resolved.name || exportedNames.has(resolved.name)) continue;
+      exportedNames.add(resolved.name);
+      out.push({
+        type: "function",
+        function: {
+          name: resolved.name,
+          description: resolved.description,
+          parameters: cloneRecord(resolved.parameters)
         }
-      }
+      });
     }
 
     return out;

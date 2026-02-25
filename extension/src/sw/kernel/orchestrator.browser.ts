@@ -229,16 +229,16 @@ export class BrainOrchestrator {
     return this.toolContracts.unregister(name);
   }
 
-  resolveToolContract(nameOrAlias: string): ToolContract | null {
-    return this.toolContracts.resolve(nameOrAlias);
+  resolveToolContract(name: string): ToolContract | null {
+    return this.toolContracts.resolve(name);
   }
 
   listToolContracts(): ToolContractView[] {
     return this.toolContracts.listContracts();
   }
 
-  listLlmToolDefinitions(options: { includeAliases?: boolean } = {}): ToolDefinition[] {
-    return this.toolContracts.listLlmToolDefinitions(options);
+  listLlmToolDefinitions(): ToolDefinition[] {
+    return this.toolContracts.listLlmToolDefinitions();
   }
 
   getToolProvider(mode: ExecuteMode): StepToolProvider | undefined {

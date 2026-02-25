@@ -3495,7 +3495,22 @@ describe("runtime-router.browser", () => {
       .map((name) => String(name || ""));
     expect(toolNames).toContain("read_file");
     expect(toolNames).toContain("bash");
+    expect(toolNames).toContain("click");
     expect(toolNames).not.toContain("workspace_ls");
+
+    const clickTool = capturedTools.find(
+      (item) => String(((item.function as Record<string, unknown> | undefined)?.name) || "") === "click"
+    );
+    const clickParams = (((clickTool?.function as Record<string, unknown> | undefined)?.parameters || {}) as Record<
+      string,
+      unknown
+    >);
+    expect(String(clickParams.type || "")).toBe("object");
+    expect(clickParams.anyOf).toBeUndefined();
+    expect(clickParams.oneOf).toBeUndefined();
+    expect(clickParams.allOf).toBeUndefined();
+    expect(clickParams.enum).toBeUndefined();
+    expect(clickParams.not).toBeUndefined();
   });
 
   it("brain.run.start 会注入 available_skills（过滤 disable-model-invocation）", async () => {
@@ -3584,7 +3599,16 @@ describe("runtime-router.browser", () => {
     expect(systemText).toContain("press_key");
     expect(systemText).toContain("scroll_page");
     expect(systemText).toContain("navigate_tab");
-    expect(systemText).toContain("For click/fill/select, prefer uid/ref/backendNodeId");
+    expect(systemText).toContain("hover_element_by_uid");
+    expect(systemText).toContain("get_editor_value");
+    expect(systemText).toContain("computer");
+    expect(systemText).toContain("capture_screenshot");
+    expect(systemText).toContain("download_image");
+    expect(systemText).toContain("request_intervention");
+    expect(systemText).toContain("list_skills");
+    expect(systemText).toContain("For click/fill/select/hover/get_editor_value/scroll_to/highlight, prefer uid/ref/backendNodeId");
+    expect(systemText).toContain("semantic search -> action -> browser_verify");
+    expect(systemText).toContain("Avoid blind repeat");
     expect(systemText).toContain("<available_skills>");
     expect(systemText).toContain('name="Visible Skill"');
     expect(systemText).toContain('location="mem://skills/visible/SKILL.md"');
