@@ -4040,8 +4040,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             providerRegistry: llmProviders,
             step: llmStep,
             messages: requestMessages,
-            toolChoice: requireBrowserProof && !browserProofSatisfied ? "required" : "auto",
-            toolScope: requireBrowserProof ? "browser_only" : "all"
+            toolChoice: "auto",
+            toolScope: "all"
           });
           llmFailureBySignature.clear();
         } catch (error) {
@@ -4070,8 +4070,6 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 const fromRoute = activeRoute;
                 activeRoute = nextResolved.route;
                 llmFailureBySignature.clear();
-                retryableFailureBySignature.clear();
-                retryableFailureTotal = 0;
                 orchestrator.updateRetryState(sessionId, {
                   active: false,
                   attempt: 0,
@@ -4146,72 +4144,6 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
         const assistantText = parseLlmContent(message).trim();
         const toolCalls = normalizeToolCalls(message.tool_calls);
-        if (toolCalls.length > 0) {
-          const signature = buildNoProgressSignature(toolCalls);
-          const noProgress = detectNoProgressPattern({
-            recentSignatures: noProgressSignatures,
-            signature,
-            sameSignatureStreak: noProgressSameSignatureStreak,
-            pingPongStreak: noProgressPingPongStreak
-          });
-          noProgressSignatures = noProgress.recentSignatures;
-          noProgressSameSignatureStreak = noProgress.sameSignatureStreak;
-          noProgressPingPongStreak = noProgress.pingPongStreak;
-          if (noProgress.reason) {
-            noProgressObserved = true;
-            const canRepair = noProgressRepairAttempts < NO_PROGRESS_REPAIR_MAX_ATTEMPTS;
-            const decision = canRepair ? "retry" : "continue";
-            const repairDirective = buildNoProgressRepairDirective({
-              reason: noProgress.reason,
-              signature,
-              streak: noProgress.reason === "repeat_signature" ? noProgress.sameSignatureStreak : noProgress.pingPongStreak
-            });
-            orchestrator.events.emit("loop_no_progress", sessionId, {
-              reason: noProgress.reason,
-              decision,
-              repairAttempt: noProgressRepairAttempts + (canRepair ? 1 : 0),
-              repairMaxAttempts: NO_PROGRESS_REPAIR_MAX_ATTEMPTS,
-              signature,
-              sameSignatureStreak: noProgress.sameSignatureStreak,
-              pingPongStreak: noProgress.pingPongStreak,
-              recentSignatures: noProgress.recentSignatures,
-              failureClass: repairDirective.failureClass,
-              modeEscalation: repairDirective.modeEscalation || null,
-              resume: repairDirective.resume,
-              stepRef: repairDirective.stepRef
-            });
-            if (canRepair) {
-              noProgressRepairAttempts += 1;
-              messages.push({
-                role: "system",
-                content: `${buildNoProgressRepairMessage(noProgress.reason)}\n[repair]\n${safeStringify(repairDirective, 1500)}`
-              });
-              continue;
-            }
-            const noProgressMessage =
-              noProgress.reason === "ping_pong"
-                ? "工具调用出现往返震荡（ping-pong），已触发进展保护并继续重规划。"
-                : "工具调用连续重复且无进展，已触发进展保护并继续重规划。";
-            await orchestrator.sessions.appendMessage({
-              sessionId,
-              role: "assistant",
-              text: `${noProgressMessage}\n${safeStringify({
-                failureClass: repairDirective.failureClass,
-                modeEscalation: repairDirective.modeEscalation || null,
-                resume: repairDirective.resume
-              }, 1200)}`
-            });
-            messages.push({
-              role: "system",
-              content: `${buildNoProgressRepairMessage(noProgress.reason)}\n[guard]\n${safeStringify(repairDirective, 1500)}`
-            });
-            continue;
-          }
-        } else {
-          noProgressSameSignatureStreak = 0;
-          noProgressPingPongStreak = 0;
-          noProgressSignatures = [];
-        }
         orchestrator.events.emit("llm.response.parsed", sessionId, {
           step: llmStep,
           toolCalls: toolCalls.length,
@@ -4235,62 +4167,6 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         }
 
         if (toolCalls.length === 0) {
-          if (requireBrowserProof && !browserProofSatisfied) {
-            browserProofMissingStreak += 1;
-            if (browserProofMissingStreak >= NO_PROGRESS_BROWSER_PROOF_MISSING_LIMIT) {
-              noProgressObserved = true;
-              const canRepair = noProgressRepairAttempts < NO_PROGRESS_REPAIR_MAX_ATTEMPTS;
-              const decision = canRepair ? "retry" : "continue";
-              const repairDirective = buildNoProgressRepairDirective({
-                reason: "browser_proof_missing",
-                streak: browserProofMissingStreak
-              });
-              orchestrator.events.emit("loop_no_progress", sessionId, {
-                reason: "browser_proof_missing",
-                decision,
-                repairAttempt: noProgressRepairAttempts + (canRepair ? 1 : 0),
-                repairMaxAttempts: NO_PROGRESS_REPAIR_MAX_ATTEMPTS,
-                streak: browserProofMissingStreak,
-                failureClass: repairDirective.failureClass,
-                modeEscalation: repairDirective.modeEscalation || null,
-                resume: repairDirective.resume,
-                stepRef: repairDirective.stepRef
-              });
-              if (canRepair) {
-                noProgressRepairAttempts += 1;
-                messages.push({
-                  role: "system",
-                  content: `${buildNoProgressRepairMessage("browser_proof_missing")}\n[repair]\n${safeStringify(repairDirective, 1500)}`
-                });
-                continue;
-              }
-              const noProgressMessage = "工具调用未产生可验证页面进展，已触发进展保护并继续重规划。";
-              await orchestrator.sessions.appendMessage({
-                sessionId,
-                role: "assistant",
-                text: `${noProgressMessage}\n${safeStringify({
-                  failureClass: repairDirective.failureClass,
-                  modeEscalation: repairDirective.modeEscalation || null,
-                  resume: repairDirective.resume
-                }, 1200)}`
-              });
-              messages.push({
-                role: "system",
-                content: `${buildNoProgressRepairMessage("browser_proof_missing")}\n[guard]\n${safeStringify(repairDirective, 1500)}`
-              });
-              continue;
-            }
-            messages.push({
-              role: "system",
-              content:
-                "尚未完成可验证页面操作。请先 search_elements，再用 click/fill_element_by_uid/fill_form，最后 browser_verify 后再给出完成结论。"
-            });
-            orchestrator.events.emit("loop_guard_browser_progress_missing", sessionId, {
-              step: llmStep
-            });
-            continue;
-          }
-          browserProofMissingStreak = 0;
           orchestrator.events.emit("step_finished", sessionId, {
             step: llmStep,
             ok: true,

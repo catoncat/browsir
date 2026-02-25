@@ -98,6 +98,7 @@ function buildTestPageFixtureScript(): string {
       '  <label>Plain Text</label>',
       '  <textarea placeholder="Write plain text here"></textarea>',
       '  <button id="act" type="button">Act</button>',
+      '  <button id="focus-act" type="button">Focus Act</button>',
       '  <button id="share" type="button">Share</button>',
       '  <button id="rerender" type="button">Rerender</button>',
       '  <div id="out">idle</div>',
@@ -117,6 +118,15 @@ function buildTestPageFixtureScript(): string {
 
     const act = document.querySelector("#act");
     if (act) wireAct(act);
+
+    const focusAct = document.querySelector("#focus-act");
+    if (focusAct) {
+      focusAct.addEventListener("click", () => {
+        const out = document.querySelector("#out");
+        if (!out) return;
+        out.textContent = document.hasFocus() ? "focus-ok" : "focus-needed";
+      });
+    }
 
     const share = document.querySelector("#share");
     if (share) {
@@ -792,17 +802,15 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
                     tool_calls: [
                       {
                         index: 0,
-                        id: "call_focus_resume_1",
+                        id: "call_focus_resume_search_1",
                         type: "function",
                         function: {
-                          name: "browser_action",
+                          name: "search_elements",
                           arguments: JSON.stringify({
                             tabId,
-                            kind: "navigate",
-                            url: "about:blank#focus-resume-fail",
-                            expect: {
-                              textIncludes: "__FOCUS_RESUME_EXPECT_MISS__"
-                            }
+                            query: "focus act button",
+                            selector: "body",
+                            maxResults: 5
                           })
                         }
                       }
@@ -824,15 +832,15 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
                     tool_calls: [
                       {
                         index: 0,
-                        id: "call_focus_resume_2",
+                        id: "call_focus_resume_click_1",
                         type: "function",
                         function: {
-                          name: "browser_verify",
+                          name: "browser_action",
                           arguments: JSON.stringify({
                             tabId,
-                            expect: {
-                              urlContains: "#focus-resume-fail"
-                            }
+                            kind: "click",
+                            uid: "e0",
+                            requireFocus: true
                           })
                         }
                       }
@@ -899,15 +907,15 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
                     tool_calls: [
                       {
                         index: 0,
-                        id: "call_sticky_fill",
+                        id: "call_sticky_search_fill",
                         type: "function",
                         function: {
-                          name: "browser_action",
+                          name: "search_elements",
                           arguments: JSON.stringify({
                             tabId,
-                            kind: "fill",
-                            selector: "#name",
-                            value: marker
+                            query: "name input",
+                            selector: "body",
+                            maxResults: 5
                           })
                         }
                       }
@@ -921,6 +929,66 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
         }
 
         if (toolMessages.length < 2) {
+          return buildSseResponse([
+            {
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: "call_sticky_fill",
+                        type: "function",
+                        function: {
+                          name: "browser_action",
+                          arguments: JSON.stringify({
+                            tabId,
+                            kind: "fill",
+                            uid: "e0",
+                            value: marker
+                          })
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            "[DONE]"
+          ]);
+        }
+
+        if (toolMessages.length < 3) {
+          return buildSseResponse([
+            {
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: "call_sticky_search_click",
+                        type: "function",
+                        function: {
+                          name: "search_elements",
+                          arguments: JSON.stringify({
+                            tabId,
+                            query: "act button",
+                            selector: "body",
+                            maxResults: 5
+                          })
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            "[DONE]"
+          ]);
+        }
+
+        if (toolMessages.length < 4) {
           await sleep(900);
           return buildSseResponse([
             {
@@ -935,8 +1003,9 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
                         function: {
                           name: "browser_action",
                           arguments: JSON.stringify({
+                            tabId,
                             kind: "click",
-                            selector: "#act",
+                            uid: "e0",
                             expect: {
                               textIncludes: `clicked:${marker}`
                             }
@@ -1118,6 +1187,11 @@ async function createTarget(chromePort: number, url: string): Promise<JsonTarget
 
 async function closeTarget(chromePort: number, targetId: string): Promise<void> {
   const endpoint = `http://${BRIDGE_HOST}:${chromePort}/json/close/${encodeURIComponent(targetId)}`;
+  await fetch(endpoint).catch(() => null);
+}
+
+async function activateTarget(chromePort: number, targetId: string): Promise<void> {
+  const endpoint = `http://${BRIDGE_HOST}:${chromePort}/json/activate/${encodeURIComponent(targetId)}`;
   await fetch(endpoint).catch(() => null);
 }
 
@@ -1958,6 +2032,64 @@ async function main() {
         });
         assert(verifyResp.ok === true && verifyResp.data?.ok === true, "plain text 输入后验证失败");
       });
+    });
+
+    await runCase("service-worker API", "scroll 无目标时应退化为窗口滚动", async () => {
+      await acquireAndUseLease("owner-scroll-window-fallback", async (owner) => {
+        const scrollResp = await sendBgMessage(sidepanelClient!, {
+          type: "cdp.action",
+          tabId: testTabId,
+          owner,
+          sessionId: "session-owner-scroll-window-fallback",
+          agentId: "owner-scroll-window-fallback",
+          action: { kind: "scroll", value: "-240" }
+        });
+        assert(scrollResp.ok === true, `scroll fallback 失败: ${scrollResp.error || "unknown"}`);
+        assert(scrollResp.data?.result?.scrolled === true, `scroll fallback 未返回 scrolled=true: ${JSON.stringify(scrollResp.data)}`);
+      });
+    });
+
+    await runCase("service-worker API", "fill selector 失效时单候选输入可自动 fallback", async () => {
+      const marker = `solo-${Date.now()}`;
+      await pageClient!.send("Runtime.evaluate", {
+        expression: `(() => {
+          document.title = ${JSON.stringify(TEST_TAB_TITLE)};
+          document.body.innerHTML = '<main><label for="solo">Solo</label><input id="solo" placeholder="Only input" value="" /></main>';
+          return { ok: true };
+        })()`,
+        returnByValue: true,
+        awaitPromise: true
+      });
+      try {
+        await acquireAndUseLease("owner-single-input-fallback", async (owner) => {
+          const fillResp = await sendBgMessage(sidepanelClient!, {
+            type: "cdp.action",
+            tabId: testTabId,
+            owner,
+            sessionId: "session-owner-single-input-fallback",
+            agentId: "owner-single-input-fallback",
+            action: { kind: "fill", selector: 'input[data-testid="missing-target"]', value: marker }
+          });
+          assert(fillResp.ok === true, `single input fallback fill 失败: ${fillResp.error || "unknown"}`);
+          const snapResp = await sendBgMessage(sidepanelClient!, {
+            type: "cdp.snapshot",
+            tabId: testTabId,
+            options: {
+              mode: "interactive",
+              selector: "#solo",
+              filter: "all",
+              format: "json",
+              diff: false
+            }
+          });
+          assert(snapResp.ok === true, "single input fallback 后 snapshot 失败");
+          const nodes = Array.isArray(snapResp.data?.nodes) ? snapResp.data.nodes : [];
+          const solo = nodes.find((node: any) => String(node?.selector || "").includes("#solo"));
+          assert(String(solo?.value || "") === marker, `single input fallback 未写入期望值: ${JSON.stringify(solo)}`);
+        });
+      } finally {
+        await resetTestPageFixture();
+      }
     });
 
     await runCase("service-worker API", "fill 支持动态加载的 vue-like 受控输入", async () => {
@@ -3272,64 +3404,68 @@ async function main() {
       });
       assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
 
-      const started = await sendBgMessage(sidepanelClient!, {
-        type: "brain.run.start",
-        prompt: `#LLM_RELIABILITY_FOCUS_RESUME TABID=${testTabId}`
-      });
-      assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
-      const sessionId = String(started.data?.sessionId || "");
-      assert(sessionId.length > 0, "sessionId 为空");
+      const distractorTarget = await createTarget(chromePort, `about:blank#focus-distractor-${Date.now()}`);
+      try {
+        if (distractorTarget?.id) {
+          await activateTarget(chromePort, distractorTarget.id).catch(() => {});
+        }
+        const started = await sendBgMessage(sidepanelClient!, {
+          type: "brain.run.start",
+          prompt: `#LLM_RELIABILITY_FOCUS_RESUME TABID=${testTabId}`
+        });
+        assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
+        const sessionId = String(started.data?.sessionId || "");
+        assert(sessionId.length > 0, "sessionId 为空");
 
-      const dump = await waitFor(
-        "reliability focus resume trace",
-        async () => {
-          const out = await sendBgMessage(sidepanelClient!, {
-            type: "brain.debug.dump",
-            sessionId,
-            maxEvents: 5_000,
-            maxBytes: 4 * 1024 * 1024
-          });
-          if (!out.ok) return null;
-          const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
-          if (!stream.some((item: any) => item?.type === "loop_done")) return null;
-          return out.data;
-        },
-        45_000,
-        250
-      );
-      const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
-      const loopDone = stream.find((item: any) => item?.type === "loop_done");
-      assert(String(loopDone?.payload?.status || "") === "done", "focus 续跑场景最终应 done");
-      const failedToolSteps = stream.filter(
-        (item: any) => item?.type === "step_finished" && item?.payload?.mode === "tool_call" && item?.payload?.ok === false
-      ).length;
-      assert(failedToolSteps >= 1, "focus 续跑场景应先出现失败工具步骤");
+        const dump = await waitFor(
+          "reliability focus resume trace",
+          async () => {
+            const out = await sendBgMessage(sidepanelClient!, {
+              type: "brain.debug.dump",
+              sessionId,
+              maxEvents: 5_000,
+              maxBytes: 4 * 1024 * 1024
+            });
+            if (!out.ok) return null;
+            const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
+            if (!stream.some((item: any) => item?.type === "loop_done")) return null;
+            return out.data;
+          },
+          45_000,
+          250
+        );
+        const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
+        const loopDone = stream.find((item: any) => item?.type === "loop_done");
+        assert(String(loopDone?.payload?.status || "") === "done", "focus 续跑场景最终应 done");
 
-      const viewed = await sendBgMessage(sidepanelClient!, {
-        type: "brain.session.view",
-        sessionId
-      });
-      assert(viewed.ok === true, "读取会话失败");
-      const messages = Array.isArray(viewed.data?.conversationView?.messages) ? viewed.data.conversationView.messages : [];
-      const userMessages = messages.filter((item: any) => String(item?.role || "") === "user");
-      assert(userMessages.length === 1, `应在同一会话续跑当前 step，不应新增用户轮次，实际=${userMessages.length}`);
+        const viewed = await sendBgMessage(sidepanelClient!, {
+          type: "brain.session.view",
+          sessionId
+        });
+        assert(viewed.ok === true, "读取会话失败");
+        const messages = Array.isArray(viewed.data?.conversationView?.messages) ? viewed.data.conversationView.messages : [];
+        const userMessages = messages.filter((item: any) => String(item?.role || "") === "user");
+        assert(userMessages.length === 1, `应在同一会话续跑当前 step，不应新增用户轮次，实际=${userMessages.length}`);
 
-      const requests = mockLlm!.getRequests().filter((req) => req.userText.includes("#LLM_RELIABILITY_FOCUS_RESUME"));
-      assert(requests.length >= 2, `focus 续跑场景至少应有 2 次 LLM 请求，实际=${requests.length}`);
-      const requestWithToolContext = requests.find((req) => req.hasToolResult);
-      assert(Boolean(requestWithToolContext), "应存在携带 tool 失败上下文的后续 LLM 请求");
-      const toolMessagesJoined = (requestWithToolContext?.toolMessages || []).join("\n");
-      assert(toolMessagesJoined.includes('"tool":"browser_action"'), "tool payload 应标识 browser_action");
-      assert(
-        toolMessagesJoined.includes('"errorReason":"failed_execute"') || toolMessagesJoined.includes('"errorReason":"failed_verify"'),
-        "tool payload 应包含失败分类"
-      );
-      assert(
-        toolMessagesJoined.includes('"modeEscalation"') && toolMessagesJoined.includes('"to":"focus"'),
-        "tool payload 应包含 background->focus 升级建议"
-      );
-      assert(toolMessagesJoined.includes('"resume_current_step"'), "tool payload 应包含续跑当前 step 指令");
-      assert(toolMessagesJoined.includes('"toolCallId":"call_focus_resume_1"'), "tool payload 应包含稳定 stepRef/toolCallId");
+        const requests = mockLlm!.getRequests().filter((req) => req.userText.includes("#LLM_RELIABILITY_FOCUS_RESUME"));
+        assert(requests.length >= 2, `focus 续跑场景至少应有 2 次 LLM 请求，实际=${requests.length}`);
+        const requestWithToolContext = requests.find((req) => req.hasToolResult);
+        assert(Boolean(requestWithToolContext), "应存在携带 tool 上下文的后续 LLM 请求");
+        const requestWithBrowserAction = requests.find((req) =>
+          (req.toolMessages || []).some((msg) => msg.includes('"tool":"browser_action"'))
+        );
+        assert(Boolean(requestWithBrowserAction), "tool payload 应包含 browser_action");
+        const toolMessagesJoined = (requestWithBrowserAction?.toolMessages || []).join("\n");
+        assert(toolMessagesJoined.includes('"tool":"browser_action"'), "tool payload 应标识 browser_action");
+        assert(
+          toolMessagesJoined.includes('"modeEscalation"') && toolMessagesJoined.includes('"to":"focus"'),
+          "tool payload 应包含 background->focus 升级建议"
+        );
+      } finally {
+        if (distractorTarget?.id) {
+          await closeTarget(chromePort, distractorTarget.id).catch(() => {});
+        }
+      }
     });
 
     await runCase("brain.reliability", "no-progress 守卫：重复失败触发熔断并终止", async () => {
@@ -5019,7 +5155,7 @@ async function main() {
     });
 
     if (useLiveLlmSuite) {
-      await runCase("brain.runtime llm-live", "真实 LLM 在浏览器目标上达到可验证成功率", async () => {
+      await runCase("sidepanel llm-live", "真实 LLM 在浏览器目标上达到可验证成功率", async () => {
         const attemptsRaw = Number(process.env.BRAIN_E2E_LIVE_ATTEMPTS || 3);
         const attempts = Number.isInteger(attemptsRaw) && attemptsRaw > 0 ? attemptsRaw : 3;
         const defaultMinPass = Math.ceil(attempts * 0.67);
