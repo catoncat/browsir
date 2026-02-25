@@ -10,6 +10,9 @@ const DEFAULT_LLM_RETRY_MAX_ATTEMPTS = 2;
 const MAX_LLM_RETRY_MAX_ATTEMPTS = 6;
 const DEFAULT_LLM_MAX_RETRY_DELAY_MS = 60_000;
 const MAX_LLM_MAX_RETRY_DELAY_MS = 300_000;
+const DEFAULT_CDP_COMMAND_TIMEOUT_MS = 10_000;
+const MAX_CDP_COMMAND_TIMEOUT_MS = 60_000;
+const CDP_AUTO_DETACH_MS = 30_000;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -65,6 +68,12 @@ interface LeaseState {
 
 interface PendingInvoke {
   resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
+interface PendingCdpCommand {
+  method: string;
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
 }
@@ -125,6 +134,12 @@ function toOptionalFiniteNumber(raw: unknown): number | null {
   return n;
 }
 
+function toPositiveInteger(raw: unknown): number | null {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  return n;
+}
+
 function normalizeOwner(raw: unknown): string {
   const owner = typeof raw === "string" ? raw.trim() : "";
   if (!owner) {
@@ -170,6 +185,23 @@ function fail(error: unknown): RuntimeInfraResult {
     return out;
   }
   return { ok: false, error: String(error) };
+}
+
+function toRuntimeError(
+  message: string,
+  meta: { code?: string; details?: unknown; retryable?: boolean; status?: number } = {}
+): Error & { code?: string; details?: unknown; retryable?: boolean; status?: number } {
+  const err = new Error(message) as Error & {
+    code?: string;
+    details?: unknown;
+    retryable?: boolean;
+    status?: number;
+  };
+  if (meta.code) err.code = meta.code;
+  if (meta.details !== undefined) err.details = meta.details;
+  if (typeof meta.retryable === "boolean") err.retryable = meta.retryable;
+  if (typeof meta.status === "number") err.status = meta.status;
+  return err;
 }
 
 function isRetryableBridgeCode(code: string): boolean {
@@ -246,6 +278,62 @@ function buildCompactSnapshot(snapshot: JsonRecord): string {
   return lines.join("\n");
 }
 
+function readAxValue(raw: unknown): string {
+  if (typeof raw === "string") return raw;
+  const rec = asRecord(raw);
+  if (typeof rec.value === "string") return rec.value;
+  if (typeof rec.value === "number" || typeof rec.value === "boolean") return String(rec.value);
+  return "";
+}
+
+function readAxBooleanProperty(rawProperties: unknown, key: string): boolean | null {
+  if (!Array.isArray(rawProperties)) return null;
+  for (const item of rawProperties) {
+    const entry = asRecord(item);
+    if (String(entry.name || "").toLowerCase() !== key.toLowerCase()) continue;
+    const value = asRecord(entry.value).value;
+    if (typeof value === "boolean") return value;
+    if (value === "true") return true;
+    if (value === "false") return false;
+  }
+  return null;
+}
+
+function isInteractiveRole(roleRaw: unknown): boolean {
+  const role = String(roleRaw || "").trim().toLowerCase();
+  if (!role) return false;
+  return [
+    "button",
+    "link",
+    "textbox",
+    "combobox",
+    "checkbox",
+    "radio",
+    "switch",
+    "menuitem",
+    "option",
+    "slider",
+    "tab",
+    "searchbox",
+    "spinbutton",
+    "listbox",
+    "treeitem",
+    "textarea"
+  ].includes(role);
+}
+
+function collectFrameIdsFromTree(frameTree: unknown, out: string[] = []): string[] {
+  const node = asRecord(frameTree);
+  const frame = asRecord(node.frame);
+  const frameId = String(frame.id || "").trim();
+  if (frameId) out.push(frameId);
+  const childFrames = Array.isArray(node.childFrames) ? (node.childFrames as unknown[]) : [];
+  for (const child of childFrames) {
+    collectFrameIdsFromTree(child, out);
+  }
+  return out;
+}
+
 function actionRequiresLease(kind: string): boolean {
   return ["click", "type", "fill", "press", "scroll", "select", "navigate"].includes(kind);
 }
@@ -292,6 +380,10 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
   const pendingInvokes = new Map<string, PendingInvoke>();
   const leaseByTab = new Map<number, LeaseState>();
   const attachedTabs = new Set<number>();
+  const attachLocksByTab = new Map<number, Promise<void>>();
+  const enabledDomainsByTab = new Map<number, Set<string>>();
+  const pendingCdpByTab = new Map<number, Set<PendingCdpCommand>>();
+  const cdpAutoDetachTimers = new Map<number, ReturnType<typeof setTimeout>>();
   const telemetryByTab = new Map<number, TelemetryState>();
   const snapshotStateByTab = new Map<number, SnapshotState>();
   let debuggerHooksInstalled = false;
@@ -662,6 +754,120 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     snapshotStateByTab.delete(tabId);
   }
 
+  function clearCdpAutoDetach(tabId: number): void {
+    const timer = cdpAutoDetachTimers.get(tabId);
+    if (timer) {
+      clearTimeout(timer);
+      cdpAutoDetachTimers.delete(tabId);
+    }
+  }
+
+  function scheduleCdpAutoDetach(tabId: number): void {
+    clearCdpAutoDetach(tabId);
+    cdpAutoDetachTimers.set(
+      tabId,
+      setTimeout(() => {
+        detachCDP(tabId).catch(() => {
+          // best-effort auto cleanup
+        });
+      }, CDP_AUTO_DETACH_MS)
+    );
+  }
+
+  function touchCdpSession(tabId: number): void {
+    if (!attachedTabs.has(tabId)) return;
+    scheduleCdpAutoDetach(tabId);
+  }
+
+  function rejectPendingCdpCommands(tabId: number, reason: string): void {
+    const pending = pendingCdpByTab.get(tabId);
+    if (!pending) return;
+    pendingCdpByTab.delete(tabId);
+    for (const item of pending) {
+      clearTimeout(item.timeout);
+      item.reject(
+        toRuntimeError(`CDP command '${item.method}' aborted: ${reason}`, {
+          code: "E_CDP_ABORTED",
+          retryable: true,
+          details: { tabId, method: item.method, reason }
+        })
+      );
+    }
+  }
+
+  async function sendCdpCommand<T = JsonRecord>(
+    tabId: number,
+    method: string,
+    params: unknown = {},
+    rawOptions: { timeoutMs?: unknown } = {}
+  ): Promise<T> {
+    const timeoutMs = toIntInRange(rawOptions.timeoutMs, DEFAULT_CDP_COMMAND_TIMEOUT_MS, 200, MAX_CDP_COMMAND_TIMEOUT_MS);
+    touchCdpSession(tabId);
+    return await new Promise<T>((resolve, reject) => {
+      const pendingSet = pendingCdpByTab.get(tabId) || new Set<PendingCdpCommand>();
+      if (!pendingCdpByTab.has(tabId)) pendingCdpByTab.set(tabId, pendingSet);
+
+      let finished = false;
+      const finish = (error: unknown, value?: T): void => {
+        if (finished) return;
+        finished = true;
+        pendingSet.delete(entry);
+        clearTimeout(entry.timeout);
+        if (pendingSet.size === 0) pendingCdpByTab.delete(tabId);
+        if (error) {
+          reject(
+            error instanceof Error
+              ? error
+              : toRuntimeError(String(error || `CDP command failed: ${method}`), {
+                  code: "E_CDP_COMMAND",
+                  retryable: true,
+                  details: { tabId, method }
+                })
+          );
+          return;
+        }
+        resolve(value as T);
+      };
+
+      const entry: PendingCdpCommand = {
+        method,
+        reject: (error: Error) => finish(error),
+        timeout: setTimeout(() => {
+          finish(
+            toRuntimeError(`CDP command '${method}' timed out after ${timeoutMs}ms`, {
+              code: "E_CDP_TIMEOUT",
+              retryable: true,
+              details: { tabId, method, timeoutMs }
+            })
+          );
+        }, timeoutMs)
+      };
+      pendingSet.add(entry);
+
+      Promise.resolve()
+        .then(() => chrome.debugger.sendCommand({ tabId }, method, params as object))
+        .then((value) => {
+          finish(null, value as T);
+        })
+        .catch((error) => finish(error));
+    });
+  }
+
+  async function ensureCdpDomains(tabId: number, domains: string[]): Promise<void> {
+    const enabled = enabledDomainsByTab.get(tabId) || new Set<string>();
+    if (!enabledDomainsByTab.has(tabId)) enabledDomainsByTab.set(tabId, enabled);
+    for (const domain of domains) {
+      if (enabled.has(domain)) continue;
+      try {
+        await sendCdpCommand(tabId, `${domain}.enable`, {});
+        enabled.add(domain);
+      } catch (error) {
+        if (domain === "Accessibility") continue;
+        throw error;
+      }
+    }
+  }
+
   function installDebuggerHooks(): void {
     if (debuggerHooksInstalled) return;
     debuggerHooksInstalled = true;
@@ -697,30 +903,72 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
 
     chrome.debugger.onDetach.addListener((source) => {
       if (!source || typeof source.tabId !== "number") return;
-      attachedTabs.delete(source.tabId);
-      telemetryByTab.delete(source.tabId);
-      clearSnapshotState(source.tabId);
-      leaseByTab.delete(source.tabId);
+      const tabId = source.tabId;
+      attachedTabs.delete(tabId);
+      attachLocksByTab.delete(tabId);
+      enabledDomainsByTab.delete(tabId);
+      clearCdpAutoDetach(tabId);
+      rejectPendingCdpCommands(tabId, "debugger detached");
+      telemetryByTab.delete(tabId);
+      clearSnapshotState(tabId);
+      leaseByTab.delete(tabId);
     });
+
+    if (chrome.tabs?.onRemoved) {
+      chrome.tabs.onRemoved.addListener((tabId) => {
+        attachedTabs.delete(tabId);
+        attachLocksByTab.delete(tabId);
+        enabledDomainsByTab.delete(tabId);
+        clearCdpAutoDetach(tabId);
+        rejectPendingCdpCommands(tabId, "tab closed");
+        telemetryByTab.delete(tabId);
+        clearSnapshotState(tabId);
+        leaseByTab.delete(tabId);
+      });
+    }
   }
 
   async function ensureDebugger(tabId: number): Promise<void> {
     installDebuggerHooks();
-    if (attachedTabs.has(tabId)) return;
-    const target = { tabId };
-    await chrome.debugger.attach(target, "1.3");
-    attachedTabs.add(tabId);
-    await chrome.debugger.sendCommand(target, "Network.enable");
-    await chrome.debugger.sendCommand(target, "Runtime.enable");
-    await chrome.debugger.sendCommand(target, "DOM.enable");
-    await chrome.debugger.sendCommand(target, "Page.enable");
-    await chrome.debugger.sendCommand(target, "Log.enable");
+    if (attachedTabs.has(tabId)) {
+      touchCdpSession(tabId);
+      await ensureCdpDomains(tabId, ["Network", "Runtime", "DOM", "Page", "Log", "Accessibility"]);
+      return;
+    }
+    const existing = attachLocksByTab.get(tabId);
+    if (existing) {
+      await existing;
+      touchCdpSession(tabId);
+      await ensureCdpDomains(tabId, ["Network", "Runtime", "DOM", "Page", "Log", "Accessibility"]);
+      return;
+    }
+
+    const attachTask = (async () => {
+      try {
+        await chrome.debugger.attach({ tabId }, "1.3");
+        attachedTabs.add(tabId);
+        enabledDomainsByTab.delete(tabId);
+        touchCdpSession(tabId);
+      } catch (error) {
+        throw toRuntimeError(`attach debugger failed for tab ${tabId}: ${error instanceof Error ? error.message : String(error)}`, {
+          code: "E_CDP_ATTACH",
+          retryable: true,
+          details: { tabId }
+        });
+      }
+    })();
+    attachLocksByTab.set(tabId, attachTask);
+    try {
+      await attachTask;
+    } finally {
+      attachLocksByTab.delete(tabId);
+    }
+    await ensureCdpDomains(tabId, ["Network", "Runtime", "DOM", "Page", "Log", "Accessibility"]);
   }
 
   async function observeByCDP(tabId: number): Promise<JsonRecord> {
     await ensureDebugger(tabId);
-    const target = { tabId };
-    const evalResult = (await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
+    const evalResult = (await sendCdpCommand(tabId, "Runtime.evaluate", {
       expression: `(() => ({
         url: location.href,
         title: document.title,
@@ -741,16 +989,387 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     };
   }
 
+  async function listFrameIdsForSnapshot(tabId: number): Promise<string[]> {
+    try {
+      const frameTreeResult = (await sendCdpCommand(tabId, "Page.getFrameTree", {}, { timeoutMs: 4_000 })) as JsonRecord;
+      const frameIds = collectFrameIdsFromTree(frameTreeResult.frameTree).filter(Boolean);
+      return Array.from(new Set(frameIds));
+    } catch {
+      return [];
+    }
+  }
+
+  async function resolveElementMetaByBackendNode(
+    tabId: number,
+    backendNodeId: number,
+    scopeSelector: string
+  ): Promise<JsonRecord | null> {
+    let objectId = "";
+    try {
+      const resolved = (await sendCdpCommand(tabId, "DOM.resolveNode", { backendNodeId })) as JsonRecord;
+      objectId = String(asRecord(resolved.object).objectId || "");
+      if (!objectId) return null;
+      const expression = `function() {
+        if (!this || this.nodeType !== 1) return null;
+        const scopeSelector = ${JSON.stringify(scopeSelector)};
+        const isValidIdent = (v) => /^[A-Za-z_][A-Za-z0-9_:\\-\\.]*$/.test(v || "");
+        const safeAttr = (v) => String(v || "").split("\\\\").join("\\\\\\\\").replace(/"/g, '\\"');
+        const fallbackPath = (el) => {
+          const parts = [];
+          let cur = el;
+          let depth = 0;
+          while (cur && cur.nodeType === 1 && depth < 5) {
+            const tag = (cur.tagName || "div").toLowerCase();
+            if (cur.id && isValidIdent(cur.id)) {
+              parts.unshift("#" + cur.id);
+              break;
+            }
+            let part = tag;
+            const cls = String(cur.className || "")
+              .split(/\\s+/)
+              .map((x) => x.trim())
+              .filter(Boolean)
+              .find((x) => isValidIdent(x));
+            if (cls) part += "." + cls;
+            const parent = cur.parentElement;
+            if (parent) {
+              const sameTag = Array.from(parent.children).filter((child) => child.tagName === cur.tagName);
+              if (sameTag.length > 1) {
+                part += ":nth-of-type(" + (sameTag.indexOf(cur) + 1) + ")";
+              }
+            }
+            parts.unshift(part);
+            cur = cur.parentElement;
+            depth += 1;
+          }
+          return parts.join(" > ");
+        };
+        const makeSelector = (el) => {
+          if (el.id && isValidIdent(el.id)) return "#" + el.id;
+          const name = (el.getAttribute("name") || "").trim();
+          if (name) return el.tagName.toLowerCase() + '[name="' + safeAttr(name) + '"]';
+          const testId = (el.getAttribute("data-testid") || el.getAttribute("data-test") || "").trim();
+          if (testId) return el.tagName.toLowerCase() + '[data-testid="' + safeAttr(testId) + '"]';
+          const ariaLabel = (el.getAttribute("aria-label") || "").trim();
+          if (ariaLabel) return el.tagName.toLowerCase() + '[aria-label="' + safeAttr(ariaLabel) + '"]';
+          const placeholder = (el.getAttribute("placeholder") || "").trim();
+          if (placeholder) return el.tagName.toLowerCase() + '[placeholder="' + safeAttr(placeholder) + '"]';
+          return fallbackPath(el);
+        };
+        let matchesScope = true;
+        if (scopeSelector) {
+          try {
+            matchesScope = this.matches(scopeSelector) || !!this.closest(scopeSelector);
+          } catch {
+            matchesScope = false;
+          }
+        }
+        const role =
+          String(this.getAttribute("role") || "")
+            .trim()
+            .toLowerCase() || String(this.tagName || "node").toLowerCase();
+        const text = String(this.textContent || "").replace(/\\s+/g, " ").trim();
+        const value = "value" in this ? String(this.value || "") : "";
+        return {
+          ok: true,
+          matchesScope,
+          tag: String(this.tagName || "").toLowerCase(),
+          role,
+          name: text.slice(0, 180),
+          value: value.slice(0, 180),
+          placeholder: String(this.getAttribute("placeholder") || "").slice(0, 180),
+          ariaLabel: String(this.getAttribute("aria-label") || "").slice(0, 180),
+          selector: makeSelector(this),
+          disabled: !!this.disabled,
+          focused: document.activeElement === this
+        };
+      }`;
+      const result = (await sendCdpCommand(tabId, "Runtime.callFunctionOn", {
+        objectId,
+        functionDeclaration: expression,
+        returnByValue: true,
+        awaitPromise: true
+      })) as JsonRecord;
+      const value = asRecord(asRecord(result.result).value);
+      return value.ok === true ? value : null;
+    } catch {
+      return null;
+    } finally {
+      if (objectId) {
+        await sendCdpCommand(tabId, "Runtime.releaseObject", { objectId }).catch(() => {
+          // ignore stale object release
+        });
+      }
+    }
+  }
+
+  async function takeInteractiveSnapshotByAX(
+    tabId: number,
+    options: JsonRecord,
+    base: JsonRecord,
+    state: SnapshotState,
+    key: string,
+    snapshotId: string
+  ): Promise<JsonRecord> {
+    const pageResult = (await sendCdpCommand(tabId, "Runtime.evaluate", {
+      expression: `(() => ({ url: location.href, title: document.title }))()`,
+      returnByValue: true
+    })) as JsonRecord;
+    const page = asRecord(asRecord(pageResult.result).value);
+
+    const frameIds = await listFrameIdsForSnapshot(tabId);
+    const treeBuckets: Array<{ frameId: string; nodes: JsonRecord[] }> = [];
+    for (const frameId of frameIds) {
+      try {
+        const tree = (await sendCdpCommand(tabId, "Accessibility.getFullAXTree", { frameId })) as JsonRecord;
+        const nodes = Array.isArray(tree.nodes) ? (tree.nodes as JsonRecord[]) : [];
+        if (nodes.length > 0) treeBuckets.push({ frameId, nodes });
+      } catch {
+        // ignore inaccessible frame tree and keep others
+      }
+    }
+    if (treeBuckets.length === 0) {
+      const fallbackTree = (await sendCdpCommand(tabId, "Accessibility.getFullAXTree", {})) as JsonRecord;
+      const nodes = Array.isArray(fallbackTree.nodes) ? (fallbackTree.nodes as JsonRecord[]) : [];
+      if (nodes.length > 0) treeBuckets.push({ frameId: "", nodes });
+    }
+    if (treeBuckets.length === 0) {
+      throw toRuntimeError("Accessibility.getFullAXTree returned empty tree", {
+        code: "E_CDP_AXTREE_EMPTY",
+        retryable: true,
+        details: { tabId, frameIds }
+      });
+    }
+
+    const maxNodes = Number(options.maxNodes || 120);
+    const scopeSelector = String(options.selector || "");
+    const mode = String(options.mode || "interactive");
+    const filter = String(options.filter || "interactive");
+    const allowAll = mode === "full" || filter === "all";
+
+    const candidates: JsonRecord[] = [];
+    for (const bucket of treeBuckets) {
+      for (const rawNode of bucket.nodes) {
+        const node = asRecord(rawNode);
+        if (node.ignored === true) continue;
+        const backendNodeId = toPositiveInteger(node.backendDOMNodeId);
+        if (!backendNodeId) continue;
+        const role = readAxValue(node.role).trim().toLowerCase();
+        const name = readAxValue(node.name).trim();
+        const value = readAxValue(node.value).trim();
+        const focusable = readAxBooleanProperty(node.properties, "focusable");
+        const focused = readAxBooleanProperty(node.properties, "focused");
+        const disabled = readAxBooleanProperty(node.properties, "disabled");
+        const interactive = isInteractiveRole(role) || focusable === true;
+        if (!allowAll && !interactive) continue;
+        candidates.push({
+          backendNodeId,
+          frameId: bucket.frameId,
+          axNodeId: String(node.nodeId || ""),
+          role: role || "node",
+          name: name.slice(0, 180),
+          value: value.slice(0, 180),
+          focused: focused === true,
+          disabled: disabled === true
+        });
+        if (candidates.length >= Math.max(maxNodes * 3, 240)) break;
+      }
+      if (candidates.length >= Math.max(maxNodes * 3, 240)) break;
+    }
+
+    const enrichedNodes: JsonRecord[] = [];
+    const seenBackendNodeIds = new Set<number>();
+    for (const item of candidates) {
+      const backendNodeId = toPositiveInteger(item.backendNodeId);
+      if (!backendNodeId) continue;
+      if (seenBackendNodeIds.has(backendNodeId)) continue;
+      const meta = await resolveElementMetaByBackendNode(tabId, backendNodeId, scopeSelector);
+      if (!meta) continue;
+      if (scopeSelector && meta.matchesScope !== true) continue;
+      seenBackendNodeIds.add(backendNodeId);
+      enrichedNodes.push({
+        ...item,
+        ...meta
+      });
+      if (enrichedNodes.length >= maxNodes) break;
+    }
+
+    if (enrichedNodes.length === 0) {
+      throw toRuntimeError("AXTree produced no actionable nodes", {
+        code: "E_CDP_AXTREE_NO_NODES",
+        retryable: true,
+        details: {
+          tabId,
+          scopeSelector,
+          candidateCount: candidates.length
+        }
+      });
+    }
+
+    state.refMap = new Map();
+    const nodes = enrichedNodes.map((node, index) => {
+      const ref = `e${index}`;
+      const enriched: JsonRecord = {
+        ...node,
+        ref,
+        key,
+        snapshotId
+      };
+      state.refMap.set(ref, enriched);
+      return enriched;
+    });
+
+    return {
+      ...base,
+      url: String(page.url || ""),
+      title: String(page.title || ""),
+      count: nodes.length,
+      nodes,
+      truncated: candidates.length > nodes.length,
+      source: "ax",
+      hash: hashText(nodes.map((node) => summarizeSnapshotNode(node)).join("\n"))
+    };
+  }
+
+  async function takeInteractiveSnapshotByDomEvaluate(
+    tabId: number,
+    options: JsonRecord,
+    base: JsonRecord,
+    state: SnapshotState,
+    key: string,
+    snapshotId: string
+  ): Promise<JsonRecord> {
+    const evalResult = (await sendCdpCommand(tabId, "Runtime.evaluate", {
+      expression: `(() => {
+        const selector = ${JSON.stringify(String(options.selector || ""))};
+        const filter = ${JSON.stringify(String(options.filter || "interactive"))};
+        const maxNodes = ${Number(options.maxNodes || 120)};
+        const scope = selector ? document.querySelector(selector) : document;
+        if (!scope) return { ok: false, error: "selector not found" };
+        const interactive = "a,button,input,textarea,select,[role='button'],[role='link'],[role='textbox'],[contenteditable='true'],[tabindex]";
+        const all = Array.from((scope === document ? document : scope).querySelectorAll("*"));
+        const list = filter === "all" ? all : all.filter((el) => el.matches(interactive));
+        const safeAttr = (v) => String(v || "").split("\\\\").join("\\\\\\\\").replace(/"/g, '\\"');
+        const isValidIdent = (v) => /^[A-Za-z_][A-Za-z0-9_:\\-\\.]*$/.test(v || "");
+        const fallbackPath = (el) => {
+          const parts = [];
+          let cur = el;
+          let depth = 0;
+          while (cur && cur.nodeType === 1 && depth < 5) {
+            const tag = (cur.tagName || "div").toLowerCase();
+            if (cur.id && isValidIdent(cur.id)) {
+              parts.unshift("#" + cur.id);
+              break;
+            }
+            let part = tag;
+            const cls = String(cur.className || "")
+              .split(/\\s+/)
+              .map((x) => x.trim())
+              .filter(Boolean)
+              .find((x) => isValidIdent(x));
+            if (cls) part += "." + cls;
+            const parent = cur.parentElement;
+            if (parent) {
+              const sameTag = Array.from(parent.children).filter((child) => child.tagName === cur.tagName);
+              if (sameTag.length > 1) {
+                part += ":nth-of-type(" + (sameTag.indexOf(cur) + 1) + ")";
+              }
+            }
+            parts.unshift(part);
+            cur = cur.parentElement;
+            depth += 1;
+          }
+          return parts.join(" > ");
+        };
+        const makeSelector = (el) => {
+          if (el.id && isValidIdent(el.id)) return "#" + el.id;
+          const name = (el.getAttribute("name") || "").trim();
+          if (name) return el.tagName.toLowerCase() + '[name="' + safeAttr(name) + '"]';
+          const testId = (el.getAttribute("data-testid") || el.getAttribute("data-test") || "").trim();
+          if (testId) return el.tagName.toLowerCase() + '[data-testid="' + safeAttr(testId) + '"]';
+          const ariaLabel = (el.getAttribute("aria-label") || "").trim();
+          if (ariaLabel) return el.tagName.toLowerCase() + '[aria-label="' + safeAttr(ariaLabel) + '"]';
+          const placeholder = (el.getAttribute("placeholder") || "").trim();
+          if (placeholder) return el.tagName.toLowerCase() + '[placeholder="' + safeAttr(placeholder) + '"]';
+          return fallbackPath(el);
+        };
+        const nodes = list.slice(0, maxNodes).map((el) => {
+          const role = (el.getAttribute("role") || el.tagName || "node").toLowerCase();
+          const text = String(el.textContent || "").replace(/\\s+/g, " ").trim();
+          const value = "value" in el ? String(el.value || "") : "";
+          const placeholder = String(el.getAttribute("placeholder") || "");
+          const ariaLabel = String(el.getAttribute("aria-label") || "");
+          return {
+            role,
+            name: text.slice(0, 180),
+            value: value.slice(0, 180),
+            placeholder: placeholder.slice(0, 180),
+            ariaLabel: ariaLabel.slice(0, 180),
+            selector: makeSelector(el),
+            disabled: !!el.disabled,
+            focused: document.activeElement === el,
+            tag: el.tagName.toLowerCase()
+          };
+        });
+        return {
+          ok: true,
+          url: location.href,
+          title: document.title,
+          nodes
+        };
+      })()`,
+      returnByValue: true,
+      awaitPromise: true
+    })) as JsonRecord;
+    const interactiveEvalException = asRecord(evalResult.exceptionDetails);
+    if (Object.keys(interactiveEvalException).length > 0) {
+      const exceptionObj = asRecord(interactiveEvalException.exception);
+      throw new Error(
+        `cdp.snapshot interactive eval exception: ${String(
+          interactiveEvalException.text || exceptionObj.description || exceptionObj.value || "unknown"
+        )}`
+      );
+    }
+    const value = asRecord(asRecord(evalResult.result).value);
+    if (value.ok !== true) {
+      throw new Error(`cdp.snapshot failed: ${String(value.error || "interactive evaluate failed")}`);
+    }
+    const rawNodes = Array.isArray(value.nodes) ? (value.nodes as JsonRecord[]) : [];
+    state.refMap = new Map();
+    const nodes = rawNodes.map((node, index) => {
+      const ref = `e${index}`;
+      const enriched: JsonRecord = {
+        ...node,
+        ref,
+        key,
+        snapshotId,
+        nodeId: Number(index + 1),
+        backendNodeId: Number(index + 1)
+      };
+      state.refMap.set(ref, enriched);
+      return enriched;
+    });
+    return {
+      ...base,
+      url: String(value.url || ""),
+      title: String(value.title || ""),
+      count: nodes.length,
+      nodes,
+      truncated: false,
+      source: "dom",
+      hash: hashText(nodes.map((node) => summarizeSnapshotNode(node)).join("\n"))
+    };
+  }
+
   async function takeSnapshot(tabId: number, rawOptions: JsonRecord = {}): Promise<JsonRecord> {
     await ensureDebugger(tabId);
     const options = normalizeSnapshotOptions(rawOptions);
     const key = snapshotKey(options);
     const state = getSnapshotState(tabId);
     const previous = state.byKey.get(key) || null;
-    const target = { tabId };
 
     if (options.noAnimations === true) {
-      await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
+      await sendCdpCommand(tabId, "Runtime.evaluate", {
         expression: `(() => {
           const id = "__brain_loop_disable_anim__";
           if (!document.getElementById(id)) {
@@ -784,7 +1403,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     let snapshot: JsonRecord;
     if (options.mode === "text") {
       const textChars = Math.max(Number(options.maxChars || 4000), Math.min(48_000, Number(options.maxTokens || 1200) * 4));
-      const evalResult = (await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
+      const evalResult = (await sendCdpCommand(tabId, "Runtime.evaluate", {
         expression: `(() => {
           const selector = ${JSON.stringify(String(options.selector || ""))};
           const scope = selector ? document.querySelector(selector) : document.body;
@@ -820,125 +1439,16 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         truncated: Number(value.textLength || text.length) > text.length
       };
     } else {
-      const evalResult = (await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
-        expression: `(() => {
-          const selector = ${JSON.stringify(String(options.selector || ""))};
-          const filter = ${JSON.stringify(String(options.filter || "interactive"))};
-          const maxNodes = ${Number(options.maxNodes || 120)};
-          const scope = selector ? document.querySelector(selector) : document;
-          if (!scope) return { ok: false, error: "selector not found" };
-          const interactive = "a,button,input,textarea,select,[role='button'],[role='link'],[role='textbox'],[contenteditable='true'],[tabindex]";
-          const all = Array.from((scope === document ? document : scope).querySelectorAll("*"));
-          const list = filter === "all" ? all : all.filter((el) => el.matches(interactive));
-          const safeAttr = (v) => String(v || "").split("\\\\").join("\\\\\\\\").replace(/"/g, '\\"');
-          const isValidIdent = (v) => /^[A-Za-z_][A-Za-z0-9_:\\-\\.]*$/.test(v || "");
-          const fallbackPath = (el) => {
-            const parts = [];
-            let cur = el;
-            let depth = 0;
-            while (cur && cur.nodeType === 1 && depth < 5) {
-              const tag = (cur.tagName || "div").toLowerCase();
-              if (cur.id && isValidIdent(cur.id)) {
-                parts.unshift("#" + cur.id);
-                break;
-              }
-              let part = tag;
-              const cls = String(cur.className || "")
-                .split(/\\s+/)
-                .map((x) => x.trim())
-                .filter(Boolean)
-                .find((x) => isValidIdent(x));
-              if (cls) part += "." + cls;
-              const parent = cur.parentElement;
-              if (parent) {
-                const sameTag = Array.from(parent.children).filter((child) => child.tagName === cur.tagName);
-                if (sameTag.length > 1) {
-                  part += ":nth-of-type(" + (sameTag.indexOf(cur) + 1) + ")";
-                }
-              }
-              parts.unshift(part);
-              cur = cur.parentElement;
-              depth += 1;
-            }
-            return parts.join(" > ");
-          };
-          const makeSelector = (el) => {
-            if (el.id && isValidIdent(el.id)) return "#" + el.id;
-            const name = (el.getAttribute("name") || "").trim();
-            if (name) return el.tagName.toLowerCase() + '[name="' + safeAttr(name) + '"]';
-            const testId = (el.getAttribute("data-testid") || el.getAttribute("data-test") || "").trim();
-            if (testId) return el.tagName.toLowerCase() + '[data-testid="' + safeAttr(testId) + '"]';
-            const ariaLabel = (el.getAttribute("aria-label") || "").trim();
-            if (ariaLabel) return el.tagName.toLowerCase() + '[aria-label="' + safeAttr(ariaLabel) + '"]';
-            const placeholder = (el.getAttribute("placeholder") || "").trim();
-            if (placeholder) return el.tagName.toLowerCase() + '[placeholder="' + safeAttr(placeholder) + '"]';
-            return fallbackPath(el);
-          };
-          const nodes = list.slice(0, maxNodes).map((el) => {
-            const role = (el.getAttribute("role") || el.tagName || "node").toLowerCase();
-            const text = String(el.textContent || "").replace(/\\s+/g, " ").trim();
-            const value = "value" in el ? String(el.value || "") : "";
-            const placeholder = String(el.getAttribute("placeholder") || "");
-            const ariaLabel = String(el.getAttribute("aria-label") || "");
-            return {
-              role,
-              name: text.slice(0, 180),
-              value: value.slice(0, 180),
-              placeholder: placeholder.slice(0, 180),
-              ariaLabel: ariaLabel.slice(0, 180),
-              selector: makeSelector(el),
-              disabled: !!el.disabled,
-              focused: document.activeElement === el,
-              tag: el.tagName.toLowerCase()
-            };
-          });
-          return {
-            ok: true,
-            url: location.href,
-            title: document.title,
-            nodes
-          };
-        })()`,
-        returnByValue: true,
-        awaitPromise: true
-      })) as JsonRecord;
-      const interactiveEvalException = asRecord(evalResult.exceptionDetails);
-      if (Object.keys(interactiveEvalException).length > 0) {
-        const exceptionObj = asRecord(interactiveEvalException.exception);
-        throw new Error(
-          `cdp.snapshot interactive eval exception: ${String(
-            interactiveEvalException.text || exceptionObj.description || exceptionObj.value || "unknown"
-          )}`
-        );
-      }
-      const value = asRecord(asRecord(evalResult.result).value);
-      if (value.ok !== true) {
-        throw new Error(`cdp.snapshot failed: ${String(value.error || "interactive evaluate failed")}`);
-      }
-      const rawNodes = Array.isArray(value.nodes) ? (value.nodes as JsonRecord[]) : [];
-      state.refMap = new Map();
-      const nodes = rawNodes.map((node, index) => {
-        const ref = `e${index}`;
-        const enriched: JsonRecord = {
-          ...node,
-          ref,
-          key,
-          snapshotId,
-          nodeId: Number(index + 1),
-          backendNodeId: Number(index + 1)
+      try {
+        snapshot = await takeInteractiveSnapshotByAX(tabId, options, base, state, key, snapshotId);
+      } catch (error) {
+        const fallback = await takeInteractiveSnapshotByDomEvaluate(tabId, options, base, state, key, snapshotId);
+        snapshot = {
+          ...fallback,
+          source: "dom-fallback",
+          axError: error instanceof Error ? error.message : String(error)
         };
-        state.refMap.set(ref, enriched);
-        return enriched;
-      });
-      snapshot = {
-        ...base,
-        url: String(value.url || ""),
-        title: String(value.title || ""),
-        count: nodes.length,
-        nodes,
-        truncated: false,
-        hash: hashText(nodes.map((node) => summarizeSnapshotNode(node)).join("\n"))
-      };
+      }
     }
 
     state.byKey.set(key, snapshot);
@@ -962,9 +1472,131 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     return node;
   }
 
+  async function executeActionByBackendNode(
+    tabId: number,
+    input: {
+      backendNodeId: number;
+      kind: string;
+      value: string;
+      waitForMs: number;
+    }
+  ): Promise<JsonRecord> {
+    const kind = input.kind;
+    const waitForMs = Math.max(0, Math.min(10_000, Number(input.waitForMs || 0)));
+    const started = Date.now();
+    let objectId = "";
+
+    const resolveObject = async (): Promise<string> => {
+      const resolved = (await sendCdpCommand(tabId, "DOM.resolveNode", {
+        backendNodeId: input.backendNodeId
+      })) as JsonRecord;
+      const nextObjectId = String(asRecord(resolved.object).objectId || "");
+      if (!nextObjectId) {
+        throw toRuntimeError(`backendNodeId ${input.backendNodeId} resolve failed`, {
+          code: "E_CDP_RESOLVE_NODE",
+          retryable: true,
+          details: { tabId, backendNodeId: input.backendNodeId }
+        });
+      }
+      return nextObjectId;
+    };
+
+    while (true) {
+      try {
+        objectId = await resolveObject();
+        break;
+      } catch (error) {
+        if (Date.now() - started >= waitForMs) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+    }
+
+    try {
+      const expression = `function() {
+        const kind = ${JSON.stringify(kind)};
+        const value = ${JSON.stringify(input.value)};
+        if (!this || this.nodeType !== 1) return { ok: false, error: "backend node is not element" };
+        const el = this;
+        const applyTextToElement = (target, text, mode) => {
+          if ("disabled" in target && !!target.disabled) return { ok: false, error: "element is disabled" };
+          if ("readOnly" in target && !!target.readOnly) return { ok: false, error: "element is readonly" };
+          if ("focus" in target) {
+            try { target.focus({ preventScroll: true }); } catch { target.focus(); }
+          }
+          if ("value" in target) {
+            let setter = null;
+            try {
+              const proto = Object.getPrototypeOf(target);
+              setter = Object.getOwnPropertyDescriptor(proto, "value")?.set
+                || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set
+                || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set
+                || null;
+            } catch {}
+            if (setter) setter.call(target, text);
+            else target.value = text;
+            try {
+              target.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
+            } catch {
+              target.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+            if (mode === "fill") target.dispatchEvent(new Event("change", { bubbles: true }));
+            return { ok: true, typed: text.length, mode, via: "backend-node-value", url: location.href, title: document.title };
+          }
+          if (target.isContentEditable) {
+            target.textContent = text;
+            try {
+              target.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
+            } catch {
+              target.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+            if (mode === "fill") target.dispatchEvent(new Event("change", { bubbles: true }));
+            return { ok: true, typed: text.length, mode, via: "backend-node-contenteditable", url: location.href, title: document.title };
+          }
+          return { ok: false, error: "element is not typable" };
+        };
+        el.scrollIntoView?.({ block: "center", inline: "nearest" });
+        if (kind === "click") {
+          el.click?.();
+          return { ok: true, clicked: true, via: "backend-node", url: location.href, title: document.title };
+        }
+        if (kind === "type" || kind === "fill") {
+          return applyTextToElement(el, value, kind);
+        }
+        if (kind === "select") {
+          if (!("value" in el)) return { ok: false, error: "element is not selectable" };
+          el.value = value;
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+          return { ok: true, selected: value, via: "backend-node", url: location.href, title: document.title };
+        }
+        return { ok: false, error: "unsupported backend action", kind };
+      }`;
+      const out = (await sendCdpCommand(tabId, "Runtime.callFunctionOn", {
+        objectId,
+        functionDeclaration: expression,
+        returnByValue: true,
+        awaitPromise: true
+      })) as JsonRecord;
+      const value = asRecord(asRecord(out.result).value);
+      if (value.ok === false) {
+        throw toRuntimeError(String(value.error || "backend action failed"), {
+          code: "E_CDP_BACKEND_ACTION",
+          retryable: true,
+          details: { tabId, backendNodeId: input.backendNodeId, kind }
+        });
+      }
+      return value;
+    } finally {
+      if (objectId) {
+        await sendCdpCommand(tabId, "Runtime.releaseObject", { objectId }).catch(() => {
+          // ignore stale object release
+        });
+      }
+    }
+  }
+
   async function executeRefActionByCDP(tabId: number, rawAction: JsonRecord): Promise<JsonRecord> {
     await ensureDebugger(tabId);
-    const target = { tabId };
     const kind = normalizeActionKind(rawAction.kind);
     const key = typeof rawAction.key === "string" ? rawAction.key.trim() : typeof rawAction.value === "string" ? rawAction.value.trim() : "";
     const value = String(rawAction.value ?? rawAction.text ?? "");
@@ -972,7 +1604,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     if (kind === "navigate") {
       const url = String(rawAction.url || "").trim();
       if (!url) throw new Error("url required for navigate");
-      const nav = (await chrome.debugger.sendCommand(target, "Page.navigate", { url })) as JsonRecord;
+      const nav = (await sendCdpCommand(tabId, "Page.navigate", { url })) as JsonRecord;
       return {
         tabId,
         kind,
@@ -987,7 +1619,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
 
     if (kind === "press") {
       if (!key) throw new Error("key required for press");
-      const out = (await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
+      const out = (await sendCdpCommand(tabId, "Runtime.evaluate", {
         expression: `(() => {
           const k = ${JSON.stringify(key)};
           const t = document.activeElement || document.body;
@@ -1009,6 +1641,8 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     const explicitSelector = typeof rawAction.selector === "string" ? rawAction.selector.trim() : "";
     const fromRef = ref ? resolveRefEntry(tabId, ref) : {};
     const selector = String(explicitSelector || fromRef.selector || "").trim();
+    const backendNodeId =
+      toPositiveInteger(rawAction.backendNodeId) || toPositiveInteger(fromRef.backendNodeId) || toPositiveInteger(fromRef.nodeId);
     const waitForMsRaw = Number(rawAction.waitForMs);
     const waitForMs = Number.isFinite(waitForMsRaw)
       ? Math.max(0, Math.min(10_000, Math.floor(waitForMsRaw)))
@@ -1016,7 +1650,28 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         ? 1_500
         : 0;
 
-    if (!selector) throw new Error("action target not found by ref/selector");
+    if (backendNodeId && (kind === "click" || kind === "type" || kind === "fill" || kind === "select")) {
+      try {
+        const backendResult = await executeActionByBackendNode(tabId, {
+          backendNodeId,
+          kind,
+          value,
+          waitForMs: selector ? 0 : waitForMs
+        });
+        return {
+          tabId,
+          kind,
+          ref: ref || undefined,
+          selector: selector || undefined,
+          backendNodeId,
+          result: backendResult
+        };
+      } catch {
+        // fallback to selector flow below
+      }
+    }
+
+    if (!selector) throw new Error("action target not found by ref/selector/backendNodeId");
 
     const expression = `(async () => {
       const selector = ${JSON.stringify(selector)};
@@ -1137,7 +1792,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       return { ok: false, error: "unsupported action kind", kind };
     })()`;
 
-    const out = (await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
+    const out = (await sendCdpCommand(tabId, "Runtime.evaluate", {
       expression,
       returnByValue: true,
       awaitPromise: true
@@ -1153,92 +1808,153 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       kind,
       ref: ref || undefined,
       selector,
+      backendNodeId: backendNodeId || undefined,
       result: resultValue
     };
   }
 
   async function executeByCDP(tabId: number, action: JsonRecord): Promise<unknown> {
     await ensureDebugger(tabId);
-    const target = { tabId };
 
     if (action.type === "runtime.evaluate") {
-      return await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
+      return await sendCdpCommand(tabId, "Runtime.evaluate", {
         expression: action.expression,
         returnByValue: action.returnByValue !== false
       });
     }
     if (action.type === "navigate") {
-      return await chrome.debugger.sendCommand(target, "Page.navigate", { url: action.url });
+      return await sendCdpCommand(tabId, "Page.navigate", { url: action.url });
     }
     if (action.domain && action.method) {
-      return await chrome.debugger.sendCommand(target, `${String(action.domain)}.${String(action.method)}`, asRecord(action.params));
+      return await sendCdpCommand(tabId, `${String(action.domain)}.${String(action.method)}`, asRecord(action.params));
     }
     throw new Error("Unsupported CDP action");
   }
 
   async function verifyByCDP(tabId: number, action: JsonRecord, result: JsonRecord | null): Promise<JsonRecord> {
-    const observation = await observeByCDP(tabId);
-    const checks: JsonRecord[] = [];
-    let verified = true;
     const expect = action.expect && typeof action.expect === "object" ? asRecord(action.expect) : action;
+    const defaultWaitMs =
+      expect.urlChanged === true || Boolean(expect.selectorExists) || Boolean(expect.textIncludes) ? 1_500 : 0;
+    const waitForMs = toIntInRange(expect.waitForMs, defaultWaitMs, 0, 15_000);
+    const pollIntervalMs = toIntInRange(expect.pollIntervalMs, 120, 50, 1_000);
+    const started = Date.now();
 
-    if (expect.expectUrlContains || expect.urlContains) {
-      const expected = String(expect.expectUrlContains || expect.urlContains || "");
-      const pass = String(asRecord(observation.page).url || "").includes(expected);
-      checks.push({ name: "expectUrlContains", pass, expected });
-      if (!pass) verified = false;
-    }
-    if (expect.expectTitleContains || expect.titleContains) {
-      const expected = String(expect.expectTitleContains || expect.titleContains || "");
-      const pass = String(asRecord(observation.page).title || "").includes(expected);
-      checks.push({ name: "expectTitleContains", pass, expected });
-      if (!pass) verified = false;
-    }
-    if (expect.urlChanged === true) {
-      const previousUrl = String(expect.previousUrl || asRecord(result).url || "");
-      const currentUrl = String(asRecord(observation.page).url || "");
-      const pass = !!previousUrl && previousUrl !== currentUrl;
-      checks.push({ name: "urlChanged", pass, previousUrl, currentUrl });
-      if (!pass) verified = false;
-    }
-    if (expect.textIncludes) {
-      const out = (await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
-        expression: `(() => document.body?.innerText || "")()`,
-        returnByValue: true
-      })) as JsonRecord;
-      const text = String(asRecord(out.result).value || "");
-      const expected = String(expect.textIncludes);
-      const pass = text.includes(expected);
-      checks.push({ name: "textIncludes", pass, expected });
-      if (!pass) verified = false;
-    }
-    if (expect.selectorExists) {
-      const selector = String(expect.selectorExists);
-      const out = (await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
-        expression: `(() => !!document.querySelector(${JSON.stringify(selector)}))()`,
-        returnByValue: true
-      })) as JsonRecord;
-      const pass = asRecord(out.result).value === true;
-      checks.push({ name: "selectorExists", pass, expected: selector });
-      if (!pass) verified = false;
-    }
+    let attempts = 0;
+    let finalChecks: JsonRecord[] = [];
+    let finalObservation: JsonRecord = {};
+    let finalVerified = false;
 
-    if (result && result.ok === false) {
-      checks.push({ name: "invokeResult", pass: false, expected: "ok=true" });
-      verified = false;
+    while (true) {
+      attempts += 1;
+      const observation = await observeByCDP(tabId);
+      const checks: JsonRecord[] = [];
+      let verified = true;
+
+      if (expect.expectUrlContains || expect.urlContains) {
+        const expected = String(expect.expectUrlContains || expect.urlContains || "");
+        const pass = String(asRecord(observation.page).url || "").includes(expected);
+        checks.push({ name: "expectUrlContains", pass, expected });
+        if (!pass) verified = false;
+      }
+      if (expect.expectTitleContains || expect.titleContains) {
+        const expected = String(expect.expectTitleContains || expect.titleContains || "");
+        const pass = String(asRecord(observation.page).title || "").includes(expected);
+        checks.push({ name: "expectTitleContains", pass, expected });
+        if (!pass) verified = false;
+      }
+      if (expect.urlChanged === true) {
+        const previousUrl = String(expect.previousUrl || asRecord(result).url || "");
+        const currentUrl = String(asRecord(observation.page).url || "");
+        const pass = !!previousUrl && previousUrl !== currentUrl;
+        checks.push({ name: "urlChanged", pass, previousUrl, currentUrl });
+        if (!pass) verified = false;
+      }
+      if (expect.textIncludes) {
+        const expected = String(expect.textIncludes);
+        const out = (await sendCdpCommand(tabId, "Runtime.evaluate", {
+          expression: `(() => {
+            const readText = (doc) => {
+              let text = String(doc?.body?.innerText || "");
+              const frames = Array.from(doc?.querySelectorAll?.("iframe") || []);
+              for (const frame of frames) {
+                try {
+                  const childDoc = frame.contentDocument;
+                  if (!childDoc) continue;
+                  text += "\\n" + readText(childDoc);
+                } catch {
+                  // cross-origin frame
+                }
+              }
+              return text;
+            };
+            return readText(document);
+          })()`,
+          returnByValue: true
+        })) as JsonRecord;
+        const text = String(asRecord(out.result).value || "");
+        const pass = text.includes(expected);
+        checks.push({ name: "textIncludes", pass, expected });
+        if (!pass) verified = false;
+      }
+      if (expect.selectorExists) {
+        const selector = String(expect.selectorExists);
+        const out = (await sendCdpCommand(tabId, "Runtime.evaluate", {
+          expression: `(() => {
+            const selector = ${JSON.stringify(selector)};
+            const existsIn = (doc) => {
+              if (doc?.querySelector?.(selector)) return true;
+              const frames = Array.from(doc?.querySelectorAll?.("iframe") || []);
+              for (const frame of frames) {
+                try {
+                  const childDoc = frame.contentDocument;
+                  if (!childDoc) continue;
+                  if (existsIn(childDoc)) return true;
+                } catch {
+                  // cross-origin frame
+                }
+              }
+              return false;
+            };
+            return existsIn(document);
+          })()`,
+          returnByValue: true
+        })) as JsonRecord;
+        const pass = asRecord(out.result).value === true;
+        checks.push({ name: "selectorExists", pass, expected: selector });
+        if (!pass) verified = false;
+      }
+      if (result && result.ok === false) {
+        checks.push({ name: "invokeResult", pass: false, expected: "ok=true" });
+        verified = false;
+      }
+
+      finalChecks = checks;
+      finalObservation = observation;
+      finalVerified = verified;
+
+      if (verified) break;
+      if (Date.now() - started >= waitForMs) break;
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     }
 
     return {
-      ok: verified,
-      checks,
-      observation
+      ok: finalVerified,
+      checks: finalChecks,
+      observation: finalObservation,
+      attempts,
+      elapsedMs: Date.now() - started
     };
   }
 
   async function detachCDP(tabId: number): Promise<void> {
-    if (!attachedTabs.has(tabId)) return;
-    await chrome.debugger.detach({ tabId });
+    clearCdpAutoDetach(tabId);
+    rejectPendingCdpCommands(tabId, "detach requested");
+    if (attachedTabs.has(tabId)) {
+      await chrome.debugger.detach({ tabId });
+    }
     attachedTabs.delete(tabId);
+    attachLocksByTab.delete(tabId);
+    enabledDomainsByTab.delete(tabId);
   }
 
   return {

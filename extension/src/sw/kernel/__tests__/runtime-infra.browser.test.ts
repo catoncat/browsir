@@ -456,4 +456,411 @@ describe("runtime infra handler", () => {
     const verifyData = (verified.data ?? {}) as Record<string, unknown>;
     expect(verifyData.ok).toBe(true);
   });
+
+  it("uses AXTree as snapshot primary path when accessibility nodes are available", async () => {
+    const calls: string[] = [];
+    (chrome as unknown as { debugger: any }).debugger = {
+      attach: async () => {},
+      detach: async () => {},
+      sendCommand: async (_target: any, method: string, params: any = {}) => {
+        calls.push(method);
+        if (method === "Accessibility.getFullAXTree") {
+          return {
+            nodes: [
+              {
+                nodeId: "ax-1",
+                backendDOMNodeId: 101,
+                role: { value: "textbox" },
+                name: { value: "Editor" },
+                properties: [{ name: "focusable", value: { value: true } }]
+              }
+            ]
+          };
+        }
+        if (method === "Runtime.evaluate") {
+          const expression = String(params.expression || "");
+          if (expression.includes("{ url: location.href, title: document.title }")) {
+            return {
+              result: {
+                value: {
+                  url: "https://example.com/editor",
+                  title: "Editor"
+                }
+              }
+            };
+          }
+          if (expression.includes("readyState") && expression.includes("nodeCount")) {
+            return {
+              result: {
+                value: {
+                  url: "https://example.com/editor",
+                  title: "Editor",
+                  readyState: "complete",
+                  textLength: 18,
+                  nodeCount: 4
+                }
+              }
+            };
+          }
+          return { result: { value: { ok: true } } };
+        }
+        if (method === "DOM.resolveNode") {
+          return { object: { objectId: "obj-101" } };
+        }
+        if (method === "Runtime.callFunctionOn") {
+          const fn = String(params.functionDeclaration || "");
+          if (fn.includes("matchesScope")) {
+            return {
+              result: {
+                value: {
+                  ok: true,
+                  matchesScope: true,
+                  tag: "input",
+                  role: "textbox",
+                  name: "Editor",
+                  value: "",
+                  placeholder: "",
+                  ariaLabel: "",
+                  selector: "#editor",
+                  disabled: false,
+                  focused: false
+                }
+              }
+            };
+          }
+          return { result: { value: { ok: true } } };
+        }
+        return {};
+      },
+      onEvent: { addListener: () => {} },
+      onDetach: { addListener: () => {} }
+    };
+
+    const infra = createRuntimeInfraHandler();
+    const snapped = await infra.handleMessage({
+      type: "cdp.snapshot",
+      tabId: 11,
+      options: { mode: "interactive", filter: "interactive" }
+    });
+    expect(snapped?.ok).toBe(true);
+    if (!snapped || snapped.ok !== true) return;
+    const data = (snapped.data ?? {}) as Record<string, unknown>;
+    const nodes = Array.isArray(data.nodes) ? (data.nodes as Array<Record<string, unknown>>) : [];
+    expect(data.source).toBe("ax");
+    expect(nodes.length).toBe(1);
+    expect(nodes[0].backendNodeId).toBe(101);
+    expect(calls).toContain("Accessibility.getFullAXTree");
+  });
+
+  it("executes action via backendNodeId before selector fallback", async () => {
+    let backendActionCalled = false;
+    (chrome as unknown as { debugger: any }).debugger = {
+      attach: async () => {},
+      detach: async () => {},
+      sendCommand: async (_target: any, method: string, params: any = {}) => {
+        if (method === "Accessibility.getFullAXTree") {
+          return {
+            nodes: [
+              {
+                nodeId: "ax-1",
+                backendDOMNodeId: 301,
+                role: { value: "button" },
+                name: { value: "提交" },
+                properties: [{ name: "focusable", value: { value: true } }]
+              }
+            ]
+          };
+        }
+        if (method === "Runtime.evaluate") {
+          const expression = String(params.expression || "");
+          if (expression.includes("{ url: location.href, title: document.title }")) {
+            return { result: { value: { url: "https://example.com/form", title: "Form" } } };
+          }
+          if (expression.includes("readyState") && expression.includes("nodeCount")) {
+            return {
+              result: {
+                value: {
+                  url: "https://example.com/form",
+                  title: "Form",
+                  readyState: "complete",
+                  textLength: 10,
+                  nodeCount: 3
+                }
+              }
+            };
+          }
+          return { result: { value: { ok: true } } };
+        }
+        if (method === "DOM.resolveNode") {
+          return { object: { objectId: "obj-301" } };
+        }
+        if (method === "Runtime.callFunctionOn") {
+          const fn = String(params.functionDeclaration || "");
+          if (fn.includes("matchesScope")) {
+            return {
+              result: {
+                value: {
+                  ok: true,
+                  matchesScope: true,
+                  tag: "button",
+                  role: "button",
+                  name: "提交",
+                  value: "",
+                  placeholder: "",
+                  ariaLabel: "",
+                  selector: "#submit",
+                  disabled: false,
+                  focused: false
+                }
+              }
+            };
+          }
+          if (fn.includes("backend-node")) {
+            backendActionCalled = true;
+            return {
+              result: {
+                value: {
+                  ok: true,
+                  clicked: true,
+                  via: "backend-node",
+                  url: "https://example.com/form",
+                  title: "Form"
+                }
+              }
+            };
+          }
+          return { result: { value: { ok: true } } };
+        }
+        if (method === "Runtime.releaseObject") return {};
+        return {};
+      },
+      onEvent: { addListener: () => {} },
+      onDetach: { addListener: () => {} }
+    };
+
+    const infra = createRuntimeInfraHandler();
+    const snapped = await infra.handleMessage({
+      type: "cdp.snapshot",
+      tabId: 21,
+      options: { mode: "interactive" }
+    });
+    expect(snapped?.ok).toBe(true);
+
+    const acquired = await infra.handleMessage({
+      type: "lease.acquire",
+      tabId: 21,
+      owner: "runner-ax"
+    });
+    expect(acquired?.ok).toBe(true);
+
+    const acted = await infra.handleMessage({
+      type: "cdp.action",
+      tabId: 21,
+      owner: "runner-ax",
+      action: {
+        kind: "click",
+        ref: "e0"
+      }
+    });
+    expect(acted?.ok).toBe(true);
+    if (!acted || acted.ok !== true) return;
+    const data = (acted.data ?? {}) as Record<string, unknown>;
+    const result = (data.result ?? {}) as Record<string, unknown>;
+    expect(result.via).toBe("backend-node");
+    expect(backendActionCalled).toBe(true);
+  });
+
+  it("includes frameId in AXTree snapshot nodes when frame trees are available", async () => {
+    (chrome as unknown as { debugger: any }).debugger = {
+      attach: async () => {},
+      detach: async () => {},
+      sendCommand: async (_target: any, method: string, params: any = {}) => {
+        if (method === "Page.getFrameTree") {
+          return {
+            frameTree: {
+              frame: { id: "main-frame" },
+              childFrames: [
+                {
+                  frame: { id: "child-frame-1" }
+                }
+              ]
+            }
+          };
+        }
+        if (method === "Accessibility.getFullAXTree") {
+          if (params.frameId === "main-frame") {
+            return {
+              nodes: [
+                {
+                  nodeId: "ax-main-1",
+                  backendDOMNodeId: 401,
+                  role: { value: "textbox" },
+                  name: { value: "Main Input" },
+                  properties: [{ name: "focusable", value: { value: true } }]
+                }
+              ]
+            };
+          }
+          if (params.frameId === "child-frame-1") {
+            return {
+              nodes: [
+                {
+                  nodeId: "ax-child-1",
+                  backendDOMNodeId: 402,
+                  role: { value: "button" },
+                  name: { value: "Child Submit" },
+                  properties: [{ name: "focusable", value: { value: true } }]
+                }
+              ]
+            };
+          }
+          return { nodes: [] };
+        }
+        if (method === "Runtime.evaluate") {
+          const expression = String(params.expression || "");
+          if (expression.includes("{ url: location.href, title: document.title }")) {
+            return { result: { value: { url: "https://example.com/frame", title: "Frame Demo" } } };
+          }
+          if (expression.includes("readyState") && expression.includes("nodeCount")) {
+            return {
+              result: {
+                value: {
+                  url: "https://example.com/frame",
+                  title: "Frame Demo",
+                  readyState: "complete",
+                  textLength: 22,
+                  nodeCount: 8
+                }
+              }
+            };
+          }
+          return { result: { value: { ok: true } } };
+        }
+        if (method === "DOM.resolveNode") {
+          const backendNodeId = Number(params.backendNodeId || 0);
+          return { object: { objectId: `obj-${backendNodeId}` } };
+        }
+        if (method === "Runtime.callFunctionOn") {
+          const fn = String(params.functionDeclaration || "");
+          if (fn.includes("matchesScope")) {
+            const objectId = String(params.objectId || "");
+            if (objectId.includes("401")) {
+              return {
+                result: {
+                  value: {
+                    ok: true,
+                    matchesScope: true,
+                    tag: "input",
+                    role: "textbox",
+                    name: "Main Input",
+                    value: "",
+                    placeholder: "",
+                    ariaLabel: "",
+                    selector: "#main-input",
+                    disabled: false,
+                    focused: false
+                  }
+                }
+              };
+            }
+            return {
+              result: {
+                value: {
+                  ok: true,
+                  matchesScope: true,
+                  tag: "button",
+                  role: "button",
+                  name: "Child Submit",
+                  value: "",
+                  placeholder: "",
+                  ariaLabel: "",
+                  selector: "#child-submit",
+                  disabled: false,
+                  focused: false
+                }
+              }
+            };
+          }
+          return { result: { value: { ok: true } } };
+        }
+        if (method === "Runtime.releaseObject") return {};
+        return {};
+      },
+      onEvent: { addListener: () => {} },
+      onDetach: { addListener: () => {} }
+    };
+
+    const infra = createRuntimeInfraHandler();
+    const snapped = await infra.handleMessage({
+      type: "cdp.snapshot",
+      tabId: 31,
+      options: { mode: "interactive" }
+    });
+    expect(snapped?.ok).toBe(true);
+    if (!snapped || snapped.ok !== true) return;
+    const data = (snapped.data ?? {}) as Record<string, unknown>;
+    const nodes = Array.isArray(data.nodes) ? (data.nodes as Array<Record<string, unknown>>) : [];
+    expect(data.source).toBe("ax");
+    expect(nodes.length).toBe(2);
+    const frameIds = nodes.map((node) => String(node.frameId || ""));
+    expect(frameIds).toContain("main-frame");
+    expect(frameIds).toContain("child-frame-1");
+  });
+
+  it("polls verify within time window until selector condition becomes true", async () => {
+    let selectorChecks = 0;
+    (chrome as unknown as { debugger: any }).debugger = {
+      attach: async () => {},
+      detach: async () => {},
+      sendCommand: async (_target: any, method: string, params: any = {}) => {
+        if (method === "Runtime.evaluate") {
+          const expression = String(params.expression || "");
+          if (expression.includes("readyState") && expression.includes("nodeCount")) {
+            return {
+              result: {
+                value: {
+                  url: "https://example.com/polling",
+                  title: "Polling",
+                  readyState: "complete",
+                  textLength: 12,
+                  nodeCount: 3
+                }
+              }
+            };
+          }
+          if (expression.includes("existsIn(document)")) {
+            selectorChecks += 1;
+            return {
+              result: {
+                value: selectorChecks >= 2
+              }
+            };
+          }
+          return { result: { value: { ok: true } } };
+        }
+        return {};
+      },
+      onEvent: { addListener: () => {} },
+      onDetach: { addListener: () => {} }
+    };
+
+    const infra = createRuntimeInfraHandler();
+    const verified = await infra.handleMessage({
+      type: "cdp.verify",
+      tabId: 41,
+      action: {
+        expect: {
+          selectorExists: "#ready",
+          waitForMs: 500,
+          pollIntervalMs: 10
+        }
+      }
+    });
+    expect(verified?.ok).toBe(true);
+    if (!verified || verified.ok !== true) return;
+    const verifyData = (verified.data ?? {}) as Record<string, unknown>;
+    expect(verifyData.ok).toBe(true);
+    expect(Number(verifyData.attempts || 0)).toBeGreaterThan(1);
+    expect(selectorChecks).toBeGreaterThanOrEqual(2);
+  });
 });
