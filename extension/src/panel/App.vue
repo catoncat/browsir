@@ -37,6 +37,11 @@ onClickOutside(moreMenuRef, () => showMoreMenu.value = false);
 onClickOutside(exportMenuRef, () => showExportMenu.value = false);
 
 const isRunning = computed(() => Boolean(runtime.value?.running && !runtime.value?.stopped));
+const runtimeQueueState = computed(() => ({
+  steer: Number(runtime.value?.queue?.steer || 0),
+  followUp: Number(runtime.value?.queue?.followUp || 0),
+  total: Number(runtime.value?.queue?.total || 0)
+}));
 const showBridgeOfflineDot = computed(() => bridgeConnectionStatus.value === "disconnected");
 const activeSession = computed(() => sessions.value.find((item) => item.id === activeSessionId.value) || null);
 
@@ -1793,7 +1798,7 @@ async function handleStopRun() {
   await runSafely(() => store.runAction("brain.run.stop"), "停止任务失败");
 }
 
-async function handleSend(payload: { text: string; tabIds: number[] }) {
+async function handleSend(payload: { text: string; tabIds: number[]; mode: "normal" | "steer" | "followUp" }) {
   if (createSessionTask) {
     await createSessionTask;
   }
@@ -1804,7 +1809,8 @@ async function handleSend(payload: { text: string; tabIds: number[] }) {
   try {
     await store.sendPrompt(text, {
       newSession: isNew,
-      tabIds: Array.isArray(payload.tabIds) ? payload.tabIds : []
+      tabIds: Array.isArray(payload.tabIds) ? payload.tabIds : [],
+      streamingBehavior: payload.mode === "normal" ? undefined : payload.mode
     });
     prompt.value = "";
   } catch (err) {
@@ -2174,6 +2180,7 @@ onUnmounted(() => {
         <ChatInput
           v-model="prompt"
           :is-running="isRunning"
+          :queue-state="runtimeQueueState"
           :disabled="loading || creatingSession"
           @send="handleSend"
           @stop="handleStopRun"

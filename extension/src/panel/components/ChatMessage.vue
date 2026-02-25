@@ -75,6 +75,7 @@ const isAssistant = computed(() => props.role === "assistant");
 const isAssistantStreaming = computed(() => props.role === "assistant_streaming");
 const isAssistantLike = computed(() => isAssistant.value || isAssistantStreaming.value);
 const isStreamingPlainText = computed(() => isAssistantStreaming.value && props.streamingMode === "plain");
+const hasAssistantContent = computed(() => String(props.content || "").trim().length > 0);
 const isTool = computed(() => props.role === "tool");
 const isToolPending = computed(() => props.role === "tool_pending" || props.toolPending === true);
 
@@ -92,6 +93,7 @@ const showSystemSummary = ref(false);
 const inlineTextarea = ref<HTMLTextAreaElement | null>(null);
 const pendingActivityViewport = ref<HTMLElement | null>(null);
 const pendingCardStickToBottom = ref(true);
+const pendingDetailsExpanded = ref(false);
 const TOOL_COMPACT_LINE_MAX = 120;
 
 const toolRender = computed(() =>
@@ -233,6 +235,74 @@ const currentPendingStepItem = computed(() =>
 const currentPendingLogs = computed(() =>
   Array.isArray(currentPendingStepItem.value?.logs) ? currentPendingStepItem.value?.logs || [] : []
 );
+const pendingRawDetail = computed(() => String(props.toolPendingDetail || "").trim());
+const pendingDetailCompact = computed(() => normalizeToolSubtitle(pendingRawDetail.value));
+
+function denoisePendingLog(line: string): string {
+  let text = String(line || "").trim();
+  if (!text) return "";
+
+  if (text.startsWith("{") && text.endsWith("}")) {
+    try {
+      const payload = JSON.parse(text) as Record<string, unknown>;
+      const event = String(payload?.event || "").trim();
+      const data = payload?.data && typeof payload.data === "object"
+        ? payload.data as Record<string, unknown>
+        : {};
+
+      if (event === "invoke.started") {
+        const command = String(data.command || "").trim();
+        return command ? `启动：${clipInlineText(command, TOOL_COMPACT_LINE_MAX)}` : "";
+      }
+      if (event === "invoke.finished") {
+        const ok = data.ok === true;
+        const exitCode = Number(data.exitCode);
+        if (Number.isFinite(exitCode)) {
+          return ok ? `已完成 · exitCode=${exitCode}` : `失败 · exitCode=${exitCode}`;
+        }
+        return ok ? "已完成" : "失败";
+      }
+      if (event === "invoke.stdout" || event === "invoke.stderr") {
+        const chunk = String(data.chunk || "").trim();
+        if (chunk) text = chunk;
+      }
+    } catch {
+      // keep raw text fallback
+    }
+  }
+
+  text = text
+    .replace(/^stderr\s*\|\s*/iu, "")
+    .replace(/^stdout\s*\|\s*/iu, "")
+    .replace(/^\[(stderr|stdout)\]\s*/iu, "")
+    .replace(/^(stderr|stdout)\s*[:：]\s*/iu, "")
+    .trim();
+  return text;
+}
+
+const denoisedPendingLogs = computed(() =>
+  currentPendingLogs.value
+    .map((line) => denoisePendingLog(line))
+    .filter((line) => line.length > 0)
+);
+const pendingPreviewLine = computed(() => {
+  if (pendingDetailCompact.value) return clipInlineText(pendingDetailCompact.value, TOOL_COMPACT_LINE_MAX);
+  const logs = denoisedPendingLogs.value;
+  if (logs.length) return clipInlineText(logs[logs.length - 1] || "", TOOL_COMPACT_LINE_MAX);
+  if (props.toolPendingStatus === "failed") return "执行失败";
+  if (props.toolPendingStatus === "done") return "执行完成";
+  return "等待工具输出";
+});
+const hasPendingDetails = computed(() =>
+  pendingRawDetail.value.length > 0 || denoisedPendingLogs.value.length > 0
+);
+const pendingDetailsToggleLabel = computed(() =>
+  pendingDetailsExpanded.value ? "收起工具输出详情" : "展开工具输出详情"
+);
+
+function togglePendingDetails() {
+  pendingDetailsExpanded.value = !pendingDetailsExpanded.value;
+}
 
 function toggleThinking() {
   showThinking.value = !showThinking.value;
@@ -316,6 +386,15 @@ watch(
 watch(
   () => props.entryId,
   () => {
+    pendingDetailsExpanded.value = false;
+    pendingCardStickToBottom.value = true;
+  }
+);
+
+watch(
+  () => currentPendingStepItem.value?.step || 0,
+  () => {
+    pendingDetailsExpanded.value = false;
     pendingCardStickToBottom.value = true;
   }
 );
@@ -510,7 +589,8 @@ watch(
         aria-live="polite"
         data-testid="assistant-streaming-spinner"
       >
-        <span class="streaming-ellipsis" aria-label="正在思考">...</span>
+        <span v-if="!hasAssistantContent" aria-label="等待模型响应">等待模型响应</span>
+        <span v-else class="streaming-ellipsis" aria-label="正在生成">...</span>
       </div>
 
       <!-- Action Bar: Copy + Retry + Fork -->
@@ -602,13 +682,29 @@ watch(
           </p>
         </div>
         <p
-          v-if="props.toolPendingDetail"
+          v-if="pendingPreviewLine"
           class="mt-1.5 text-[11px] leading-snug text-ui-text-muted break-all pl-7"
         >
-          {{ props.toolPendingDetail }}
+          {{ pendingPreviewLine }}
         </p>
         <div
-          v-if="currentPendingStepItem"
+          v-if="hasPendingDetails"
+          class="mt-1 flex items-center pl-7"
+        >
+          <button
+            type="button"
+            class="rounded-sm p-1 text-ui-text-muted transition-colors hover:bg-ui-bg/70 hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+            :aria-label="pendingDetailsToggleLabel"
+            :title="pendingDetailsToggleLabel"
+            :aria-expanded="pendingDetailsExpanded"
+            @click="togglePendingDetails"
+          >
+            <ChevronUp v-if="pendingDetailsExpanded" :size="12" aria-hidden="true" />
+            <ChevronDown v-else :size="12" aria-hidden="true" />
+          </button>
+        </div>
+        <div
+          v-if="pendingDetailsExpanded && currentPendingStepItem"
           ref="pendingActivityViewport"
           class="tool-activity-viewport mt-2.5 max-h-40 overflow-y-auto rounded-md bg-ui-bg/70 px-2 py-1.5 font-mono text-[11px] leading-snug"
           role="log"
@@ -618,9 +714,15 @@ watch(
           <div
             class="py-1"
           >
-            <div v-if="currentPendingLogs.length" class="pl-2">
+            <p
+              v-if="pendingRawDetail"
+              class="pl-2 break-all whitespace-pre-wrap text-ui-text-muted/90"
+            >
+              {{ pendingRawDetail }}
+            </p>
+            <div v-if="denoisedPendingLogs.length" class="pl-2">
               <p
-                v-for="(log, logIdx) in currentPendingLogs"
+                v-for="(log, logIdx) in denoisedPendingLogs"
                 :key="`${currentPendingStepItem.step}-log-${logIdx}-${log}`"
                 class="break-all whitespace-pre-wrap text-ui-text-muted"
               >

@@ -36,13 +36,14 @@ const incremarkComponents = {
     </div>
 
     <div
-      v-if="props.active && !hasContent"
+      v-if="props.active"
       class="inline-flex items-center text-[12px] font-mono text-ui-text-muted"
       role="status"
       aria-live="polite"
       data-testid="assistant-streaming-spinner"
     >
-      <span class="streaming-ellipsis" aria-label="正在思考">...</span>
+      <span v-if="!hasContent" aria-label="等待模型响应">等待模型响应</span>
+      <span v-else class="streaming-ellipsis" aria-label="正在生成">...</span>
     </div>
   </div>
 </template>

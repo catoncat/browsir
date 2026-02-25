@@ -35,6 +35,18 @@ interface RuntimeStateView {
   running?: boolean;
   paused: boolean;
   stopped: boolean;
+  queue?: {
+    dequeueMode?: "one-at-a-time" | "all";
+    steer?: number;
+    followUp?: number;
+    total?: number;
+    items?: Array<{
+      id?: string;
+      behavior?: "steer" | "followUp";
+      text?: string;
+      timestamp?: string;
+    }>;
+  };
   retry: {
     active: boolean;
     attempt: number;
@@ -213,7 +225,10 @@ export const useRuntimeStore = defineStore("runtime", () => {
     await loadConversation(result.sessionId, { setActive: true });
   }
 
-  async function sendPrompt(prompt: string, options: { newSession?: boolean; tabIds?: number[] } = {}) {
+  async function sendPrompt(
+    prompt: string,
+    options: { newSession?: boolean; tabIds?: number[]; streamingBehavior?: "steer" | "followUp" } = {}
+  ) {
     const text = prompt.trim();
     if (!text) return;
     const useCurrentSession = !options.newSession && !!activeSessionId.value;
@@ -223,7 +238,8 @@ export const useRuntimeStore = defineStore("runtime", () => {
     const result = await sendMessage<{ sessionId: string; runtime: RuntimeStateView }>("brain.run.start", {
       sessionId: useCurrentSession ? activeSessionId.value : undefined,
       prompt: text,
-      tabIds
+      tabIds,
+      streamingBehavior: options.streamingBehavior
     });
     runtime.value = result.runtime;
     activeSessionId.value = result.sessionId;

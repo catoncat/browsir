@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, computed, nextTick } from "vue";
-import { Send, Square, Plus, ChevronDown, ChevronUp, X, Globe, Search, Check } from "lucide-vue-next";
+import { Send, Square, Plus, ChevronDown, ChevronUp, X, Globe, Search, Check, CornerDownLeft } from "lucide-vue-next";
 import { useTextareaAutosize, onClickOutside } from "@vueuse/core";
 
 interface TabItem {
@@ -14,11 +14,16 @@ const props = defineProps<{
   disabled?: boolean;
   isRunning?: boolean;
   modelValue: string;
+  queueState?: {
+    steer?: number;
+    followUp?: number;
+    total?: number;
+  };
 }>();
 
 const emit = defineEmits<{
   (e: "update:modelValue", value: string): void;
-  (e: "send", payload: { text: string; tabIds: number[] }): void;
+  (e: "send", payload: { text: string; tabIds: number[]; mode: "normal" | "steer" | "followUp" }): void;
   (e: "stop"): void;
 }>();
 
@@ -55,6 +60,7 @@ const filteredTabs = computed(() => {
   );
 });
 const canSend = computed(() => text.value.trim().length > 0 && !props.disabled && !props.isRunning);
+const canQueue = computed(() => text.value.trim().length > 0 && !props.disabled && !!props.isRunning);
 
 watch(
   () => props.modelValue,
@@ -148,7 +154,11 @@ function handleKeydown(e: KeyboardEvent) {
   if (e.key === "Enter" && !e.shiftKey) {
     if (e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
-    handleSend();
+    if (props.isRunning) {
+      handleSubmit(e.altKey ? "followUp" : "steer");
+      return;
+    }
+    handleSubmit("normal");
   }
 }
 
@@ -161,11 +171,13 @@ function scrollToFocused() {
   });
 }
 
-function handleSend() {
-  if (text.value.trim().length === 0 || props.disabled || props.isRunning) return;
+function handleSubmit(mode: "normal" | "steer" | "followUp") {
+  if (text.value.trim().length === 0 || props.disabled) return;
+  const resolvedMode = props.isRunning ? (mode === "normal" ? "steer" : mode) : "normal";
   emit("send", {
     text: text.value,
-    tabIds: selectedTabs.value.map(t => t.id)
+    tabIds: selectedTabs.value.map(t => t.id),
+    mode: resolvedMode
   });
   text.value = "";
 }
@@ -289,6 +301,16 @@ function handleSend() {
 
       <!-- Main Input Flow -->
       <div class="flex flex-col">
+        <div
+          v-if="isRunning && Number(props.queueState?.total || 0) > 0"
+          class="px-4 pt-2 text-[10px] font-medium text-ui-text-muted"
+          role="status"
+          aria-live="polite"
+        >
+          已排队 {{ Number(props.queueState?.total || 0) }} 条
+          · steer {{ Number(props.queueState?.steer || 0) }}
+          · followUp {{ Number(props.queueState?.followUp || 0) }}
+        </div>
         <textarea
           ref="textarea"
           v-model="text"
@@ -313,21 +335,42 @@ function handleSend() {
           </div>
 
           <div class="flex items-center gap-2">
-            <button
-              v-if="isRunning"
-              class="p-2.5 bg-black text-white rounded-xl hover:opacity-80 transition-all shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-              aria-label="停止生成"
-              @click="$emit('stop')"
-            >
-              <Square :size="14" fill="currentColor" aria-hidden="true" />
-            </button>
+            <template v-if="isRunning">
+              <button
+                class="p-2.5 bg-black text-white rounded-xl hover:opacity-80 transition-all shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+                aria-label="停止生成"
+                @click="$emit('stop')"
+              >
+                <Square :size="14" fill="currentColor" aria-hidden="true" />
+              </button>
+              <button
+                class="p-2.5 rounded-xl transition-all shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+                :class="canQueue ? 'bg-ui-accent text-white hover:opacity-90' : 'bg-ui-surface text-ui-text-muted/30'"
+                :disabled="!canQueue"
+                aria-label="发送为 steer（Enter）"
+                title="发送为 steer（Enter）"
+                @click="handleSubmit('steer')"
+              >
+                <Send :size="18" aria-hidden="true" />
+              </button>
+              <button
+                class="p-2.5 rounded-xl transition-all shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+                :class="canQueue ? 'bg-ui-surface text-ui-text hover:bg-black/5' : 'bg-ui-surface text-ui-text-muted/30'"
+                :disabled="!canQueue"
+                aria-label="发送为 followUp（Alt+Enter）"
+                title="发送为 followUp（Alt+Enter）"
+                @click="handleSubmit('followUp')"
+              >
+                <CornerDownLeft :size="16" aria-hidden="true" />
+              </button>
+            </template>
             <button
               v-else
               class="p-2.5 rounded-xl transition-all shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
               :class="canSend ? 'bg-ui-accent text-white hover:opacity-90' : 'bg-ui-surface text-ui-text-muted/30'"
               :disabled="!canSend"
               aria-label="发送消息"
-              @click="handleSend"
+              @click="handleSubmit('normal')"
             >
               <Send :size="18" aria-hidden="true" />
             </button>
