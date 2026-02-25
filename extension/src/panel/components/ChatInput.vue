@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, computed, nextTick } from "vue";
-import { Send, Square, Plus, ChevronDown, ChevronUp, X, Globe, Search, Check, CornerDownLeft } from "lucide-vue-next";
+import { Send, Square, Plus, ChevronDown, ChevronUp, X, Globe, Search, Check, Loader2 } from "lucide-vue-next";
 import { useTextareaAutosize, onClickOutside } from "@vueuse/core";
 
 interface TabItem {
@@ -10,10 +10,20 @@ interface TabItem {
   favIconUrl?: string;
 }
 
+interface QueueItem {
+  id: string;
+  behavior: "steer" | "followUp";
+  text: string;
+}
+
 const props = defineProps<{
   disabled?: boolean;
   isRunning?: boolean;
+  isCompacting?: boolean;
+  isStartingRun?: boolean;
   modelValue: string;
+  queueItems?: QueueItem[];
+  queuePromotingIds?: string[];
   queueState?: {
     steer?: number;
     followUp?: number;
@@ -24,6 +34,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "update:modelValue", value: string): void;
   (e: "send", payload: { text: string; tabIds: number[]; mode: "normal" | "steer" | "followUp" }): void;
+  (e: "queue-promote", payload: { id: string }): void;
   (e: "stop"): void;
 }>();
 
@@ -59,8 +70,27 @@ const filteredTabs = computed(() => {
     t.title.toLowerCase().includes(q) || t.url.toLowerCase().includes(q)
   );
 });
-const canSend = computed(() => text.value.trim().length > 0 && !props.disabled && !props.isRunning);
-const canQueue = computed(() => text.value.trim().length > 0 && !props.disabled && !!props.isRunning);
+const isCompacting = computed(() => Boolean(props.isCompacting) && Boolean(props.isRunning));
+const isStartingRun = computed(() => Boolean(props.isStartingRun) && !props.isRunning);
+const canSubmit = computed(() => text.value.trim().length > 0 && !props.disabled && !isStartingRun.value);
+const queueItems = computed<QueueItem[]>(() => {
+  return Array.isArray(props.queueItems) ? props.queueItems : [];
+});
+const queuePromotingIdSet = computed(() => {
+  return new Set((Array.isArray(props.queuePromotingIds) ? props.queuePromotingIds : []).map((id) => String(id || "").trim()));
+});
+
+function isQueuePromoting(id: string): boolean {
+  const normalized = String(id || "").trim();
+  if (!normalized) return false;
+  return queuePromotingIdSet.value.has(normalized);
+}
+
+function handleQueuePromote(id: string): void {
+  const normalized = String(id || "").trim();
+  if (!normalized) return;
+  emit("queue-promote", { id: normalized });
+}
 
 watch(
   () => props.modelValue,
@@ -172,7 +202,7 @@ function scrollToFocused() {
 }
 
 function handleSubmit(mode: "normal" | "steer" | "followUp") {
-  if (text.value.trim().length === 0 || props.disabled) return;
+  if (text.value.trim().length === 0 || props.disabled || isStartingRun.value) return;
   const resolvedMode = props.isRunning ? (mode === "normal" ? "steer" : mode) : "normal";
   emit("send", {
     text: text.value,
@@ -302,14 +332,62 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
       <!-- Main Input Flow -->
       <div class="flex flex-col">
         <div
-          v-if="isRunning && Number(props.queueState?.total || 0) > 0"
-          class="px-4 pt-2 text-[10px] font-medium text-ui-text-muted"
+          v-if="isRunning && queueItems.length > 0"
+          class="flex flex-col bg-ui-surface/70 border-b border-ui-border/30"
+          role="region"
+          aria-label="排队消息"
+        >
+          <div class="px-4 pt-2 text-[10px] font-semibold uppercase tracking-wider text-ui-text-muted" role="status" aria-live="polite">
+            Queue {{ queueItems.length }} 条
+          </div>
+          <div class="px-3 pb-2 pt-1 space-y-1.5 max-h-40 overflow-y-auto custom-scrollbar" role="list">
+            <div
+              v-for="item in queueItems"
+              :key="item.id"
+              class="flex items-start gap-2 rounded-lg border border-ui-border/50 bg-ui-bg/85 px-2.5 py-2"
+              role="listitem"
+              :aria-label="`排队消息：${item.behavior === 'steer' ? 'steer' : 'followUp'}`"
+            >
+              <div class="min-w-0 flex-1">
+                <div class="text-[10px] font-semibold text-ui-text-muted">
+                  {{ item.behavior === "steer" ? "Steer" : "FollowUp" }}
+                </div>
+                <div class="mt-1 whitespace-pre-wrap break-words text-[12px] leading-snug text-ui-text">
+                  {{ item.text }}
+                </div>
+              </div>
+              <button
+                v-if="item.behavior !== 'steer'"
+                type="button"
+                class="shrink-0 p-1.5 rounded-md text-ui-text-muted hover:text-ui-accent hover:bg-ui-accent/10 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent disabled:opacity-50"
+                :disabled="isQueuePromoting(item.id)"
+                :aria-label="isQueuePromoting(item.id) ? '正在直接插入' : '直接插入'"
+                :title="isQueuePromoting(item.id) ? '正在直接插入' : '直接插入（steer）'"
+                @click="handleQueuePromote(item.id)"
+              >
+                <Loader2 v-if="isQueuePromoting(item.id)" :size="13" class="animate-spin" aria-hidden="true" />
+                <Send v-else :size="13" aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+        </div>
+        <div
+          v-if="isStartingRun"
+          class="px-4 pt-2 text-[10px] font-medium text-ui-text-muted inline-flex items-center gap-1.5"
           role="status"
           aria-live="polite"
         >
-          已排队 {{ Number(props.queueState?.total || 0) }} 条
-          · steer {{ Number(props.queueState?.steer || 0) }}
-          · followUp {{ Number(props.queueState?.followUp || 0) }}
+          <Loader2 :size="11" class="animate-spin" aria-hidden="true" />
+          <span>正在启动响应…</span>
+        </div>
+        <div
+          v-else-if="isCompacting"
+          class="px-4 pt-2 text-[10px] font-medium text-ui-text-muted inline-flex items-center gap-1.5"
+          role="status"
+          aria-live="polite"
+        >
+          <Loader2 :size="11" class="animate-spin" aria-hidden="true" />
+          <span>正在整理上下文，消息会排队</span>
         </div>
         <textarea
           ref="textarea"
@@ -335,44 +413,24 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
           </div>
 
           <div class="flex items-center gap-2">
-            <template v-if="isRunning">
-              <button
-                class="p-2.5 bg-black text-white rounded-xl hover:opacity-80 transition-all shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-                aria-label="停止生成"
-                @click="$emit('stop')"
-              >
-                <Square :size="14" fill="currentColor" aria-hidden="true" />
-              </button>
-              <button
-                class="p-2.5 rounded-xl transition-all shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-                :class="canQueue ? 'bg-ui-accent text-white hover:opacity-90' : 'bg-ui-surface text-ui-text-muted/30'"
-                :disabled="!canQueue"
-                aria-label="发送为 steer（Enter）"
-                title="发送为 steer（Enter）"
-                @click="handleSubmit('steer')"
-              >
-                <Send :size="18" aria-hidden="true" />
-              </button>
-              <button
-                class="p-2.5 rounded-xl transition-all shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-                :class="canQueue ? 'bg-ui-surface text-ui-text hover:bg-black/5' : 'bg-ui-surface text-ui-text-muted/30'"
-                :disabled="!canQueue"
-                aria-label="发送为 followUp（Alt+Enter）"
-                title="发送为 followUp（Alt+Enter）"
-                @click="handleSubmit('followUp')"
-              >
-                <CornerDownLeft :size="16" aria-hidden="true" />
-              </button>
-            </template>
             <button
-              v-else
+              v-if="isRunning"
+              class="p-2.5 bg-black text-white rounded-xl hover:opacity-80 transition-all shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+              aria-label="停止生成"
+              @click="$emit('stop')"
+            >
+              <Square :size="14" fill="currentColor" aria-hidden="true" />
+            </button>
+            <button
               class="p-2.5 rounded-xl transition-all shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-              :class="canSend ? 'bg-ui-accent text-white hover:opacity-90' : 'bg-ui-surface text-ui-text-muted/30'"
-              :disabled="!canSend"
-              aria-label="发送消息"
+              :class="canSubmit ? 'bg-ui-accent text-white hover:opacity-90' : 'bg-ui-surface text-ui-text-muted/30'"
+              :disabled="!canSubmit"
+              :aria-label="isStartingRun ? '正在启动响应' : (isRunning ? '追加发送（默认 steer，Alt+Enter 为 followUp）' : '发送消息')"
+              :title="isStartingRun ? '正在启动响应' : (isRunning ? '追加发送（默认 steer，Alt+Enter 为 followUp）' : '发送消息')"
               @click="handleSubmit('normal')"
             >
-              <Send :size="18" aria-hidden="true" />
+              <Loader2 v-if="isStartingRun" :size="18" class="animate-spin" aria-hidden="true" />
+              <Send v-else :size="18" aria-hidden="true" />
             </button>
           </div>
         </div>

@@ -33,8 +33,10 @@ interface SessionIndexEntry {
 
 interface RuntimeStateView {
   running?: boolean;
+  compacting?: boolean;
   paused: boolean;
   stopped: boolean;
+  lifecycle?: "idle" | "running" | "stopping";
   queue?: {
     dequeueMode?: "one-at-a-time" | "all";
     steer?: number;
@@ -52,6 +54,19 @@ interface RuntimeStateView {
     attempt: number;
     maxAttempts: number;
     delayMs: number;
+  };
+}
+
+function normalizeRuntimeState(raw: RuntimeStateView | null | undefined): RuntimeStateView | null {
+  if (!raw) return null;
+  const running = raw.running === true;
+  const stopped = raw.stopped === true;
+  const lifecycle: "idle" | "running" | "stopping" = running
+    ? (stopped ? "stopping" : "running")
+    : "idle";
+  return {
+    ...raw,
+    lifecycle
   };
 }
 
@@ -206,7 +221,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
       }
 
       messages.value = view.conversationView?.messages ?? [];
-      runtime.value = view.conversationView?.lastStatus ?? null;
+      runtime.value = normalizeRuntimeState(view.conversationView?.lastStatus ?? null);
     } catch (err) {
       if (requestSeq === conversationRequestSeq.value && shouldSetActive) {
         activeSessionId.value = previousActiveSessionId;
@@ -219,7 +234,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
     const result = await sendMessage<{ sessionId: string; runtime: RuntimeStateView }>("brain.run.start", {
       autoRun: false
     });
-    runtime.value = result.runtime;
+    runtime.value = normalizeRuntimeState(result.runtime);
     activeSessionId.value = result.sessionId;
     await refreshSessions();
     await loadConversation(result.sessionId, { setActive: true });
@@ -241,7 +256,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
       tabIds,
       streamingBehavior: options.streamingBehavior
     });
-    runtime.value = result.runtime;
+    runtime.value = normalizeRuntimeState(result.runtime);
     activeSessionId.value = result.sessionId;
     await refreshSessions();
     await loadConversation(result.sessionId, { setActive: true });
@@ -308,7 +323,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
         requireSourceIsLeaf: true,
         rebaseLeafToPreviousUser: true
       });
-      runtime.value = result.runtime;
+      runtime.value = normalizeRuntimeState(result.runtime);
     }
 
     await refreshSessions();
@@ -348,7 +363,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
       requireSourceIsLeaf: true,
       rebaseLeafToPreviousUser: true
     });
-    runtime.value = result.runtime;
+    runtime.value = normalizeRuntimeState(result.runtime);
     await refreshSessions();
     await loadConversation(currentSessionId, { setActive: options.setActive === true });
     return {
@@ -394,7 +409,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
       prompt: editedText
     });
 
-    runtime.value = result.runtime;
+    runtime.value = normalizeRuntimeState(result.runtime);
     await refreshSessions();
     if (options.setActive === false) {
       if (result.sessionId === activeSessionId.value) {
@@ -414,7 +429,20 @@ export const useRuntimeStore = defineStore("runtime", () => {
 
   async function runAction(type: "brain.run.pause" | "brain.run.resume" | "brain.run.stop") {
     if (!activeSessionId.value) return;
-    runtime.value = await sendMessage<RuntimeStateView>(type, { sessionId: activeSessionId.value });
+    runtime.value = normalizeRuntimeState(await sendMessage<RuntimeStateView>(type, { sessionId: activeSessionId.value }));
+  }
+
+  async function promoteQueuedPromptToSteer(queuedPromptId: string) {
+    const sessionId = String(activeSessionId.value || "").trim();
+    const id = String(queuedPromptId || "").trim();
+    if (!sessionId) throw new Error("当前无活动会话");
+    if (!id) throw new Error("queuedPromptId 不能为空");
+
+    runtime.value = normalizeRuntimeState(await sendMessage<RuntimeStateView>("brain.run.queue.promote", {
+      sessionId,
+      queuedPromptId: id,
+      targetBehavior: "steer"
+    }));
   }
 
   async function refreshSessionTitle(sessionId = activeSessionId.value, force = true) {
@@ -527,6 +555,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
     regenerateFromAssistantEntry,
     editUserMessageAndRerun,
     runAction,
+    promoteQueuedPromptToSteer,
     refreshSessionTitle,
     updateSessionTitle,
     deleteSession,

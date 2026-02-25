@@ -36,12 +36,40 @@ const forkSourceResolvedTitle = ref("");
 onClickOutside(moreMenuRef, () => showMoreMenu.value = false);
 onClickOutside(exportMenuRef, () => showExportMenu.value = false);
 
-const isRunning = computed(() => Boolean(runtime.value?.running && !runtime.value?.stopped));
+const runtimeLifecycle = computed(() => {
+  const lifecycle = String(runtime.value?.lifecycle || "").trim().toLowerCase();
+  if (lifecycle === "running" || lifecycle === "stopping" || lifecycle === "idle") {
+    return lifecycle as "running" | "stopping" | "idle";
+  }
+  if (runtime.value?.running === true && runtime.value?.stopped === true) return "stopping";
+  if (runtime.value?.running === true) return "running";
+  return "idle";
+});
+const isStopping = computed(() => runtimeLifecycle.value === "stopping");
+const isRunning = computed(() => runtimeLifecycle.value === "running");
+const isRunActive = computed(() => runtimeLifecycle.value === "running" || runtimeLifecycle.value === "stopping");
+const isCompacting = computed(() => isRunActive.value && runtime.value?.compacting === true);
 const runtimeQueueState = computed(() => ({
   steer: Number(runtime.value?.queue?.steer || 0),
   followUp: Number(runtime.value?.queue?.followUp || 0),
   total: Number(runtime.value?.queue?.total || 0)
 }));
+const queuedPromptViewItems = computed<QueuedPromptViewItem[]>(() => {
+  const rows = Array.isArray(runtime.value?.queue?.items) ? runtime.value?.queue?.items : [];
+  const out: QueuedPromptViewItem[] = [];
+  for (const row of rows) {
+    const id = String(row?.id || "").trim();
+    const text = String(row?.text || "").trim();
+    if (!id || !text) continue;
+    out.push({
+      id,
+      behavior: row?.behavior === "steer" ? "steer" : "followUp",
+      text,
+      timestamp: String(row?.timestamp || "")
+    });
+  }
+  return out.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+});
 const showBridgeOfflineDot = computed(() => bridgeConnectionStatus.value === "disconnected");
 const activeSession = computed(() => sessions.value.find((item) => item.id === activeSessionId.value) || null);
 
@@ -87,6 +115,13 @@ interface DisplayMessage extends PanelMessageLike {
     line: string;
     logs: string[];
   }>;
+}
+
+interface QueuedPromptViewItem {
+  id: string;
+  behavior: "steer" | "followUp";
+  text: string;
+  timestamp: string;
 }
 
 interface StepTraceRecord {
@@ -177,7 +212,7 @@ const {
   cleanupMessageActions
 } = useMessageActions({
   messages,
-  isRunning,
+  isRunning: isRunActive,
   regenerateFromAssistantEntry: regenerateFromAssistantWithScene
 });
 
@@ -186,6 +221,7 @@ const editingUserDraft = ref("");
 const editingUserSubmitting = ref(false);
 const userPendingRegenerate = ref<PendingRegenerateState | null>(null);
 const userForkingEntryId = ref("");
+const startRunPending = ref(false);
 const forkScenePhase = ref<"idle" | "prepare" | "leave" | "swap" | "enter">("idle");
 const forkSceneToken = ref(0);
 const forkSceneSwitching = ref(false);
@@ -202,6 +238,7 @@ const llmStreamingText = ref("");
 const llmStreamingSessionId = ref("");
 const llmStreamingActive = ref(false);
 const recentRuntimeEvents = ref<RuntimeEventDigest[]>([]);
+const queuedPromotingIds = ref<Set<string>>(new Set());
 let forkSessionHighlightTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingStepLogFlushTimer: ReturnType<typeof setTimeout> | null = null;
 let toolPendingCardLeaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -232,6 +269,21 @@ const LOOP_TERMINAL_TYPES = new Set([
   "loop_skip_stopped",
   "loop_internal_error"
 ]);
+
+function setQueuedPromptPromoting(id: string, active: boolean) {
+  const normalizedId = String(id || "").trim();
+  if (!normalizedId) return;
+  const next = new Set(queuedPromotingIds.value);
+  if (active) next.add(normalizedId);
+  else next.delete(normalizedId);
+  queuedPromotingIds.value = next;
+}
+
+function isQueuedPromptPromoting(id: string): boolean {
+  const normalizedId = String(id || "").trim();
+  if (!normalizedId) return false;
+  return queuedPromotingIds.value.has(normalizedId);
+}
 
 function patchRunViewState(patch: Partial<RunViewState>) {
   runViewState.value = {
@@ -283,7 +335,7 @@ const finalAssistantStreamingPhase = computed({
       return;
     }
     if (runPhase.value !== "final_assistant") return;
-    runPhase.value = isRunning.value ? "llm" : "idle";
+    runPhase.value = isRunActive.value ? "llm" : "idle";
   }
 });
 
@@ -664,7 +716,7 @@ function dismissToolPendingCardWithHandoff() {
     toolPendingCardLeaveTimer = null;
     if (epoch !== runViewState.value.epoch) return;
     if (runPhase.value !== "tool_handoff_leaving") return;
-    runPhase.value = isRunning.value ? "final_assistant" : "idle";
+    runPhase.value = isRunActive.value ? "final_assistant" : "idle";
   }, TOOL_CARD_HANDOFF_MS);
 }
 
@@ -679,7 +731,7 @@ function startInitialToolSync() {
   stopInitialToolSync();
   let attempts = 0;
   const tick = () => {
-    if (!isRunning.value) return;
+    if (!isRunActive.value) return;
     const sessionId = String(activeSessionId.value || "").trim();
     if (!sessionId) return;
     const hasStableActivity =
@@ -987,6 +1039,10 @@ function applyRuntimeEventToolRun(event: unknown) {
   }
   if (type === "llm.request") {
     if (String(payload.mode || "").trim().toLowerCase() === "compaction") {
+      if (runPhase.value === "idle") {
+        runPhase.value = "llm";
+      }
+      setLlmRunHint("整理上下文", "正在压缩历史上下文");
       return;
     }
     if (runPhase.value === "idle") {
@@ -1094,6 +1150,21 @@ function applyRuntimeEventToolRun(event: unknown) {
     llmStreamingActive.value = false;
     return;
   }
+  if (type === "auto_compaction_start") {
+    if (runPhase.value === "idle") {
+      runPhase.value = "llm";
+    }
+    setLlmRunHint("整理上下文", "正在压缩历史上下文");
+    return;
+  }
+  if (type === "auto_compaction_end") {
+    if (String(payload.errorMessage || "").trim()) {
+      setLlmRunHint("继续推理", "上下文压缩失败，继续执行");
+    } else {
+      setLlmRunHint("继续推理", "上下文压缩完成，继续执行");
+    }
+    return;
+  }
   if (["loop_done", "loop_error", "loop_skip_stopped", "loop_internal_error"].includes(type)) {
     activeToolRun.value = null;
     resetLlmStreamingState();
@@ -1108,7 +1179,7 @@ function applyBridgeEventToolOutput(rawEvent: unknown) {
   const envelope = toRecord(rawEvent);
   const eventSessionId = String(envelope.sessionId || "").trim();
   if (!eventSessionId || eventSessionId !== String(activeSessionId.value || "").trim()) return;
-  if (!isRunning.value) return;
+  if (!isRunActive.value) return;
   const eventName = String(envelope.event || "").trim();
   const data = toRecord(envelope.data);
 
@@ -1140,7 +1211,7 @@ async function syncActiveToolRun(sessionId: string) {
   const currentLoop = deriveCurrentLoopWindow(stream);
   const hasLoopStartEvent = stream.some((item) => String(item?.type || "") === "loop_start");
   const shouldHoldStateForTruncatedWindow = Boolean(
-    isRunning.value &&
+    isRunActive.value &&
     meta.truncated &&
     !hasLoopStartEvent
   );
@@ -1151,7 +1222,7 @@ async function syncActiveToolRun(sessionId: string) {
       }
       return;
     }
-    if (!isRunning.value) {
+    if (!isRunActive.value) {
       runPhase.value = "idle";
     } else if (runPhase.value !== "final_assistant") {
       runPhase.value = "llm";
@@ -1186,13 +1257,13 @@ async function syncActiveToolRun(sessionId: string) {
   }
   if (latest) {
     setToolRunHint(latest.action, latest.arguments, latest.ts);
-  } else if (isRunning.value && !activeRunHint.value) {
+  } else if (isRunActive.value && !activeRunHint.value) {
     setLlmRunHint("思考中", "正在分析你的请求");
   }
 }
 
 const runningStatus = computed(() => {
-  if (!isRunning.value) return null;
+  if (!isRunActive.value) return null;
   if (activeToolRun.value) {
     return {
       action: prettyToolAction(activeToolRun.value.action),
@@ -1225,7 +1296,7 @@ const hasRunningToolPendingActivity = computed(() =>
 
 const toolPendingCardStatus = computed<"running" | "done" | "failed">(() => {
   if (hasRunningToolPendingActivity.value) return "running";
-  if (isRunning.value && hasToolPendingActivity.value) return "running";
+  if (isRunActive.value && hasToolPendingActivity.value) return "running";
   if (latestToolPendingStepState.value?.status === "failed") return "failed";
   if (latestToolPendingStepState.value?.status === "done") return "done";
   return activeToolRun.value ? "running" : "done";
@@ -1246,7 +1317,7 @@ const toolPendingCardHeadline = computed(() => {
     };
     return formatToolPendingHeadline(pending);
   }
-  if (isRunning.value && hasToolPendingActivity.value) {
+  if (isRunActive.value && hasToolPendingActivity.value) {
     return "进行中 · 正在处理步骤结果";
   }
   if (latestToolPendingStepState.value) {
@@ -1260,7 +1331,7 @@ const hasToolPendingActivity = computed(() =>
 );
 
 const shouldShowStreamingDraft = computed(() => {
-  if (!isRunning.value) return false;
+  if (!isRunActive.value) return false;
 
   const sourceSessionId = String(llmStreamingSessionId.value || "").trim();
   const currentSessionId = String(activeSessionId.value || "").trim();
@@ -1294,8 +1365,15 @@ const shouldShowStreamingDraft = computed(() => {
   return true;
 });
 
+const shouldShowStartPendingDraft = computed(() =>
+  startRunPending.value &&
+  !isRunActive.value &&
+  !shouldShowStreamingDraft.value &&
+  !shouldShowToolPendingCard.value
+);
+
 const shouldShowToolPendingCard = computed(() => {
-  if (!isRunning.value) return false;
+  if (!isRunActive.value) return false;
   if (runPhase.value !== "tool_running") return false;
   return Boolean(activeToolRun.value || runningToolPendingStepState.value);
 });
@@ -1373,11 +1451,29 @@ const stableMessages = computed<DisplayMessage[]>(() => {
 });
 
 const hasVisibleConversation = computed(() =>
-  stableMessages.value.length > 0 || shouldShowStreamingDraft.value || shouldShowToolPendingCard.value
+  stableMessages.value.length > 0
+  || shouldShowStreamingDraft.value
+  || shouldShowToolPendingCard.value
+  || shouldShowStartPendingDraft.value
 );
 
-watch(isRunning, (running, wasRunning) => {
+watch(queuedPromptViewItems, (items) => {
+  if (!queuedPromotingIds.value.size) return;
+  const valid = new Set(items.map((item) => item.id));
+  let changed = false;
+  const next = new Set<string>();
+  for (const id of queuedPromotingIds.value) {
+    if (valid.has(id)) next.add(id);
+    else changed = true;
+  }
+  if (changed) {
+    queuedPromotingIds.value = next;
+  }
+});
+
+watch(isRunActive, (running, wasRunning) => {
   if (running) {
+    startRunPending.value = false;
     if (runPhase.value === "idle") {
       runPhase.value = "llm";
     }
@@ -1409,9 +1505,10 @@ watch(isRunning, (running, wasRunning) => {
 });
 
 watch(activeSessionId, () => {
+  queuedPromotingIds.value = new Set();
   stopInitialToolSync();
   resetToolPendingCardHandoff();
-  runPhase.value = isRunning.value ? "llm" : "idle";
+  runPhase.value = isRunActive.value ? "llm" : "idle";
   const currentSessionId = String(activeSessionId.value || "").trim();
   const isExpectedForkSwitch =
     forkSceneSwitching.value &&
@@ -1429,7 +1526,7 @@ watch(activeSessionId, () => {
     setForkSessionHighlight(false);
   }
   resetEditingState();
-  if (activeSessionId.value && isRunning.value) {
+  if (activeSessionId.value && isRunActive.value) {
     void runSafely(
       () => syncActiveToolRun(activeSessionId.value),
       "同步工具运行状态失败"
@@ -1440,7 +1537,7 @@ watch(activeSessionId, () => {
 
 watch(
   [
-    isRunning,
+    isRunActive,
     hasToolPendingActivity,
     hasRunningToolPendingActivity,
     llmStreamingActive,
@@ -1471,7 +1568,7 @@ watch(
     clearToolPendingSteps();
     finalAssistantStreamingPhase.value = false;
     runPhase.value = "llm";
-    if (isRunning.value) {
+    if (isRunActive.value) {
       startInitialToolSync();
     }
   }
@@ -1547,7 +1644,7 @@ watch(visibleMessageStructureKey, async () => {
 });
 
 watch(llmStreamingText, async () => {
-  if (!isRunning.value) return;
+  if (!isRunActive.value) return;
   const shouldFollow = isMainScrollNearBottom();
   await nextTick();
   if (shouldFollow && scrollContainer.value) {
@@ -1561,7 +1658,7 @@ watch(
       .map((item) => `${item.step}:${item.status}:${item.logs.length}`)
       .join("|"),
   async () => {
-    if (!isRunning.value) return;
+    if (!isRunActive.value) return;
     const shouldFollow = isMainScrollNearBottom();
     await nextTick();
     if (shouldFollow && scrollContainer.value) {
@@ -1725,14 +1822,14 @@ onMounted(() => {
   void runSafely(async () => {
     await store.bootstrap();
     await refreshBridgeConnectionStatus();
-    if (activeSessionId.value && isRunning.value) {
+    if (activeSessionId.value && isRunActive.value) {
       await syncActiveToolRun(activeSessionId.value);
     }
   }, "初始化失败");
 });
 
 useIntervalFn(() => {
-  if (!activeSessionId.value || !isRunning.value) return;
+  if (!activeSessionId.value || !isRunActive.value) return;
   void runSafely(
     async () => {
       await Promise.all([
@@ -1798,15 +1895,32 @@ async function handleStopRun() {
   await runSafely(() => store.runAction("brain.run.stop"), "停止任务失败");
 }
 
+async function handlePromoteQueuedPromptToSteer(queuedPromptId: string) {
+  const id = String(queuedPromptId || "").trim();
+  if (!id) return;
+  if (!activeSessionId.value) return;
+  if (isQueuedPromptPromoting(id)) return;
+  setQueuedPromptPromoting(id, true);
+  try {
+    await store.promoteQueuedPromptToSteer(id);
+  } catch (err) {
+    setErrorMessage(err, "直接插入失败");
+  } finally {
+    setQueuedPromptPromoting(id, false);
+  }
+}
+
 async function handleSend(payload: { text: string; tabIds: number[]; mode: "normal" | "steer" | "followUp" }) {
   if (createSessionTask) {
     await createSessionTask;
   }
+  if (startRunPending.value && !isRunActive.value) return;
   const text = String(payload.text || "");
   if (!text.trim()) return;
   const isNew = !activeSessionId.value;
 
   try {
+    startRunPending.value = true;
     await store.sendPrompt(text, {
       newSession: isNew,
       tabIds: Array.isArray(payload.tabIds) ? payload.tabIds : [],
@@ -1814,7 +1928,12 @@ async function handleSend(payload: { text: string; tabIds: number[]; mode: "norm
     });
     prompt.value = "";
   } catch (err) {
+    startRunPending.value = false;
     setErrorMessage(err, "发送失败");
+  } finally {
+    if (!isRunActive.value) {
+      startRunPending.value = false;
+    }
   }
 }
 
@@ -2116,7 +2235,7 @@ onUnmounted(() => {
               :entry-id="msg.entryId"
               :tool-name="msg.toolName"
               :tool-call-id="msg.toolCallId"
-                :edit-disabled="loading || isRunning"
+                :edit-disabled="loading || isRunActive"
                 :copied="copiedEntryId === msg.entryId"
                 :retrying="retryingEntryId === msg.entryId"
                 :forking="forkingEntryId === msg.entryId || userForkingEntryId === msg.entryId"
@@ -2125,8 +2244,8 @@ onUnmounted(() => {
                 :edit-draft="editingUserEntryId === msg.entryId ? editingUserDraft : ''"
                 :edit-submitting="editingUserSubmitting && editingUserEntryId === msg.entryId"
                 :copy-disabled="loading || !canCopyMessage(msg)"
-                :retry-disabled="loading || isRunning || !canRetryMessage(msg, index)"
-                :fork-disabled="loading || isRunning || !canForkMessage(msg, index)"
+                :retry-disabled="loading || isRunActive || !canRetryMessage(msg, index)"
+                :fork-disabled="loading || isRunActive || !canForkMessage(msg, index)"
                 :show-copy-action="canCopyMessage(msg)"
                 :show-retry-action="canRetryMessage(msg, index)"
                 :show-fork-action="canForkMessage(msg, index)"
@@ -2140,9 +2259,17 @@ onUnmounted(() => {
               />
 
             <StreamingDraftContainer
+              v-if="shouldShowStartPendingDraft"
+              content=""
+              :active="true"
+              waiting-label="正在启动响应"
+            />
+
+            <StreamingDraftContainer
               v-if="shouldShowStreamingDraft"
               :content="llmStreamingText"
               :active="llmStreamingActive"
+              :waiting-label="isCompacting ? '正在整理上下文' : '等待模型响应'"
             />
 
             <ChatMessage
@@ -2160,6 +2287,7 @@ onUnmounted(() => {
               :tool-pending-detail="toolPendingCardDetail"
               :tool-pending-steps-data="toolPendingCardStepsData"
             />
+
           </div>
 
           <div v-else class="flex flex-col items-start py-8 animate-in fade-in duration-500">
@@ -2180,9 +2308,14 @@ onUnmounted(() => {
         <ChatInput
           v-model="prompt"
           :is-running="isRunning"
+          :is-compacting="isCompacting"
+          :is-starting-run="startRunPending && !isRunActive"
+          :queue-items="queuedPromptViewItems"
+          :queue-promoting-ids="Array.from(queuedPromotingIds)"
           :queue-state="runtimeQueueState"
-          :disabled="loading || creatingSession"
+          :disabled="loading || creatingSession || isStopping"
           @send="handleSend"
+          @queue-promote="handlePromoteQueuedPromptToSteer($event.id)"
           @stop="handleStopRun"
         />
       </div>

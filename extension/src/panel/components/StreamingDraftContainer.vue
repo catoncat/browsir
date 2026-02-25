@@ -7,11 +7,16 @@ import { usePanelDarkMode } from "../utils/use-panel-dark-mode";
 const props = defineProps<{
   content: string;
   active: boolean;
+  waitingLabel?: string;
 }>();
 
 const isDark = usePanelDarkMode();
 const incremarkTheme = computed(() => (isDark.value ? "dark" : "default"));
 const hasContent = computed(() => String(props.content || "").trim().length > 0);
+const waitingLabel = computed(() => {
+  const text = String(props.waitingLabel || "").trim();
+  return text || "等待模型响应";
+});
 
 const incremarkComponents = {
   code: IncremarkCodeBlock
@@ -42,7 +47,7 @@ const incremarkComponents = {
       aria-live="polite"
       data-testid="assistant-streaming-spinner"
     >
-      <span v-if="!hasContent" aria-label="等待模型响应">等待模型响应</span>
+      <span v-if="!hasContent" :aria-label="waitingLabel">{{ waitingLabel }}</span>
       <span v-else class="streaming-ellipsis" aria-label="正在生成">...</span>
     </div>
   </div>
