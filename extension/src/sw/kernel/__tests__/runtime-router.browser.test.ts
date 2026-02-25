@@ -1159,6 +1159,51 @@ describe("runtime-router.browser", () => {
     expect(String((stepDelta[1].payload as Record<string, unknown> | undefined)?.capabilityUsed || "")).toBe("fs.virtual.read");
   });
 
+  it("brain.step.stream 支持按 maxEvents/maxBytes 裁剪并返回元信息", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    const created = await orchestrator.createSession({ title: "stream-limit" });
+    const sessionId = created.sessionId;
+
+    for (let i = 0; i < 40; i += 1) {
+      orchestrator.events.emit("step_planned", sessionId, {
+        index: i,
+        mode: "tool_call",
+        action: "mock",
+        marker: `m-${i}`,
+        payload: "x".repeat(220)
+      });
+    }
+
+    const deadline = Date.now() + 1500;
+    let data: Record<string, unknown> = {};
+    while (Date.now() < deadline) {
+      const out = await invokeRuntime({
+        type: "brain.step.stream",
+        sessionId,
+        maxEvents: 5,
+        maxBytes: 12_000
+      });
+      expect(out.ok).toBe(true);
+      data = (out.data || {}) as Record<string, unknown>;
+      const streamMeta = (data.streamMeta || {}) as Record<string, unknown>;
+      if (Number(streamMeta.totalEvents || 0) >= 40) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    const stream = Array.isArray(data.stream) ? (data.stream as Array<Record<string, unknown>>) : [];
+    const streamMeta = (data.streamMeta || {}) as Record<string, unknown>;
+
+    expect(stream.length).toBeLessThanOrEqual(5);
+    expect(stream.length).toBeGreaterThan(0);
+    expect(streamMeta.truncated).toBe(true);
+    expect(Number(streamMeta.totalEvents || 0)).toBeGreaterThanOrEqual(40);
+    expect(Number(streamMeta.returnedEvents || 0)).toBe(stream.length);
+    const latest = stream[stream.length - 1] || {};
+    const latestPayload = (latest.payload || {}) as Record<string, unknown>;
+    expect(Number(latestPayload.index || -1)).toBe(39);
+  });
+
   it("brain.run.start 主链路会触发 llm.before_request 和 llm.after_response", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);

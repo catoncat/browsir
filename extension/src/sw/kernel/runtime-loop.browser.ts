@@ -36,7 +36,7 @@ const TOOL_AUTO_RETRY_CAP_DELAY_MS = 2_000;
 const DEFAULT_LLM_MAX_RETRY_DELAY_MS = 60_000;
 const MIN_LLM_MAX_RETRY_DELAY_MS = 0;
 const MAX_LLM_MAX_RETRY_DELAY_MS = 300_000;
-const LLM_TRACE_BODY_MAX_CHARS = 4_000;
+const LLM_TRACE_BODY_PREVIEW_MAX_CHARS = 1_200;
 const LLM_TRACE_USER_SNIPPET_MAX_CHARS = 420;
 const TOOL_RETRYABLE_FAILURE_MAX_TOTAL = 8;
 const TOOL_RETRYABLE_FAILURE_MAX_PER_SIGNATURE = 3;
@@ -272,9 +272,9 @@ function buildLlmRawTracePayload(input: {
     status: input.status,
     ok: input.ok,
     retryDelayHintMs: input.retryDelayHintMs,
-    body: clipText(body, LLM_TRACE_BODY_MAX_CHARS),
+    bodyPreview: clipText(body, LLM_TRACE_BODY_PREVIEW_MAX_CHARS),
     bodyLength: body.length,
-    bodyTruncated: body.length > LLM_TRACE_BODY_MAX_CHARS
+    bodyTruncated: body.length > LLM_TRACE_BODY_PREVIEW_MAX_CHARS
   };
 }
 
@@ -1175,12 +1175,19 @@ async function requestCompactionSummaryFromLlm(input: {
   const llmKey = String(config.llmApiKey || "").trim();
   const llmModel = String(config.llmModel || "gpt-5.3-codex").trim();
   const llmTimeoutMs = normalizeIntInRange(config.llmTimeoutMs, DEFAULT_LLM_TIMEOUT_MS, MIN_LLM_TIMEOUT_MS, MAX_LLM_TIMEOUT_MS);
+  const llmRetryMaxAttempts = normalizeIntInRange(config.llmRetryMaxAttempts, MAX_LLM_RETRIES, 0, 6);
+  const llmMaxRetryDelayMs = normalizeIntInRange(
+    config.llmMaxRetryDelayMs,
+    DEFAULT_LLM_MAX_RETRY_DELAY_MS,
+    MIN_LLM_MAX_RETRY_DELAY_MS,
+    MAX_LLM_MAX_RETRY_DELAY_MS
+  );
   if (!llmBase || !llmKey) {
     throw new Error("compaction summary 需要可用 LLM（llmApiBase/llmApiKey）");
   }
 
   const baseUrl = `${llmBase.replace(/\/$/, "")}/chat/completions`;
-  const payload: JsonRecord = {
+  const basePayload: JsonRecord = {
     model: llmModel,
     messages: [
       { role: "system", content: SUMMARIZATION_SYSTEM_PROMPT },
@@ -1191,94 +1198,136 @@ async function requestCompactionSummaryFromLlm(input: {
     stream: false,
     reasoning: "high"
   };
+  const totalAttempts = Math.max(1, llmRetryMaxAttempts + 1);
 
-  const beforeRequest = await input.orchestrator.runHook("llm.before_request", {
-    request: {
-      sessionId: input.sessionId,
-      step: 0,
-      attempt: 1,
-      mode: input.mode,
-      source: "compaction",
-      url: baseUrl,
-      payload
-    }
-  });
-  if (beforeRequest.blocked) {
-    throw new Error(`llm.before_request blocked: ${beforeRequest.reason || "blocked"}`);
-  }
-  const patchedRequest = toRecord(beforeRequest.value.request);
-  const requestUrl = String(patchedRequest.url || baseUrl).trim() || baseUrl;
-  const requestPayload = toRecord(patchedRequest.payload);
+  for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
+    try {
+      const beforeRequest = await input.orchestrator.runHook("llm.before_request", {
+        request: {
+          sessionId: input.sessionId,
+          step: 0,
+          attempt,
+          mode: input.mode,
+          source: "compaction",
+          url: baseUrl,
+          payload: basePayload
+        }
+      });
+      if (beforeRequest.blocked) {
+        throw new Error(`llm.before_request blocked: ${beforeRequest.reason || "blocked"}`);
+      }
+      const patchedRequest = toRecord(beforeRequest.value.request);
+      const requestUrl = String(patchedRequest.url || baseUrl).trim() || baseUrl;
+      const requestPayload = toRecord(patchedRequest.payload);
+      if (!Array.isArray(requestPayload.messages)) requestPayload.messages = basePayload.messages;
+      if (!String(requestPayload.model || "").trim()) requestPayload.model = llmModel;
+      if (typeof requestPayload.stream !== "boolean") requestPayload.stream = false;
 
-  input.orchestrator.events.emit("llm.request", input.sessionId, {
-    step: 0,
-    mode: "compaction",
-    summaryMode: input.mode,
-    url: requestUrl,
-    model: llmModel,
-    ...summarizeLlmRequestPayload(requestPayload)
-  });
-
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort("compaction-summary-timeout"), llmTimeoutMs);
-  try {
-    const response = await fetch(requestUrl, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${llmKey}`
-      },
-      body: JSON.stringify(requestPayload),
-      signal: ctrl.signal
-    });
-
-    const status = response.status;
-    const ok = response.ok;
-    const contentType = String(response.headers.get("content-type") || "");
-    const rawBody = await response.text();
-    input.orchestrator.events.emit(
-      "llm.response.raw",
-      input.sessionId,
-      buildLlmRawTracePayload({
+      input.orchestrator.events.emit("llm.request", input.sessionId, {
         step: 0,
-        attempt: 1,
-        status,
-        ok,
-        body: rawBody
-      })
-    );
-
-    if (!ok) {
-      throw new Error(`Compaction summary HTTP ${status}`);
-    }
-
-    const message = parseLlmMessageFromBody(rawBody, contentType);
-    const afterResponse = await input.orchestrator.runHook("llm.after_response", {
-      request: {
-        sessionId: input.sessionId,
-        step: 0,
-        attempt: 1,
-        mode: input.mode,
-        source: "compaction",
+        attempt,
+        mode: "compaction",
+        summaryMode: input.mode,
         url: requestUrl,
-        payload: requestPayload,
-        status,
-        ok
-      },
-      response: message
-    });
-    if (afterResponse.blocked) {
-      throw new Error(`llm.after_response blocked: ${afterResponse.reason || "blocked"}`);
+        model: llmModel,
+        ...summarizeLlmRequestPayload(requestPayload)
+      });
+
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort("compaction-summary-timeout"), llmTimeoutMs);
+      let response: Response;
+      try {
+        response = await fetch(requestUrl, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${llmKey}`
+          },
+          body: JSON.stringify(requestPayload),
+          signal: ctrl.signal
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+
+      const status = response.status;
+      const ok = response.ok;
+      const contentType = String(response.headers.get("content-type") || "");
+      const rawBody = await response.text();
+      const retryDelayHintMs = ok ? null : extractRetryDelayHintMs(rawBody, response);
+      input.orchestrator.events.emit(
+        "llm.response.raw",
+        input.sessionId,
+        buildLlmRawTracePayload({
+          step: 0,
+          attempt,
+          status,
+          ok,
+          retryDelayHintMs,
+          body: rawBody
+        })
+      );
+
+      if (!ok) {
+        if (attempt < totalAttempts && isRetryableLlmStatus(status)) {
+          const delayMs = Math.max(
+            0,
+            Math.min(
+              llmMaxRetryDelayMs > 0 ? llmMaxRetryDelayMs : Number.MAX_SAFE_INTEGER,
+              retryDelayHintMs ?? computeRetryDelayMs(attempt)
+            )
+          );
+          if (delayMs > 0) await delay(delayMs);
+          continue;
+        }
+        const err = new Error(`Compaction summary HTTP ${status}`) as RuntimeErrorWithMeta;
+        err.status = status;
+        throw err;
+      }
+
+      const message = parseLlmMessageFromBody(rawBody, contentType);
+      const afterResponse = await input.orchestrator.runHook("llm.after_response", {
+        request: {
+          sessionId: input.sessionId,
+          step: 0,
+          attempt,
+          mode: input.mode,
+          source: "compaction",
+          url: requestUrl,
+          payload: requestPayload,
+          status,
+          ok
+        },
+        response: message
+      });
+      if (afterResponse.blocked) {
+        throw new Error(`llm.after_response blocked: ${afterResponse.reason || "blocked"}`);
+      }
+      const patchedResponse = toRecord(afterResponse.value.response);
+      const summary = parseLlmContent(patchedResponse).trim();
+      if (!summary) {
+        throw new Error("Compaction summary 为空");
+      }
+      return summary;
+    } catch (error) {
+      if (attempt >= totalAttempts) throw error;
+      const err = asRuntimeErrorWithMeta(error);
+      const reason = String(err.message || "");
+      if (reason.includes("llm.before_request blocked") || reason.includes("llm.after_response blocked")) {
+        throw error;
+      }
+      if (reason.includes("Compaction summary 为空")) {
+        throw error;
+      }
+      const status = Number(err.status || 0);
+      const retryableStatus = Number.isInteger(status) && status > 0 ? isRetryableLlmStatus(status) : true;
+      if (!retryableStatus) throw error;
+      const fallbackDelayMs = Math.max(0, Math.min(llmMaxRetryDelayMs, computeRetryDelayMs(attempt)));
+      if (fallbackDelayMs > 0) await delay(fallbackDelayMs);
     }
-    const patchedResponse = toRecord(afterResponse.value.response);
-    const summary = parseLlmContent(patchedResponse).trim();
-    if (!summary) {
-      throw new Error("Compaction summary 为空");
-    }
-    return summary;
-  } finally {
-    clearTimeout(timer);
   }
+
+  throw new Error("compaction summary 请求失败");
 }
 
 async function refreshSessionTitleAuto(

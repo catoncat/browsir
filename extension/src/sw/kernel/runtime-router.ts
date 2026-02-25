@@ -27,6 +27,10 @@ type RuntimeResult<T = unknown> = RuntimeOk<T> | RuntimeErr;
 const SESSION_TITLE_MAX = 28;
 const SESSION_TITLE_MIN = 2;
 const SESSION_TITLE_SOURCE_MANUAL = "manual";
+const DEFAULT_STEP_STREAM_MAX_EVENTS = 240;
+const DEFAULT_STEP_STREAM_MAX_BYTES = 256 * 1024;
+const MAX_STEP_STREAM_MAX_EVENTS = 5000;
+const MAX_STEP_STREAM_MAX_BYTES = 4 * 1024 * 1024;
 
 function ok<T>(data: T): RuntimeResult<T> {
   return { ok: true, data };
@@ -53,6 +57,96 @@ function requireSessionId(message: unknown): string {
 
 function toRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function normalizeIntInRange(raw: unknown, fallback: number, min: number, max: number): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  const floored = Math.floor(n);
+  if (floored < min) return min;
+  if (floored > max) return max;
+  return floored;
+}
+
+function estimateJsonBytes(value: unknown): number {
+  try {
+    return new TextEncoder().encode(JSON.stringify(value)).length;
+  } catch {
+    return 0;
+  }
+}
+
+function clampStepStream(
+  source: unknown[],
+  rawOptions: { maxEvents?: unknown; maxBytes?: unknown } = {}
+): {
+  stream: unknown[];
+  meta: {
+    truncated: boolean;
+    cutBy: "events" | "bytes" | null;
+    totalEvents: number;
+    totalBytes: number;
+    returnedEvents: number;
+    returnedBytes: number;
+    maxEvents: number;
+    maxBytes: number;
+  };
+} {
+  const stream = Array.isArray(source) ? source : [];
+  const maxEvents = normalizeIntInRange(rawOptions.maxEvents, DEFAULT_STEP_STREAM_MAX_EVENTS, 1, MAX_STEP_STREAM_MAX_EVENTS);
+  const maxBytes = normalizeIntInRange(rawOptions.maxBytes, DEFAULT_STEP_STREAM_MAX_BYTES, 2 * 1024, MAX_STEP_STREAM_MAX_BYTES);
+  const totalEvents = stream.length;
+  const totalBytes = stream.reduce((sum, item) => sum + estimateJsonBytes(item), 0);
+
+  if (totalEvents <= maxEvents && totalBytes <= maxBytes) {
+    return {
+      stream: stream.slice(),
+      meta: {
+        truncated: false,
+        cutBy: null,
+        totalEvents,
+        totalBytes,
+        returnedEvents: totalEvents,
+        returnedBytes: totalBytes,
+        maxEvents,
+        maxBytes
+      }
+    };
+  }
+
+  const picked: unknown[] = [];
+  let returnedBytes = 0;
+  let cutBy: "events" | "bytes" | null = null;
+  for (let i = stream.length - 1; i >= 0; i -= 1) {
+    const item = stream[i];
+    const bytes = estimateJsonBytes(item);
+    const exceedEvents = picked.length + 1 > maxEvents;
+    const exceedBytes = returnedBytes + bytes > maxBytes;
+    if (exceedEvents || exceedBytes) {
+      cutBy = exceedEvents ? "events" : "bytes";
+      if (picked.length === 0) {
+        picked.push(item);
+        returnedBytes += bytes;
+      }
+      break;
+    }
+    picked.push(item);
+    returnedBytes += bytes;
+  }
+  picked.reverse();
+  return {
+    stream: picked,
+    meta: {
+      truncated: true,
+      cutBy,
+      totalEvents,
+      totalBytes,
+      returnedEvents: picked.length,
+      returnedBytes,
+      maxEvents,
+      maxBytes
+    }
+  };
 }
 
 function normalizeSessionTitle(value: unknown, fallback = ""): string {
@@ -565,7 +659,11 @@ async function handleStep(
   if (type === "brain.step.stream") {
     const sessionId = requireSessionId(payload);
     const stream = await orchestrator.getStepStream(sessionId);
-    return ok({ sessionId, stream });
+    const limited = clampStepStream(stream, {
+      maxEvents: payload.maxEvents,
+      maxBytes: payload.maxBytes
+    });
+    return ok({ sessionId, stream: limited.stream, streamMeta: limited.meta });
   }
 
   if (type === "brain.step.execute") {
@@ -620,6 +718,10 @@ async function handleBrainDebug(orchestrator: BrainOrchestrator, infra: RuntimeI
       }
       const entries = await orchestrator.sessions.getEntries(sessionId);
       const stream = await orchestrator.getStepStream(sessionId);
+      const limited = clampStepStream(stream, {
+        maxEvents: payload.maxEvents,
+        maxBytes: payload.maxBytes
+      });
       const conversationView = await buildConversationView(orchestrator, sessionId);
       return ok({
         sessionId,
@@ -627,8 +729,9 @@ async function handleBrainDebug(orchestrator: BrainOrchestrator, infra: RuntimeI
         meta,
         entryCount: entries.length,
         conversationView,
-        stepStream: stream,
-        globalTail: stream.slice(-80)
+        stepStream: limited.stream,
+        stepStreamMeta: limited.meta,
+        globalTail: limited.stream.slice(-80)
       });
     }
 

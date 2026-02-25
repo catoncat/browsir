@@ -6,6 +6,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { resolveVisualReviewConfig, runLlmVisualReview, type VisualReviewReport } from "./lib/visual-review";
 
 interface JsonVersion {
   webSocketDebuggerUrl: string;
@@ -39,6 +40,9 @@ interface MockLlmRequest {
   userText: string;
   messageCount: number;
   hasToolResult: boolean;
+  toolCallIds: string[];
+  assistantToolCallIds: string[];
+  hasPairedToolContext: boolean;
   hasSharedTabsContext: boolean;
   toolMessages: string[];
 }
@@ -353,6 +357,19 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
         .filter((item) => item?.role === "tool")
         .map((item) => String(item?.content || ""));
       const hasToolResult = messages.some((item) => item?.role === "tool");
+      const toolCallIds = messages
+        .filter((item) => item?.role === "tool")
+        .map((item) => String(item?.tool_call_id || "").trim())
+        .filter(Boolean);
+      const assistantToolCallIds = messages.flatMap((item) => {
+        if (String(item?.role || "") !== "assistant") return [];
+        const toolCalls = Array.isArray(item?.tool_calls) ? item.tool_calls : [];
+        return toolCalls
+          .map((toolCall: any) => String(toolCall?.id || "").trim())
+          .filter(Boolean);
+      });
+      const assistantToolCallIdSet = new Set(assistantToolCallIds);
+      const hasPairedToolContext = toolCallIds.some((id) => assistantToolCallIdSet.has(id));
       const hasSharedTabsContext = messages.some((item) => {
         if (String(item?.role || "") !== "system") return false;
         const content = String(item?.content || "");
@@ -363,6 +380,9 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
         userText,
         messageCount: messages.length,
         hasToolResult,
+        toolCallIds,
+        assistantToolCallIds,
+        hasPairedToolContext,
         hasSharedTabsContext,
         toolMessages: toolMessages.map((item) => item.slice(0, 4_000))
       });
@@ -888,7 +908,13 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
 
   return {
     baseUrl: `http://${BRIDGE_HOST}:${port}/v1`,
-    getRequests: () => requests.map((item) => ({ ...item, toolMessages: [...item.toolMessages] })),
+    getRequests: () =>
+      requests.map((item) => ({
+        ...item,
+        toolMessages: [...item.toolMessages],
+        toolCallIds: [...item.toolCallIds],
+        assistantToolCallIds: [...item.assistantToolCallIds]
+      })),
     clearRequests: () => {
       requests.length = 0;
     },
@@ -1123,6 +1149,7 @@ async function main() {
   const startedAt = Date.now();
   const testResults: TestCaseResult[] = [];
   const visualScreenshots: string[] = [];
+  const visualReviews: VisualReviewReport[] = [];
   const bridgeLogs: string[] = [];
   const chromeLogs: string[] = [];
 
@@ -1145,6 +1172,12 @@ async function main() {
   const liveLlmBase = String(process.env.BRAIN_E2E_LIVE_LLM_BASE || "https://ai.chen.rs/v1").trim();
   const liveLlmKey = String(process.env.BRAIN_E2E_LIVE_LLM_KEY || "").trim();
   const liveLlmModel = String(process.env.BRAIN_E2E_LIVE_LLM_MODEL || "gpt-5.3-codex").trim();
+  const visualReviewConfig = resolveVisualReviewConfig({
+    env: process.env,
+    liveLlmBase,
+    liveLlmKey,
+    liveLlmModel
+  });
 
   async function runCase(group: string, name: string, fn: () => Promise<void>) {
     const caseStarted = Date.now();
@@ -1419,6 +1452,8 @@ async function main() {
       );
 
       await sidepanelClient!.send("Page.enable").catch(() => null);
+      const capturedThemeShots: Array<{ theme: "light" | "dark"; path: string; base64: string }> = [];
+      const themeVisualChecks: Record<string, any> = {};
 
       const captureThemeScreenshot = async (theme: "light" | "dark", suffix = "") => {
         const screenshot = await sidepanelClient!.send("Page.captureScreenshot", {
@@ -1435,7 +1470,10 @@ async function main() {
         await writeFile(filePath, Buffer.from(String(screenshot.data), "base64"));
         const relativePath = path.relative(ROOT_DIR, filePath);
         visualScreenshots.push(relativePath);
-        return relativePath;
+        return {
+          path: relativePath,
+          base64: String(screenshot.data)
+        };
       };
 
       const assertAndCaptureTheme = async (theme: "light" | "dark") => {
@@ -1557,7 +1595,13 @@ async function main() {
           throw new Error(`${errorMessage}; diag=${JSON.stringify(diagnosticState)}`);
         });
 
-        await captureThemeScreenshot(theme);
+        const screenshot = await captureThemeScreenshot(theme);
+        capturedThemeShots.push({
+          theme,
+          path: screenshot.path,
+          base64: screenshot.base64
+        });
+        themeVisualChecks[theme] = visualCheck;
 
         assert(visualCheck?.ok === true, `样式检查失败(${theme}): ${JSON.stringify(visualCheck)}`);
         assert(visualCheck.hasShiki === true, `代码块未启用 Shiki(${theme}): ${JSON.stringify(visualCheck)}`);
@@ -1580,6 +1624,38 @@ async function main() {
         await assertAndCaptureTheme("dark");
       } finally {
         await sidepanelClient!.send("Emulation.setEmulatedMedia", { media: "", features: [] }).catch(() => null);
+      }
+
+      const visualReview = await runLlmVisualReview({
+        caseId: "panel-markdown-theme-highlight",
+        caseName: "Markdown 视觉回归：亮/暗主题可读 + Shiki 高亮",
+        objective: "评估扩展侧边栏 markdown 在亮/暗主题下的可读性和语法高亮质量。",
+        rubric: [
+          "亮色和暗色截图中的正文、引用、表格文本都应清晰可读，不能出现白底白字或近似同色。",
+          "代码块应表现为语法高亮而非纯单色文本，且行结构完整。",
+          "整体布局应稳定，不应出现代码块坍缩、内容覆盖或明显样式错位。"
+        ],
+        context: {
+          marker,
+          themeVisualChecks
+        },
+        images: capturedThemeShots.map((item) => ({
+          label: `${item.theme} theme`,
+          path: item.path,
+          base64: item.base64,
+          mimeType: "image/png"
+        })),
+        config: visualReviewConfig
+      });
+      visualReviews.push(visualReview);
+      if (visualReview.status !== "passed") {
+        console.warn(`[visual-review] ${visualReview.caseId}: ${visualReview.status}; ${visualReview.reason || visualReview.summary}`);
+      }
+      if (visualReviewConfig.mode === "required") {
+        assert(
+          visualReview.status === "passed",
+          `视觉评审未通过(${visualReview.status}/${visualReview.verdict}): ${visualReview.summary}; issues=${JSON.stringify(visualReview.issues)}`
+        );
       }
     });
 
@@ -2376,6 +2452,14 @@ async function main() {
         !secondDone.messages.some((item: any) => String(item?.content || "").includes("LLM HTTP 400")),
         "第二轮不应出现 LLM HTTP 400"
       );
+
+      const secondTurnRequest = [...mockLlm!.getRequests()]
+        .reverse()
+        .find((req) => req.userText.includes("#LLM_MULTI_TURN"));
+      assert(Boolean(secondTurnRequest), "未捕获到第二轮 #LLM_MULTI_TURN 请求");
+      assert(secondTurnRequest!.hasToolResult === true, "第二轮请求应携带历史 tool role 消息");
+      assert(secondTurnRequest!.toolCallIds.length > 0, "第二轮请求应携带历史 tool_call_id");
+      assert(secondTurnRequest!.hasPairedToolContext === true, "第二轮请求应包含 assistant/tool_call 与 tool_result 配对");
     });
 
     await runCase("brain.runtime", "brain.run.start 注入 shared tabs 上下文并每次覆盖", async () => {
@@ -4913,7 +4997,17 @@ async function main() {
       debug: {
         bridgeLogsTail: bridgeLogs.slice(-80),
         chromeLogsTail: chromeLogs.slice(-80),
-        visualScreenshots
+        visualScreenshots,
+        visualReview: {
+          mode: visualReviewConfig.mode,
+          configured: {
+            hasBase: !!visualReviewConfig.llmApiBase,
+            hasKey: !!visualReviewConfig.llmApiKey,
+            model: visualReviewConfig.llmModel,
+            timeoutMs: visualReviewConfig.timeoutMs
+          },
+          results: visualReviews
+        }
       }
     };
 
