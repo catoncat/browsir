@@ -199,7 +199,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/runtime-router.ts::handleBrainAgentRun + extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts::supports brain.agent.run single and binds role/profile into route selection + supports brain.agent.run parallel with per-task role/profile routing + brain.agent.run parallel rejects oversized task list"
+          "target": "extension/src/sw/kernel/runtime-router.ts::handleBrainAgentRun + extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts::supports brain.agent.run single and binds role/profile into route selection + supports brain.agent.run parallel with per-task role/profile routing + supports brain.agent.run chain and returns fan-in summary with {previous} injection + brain.agent.run chain rejects autoRun=false + brain.agent.run parallel rejects oversized task list"
         },
         {
           "layer": "browser-cdp",

@@ -16,8 +16,9 @@
 - Phase 1 Provider 已落地：`runtime-loop` 已改为走 `LlmProviderRegistry + LlmProviderAdapter`，不再硬编码直接请求。
 - 已支持 profile 路由与升级策略骨架：`llmDefaultProfile/llmProfiles/llmProfileChains/llmEscalationPolicy`。
 - 已补齐关键观测事件：`llm.route.selected`、`llm.route.escalated`、`llm.route.blocked`。
-- Phase 2 已有最小落地：新增 `brain.agent.run`，支持 `single/parallel` 子任务启动，并将 `agent/role/profile` 绑定到会话路由元数据。
-- 仍未完成的 Agents 能力：尚无 `chain` 原语、跨子任务汇总/回填、独立子 agent 生命周期管理与更细粒度观测。
+- Phase 2 已有最小落地：新增 `brain.agent.run`，支持 `single/parallel/chain` 子任务启动，并将 `agent/role/profile` 绑定到会话路由元数据。
+- 已支持 chain 的 `{previous}` 注入与 fan-in 汇总（`fanIn.finalOutput/fanIn.summary`）。
+- 仍未完成的 Agents 能力：独立子 agent 生命周期管理、跨子任务更细粒度观测与回填策略。
 
 结论：Provider 基础已完成，可进入 Agents 阶段实现。
 
@@ -41,7 +42,7 @@
 | 阶段 | Entry（进入条件） | Exit（完成条件） | Blocker（阻塞） |
 | --- | --- | --- | --- |
 | Phase 1 Provider | 单模型链路稳定、BDD 门禁可跑 | 具备 `ProviderAdapter + Registry + ProfileResolver` 最小闭环；新增合同通过 | 出现“无提示降级”或 Bridge 承担决策 |
-| Phase 2 Agents | Phase 1 全部 Exit 满足 | 角色绑定 profile、支持最小 `single/parallel` 子任务编排、可观测路由 | Provider 选路不稳定、失败语义不可解释 |
+| Phase 2 Agents | Phase 1 全部 Exit 满足 | 角色绑定 profile、支持最小 `single/parallel/chain` 子任务编排、可观测路由 | Provider 选路不稳定、失败语义不可解释 |
 
 ## 4. Phase 1：Provider（先做）
 
@@ -91,7 +92,7 @@
 
 - 引入子 Agent 角色：`scout / worker / reviewer`（初版）。
 - 角色绑定 profile，不允许角色外静默切模。
-- 支持最小编排原语：`single`、`parallel`。
+- 支持最小编排原语：`single`、`parallel`、`chain`。
 
 ### 5.3 失败策略
 
@@ -135,7 +136,7 @@
 - `BHV-LLM-PROFILE-ESCALATION`
   - 约束仅允许升级、不允许静默降级。
 - `BHV-SUBAGENT-RUN-MODES`
-  - 约束 `brain.agent.run` 的 `single/parallel` 入口语义与 role/profile 路由绑定。
+  - 约束 `brain.agent.run` 的 `single/parallel/chain` 入口语义、`{previous}` 注入与 fan-in 汇总语义。
 
 ## 7.3 新增 BDD 场景（technical/chat）
 
@@ -158,8 +159,8 @@ bun run bdd:validate
 3. 接 profile resolver 与兼容配置。`[done]`
 4. 补齐可观测事件。`[done]`
 5. 跑通 unit + bdd validate。`[done]`
-6. 进入 Agents 编排阶段（single/parallel + role 绑定 profile）。`[done-mvp]`
-7. 完成 Agents 全量能力（chain + fan-in 汇总 + 生命周期与门禁）。`[next]`
+6. 进入 Agents 编排阶段（single/parallel/chain + role 绑定 profile）。`[done-mvp]`
+7. 完成 Agents 全量能力（生命周期管理 + 细粒度观测与回填策略）。`[next]`
 
 ## 9. 参考资料
 

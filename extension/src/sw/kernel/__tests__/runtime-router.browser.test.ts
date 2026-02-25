@@ -395,6 +395,144 @@ describe("runtime-router.browser", () => {
     expect(String(out.error || "")).toContain("不能超过 8");
   });
 
+  it("supports brain.agent.run chain and returns fan-in summary with {previous} injection", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const body = (JSON.parse(String(init?.body || "{}")) || {}) as Record<string, unknown>;
+      if (Array.isArray(body.tools) && body.stream === true) {
+        const messages = Array.isArray(body.messages) ? (body.messages as Array<Record<string, unknown>>) : [];
+        let lastUser = "";
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+          const item = messages[i] || {};
+          if (String(item.role || "") !== "user") continue;
+          lastUser = String(item.content || "");
+          if (lastUser.trim()) break;
+        }
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: `chain:${lastUser}`
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "title-ok"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-legacy",
+        llmDefaultProfile: "worker.basic",
+        llmProfiles: [
+          {
+            id: "worker.basic",
+            provider: "openai_compatible",
+            llmApiBase: "https://example.ai/v1",
+            llmApiKey: "sk-demo",
+            llmModel: "gpt-worker-basic",
+            role: "worker"
+          },
+          {
+            id: "reviewer.basic",
+            provider: "openai_compatible",
+            llmApiBase: "https://example.ai/v1",
+            llmApiKey: "sk-demo",
+            llmModel: "gpt-reviewer-basic",
+            role: "reviewer"
+          }
+        ],
+        llmProfileChains: {
+          worker: ["worker.basic"],
+          reviewer: ["reviewer.basic"]
+        }
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.agent.run",
+      mode: "chain",
+      waitTimeoutMs: 5000,
+      chain: [
+        {
+          agent: "worker",
+          role: "worker",
+          profile: "worker.basic",
+          task: "第一步: Alpha"
+        },
+        {
+          agent: "reviewer",
+          role: "reviewer",
+          profile: "reviewer.basic",
+          task: "第二步: {previous} + Beta"
+        }
+      ]
+    });
+    expect(started.ok).toBe(true);
+    const startedData = (started.data || {}) as Record<string, unknown>;
+    expect(String(startedData.mode || "")).toBe("chain");
+    const results = Array.isArray(startedData.results) ? (startedData.results as Array<Record<string, unknown>>) : [];
+    expect(results.length).toBe(2);
+    expect(String(results[0].status || "")).toBe("done");
+    expect(String(results[1].status || "")).toBe("done");
+    expect(String(results[0].output || "")).toContain("第一步: Alpha");
+    expect(String(results[1].task || "")).toContain(String(results[0].output || "").trim());
+    const fanIn = (startedData.fanIn || {}) as Record<string, unknown>;
+    expect(String(fanIn.finalOutput || "")).toBe(String(results[1].output || ""));
+    expect(String(fanIn.summary || "")).toContain("1. worker [done]");
+    expect(String(fanIn.summary || "")).toContain("2. reviewer [done]");
+  });
+
+  it("brain.agent.run chain rejects autoRun=false", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const out = await invokeRuntime({
+      type: "brain.agent.run",
+      mode: "chain",
+      autoRun: false,
+      chain: [
+        {
+          agent: "worker",
+          task: "第一步"
+        }
+      ]
+    });
+    expect(out.ok).toBe(false);
+    expect(String(out.error || "")).toContain("需要 autoRun=true");
+  });
+
   it("supports edit_rerun for latest user in current session", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);

@@ -1,24 +1,28 @@
 {
   "id": "BHV-SUBAGENT-RUN-MODES",
-  "intent": "子 Agent 运行入口必须支持 single/parallel 两种编排原语，并保持角色与 profile 路由可观测",
+  "intent": "子 Agent 运行入口必须支持 single/parallel/chain 三种编排原语，并在 chain 下提供 fan-in 汇总语义",
   "context": {
     "surface": "sidepanel.chat.loop",
     "runtime_layer": "service-worker.kernel.runtime_router",
     "entry": "brain.agent.run",
-    "modes": ["single", "parallel"],
+    "modes": ["single", "parallel", "chain"],
     "routing_signals": ["llm.route.selected"]
   },
   "steps": [
     "accept_single_agent_task_with_agent_and_task_fields",
     "accept_parallel_agent_tasks_with_bounded_concurrency",
+    "accept_chain_tasks_with_previous_injection_and_fail_fast",
+    "return_fan_in_summary_after_chain_execution",
     "bind_agent_role_profile_into_session_route_metadata",
-    "reject_invalid_or_oversized_parallel_tasks_explicitly"
+    "reject_invalid_or_oversized_parallel_or_chain_tasks_explicitly"
   ],
   "observables": [
     "brain_agent_run_single_returns_new_session_runtime",
     "brain_agent_run_parallel_returns_task_result_list",
+    "brain_agent_run_chain_returns_result_list_and_fan_in_summary",
+    "chain_task_supports_previous_placeholder_injection",
     "llm_route_selected_contains_bound_role_and_profile",
-    "invalid_parallel_input_returns_explicit_error"
+    "invalid_parallel_or_chain_input_returns_explicit_error"
   ],
   "risk": "medium",
   "allowed_side_effects": [
@@ -31,7 +35,7 @@
     "min_layers": 2
   },
   "degrade_policy": {
-    "on_invalid_parallel_input": [
+    "on_invalid_parallel_or_chain_input": [
       "return_explicit_error",
       "do_not_start_any_subagent_session"
     ]

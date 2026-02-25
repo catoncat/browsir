@@ -1,7 +1,7 @@
 @contract(BHV-SUBAGENT-RUN-MODES)
 Feature: Subagent run modes
   作为编排内核
-  我希望 `brain.agent.run` 支持 single/parallel 两种最小原语
+  我希望 `brain.agent.run` 支持 single/parallel/chain 三种最小原语
   以便在角色绑定 profile 下稳定启动子任务
 
   Scenario: single 模式可启动子任务并绑定路由
@@ -20,3 +20,13 @@ Feature: Subagent run modes
   Scenario: parallel 超过上限时显式失败
     When 调用 brain.agent.run mode=parallel 且 tasks 超过上限
     Then 返回应为失败并包含上限错误信息
+
+  Scenario: chain 模式支持 {previous} 注入并返回 fan-in 汇总
+    Given sidepanel 已配置 worker 与 reviewer profile
+    When 调用 brain.agent.run mode=chain 并提供两段串行 chain
+    Then 第二段任务应使用第一段输出替换 {previous}
+    And 返回应包含 chain 结果列表与 fanIn.finalOutput fanIn.summary
+
+  Scenario: chain 禁止 autoRun=false
+    When 调用 brain.agent.run mode=chain 且 autoRun=false
+    Then 返回应为失败并提示 chain 需要 autoRun=true
