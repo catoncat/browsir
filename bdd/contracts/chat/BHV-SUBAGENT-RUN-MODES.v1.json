@@ -6,7 +6,7 @@
     "runtime_layer": "service-worker.kernel.runtime_router",
     "entry": "brain.agent.run",
     "modes": ["single", "parallel", "chain"],
-    "routing_signals": ["llm.route.selected"]
+    "routing_signals": ["llm.route.selected", "subagent.run.start", "subagent.task.start", "subagent.task.end", "subagent.run.end"]
   },
   "steps": [
     "accept_single_agent_task_with_agent_and_task_fields",
@@ -21,13 +21,14 @@
     "brain_agent_run_parallel_returns_task_result_list",
     "brain_agent_run_chain_returns_result_list_and_fan_in_summary",
     "chain_task_supports_previous_placeholder_injection",
+    "subagent_lifecycle_events_form_closed_loop",
     "llm_route_selected_contains_bound_role_and_profile",
     "invalid_parallel_or_chain_input_returns_explicit_error"
   ],
   "risk": "medium",
   "allowed_side_effects": [
     "session_create",
-    "loop_event(llm.route.selected)",
+    "loop_event(llm.route.selected|subagent.run.start|subagent.task.start|subagent.task.end|subagent.run.end)",
     "loop_status_transition(done|failed_execute|failed_verify)"
   ],
   "proof_requirements": {

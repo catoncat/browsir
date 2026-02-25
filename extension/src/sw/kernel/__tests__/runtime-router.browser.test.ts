@@ -78,6 +78,29 @@ async function waitForLoopDone(sessionId: string, timeoutMs = 2500): Promise<Arr
   throw new Error(`waitForLoopDone timeout: ${sessionId}`);
 }
 
+async function waitForStreamEvent(
+  sessionId: string,
+  eventType: string,
+  timeoutMs = 2500
+): Promise<{ event: Record<string, unknown>; stream: Array<Record<string, unknown>> }> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const out = await invokeRuntime({
+      type: "brain.step.stream",
+      sessionId
+    });
+    const stream = Array.isArray((out.data as Record<string, unknown>)?.stream)
+      ? (((out.data as Record<string, unknown>).stream as unknown[]) as Array<Record<string, unknown>>)
+      : [];
+    const event = stream.find((item) => String(item.type || "") === eventType);
+    if (event) {
+      return { event, stream };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`waitForStreamEvent timeout: ${sessionId}:${eventType}`);
+}
+
 describe("runtime-router.browser", () => {
   beforeEach(() => {
     runtimeListeners = [];
@@ -262,6 +285,8 @@ describe("runtime-router.browser", () => {
     expect(started.ok).toBe(true);
     const startedData = (started.data || {}) as Record<string, unknown>;
     expect(String(startedData.mode || "")).toBe("single");
+    const runSessionId = String(startedData.runSessionId || "");
+    expect(runSessionId).not.toBe("");
     const result = (startedData.result || {}) as Record<string, unknown>;
     const sessionId = String(result.sessionId || "");
     expect(sessionId).not.toBe("");
@@ -275,6 +300,16 @@ describe("runtime-router.browser", () => {
     const runRequest = capturedBodies.find((body) => Array.isArray(body.tools) && body.stream === true);
     expect(runRequest).toBeDefined();
     expect(String(runRequest?.model || "")).toBe("gpt-worker-basic");
+
+    const runDone = await waitForStreamEvent(runSessionId, "subagent.run.end", 5000);
+    const runDonePayload = (runDone.event.payload || {}) as Record<string, unknown>;
+    expect(String(runDonePayload.mode || "")).toBe("single");
+    expect(String(runDonePayload.status || "")).toBe("done");
+    expect(Number(runDonePayload.completedCount || 0)).toBe(1);
+    const hasTaskStart = runDone.stream.some((item) => String(item.type || "") === "subagent.task.start");
+    const hasTaskEnd = runDone.stream.some((item) => String(item.type || "") === "subagent.task.end");
+    expect(hasTaskStart).toBe(true);
+    expect(hasTaskEnd).toBe(true);
   });
 
   it("supports brain.agent.run parallel with per-task role/profile routing", async () => {
@@ -360,6 +395,8 @@ describe("runtime-router.browser", () => {
     expect(started.ok).toBe(true);
     const startedData = (started.data || {}) as Record<string, unknown>;
     expect(String(startedData.mode || "")).toBe("parallel");
+    const runSessionId = String(startedData.runSessionId || "");
+    expect(runSessionId).not.toBe("");
     const results = Array.isArray(startedData.results) ? (startedData.results as Array<Record<string, unknown>>) : [];
     expect(results.length).toBe(2);
     const sessionIds = results.map((item) => String(item.sessionId || ""));
@@ -376,6 +413,16 @@ describe("runtime-router.browser", () => {
     const selectedProfiles = [String(payloadA.profile || ""), String(payloadB.profile || "")].sort();
     expect(selectedProfiles).toEqual(["reviewer.basic", "worker.basic"]);
     expect(runModels.sort()).toEqual(["gpt-reviewer-basic", "gpt-worker-basic"]);
+
+    const runDone = await waitForStreamEvent(runSessionId, "subagent.run.end", 5000);
+    const runDonePayload = (runDone.event.payload || {}) as Record<string, unknown>;
+    expect(String(runDonePayload.mode || "")).toBe("parallel");
+    expect(String(runDonePayload.status || "")).toBe("done");
+    expect(Number(runDonePayload.completedCount || 0)).toBe(2);
+    const taskStartCount = runDone.stream.filter((item) => String(item.type || "") === "subagent.task.start").length;
+    const taskEndCount = runDone.stream.filter((item) => String(item.type || "") === "subagent.task.end").length;
+    expect(taskStartCount).toBe(2);
+    expect(taskEndCount).toBe(2);
   });
 
   it("brain.agent.run parallel rejects oversized task list", async () => {
@@ -502,6 +549,8 @@ describe("runtime-router.browser", () => {
     expect(started.ok).toBe(true);
     const startedData = (started.data || {}) as Record<string, unknown>;
     expect(String(startedData.mode || "")).toBe("chain");
+    const runSessionId = String(startedData.runSessionId || "");
+    expect(runSessionId).not.toBe("");
     const results = Array.isArray(startedData.results) ? (startedData.results as Array<Record<string, unknown>>) : [];
     expect(results.length).toBe(2);
     expect(String(results[0].status || "")).toBe("done");
@@ -512,6 +561,16 @@ describe("runtime-router.browser", () => {
     expect(String(fanIn.finalOutput || "")).toBe(String(results[1].output || ""));
     expect(String(fanIn.summary || "")).toContain("1. worker [done]");
     expect(String(fanIn.summary || "")).toContain("2. reviewer [done]");
+
+    const runDone = await waitForStreamEvent(runSessionId, "subagent.run.end", 5000);
+    const runDonePayload = (runDone.event.payload || {}) as Record<string, unknown>;
+    expect(String(runDonePayload.mode || "")).toBe("chain");
+    expect(String(runDonePayload.status || "")).toBe("done");
+    expect(Number(runDonePayload.completedCount || 0)).toBe(2);
+    const taskStartCount = runDone.stream.filter((item) => String(item.type || "") === "subagent.task.start").length;
+    const taskEndCount = runDone.stream.filter((item) => String(item.type || "") === "subagent.task.end").length;
+    expect(taskStartCount).toBe(2);
+    expect(taskEndCount).toBe(2);
   });
 
   it("brain.agent.run chain rejects autoRun=false", async () => {

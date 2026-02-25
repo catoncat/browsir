@@ -3,6 +3,10 @@ import { nowIso } from "./types";
 export type BrainEventType =
   | "input.user"
   | "input.shared_tabs"
+  | "subagent.run.start"
+  | "subagent.task.start"
+  | "subagent.task.end"
+  | "subagent.run.end"
   | "auto_retry_start"
   | "auto_retry_end"
   | "auto_compaction_start"

@@ -18,7 +18,8 @@
 - 已补齐关键观测事件：`llm.route.selected`、`llm.route.escalated`、`llm.route.blocked`。
 - Phase 2 已有最小落地：新增 `brain.agent.run`，支持 `single/parallel/chain` 子任务启动，并将 `agent/role/profile` 绑定到会话路由元数据。
 - 已支持 chain 的 `{previous}` 注入与 fan-in 汇总（`fanIn.finalOutput/fanIn.summary`）。
-- 仍未完成的 Agents 能力：独立子 agent 生命周期管理、跨子任务更细粒度观测与回填策略。
+- 已支持 Subagent 生命周期事件闭环：`subagent.run.start -> subagent.task.start -> subagent.task.end -> subagent.run.end`。
+- 仍未完成的 Agents 能力：更完整的生命周期管理策略（取消/重试预算）、跨子任务更细粒度回填策略。
 
 结论：Provider 基础已完成，可进入 Agents 阶段实现。
 

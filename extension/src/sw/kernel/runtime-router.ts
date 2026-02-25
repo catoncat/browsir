@@ -484,6 +484,114 @@ function buildChainFanInSummary(results: Array<Record<string, unknown>>): string
   return lines.join("\n");
 }
 
+interface StartedSubagentTask {
+  index: number;
+  agent: string;
+  role: string;
+  profile: string;
+  sessionId: string;
+  task: string;
+  templateTask: string;
+  autoRun: boolean;
+}
+
+function resolveSubagentRunSessionId(source: Record<string, unknown>, parentSessionId: string): string {
+  const explicit = String(source.runSessionId || "").trim();
+  if (explicit) return explicit;
+  if (parentSessionId) return parentSessionId;
+  return randomId("subagent-run");
+}
+
+function classifySubagentRunStatus(results: Array<Record<string, unknown>>): {
+  status: string;
+  failCount: number;
+  timeoutCount: number;
+  notStartedCount: number;
+} {
+  let failCount = 0;
+  let timeoutCount = 0;
+  let notStartedCount = 0;
+  for (const item of results) {
+    const status = String(item.status || "").trim() || "unknown";
+    const timeout = item.timeout === true || status === "timeout";
+    if (timeout) {
+      timeoutCount += 1;
+      continue;
+    }
+    if (status === "not_started") {
+      notStartedCount += 1;
+      continue;
+    }
+    if (status !== "done") {
+      failCount += 1;
+    }
+  }
+  if (timeoutCount > 0) return { status: "timeout", failCount, timeoutCount, notStartedCount };
+  if (failCount > 0) return { status: "partial_failed", failCount, timeoutCount, notStartedCount };
+  if (notStartedCount > 0) return { status: "not_started", failCount, timeoutCount, notStartedCount };
+  return { status: "done", failCount, timeoutCount, notStartedCount };
+}
+
+async function completeStartedSubagentTask(
+  orchestrator: BrainOrchestrator,
+  runSessionId: string,
+  task: StartedSubagentTask,
+  waitTimeoutMs: number
+): Promise<Record<string, unknown>> {
+  if (!task.autoRun) {
+    const completed = {
+      ...task,
+      status: "not_started",
+      timeout: false,
+      output: ""
+    };
+    orchestrator.events.emit("subagent.task.end", runSessionId, completed);
+    return completed;
+  }
+  const done = await waitForLoopDoneBySession(orchestrator, task.sessionId, waitTimeoutMs);
+  const output = await readLatestAssistantMessage(orchestrator, task.sessionId);
+  const completed = {
+    ...task,
+    status: done.status,
+    timeout: done.timeout,
+    output
+  };
+  orchestrator.events.emit("subagent.task.end", runSessionId, completed);
+  return completed;
+}
+
+function scheduleSubagentRunCompletion(
+  orchestrator: BrainOrchestrator,
+  runSessionId: string,
+  mode: "single" | "parallel",
+  tasks: StartedSubagentTask[],
+  waitTimeoutMs: number
+): void {
+  void Promise.all(tasks.map((task) => completeStartedSubagentTask(orchestrator, runSessionId, task, waitTimeoutMs)))
+    .then((results) => {
+      const summary = classifySubagentRunStatus(results);
+      orchestrator.events.emit("subagent.run.end", runSessionId, {
+        mode,
+        ...summary,
+        taskCount: tasks.length,
+        completedCount: results.length,
+        results
+      });
+    })
+    .catch((error) => {
+      orchestrator.events.emit("subagent.run.end", runSessionId, {
+        mode,
+        status: "internal_error",
+        taskCount: tasks.length,
+        completedCount: 0,
+        failCount: tasks.length,
+        timeoutCount: 0,
+        notStartedCount: 0,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+}
+
 async function handleBrainAgentRun(
   orchestrator: BrainOrchestrator,
   runtimeLoop: ReturnType<typeof createRuntimeLoopController>,
@@ -496,6 +604,13 @@ async function handleBrainAgentRun(
     modeRaw || (Array.isArray(source.chain) ? "chain" : Array.isArray(source.tasks) ? "parallel" : "single");
   const parentSessionId = String(source.parentSessionId || source.sessionId || "").trim();
   const defaultAutoRun = source.autoRun === false ? false : true;
+  const waitTimeoutMs = normalizeIntInRange(
+    source.waitTimeoutMs,
+    DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS,
+    1_000,
+    MAX_SUBAGENT_WAIT_TIMEOUT_MS
+  );
+  const runSessionId = resolveSubagentRunSessionId(source, parentSessionId);
 
   if (parentSessionId) {
     await orchestrator.sessions.ensureSession(parentSessionId);
@@ -505,9 +620,29 @@ async function handleBrainAgentRun(
     const rawSingle = source.single !== undefined ? source.single : source;
     const parsed = parseAgentRunTask(rawSingle, defaultAutoRun);
     if (!parsed.ok) return fail(parsed.error);
+    orchestrator.events.emit("subagent.run.start", runSessionId, {
+      mode: "single",
+      parentSessionId: parentSessionId || null,
+      taskCount: 1,
+      waitTimeoutMs
+    });
+    const started = await startAgentRunTask(runtimeLoop, parsed.task, parsed.task.task, parentSessionId || undefined);
+    const startedTask: StartedSubagentTask = {
+      index: 1,
+      agent: String(started.agent || ""),
+      role: String(started.role || ""),
+      profile: String(started.profile || ""),
+      sessionId: String(started.sessionId || ""),
+      task: String(started.task || ""),
+      templateTask: String(started.templateTask || ""),
+      autoRun: parsed.task.autoRun
+    };
+    orchestrator.events.emit("subagent.task.start", runSessionId, startedTask);
+    scheduleSubagentRunCompletion(orchestrator, runSessionId, "single", [startedTask], waitTimeoutMs);
     return ok({
       mode: "single",
-      result: await startAgentRunTask(runtimeLoop, parsed.task, parsed.task.task, parentSessionId || undefined)
+      runSessionId,
+      result: started
     });
   }
 
@@ -534,7 +669,16 @@ async function handleBrainAgentRun(
       parsedTasks.push(parsed.task);
     }
 
+    orchestrator.events.emit("subagent.run.start", runSessionId, {
+      mode: "parallel",
+      parentSessionId: parentSessionId || null,
+      taskCount: parsedTasks.length,
+      concurrency,
+      waitTimeoutMs
+    });
+
     const results: Array<Record<string, unknown>> = new Array(parsedTasks.length);
+    const startedTasks: StartedSubagentTask[] = new Array(parsedTasks.length);
     let cursor = 0;
     const workerCount = Math.min(concurrency, parsedTasks.length);
     await Promise.all(
@@ -543,13 +687,28 @@ async function handleBrainAgentRun(
           const index = cursor;
           cursor += 1;
           if (index >= parsedTasks.length) break;
-          results[index] = await startAgentRunTask(runtimeLoop, parsedTasks[index], parsedTasks[index].task, parentSessionId || undefined);
+          const started = await startAgentRunTask(runtimeLoop, parsedTasks[index], parsedTasks[index].task, parentSessionId || undefined);
+          results[index] = started;
+          const startedTask: StartedSubagentTask = {
+            index: index + 1,
+            agent: String(started.agent || ""),
+            role: String(started.role || ""),
+            profile: String(started.profile || ""),
+            sessionId: String(started.sessionId || ""),
+            task: String(started.task || ""),
+            templateTask: String(started.templateTask || ""),
+            autoRun: parsedTasks[index].autoRun
+          };
+          startedTasks[index] = startedTask;
+          orchestrator.events.emit("subagent.task.start", runSessionId, startedTask);
         }
       })
     );
+    scheduleSubagentRunCompletion(orchestrator, runSessionId, "parallel", startedTasks, waitTimeoutMs);
 
     return ok({
       mode: "parallel",
+      runSessionId,
       concurrency: workerCount,
       results
     });
@@ -566,12 +725,6 @@ async function handleBrainAgentRun(
     if (rawChain.length > MAX_SUBAGENT_CHAIN_TASKS) {
       return fail(`brain.agent.run chain tasks 不能超过 ${MAX_SUBAGENT_CHAIN_TASKS}`);
     }
-    const waitTimeoutMs = normalizeIntInRange(
-      source.waitTimeoutMs,
-      DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS,
-      1_000,
-      MAX_SUBAGENT_WAIT_TIMEOUT_MS
-    );
     const failFast = source.failFast !== false;
     const parsedChain: AgentRunTaskInput[] = [];
     for (let i = 0; i < rawChain.length; i += 1) {
@@ -581,6 +734,14 @@ async function handleBrainAgentRun(
       }
       parsedChain.push(parsed.task);
     }
+
+    orchestrator.events.emit("subagent.run.start", runSessionId, {
+      mode: "chain",
+      parentSessionId: parentSessionId || null,
+      taskCount: parsedChain.length,
+      waitTimeoutMs,
+      failFast
+    });
 
     const results: Array<Record<string, unknown>> = [];
     let previousOutput = String(source.previous || "").trim();
@@ -592,41 +753,70 @@ async function handleBrainAgentRun(
       const task = parsedChain[i];
       const resolvedTask = injectChainPrevious(task.task, previousOutput);
       const started = await startAgentRunTask(runtimeLoop, task, resolvedTask, parentSessionId || undefined);
-      const sessionId = String(started.sessionId || "");
-      const done = await waitForLoopDoneBySession(orchestrator, sessionId, waitTimeoutMs);
-      const output = await readLatestAssistantMessage(orchestrator, sessionId);
-      if (output) {
-        previousOutput = output;
-      }
-      results.push({
-        ...started,
+      const startedTask: StartedSubagentTask = {
         index: i + 1,
-        status: done.status,
-        timeout: done.timeout,
-        output
-      });
-      if (failFast && done.status !== "done") {
+        agent: String(started.agent || ""),
+        role: String(started.role || ""),
+        profile: String(started.profile || ""),
+        sessionId: String(started.sessionId || ""),
+        task: String(started.task || ""),
+        templateTask: String(started.templateTask || ""),
+        autoRun: true
+      };
+      orchestrator.events.emit("subagent.task.start", runSessionId, startedTask);
+      const completed = await completeStartedSubagentTask(orchestrator, runSessionId, startedTask, waitTimeoutMs);
+      if (String(completed.output || "").trim()) {
+        previousOutput = String(completed.output || "").trim();
+      }
+      results.push(completed);
+      if (failFast && String(completed.status || "") !== "done") {
         halted = true;
-        haltedStatus = done.status;
+        haltedStatus = String(completed.status || "");
         haltedStep = i + 1;
         break;
       }
     }
 
+    const fanIn = {
+      finalOutput: previousOutput,
+      summary: buildChainFanInSummary(results)
+    };
+    const summary = classifySubagentRunStatus(results);
+    orchestrator.events.emit("subagent.run.end", runSessionId, {
+      mode: "chain",
+      ...summary,
+      taskCount: parsedChain.length,
+      completedCount: results.length,
+      failFast,
+      halted,
+      haltedStep: halted ? haltedStep : null,
+      haltedStatus: halted ? haltedStatus : "",
+      fanIn,
+      results
+    });
+
     return ok({
       mode: "chain",
+      runSessionId,
       failFast,
       results,
       halted,
       haltedStep: halted ? haltedStep : null,
       haltedStatus: halted ? haltedStatus : "",
-      fanIn: {
-        finalOutput: previousOutput,
-        summary: buildChainFanInSummary(results)
-      }
+      fanIn
     });
   }
 
+  orchestrator.events.emit("subagent.run.end", runSessionId, {
+    mode,
+    status: "failed_execute",
+    taskCount: 0,
+    completedCount: 0,
+    failCount: 1,
+    timeoutCount: 0,
+    notStartedCount: 0,
+    error: "unsupported_mode"
+  });
   return fail("brain.agent.run 仅支持 mode=single|parallel|chain");
 }
 

@@ -8,14 +8,17 @@ Feature: Subagent run modes
     Given sidepanel 已配置可用 worker profile
     When 调用 brain.agent.run mode=single 且提供 agent 与 task
     Then 应返回子任务 sessionId 与 runtime 视图
+    And 应返回可用于查询生命周期流的 runSessionId
     And 子任务 step stream 中应出现 llm.route.selected
     And llm.route.selected 应包含绑定后的 role 与 profile
+    And runSessionId 的 step stream 应包含 subagent.run.start 与 subagent.run.end
 
   Scenario: parallel 模式可批量启动并返回结果列表
     Given sidepanel 已配置 worker 与 reviewer profile
     When 调用 brain.agent.run mode=parallel 并提供多个 tasks
     Then 应返回与 tasks 等长的结果列表
     And 每个结果都应包含独立 sessionId
+    And runSessionId 的 step stream 应包含等量的 subagent.task.start 与 subagent.task.end
 
   Scenario: parallel 超过上限时显式失败
     When 调用 brain.agent.run mode=parallel 且 tasks 超过上限
