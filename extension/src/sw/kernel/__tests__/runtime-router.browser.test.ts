@@ -869,6 +869,167 @@ describe("runtime-router.browser", () => {
     expect(String(actionPayload?.errorCode || "")).not.toBe("E_VERIFY_FAILED");
   });
 
+  it("同一会话二轮请求会保留历史 tool role 并补齐 assistant/tool_call 配对", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.history.tool.read",
+        name: "history-tool-read",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["fs.read"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "fs.read": {
+            id: "plugin.history.tool.read.provider",
+            mode: "script",
+            priority: 50,
+            canHandle: (input) => String((input.args?.frame as Record<string, unknown> | undefined)?.tool || "") === "read",
+            invoke: async () => ({
+              provider: "history-tool-read"
+            })
+          }
+        }
+      }
+    });
+
+    const capturedBodies: Array<Record<string, unknown>> = [];
+    let llmCall = 0;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      llmCall += 1;
+      const body = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
+      capturedBodies.push(body);
+
+      if (llmCall === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_read_history_1",
+                      type: "function",
+                      function: {
+                        name: "read_file",
+                        arguments: JSON.stringify({
+                          path: "/tmp/history.txt"
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      if (llmCall === 2) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "FIRST_TURN_DONE"
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "SECOND_TURN_DONE"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test",
+        autoTitleInterval: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const first = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "第一轮读取文件",
+      sessionOptions: {
+        title: "History Tool Session",
+        metadata: {
+          titleSource: "manual"
+        }
+      }
+    });
+    expect(first.ok).toBe(true);
+    const sessionId = String(((first.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+    await waitForLoopDone(sessionId);
+
+    const second = await invokeRuntime({
+      type: "brain.run.start",
+      sessionId,
+      prompt: "第二轮继续"
+    });
+    expect(second.ok).toBe(true);
+
+    const deadline = Date.now() + 2500;
+    while (fetchSpy.mock.calls.length < 3 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(fetchSpy.mock.calls.length).toBeGreaterThanOrEqual(3);
+
+    const thirdBody = capturedBodies[2] || {};
+    const thirdMessages = Array.isArray(thirdBody.messages)
+      ? (thirdBody.messages as Array<Record<string, unknown>>)
+      : [];
+    const toolMessage = thirdMessages.find(
+      (item) => String(item.role || "") === "tool" && String(item.tool_call_id || "") === "call_read_history_1"
+    );
+    expect(toolMessage).toBeDefined();
+    const pairedAssistant = thirdMessages.find((item) => {
+      if (String(item.role || "") !== "assistant") return false;
+      const calls = Array.isArray(item.tool_calls) ? (item.tool_calls as Array<Record<string, unknown>>) : [];
+      return calls.some((call) => String(call.id || "") === "call_read_history_1");
+    });
+    expect(pairedAssistant).toBeDefined();
+  });
+
   it("returns runtime-not-ready when capability provider is missing", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);

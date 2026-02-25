@@ -6,6 +6,11 @@ import {
   type RuntimeView
 } from "./orchestrator.browser";
 import { SUMMARIZATION_SYSTEM_PROMPT } from "./compaction.browser";
+import {
+  convertSessionContextMessagesToLlm,
+  transformMessagesForLlm,
+  type SessionContextMessageLike
+} from "./llm-message-model.browser";
 import { writeSessionMeta } from "./session-store.browser";
 import { type BridgeConfig, type RuntimeInfraHandler } from "./runtime-infra.browser";
 import { type CapabilityExecutionPolicy, type StepVerifyPolicy } from "./capability-policy";
@@ -856,7 +861,7 @@ function buildTaskProgressSystemMessage(input: {
   ].join("\n");
 }
 
-function buildLlmMessagesFromContext(meta: SessionMeta | null, contextMessages: Array<{ role: string; content: string }>): JsonRecord[] {
+function buildLlmMessagesFromContext(meta: SessionMeta | null, contextMessages: SessionContextMessageLike[]): JsonRecord[] {
   const out: JsonRecord[] = [];
   out.push({
     role: "system",
@@ -877,21 +882,9 @@ function buildLlmMessagesFromContext(meta: SessionMeta | null, contextMessages: 
     });
   }
 
-  for (const item of contextMessages) {
-    const rawRole = String(item.role || "assistant").toLowerCase();
-    let role = rawRole;
-    let content = String(item.content || "");
-    if (!content.trim()) continue;
-    if (rawRole === "tool") {
-      role = "assistant";
-      content = `工具执行结果（历史）:\n${content}`;
-    } else if (!["system", "user", "assistant"].includes(rawRole)) {
-      role = "assistant";
-    }
-    out.push({ role, content });
-  }
+  out.push(...convertSessionContextMessagesToLlm(contextMessages));
 
-  if (out.length === 0) {
+  if (out.filter((item) => String(item.role || "") !== "system").length === 0) {
     out.push({ role: "user", content: "继续当前任务。" });
   }
 
@@ -2624,6 +2617,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           requestPayload.temperature = 0.2;
         }
         if (typeof requestPayload.stream !== "boolean") requestPayload.stream = true;
+        requestPayload.messages = transformMessagesForLlm(
+          Array.isArray(requestPayload.messages) ? requestPayload.messages : []
+        );
 
         orchestrator.events.emit("llm.request", sessionId, {
           step,
@@ -2850,10 +2846,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
     const context = await orchestrator.sessions.buildSessionContext(sessionId);
     const meta = await orchestrator.sessions.getMeta(sessionId);
-    const messages = buildLlmMessagesFromContext(
-      meta,
-      context.messages.map((item) => ({ role: String(item.role || ""), content: String(item.content || "") }))
-    );
+    const messages = buildLlmMessagesFromContext(meta, context.messages);
 
     let llmStep = 0;
     let toolStep = 0;
