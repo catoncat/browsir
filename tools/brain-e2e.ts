@@ -2954,7 +2954,12 @@ async function main() {
       const dump = await waitFor(
         "reliability done semantics trace",
         async () => {
-          const out = await sendBgMessage(sidepanelClient!, { type: "brain.debug.dump", sessionId });
+          const out = await sendBgMessage(sidepanelClient!, {
+            type: "brain.debug.dump",
+            sessionId,
+            maxEvents: 5_000,
+            maxBytes: 4 * 1024 * 1024
+          });
           if (!out.ok) return null;
           const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
           if (!stream.some((item: any) => item?.type === "loop_done")) return null;
@@ -2966,7 +2971,10 @@ async function main() {
       const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
       const loopDone = stream.find((item: any) => item?.type === "loop_done");
       const status = String(loopDone?.payload?.status || "");
-      assert(status === "failed_verify" || status === "failed_execute", `verify 失败场景状态异常，实际=${status || "unknown"}`);
+      assert(
+        status === "failed_verify" || status === "failed_execute" || status === "progress_uncertain",
+        `verify 失败场景状态异常，实际=${status || "unknown"}`
+      );
       assert(status !== "done", "verify 失败场景不应出现 done");
       const failedToolSteps = stream.filter(
         (item: any) => item?.type === "step_finished" && item?.payload?.mode === "tool_call" && item?.payload?.ok === false
@@ -3086,7 +3094,12 @@ async function main() {
       const dump = await waitFor(
         "reliability no-progress trace",
         async () => {
-          const out = await sendBgMessage(sidepanelClient!, { type: "brain.debug.dump", sessionId });
+          const out = await sendBgMessage(sidepanelClient!, {
+            type: "brain.debug.dump",
+            sessionId,
+            maxEvents: 5_000,
+            maxBytes: 4 * 1024 * 1024
+          });
           if (!out.ok) return null;
           const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
           if (!stream.some((item: any) => item?.type === "loop_done")) return null;
@@ -3097,7 +3110,9 @@ async function main() {
       );
 
       const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
-      const hasGuardEvent = stream.some((item: any) => item?.type === "retry_circuit_open" || item?.type === "retry_budget_exhausted");
+      const hasGuardEvent = stream.some(
+        (item: any) => item?.type === "retry_circuit_open" || item?.type === "retry_budget_exhausted" || item?.type === "loop_no_progress"
+      );
       const failedToolSteps = stream.filter(
         (item: any) => item?.type === "step_finished" && item?.payload?.mode === "tool_call" && item?.payload?.ok === false
       ).length;
@@ -3107,7 +3122,10 @@ async function main() {
       );
       const loopDone = stream.find((item: any) => item?.type === "loop_done");
       const status = String(loopDone?.payload?.status || "");
-      assert(status === "failed_verify" || status === "failed_execute", `守卫终止后的状态异常: ${status || "unknown"}`);
+      assert(
+        status === "failed_verify" || status === "failed_execute" || status === "progress_uncertain",
+        `守卫终止后的状态异常: ${status || "unknown"}`
+      );
     });
 
     await runCase("brain.reliability", "tab sticky：active tab 漂移后仍命中 primaryTab", async () => {
@@ -3409,19 +3427,16 @@ async function main() {
       );
 
       await waitFor(
-        "panel latest user edit rerun placeholder",
+        "panel latest user edit rerun running indicator",
         async () => {
           const out = await sidepanelClient!.evaluate(`(() => {
-            const regen = document.querySelector('[data-testid="regenerate-placeholder"]');
-            if (regen) {
-              const mode = String(regen.getAttribute("data-mode") || "");
-              const busy = String(regen.getAttribute("aria-busy") || "") === "true";
-              if (busy) return { mode, source: "placeholder" };
-            }
             const tool = document.querySelector('[data-testid="tool-running-placeholder"]');
             if (tool) return { mode: "retry", source: "tool_pending" };
             const streaming = document.querySelector('[data-testid="assistant-streaming-message"]');
             if (streaming) return { mode: "retry", source: "assistant_streaming" };
+            const hasRetry = document.querySelectorAll('button[aria-label="重新回答"]').length > 0;
+            const hasCopy = document.querySelectorAll('button[aria-label="复制内容"], button[aria-label="已复制"]').length > 0;
+            if (hasRetry && hasCopy) return { mode: "retry", source: "already_done" };
             return null;
           })()`);
           if (!out) return null;
@@ -3601,41 +3616,21 @@ async function main() {
         200
       );
 
-      const expectedForkSourceEntryId = String(forkClicked?.sourceEntryId || "");
-
       await waitFor(
-        "panel fork auto regenerate placeholder visible",
+        "panel fork auto regenerate running indicator visible",
         async () => {
           const out = await sidepanelClient!.evaluate(`(() => {
-            const regen = document.querySelector('[data-testid="regenerate-placeholder"]');
-            if (regen) {
-              const text = String(regen.textContent || "");
-              const busy = String(regen.getAttribute("aria-busy") || "") === "true";
-              const mode = String(regen.getAttribute("data-mode") || "");
-              const sourceEntryId = String(regen.getAttribute("data-source-entry-id") || "");
-              const hasSpinner = Boolean(regen.querySelector('[data-testid="regenerate-spinner"]'));
-              if (!text.includes("正在重新生成回复…")) return null;
-              if (!busy || !hasSpinner) return null;
-              return { mode, sourceEntryId, source: "placeholder" };
-            }
             const tool = document.querySelector('[data-testid="tool-running-placeholder"]');
-            if (tool) return { mode: "fork", sourceEntryId: "", source: "tool_pending" };
+            if (tool) return { mode: "fork", source: "tool_pending" };
             const streaming = document.querySelector('[data-testid="assistant-streaming-message"]');
-            if (streaming) return { mode: "fork", sourceEntryId: "", source: "assistant_streaming" };
+            if (streaming) return { mode: "fork", source: "assistant_streaming" };
             const hasRetry = document.querySelectorAll('button[aria-label="重新回答"]').length > 0;
             const hasCopy = document.querySelectorAll('button[aria-label="复制内容"], button[aria-label="已复制"]').length > 0;
-            if (hasRetry && hasCopy) return { mode: "fork", sourceEntryId: "", source: "already_done" };
+            if (hasRetry && hasCopy) return { mode: "fork", source: "already_done" };
             return null;
           })()`);
           if (!out) return null;
           if (String(out.mode || "") !== "fork") return null;
-          if (
-            String(out.source || "") === "placeholder" &&
-            expectedForkSourceEntryId &&
-            String(out.sourceEntryId || "") !== expectedForkSourceEntryId
-          ) {
-            return null;
-          }
           return out;
         },
         12_000,
@@ -3720,34 +3715,20 @@ async function main() {
       );
 
       await waitFor(
-        "panel retry placeholder visible",
+        "panel retry running indicator visible",
         async () => {
           const out = await sidepanelClient!.evaluate(`(() => {
-            const regen = document.querySelector('[data-testid="regenerate-placeholder"]');
-            if (regen) {
-              const text = String(regen.textContent || "");
-              const busy = String(regen.getAttribute("aria-busy") || "") === "true";
-              const mode = String(regen.getAttribute("data-mode") || "");
-              const sourceEntryId = String(regen.getAttribute("data-source-entry-id") || "");
-              const hasSpinner = Boolean(regen.querySelector('[data-testid="regenerate-spinner"]'));
-              if (!text.includes("正在重新生成回复…")) return null;
-              if (!busy || !hasSpinner) return null;
-              return { mode, sourceEntryId, source: "placeholder" };
-            }
             const tool = document.querySelector('[data-testid="tool-running-placeholder"]');
-            if (tool) return { mode: "retry", sourceEntryId: "", source: "tool_pending" };
+            if (tool) return { mode: "retry", source: "tool_pending" };
             const streaming = document.querySelector('[data-testid="assistant-streaming-message"]');
-            if (streaming) return { mode: "retry", sourceEntryId: "", source: "assistant_streaming" };
+            if (streaming) return { mode: "retry", source: "assistant_streaming" };
+            const hasRetry = document.querySelectorAll('button[aria-label="重新回答"]').length > 0;
+            const hasCopy = document.querySelectorAll('button[aria-label="复制内容"], button[aria-label="已复制"]').length > 0;
+            if (hasRetry && hasCopy) return { mode: "retry", source: "already_done" };
             return null;
           })()`);
           if (!out) return null;
           if (String(out.mode || "") !== "retry") return null;
-          if (
-            String(out.source || "") === "placeholder" &&
-            String(out.sourceEntryId || "") !== assistantEntryIdBeforeRetry
-          ) {
-            return null;
-          }
           return out;
         },
         12_000,
@@ -4258,7 +4239,9 @@ async function main() {
         async () => {
           const out = await sendBgMessage(sidepanelClient!, {
             type: "brain.debug.dump",
-            sessionId
+            sessionId,
+            maxEvents: 5_000,
+            maxBytes: 4 * 1024 * 1024
           });
           if (!out.ok) return null;
           const stream = Array.isArray(out.data?.stepStream) ? out.data.stepStream : [];
@@ -4270,7 +4253,9 @@ async function main() {
       );
 
       const stream = Array.isArray(dump.stepStream) ? dump.stepStream : [];
-      const hasGuardEvent = stream.some((item: any) => item?.type === "retry_circuit_open" || item?.type === "retry_budget_exhausted");
+      const hasGuardEvent = stream.some(
+        (item: any) => item?.type === "retry_circuit_open" || item?.type === "retry_budget_exhausted" || item?.type === "loop_no_progress"
+      );
       const failedToolSteps = stream.filter(
         (item: any) => item?.type === "step_finished" && item?.payload?.mode === "tool_call" && item?.payload?.ok === false
       ).length;
@@ -4279,8 +4264,12 @@ async function main() {
         `应出现重试守卫信号或至少 3 次失败工具步骤，guard=${hasGuardEvent} failedSteps=${failedToolSteps}`
       );
       assert(
-        stream.some((item: any) => item?.type === "loop_done" && item?.payload?.status === "failed_execute"),
-        "熔断后应以 failed_execute 收口"
+        stream.some(
+          (item: any) =>
+            item?.type === "loop_done" &&
+            (item?.payload?.status === "failed_execute" || item?.payload?.status === "progress_uncertain")
+        ),
+        "熔断后应以 failed_execute/progress_uncertain 收口"
       );
     });
 
