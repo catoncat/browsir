@@ -22,7 +22,7 @@ import { resolveLlmRoute } from "./llm-profile-resolver";
 import { writeSessionMeta } from "./session-store.browser";
 import { type BridgeConfig, type RuntimeInfraHandler } from "./runtime-infra.browser";
 import { type CapabilityExecutionPolicy, type StepVerifyPolicy } from "./capability-policy";
-import { nowIso, type SessionEntry, type SessionMeta } from "./types";
+import { nowIso, type SessionEntry, type SessionMeta, type StreamingBehavior } from "./types";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -71,6 +71,7 @@ interface RunStartInput {
   prompt?: string;
   tabIds?: unknown[];
   autoRun?: boolean;
+  streamingBehavior?: StreamingBehavior;
 }
 
 interface RegenerateRunInput {
@@ -426,6 +427,12 @@ function normalizeTabIds(input: unknown[]): number[] {
     out.push(id);
   }
   return out;
+}
+
+function normalizeStreamingBehavior(input: unknown): StreamingBehavior | null {
+  const value = String(input || "").trim();
+  if (value === "steer" || value === "followUp") return value;
+  return null;
 }
 
 function extractTabIdsFromPrompt(prompt: string): number[] {
@@ -3212,6 +3219,29 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           break;
         }
 
+        const dequeuedSteers = orchestrator.dequeueQueuedPrompts(sessionId, "steer");
+        for (const steer of dequeuedSteers) {
+          await orchestrator.appendUserMessage(sessionId, steer.text);
+          await orchestrator.preSendCompactionCheck(sessionId);
+          messages.push({
+            role: "user",
+            content: steer.text
+          });
+          const runtimeAfterDequeue = orchestrator.getRunState(sessionId);
+          orchestrator.events.emit("message.dequeued", sessionId, {
+            behavior: "steer",
+            id: steer.id,
+            text: clipText(steer.text, 3000),
+            total: runtimeAfterDequeue.queue.total,
+            steer: runtimeAfterDequeue.queue.steer,
+            followUp: runtimeAfterDequeue.queue.followUp
+          });
+          orchestrator.events.emit("input.steer", sessionId, {
+            text: clipText(steer.text, 3000),
+            id: steer.id
+          });
+        }
+
         llmStep += 1;
         const requestMessages = [
           ...messages,
@@ -3462,7 +3492,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         }
 
         let shouldContinueAfterToolFailure = false;
-        for (const tc of toolCalls) {
+        let skipRemainingToolCallsBySteer = false;
+        for (let toolCallIndex = 0; toolCallIndex < toolCalls.length; toolCallIndex += 1) {
+          const tc = toolCalls[toolCallIndex];
           toolStep += 1;
           orchestrator.events.emit("step_planned", sessionId, {
             step: toolStep,
@@ -3584,9 +3616,23 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             action: tc.function.name,
             preview: clipText(llmToolContent, 800)
           });
+
+          if (toolCallIndex < toolCalls.length - 1 && orchestrator.hasQueuedPrompt(sessionId, "steer")) {
+            const skippedCount = toolCalls.length - toolCallIndex - 1;
+            skipRemainingToolCallsBySteer = true;
+            orchestrator.events.emit("tool.skipped_due_to_steer", sessionId, {
+              afterTool: tc.function.name,
+              afterToolCallId: tc.id,
+              skippedCount
+            });
+            break;
+          }
         }
 
         if (shouldContinueAfterToolFailure) {
+          continue;
+        }
+        if (skipRemainingToolCallsBySteer) {
           continue;
         }
       }
@@ -3628,6 +3674,36 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         llmSteps: llmStep,
         toolSteps: toolStep
       });
+      const runtimeAfterDone = orchestrator.getRunState(sessionId);
+      if (!runtimeAfterDone.stopped && runtimeAfterDone.queue.followUp > 0) {
+        const followUps = orchestrator.dequeueQueuedPrompts(sessionId, "followUp");
+        const nextFollowUp = followUps[0];
+        if (nextFollowUp) {
+          const runtimeAfterDequeue = orchestrator.getRunState(sessionId);
+          orchestrator.events.emit("message.dequeued", sessionId, {
+            behavior: "followUp",
+            id: nextFollowUp.id,
+            text: clipText(nextFollowUp.text, 3000),
+            total: runtimeAfterDequeue.queue.total,
+            steer: runtimeAfterDequeue.queue.steer,
+            followUp: runtimeAfterDequeue.queue.followUp
+          });
+          orchestrator.events.emit("loop_follow_up_start", sessionId, {
+            id: nextFollowUp.id,
+            text: clipText(nextFollowUp.text, 3000)
+          });
+          void startFromPrompt({
+            sessionId,
+            prompt: nextFollowUp.text,
+            autoRun: true
+          }).catch((error) => {
+            orchestrator.events.emit("loop_internal_error", sessionId, {
+              error: error instanceof Error ? error.message : String(error),
+              reason: "follow_up_start_failed"
+            });
+          });
+        }
+      }
     }
   }
 
@@ -3696,9 +3772,6 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         orchestrator.events.emit("loop_internal_error", sessionId, {
           error: error instanceof Error ? error.message : String(error)
         });
-      })
-      .finally(() => {
-        orchestrator.setRunning(sessionId, false);
       });
 
     return orchestrator.getRunState(sessionId);
@@ -3737,6 +3810,32 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       return {
         sessionId,
         runtime: orchestrator.getRunState(sessionId)
+      };
+    }
+
+    const behavior = normalizeStreamingBehavior(input.streamingBehavior);
+    const state = orchestrator.getRunState(sessionId);
+    if (state.running) {
+      if (!behavior) {
+        throw new Error("会话正在运行中；请显式指定 streamingBehavior=steer|followUp");
+      }
+      const queuedRuntime = orchestrator.enqueueQueuedPrompt(sessionId, behavior, prompt);
+      orchestrator.events.emit("message.queued", sessionId, {
+        behavior,
+        text: clipText(prompt, 3000),
+        total: queuedRuntime.queue.total,
+        steer: queuedRuntime.queue.steer,
+        followUp: queuedRuntime.queue.followUp
+      });
+      if (behavior === "followUp") {
+        orchestrator.events.emit("loop_follow_up_queued", sessionId, {
+          text: clipText(prompt, 3000),
+          total: queuedRuntime.queue.followUp
+        });
+      }
+      return {
+        sessionId,
+        runtime: queuedRuntime
       };
     }
 

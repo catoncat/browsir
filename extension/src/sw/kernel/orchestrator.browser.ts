@@ -13,10 +13,13 @@ import {
   type ExecuteCapability,
   nowIso,
   randomId,
+  type QueueDequeueMode,
   type ExecuteMode,
   type ExecuteStepInput,
   type ExecuteStepResult,
+  type QueuedRuntimePrompt,
   type RunState,
+  type StreamingBehavior,
   type StepTraceRecord
 } from "./types";
 import { ToolProviderRegistry, type RegisterProviderOptions, type StepToolProvider } from "./tool-provider-registry";
@@ -63,6 +66,13 @@ export interface RuntimeView {
   paused: boolean;
   stopped: boolean;
   retry: RunState["retry"];
+  queue: {
+    dequeueMode: RunState["queue"]["dequeueMode"];
+    steer: number;
+    followUp: number;
+    total: number;
+    items: QueuedRuntimePrompt[];
+  };
 }
 
 function toPositiveInt(value: unknown, fallback: number): number {
@@ -130,6 +140,30 @@ export class BrainOrchestrator {
   private readonly runStateBySession = new Map<string, RunState>();
   private readonly streamBySession = new Map<string, StepTraceRecord[]>();
   private readonly traceWriteTailBySession = new Map<string, Promise<void>>();
+
+  private createEmptyQueueState(): RunState["queue"] {
+    return {
+      dequeueMode: "one-at-a-time",
+      steer: [],
+      followUp: []
+    };
+  }
+
+  private createRunState(sessionId: string): RunState {
+    return {
+      sessionId,
+      running: false,
+      paused: false,
+      stopped: false,
+      retry: {
+        active: false,
+        attempt: 0,
+        maxAttempts: this.options.retryMaxAttempts,
+        delayMs: 0
+      },
+      queue: this.createEmptyQueueState()
+    };
+  }
 
   constructor(options: OrchestratorOptions = {}) {
     this.options = {
@@ -319,18 +353,7 @@ export class BrainOrchestrator {
 
   async createSession(input?: Parameters<BrowserSessionManager["createSession"]>[0]): Promise<{ sessionId: string }> {
     const meta = await this.sessions.createSession(input);
-    this.runStateBySession.set(meta.header.id, {
-      sessionId: meta.header.id,
-      running: false,
-      paused: false,
-      stopped: false,
-      retry: {
-        active: false,
-        attempt: 0,
-        maxAttempts: this.options.retryMaxAttempts,
-        delayMs: 0
-      }
-    });
+    this.runStateBySession.set(meta.header.id, this.createRunState(meta.header.id));
     return { sessionId: meta.header.id };
   }
 
@@ -345,12 +368,22 @@ export class BrainOrchestrator {
   getRunState(sessionId: string): RuntimeView {
     const current = this.runStateBySession.get(sessionId);
     if (current) {
+      const queueItems = [...current.queue.steer, ...current.queue.followUp].sort((a, b) =>
+        String(a.timestamp || "").localeCompare(String(b.timestamp || ""))
+      );
         return {
           sessionId,
           running: current.running,
           paused: current.paused,
           stopped: current.stopped,
-          retry: { ...current.retry }
+          retry: { ...current.retry },
+          queue: {
+            dequeueMode: current.queue.dequeueMode,
+            steer: current.queue.steer.length,
+            followUp: current.queue.followUp.length,
+            total: current.queue.steer.length + current.queue.followUp.length,
+            items: queueItems.map((item) => ({ ...item }))
+          }
       };
     }
     return {
@@ -363,6 +396,13 @@ export class BrainOrchestrator {
         attempt: 0,
         maxAttempts: this.options.retryMaxAttempts,
         delayMs: 0
+      },
+      queue: {
+        dequeueMode: "one-at-a-time",
+        steer: 0,
+        followUp: 0,
+        total: 0,
+        items: []
       }
     };
   }
@@ -382,6 +422,8 @@ export class BrainOrchestrator {
   stop(sessionId: string): RuntimeView {
     const state = this.ensureRunState(sessionId);
     state.stopped = true;
+    state.queue.steer = [];
+    state.queue.followUp = [];
     return this.getRunState(sessionId);
   }
 
@@ -395,6 +437,61 @@ export class BrainOrchestrator {
   setRunning(sessionId: string, running: boolean): RuntimeView {
     const state = this.ensureRunState(sessionId);
     state.running = running;
+    return this.getRunState(sessionId);
+  }
+
+  setQueueDequeueMode(sessionId: string, mode: QueueDequeueMode): RuntimeView {
+    const state = this.ensureRunState(sessionId);
+    state.queue.dequeueMode = mode;
+    return this.getRunState(sessionId);
+  }
+
+  enqueueQueuedPrompt(sessionId: string, behavior: StreamingBehavior, text: string): RuntimeView {
+    const normalizedText = String(text || "").trim();
+    if (!normalizedText) return this.getRunState(sessionId);
+    const state = this.ensureRunState(sessionId);
+    const item: QueuedRuntimePrompt = {
+      id: randomId("queued_prompt"),
+      behavior,
+      text: normalizedText,
+      timestamp: nowIso()
+    };
+    if (behavior === "steer") {
+      state.queue.steer.push(item);
+    } else {
+      state.queue.followUp.push(item);
+    }
+    return this.getRunState(sessionId);
+  }
+
+  hasQueuedPrompt(sessionId: string, behavior?: StreamingBehavior): boolean {
+    const state = this.ensureRunState(sessionId);
+    if (behavior === "steer") return state.queue.steer.length > 0;
+    if (behavior === "followUp") return state.queue.followUp.length > 0;
+    return state.queue.steer.length > 0 || state.queue.followUp.length > 0;
+  }
+
+  dequeueQueuedPrompts(
+    sessionId: string,
+    behavior: StreamingBehavior,
+    mode?: QueueDequeueMode
+  ): QueuedRuntimePrompt[] {
+    const state = this.ensureRunState(sessionId);
+    const queue = behavior === "steer" ? state.queue.steer : state.queue.followUp;
+    if (queue.length === 0) return [];
+    const dequeueMode = mode || state.queue.dequeueMode;
+    if (dequeueMode === "all") {
+      const drained = queue.splice(0, queue.length);
+      return drained.map((item) => ({ ...item }));
+    }
+    const first = queue.shift();
+    return first ? [{ ...first }] : [];
+  }
+
+  clearQueuedPrompts(sessionId: string): RuntimeView {
+    const state = this.ensureRunState(sessionId);
+    state.queue.steer = [];
+    state.queue.followUp = [];
     return this.getRunState(sessionId);
   }
 
@@ -424,18 +521,7 @@ export class BrainOrchestrator {
   private ensureRunState(sessionId: string): RunState {
     const cached = this.runStateBySession.get(sessionId);
     if (cached) return cached;
-    const created: RunState = {
-      sessionId,
-      running: false,
-      paused: false,
-      stopped: false,
-      retry: {
-        active: false,
-        attempt: 0,
-        maxAttempts: this.options.retryMaxAttempts,
-        delayMs: 0
-      }
-    };
+    const created: RunState = this.createRunState(sessionId);
     this.runStateBySession.set(sessionId, created);
     return created;
   }

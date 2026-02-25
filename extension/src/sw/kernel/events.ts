@@ -2,7 +2,9 @@ import { nowIso } from "./types";
 
 export type BrainEventType =
   | "input.user"
+  | "input.steer"
   | "input.shared_tabs"
+  | "input.tab_ids_inferred"
   | "subagent.run.start"
   | "subagent.task.start"
   | "subagent.task.end"
@@ -23,6 +25,9 @@ export type BrainEventType =
   | "llm.stream.end"
   | "llm.response.raw"
   | "llm.response.parsed"
+  | "llm.route.selected"
+  | "llm.route.blocked"
+  | "llm.route.escalated"
   | "loop_start"
   | "loop_error"
   | "loop_done"
@@ -31,10 +36,16 @@ export type BrainEventType =
   | "loop_internal_error"
   | "loop_restart"
   | "loop_enqueue_skipped"
+  | "loop_follow_up_queued"
+  | "loop_follow_up_start"
+  | "loop_guard_browser_progress_missing"
+  | "message.queued"
+  | "message.dequeued"
   | "step_planned"
   | "step_finished"
   | "step_execute"
   | "step_execute_result"
+  | "tool.skipped_due_to_steer"
   | "retry_circuit_open"
   | "retry_budget_exhausted";
 

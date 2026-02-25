@@ -828,12 +828,40 @@ async function handleBrainRun(
   const payload = toRecord(message);
   const action = String(payload.type || "");
   if (action === "brain.run.start") {
+    const rawStreamingBehavior =
+      typeof payload.streamingBehavior === "string"
+        ? payload.streamingBehavior
+        : typeof payload.deliverAs === "string"
+          ? payload.deliverAs
+          : "";
+    const streamingBehavior =
+      rawStreamingBehavior === "follow_up"
+        ? "followUp"
+        : rawStreamingBehavior === "steer" || rawStreamingBehavior === "followUp"
+          ? rawStreamingBehavior
+          : undefined;
     const out = await runtimeLoop.startFromPrompt({
       sessionId: typeof payload.sessionId === "string" ? payload.sessionId : "",
       sessionOptions: payload.sessionOptions ? toRecord(payload.sessionOptions) : {},
       prompt: typeof payload.prompt === "string" ? payload.prompt : "",
       tabIds: Array.isArray(payload.tabIds) ? payload.tabIds : undefined,
-      autoRun: payload.autoRun === false ? false : true
+      autoRun: payload.autoRun === false ? false : true,
+      streamingBehavior
+    });
+    return ok(out);
+  }
+
+  if (action === "brain.run.steer" || action === "brain.run.follow_up") {
+    const sessionId = requireSessionId(payload);
+    const prompt = String(payload.prompt || "").trim();
+    if (!prompt) {
+      return fail(`${action} 需要非空 prompt`);
+    }
+    const out = await runtimeLoop.startFromPrompt({
+      sessionId,
+      prompt,
+      autoRun: true,
+      streamingBehavior: action === "brain.run.steer" ? "steer" : "followUp"
     });
     return ok(out);
   }

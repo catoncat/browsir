@@ -1,6 +1,6 @@
 import "./test-setup";
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BrainOrchestrator } from "../orchestrator.browser";
 import { registerRuntimeRouter } from "../runtime-router";
 
@@ -57,6 +57,9 @@ describe("runtime-router interruption boundary", () => {
   beforeEach(() => {
     runtimeListeners = [];
     resetRuntimeOnMessageMock();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("user stop should not be treated as implicit interruption recovery", async () => {
@@ -130,12 +133,206 @@ describe("runtime-router interruption boundary", () => {
       type: "brain.run.start",
       sessionId,
       prompt: "start-while-stopping",
-      autoRun: true
+      autoRun: true,
+      streamingBehavior: "followUp"
     });
     expect(restartDuringStopping.ok).toBe(true);
     const restartRuntime = ((restartDuringStopping.data as Record<string, unknown>)?.runtime || {}) as Record<string, unknown>;
     expect(Boolean(restartRuntime.running)).toBe(true);
     expect(Boolean(restartRuntime.stopped)).toBe(true);
 
+  });
+
+  it("running 时普通 prompt 必须显式声明 streamingBehavior", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "seed",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    orchestrator.setRunning(sessionId, true);
+    const missingBehavior = await invokeRuntime({
+      type: "brain.run.start",
+      sessionId,
+      prompt: "no-behavior"
+    });
+    expect(missingBehavior.ok).toBe(false);
+    expect(String(missingBehavior.error || "")).toContain("streamingBehavior");
+  });
+
+  it("running 时 steer/followUp 入队，并在 stop 时清空队列", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "seed",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    orchestrator.setRunning(sessionId, true);
+
+    const steered = await invokeRuntime({
+      type: "brain.run.start",
+      sessionId,
+      prompt: "steer-a",
+      streamingBehavior: "steer"
+    });
+    expect(steered.ok).toBe(true);
+    const steerRuntime = ((steered.data as Record<string, unknown>)?.runtime || {}) as Record<string, unknown>;
+    const steerQueue = (steerRuntime.queue || {}) as Record<string, unknown>;
+    expect(Number(steerQueue.steer || 0)).toBe(1);
+    expect(Number(steerQueue.total || 0)).toBe(1);
+
+    const followUp = await invokeRuntime({
+      type: "brain.run.start",
+      sessionId,
+      prompt: "follow-b",
+      streamingBehavior: "followUp"
+    });
+    expect(followUp.ok).toBe(true);
+    const followRuntime = ((followUp.data as Record<string, unknown>)?.runtime || {}) as Record<string, unknown>;
+    const followQueue = (followRuntime.queue || {}) as Record<string, unknown>;
+    expect(Number(followQueue.followUp || 0)).toBe(1);
+    expect(Number(followQueue.total || 0)).toBe(2);
+
+    const stopResult = await invokeRuntime({
+      type: "brain.run.stop",
+      sessionId
+    });
+    expect(stopResult.ok).toBe(true);
+    const stopQueue = ((stopResult.data as Record<string, unknown>)?.queue || {}) as Record<string, unknown>;
+    expect(Number(stopQueue.total || 0)).toBe(0);
+  });
+
+  it("显式 brain.run.steer / brain.run.follow_up 与 start+streamingBehavior 等价", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "seed",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    orchestrator.setRunning(sessionId, true);
+
+    const steer = await invokeRuntime({
+      type: "brain.run.steer",
+      sessionId,
+      prompt: "steer-x"
+    });
+    expect(steer.ok).toBe(true);
+    const steerQueue = (((steer.data as Record<string, unknown>)?.runtime as Record<string, unknown>)?.queue ||
+      {}) as Record<string, unknown>;
+    expect(Number(steerQueue.steer || 0)).toBe(1);
+
+    const follow = await invokeRuntime({
+      type: "brain.run.follow_up",
+      sessionId,
+      prompt: "follow-y"
+    });
+    expect(follow.ok).toBe(true);
+    const followQueue = (((follow.data as Record<string, unknown>)?.runtime as Record<string, unknown>)?.queue ||
+      {}) as Record<string, unknown>;
+    expect(Number(followQueue.followUp || 0)).toBe(1);
+  });
+
+  it("followUp 会在当前 loop_done 后自动启动下一轮", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    let fetchCount = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      fetchCount += 1;
+      if (fetchCount === 1) {
+        await new Promise((resolve) => setTimeout(resolve, 70));
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: `assistant-${fetchCount}`
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test"
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "first-round"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const queued = await invokeRuntime({
+      type: "brain.run.start",
+      sessionId,
+      prompt: "second-round",
+      streamingBehavior: "followUp"
+    });
+    expect(queued.ok).toBe(true);
+
+    const deadline = Date.now() + 5000;
+    let loopDoneCount = 0;
+    while (Date.now() < deadline) {
+      const out = await invokeRuntime({
+        type: "brain.step.stream",
+        sessionId
+      });
+      const stream = Array.isArray((out.data as Record<string, unknown>)?.stream)
+        ? (((out.data as Record<string, unknown>).stream as unknown[]) as Array<Record<string, unknown>>)
+        : [];
+      loopDoneCount = stream.filter((event) => String(event.type || "") === "loop_done").length;
+      if (loopDoneCount >= 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    expect(loopDoneCount).toBeGreaterThanOrEqual(2);
+    expect(fetchCount).toBeGreaterThanOrEqual(2);
+
+    const conversation = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(conversation.ok).toBe(true);
+    const messages = ((((conversation.data as Record<string, unknown>) || {}).conversationView as Record<string, unknown>)
+      ?.messages || []) as Array<Record<string, unknown>>;
+    const hasFollowUpUser = messages.some(
+      (item) => String(item.role || "") === "user" && String(item.content || "").includes("second-round")
+    );
+    expect(hasFollowUpUser).toBe(true);
   });
 });

@@ -148,12 +148,29 @@ export interface RetryState {
   delayMs: number;
 }
 
+export type StreamingBehavior = "steer" | "followUp";
+export type QueueDequeueMode = "one-at-a-time" | "all";
+
+export interface QueuedRuntimePrompt {
+  id: string;
+  behavior: StreamingBehavior;
+  text: string;
+  timestamp: string;
+}
+
+export interface RunQueueState {
+  dequeueMode: QueueDequeueMode;
+  steer: QueuedRuntimePrompt[];
+  followUp: QueuedRuntimePrompt[];
+}
+
 export interface RunState {
   sessionId: string;
   running: boolean;
   paused: boolean;
   stopped: boolean;
   retry: RetryState;
+  queue: RunQueueState;
 }
 
 export interface StepTraceRecord {
