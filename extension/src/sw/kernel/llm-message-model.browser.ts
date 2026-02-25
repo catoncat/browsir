@@ -379,13 +379,6 @@ export function transformMessagesForLlm(rawMessages: unknown[]): JsonRecord[] {
   return finalMessages.map((item) => toSerializableMessage(item));
 }
 
-function readSummaryBody(rawContent: string): string {
-  const content = String(rawContent || "");
-  const prefix = "Previous summary:\n";
-  if (!content.startsWith(prefix)) return content.trim();
-  return content.slice(prefix.length).trim();
-}
-
 export function convertSessionContextMessagesToLlm(messages: SessionContextMessageLike[]): JsonRecord[] {
   const out: JsonRecord[] = [];
   for (let i = 0; i < messages.length; i += 1) {
@@ -393,14 +386,6 @@ export function convertSessionContextMessagesToLlm(messages: SessionContextMessa
     const role = String(item.role || "").trim().toLowerCase();
     const content = String(item.content || "");
     if (!content.trim()) continue;
-
-    if (role === "system" && String(item.entryId || "").startsWith("summary:")) {
-      const summary = readSummaryBody(content);
-      if (!summary) continue;
-      const summaryMessage = buildCompactionSummaryLlmMessage(summary);
-      if (summaryMessage) out.push(summaryMessage);
-      continue;
-    }
 
     if (role === "tool") {
       const toolCallId = String(item.toolCallId || "").trim();

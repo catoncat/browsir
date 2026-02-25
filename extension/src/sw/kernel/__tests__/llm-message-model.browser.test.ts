@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { convertSessionContextMessagesToLlm, transformMessagesForLlm } from "../llm-message-model.browser";
+import {
+  buildCompactionSummaryLlmMessage,
+  convertSessionContextMessagesToLlm,
+  transformMessagesForLlm
+} from "../llm-message-model.browser";
 
 function asMessages(value: unknown): Array<Record<string, unknown>> {
   return Array.isArray(value) ? (value as Array<Record<string, unknown>>) : [];
@@ -62,14 +66,16 @@ describe("llm-message-model.browser", () => {
     expect(String(out[1]?.content || "")).toBe("No result provided");
   });
 
-  it("session context 转换对齐 compaction summary 与 tool role", () => {
+  it("buildCompactionSummaryLlmMessage 按新路径生成 compaction summary 消息", () => {
+    const message = buildCompactionSummaryLlmMessage("line-a\nline-b") as Record<string, unknown>;
+    expect(String(message.role || "")).toBe("user");
+    expect(String(message.content || "")).toContain("<summary>");
+    expect(String(message.content || "")).toContain("line-a");
+  });
+
+  it("session context 转换保留 tool role 语义（不再兼容旧 summary 消息）", () => {
     const out = asMessages(
       convertSessionContextMessagesToLlm([
-        {
-          role: "system",
-          entryId: "summary:session-1",
-          content: "Previous summary:\nline-a\nline-b"
-        },
         {
           role: "tool",
           content: "{\"ok\":true}",
@@ -84,16 +90,12 @@ describe("llm-message-model.browser", () => {
       ])
     );
 
-    expect(out).toHaveLength(3);
-    expect(String(out[0]?.role || "")).toBe("user");
-    expect(String(out[0]?.content || "")).toContain("<summary>");
-    expect(String(out[0]?.content || "")).toContain("line-a");
+    expect(out).toHaveLength(2);
+    expect(String(out[0]?.role || "")).toBe("tool");
+    expect(String(out[0]?.tool_call_id || "")).toBe("call_read_1");
+    expect(String(out[0]?.name || "")).toBe("read_file");
 
-    expect(String(out[1]?.role || "")).toBe("tool");
-    expect(String(out[1]?.tool_call_id || "")).toBe("call_read_1");
-    expect(String(out[1]?.name || "")).toBe("read_file");
-
-    expect(String(out[2]?.role || "")).toBe("user");
-    expect(String(out[2]?.content || "")).toContain("Tool result (write_file)");
+    expect(String(out[1]?.role || "")).toBe("user");
+    expect(String(out[1]?.content || "")).toContain("Tool result (write_file)");
   });
 });
