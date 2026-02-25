@@ -40,7 +40,7 @@
 | --- | --- | --- | --- | --- | --- |
 | BA-01 | CDP 会话控制层（Session Plane） | attach/detach、timeout、pending、disconnect 统一语义 | 已落第一版（attach 锁、command timeout/pending、detach/close 清理）；仍需补更多异常覆盖 | 并发同 tab 不互相踩踏；断链后无悬挂命令；错误码一致 | in_progress |
 | BA-02 | 语义快照层（Observe Plane） | AXTree-first，DOM fallback；稳定 `uid <-> backendNodeId/frameId` | 已切 AXTree-first + DOM fallback，动作链已可优先 backendNodeId；仍需补 iframe 与稳定 UID 回注入 | 同页多轮快照节点可追踪；重渲染可恢复映射 | in_progress |
-| BA-03 | 动作执行层（Act Plane） | 动作优先真实节点句柄；smart click/fill | 以 selector/注入为主，复杂控件易失败 | React/Vue/Monaco 输入成功率显著提升；失败可分型 | planned |
+| BA-03 | 动作执行层（Act Plane） | 动作优先真实节点句柄；smart click/fill | 已落 backendNodeId 优先执行与 Monaco-like model.setValue 适配；仍需补更多复杂控件策略 | React/Vue/Monaco 输入成功率显著提升；失败可分型 | in_progress |
 | BA-04 | 跨 Frame 统一模型 | 主文档 + iframe 快照/动作统一 | 已落 AXTree 跨 frame 采集与 frameId 标注；仍需补更完整跨 frame 动作/坐标恢复 | 含 iframe 场景可稳定点击/输入/验证 | in_progress |
 | BA-05 | 验证与进展判定层 | 时间窗轮询验证 + 多证据；no_progress 与 failed_execute 分离 | 已落 verify 时间窗轮询（含 selector/text 跨同源 iframe 检查）；语义收口仍需与 loop 联动强化 | 不再出现“动作成功但目标未推进仍通过” | in_progress |
 | BA-06 | 模式编排层（background/focus） | 失败后可提示并升级 focus，保留上下文续跑当前 step | 具备模式概念，但缺完整升级编排 | 升级后无需从头开始；可在会话中续跑 | planned |
@@ -128,6 +128,9 @@
 - 2026-02-25：继续推进 BA-04/BA-05 第一阶段实现：
   - AXTree 快照支持按 frame tree 聚合并输出 `frameId`。
   - `cdp.verify` 支持时间窗轮询（`waitForMs/pollIntervalMs`）并增强同源 iframe 下 `selectorExists/textIncludes` 检查。
+- 2026-02-25：推进 BA-03 第一阶段实现：
+  - `fill/type` 输入链路加入 Monaco-like `model.setValue` 优先策略，并保留 value/contenteditable fallback。
+  - 输入事件序列增强（beforeinput/input/change/keyup），降低受控组件状态不同步概率。
 - 证明测试：
   - `extension/src/sw/kernel/__tests__/runtime-infra.browser.test.ts`
   - 新增用例：
@@ -135,3 +138,5 @@
     - `executes action via backendNodeId before selector fallback`
     - `includes frameId in AXTree snapshot nodes when frame trees are available`
     - `polls verify within time window until selector condition becomes true`
+  - 端到端场景：
+    - `tools/brain-e2e.ts` 新增 `fill 支持 monaco-like 受控输入（model.setValue）`，并在 `bun run brain:e2e` 中通过。

@@ -103,6 +103,7 @@ function buildTestPageFixtureScript(): string {
       '  <div id="out">idle</div>',
       '  <div id="share-out">share:idle</div>',
       '  <section id="dyn-vue-root">loading-dynamic...</section>',
+      '  <section id="dyn-monaco-root">loading-monaco...</section>',
       '</main>'
     ].join('');
 
@@ -179,6 +180,63 @@ function buildTestPageFixtureScript(): string {
       }
     };
     setTimeout(mountDynamicVueLike, 320);
+
+    const mountMonacoLike = () => {
+      const root = document.querySelector("#dyn-monaco-root");
+      if (!root) return;
+      root.innerHTML = [
+        '<label for="dyn-monaco-input">Dynamic Monaco-like Input</label>',
+        '<div class="monaco-editor" data-monaco-uri="inmemory://model/main">',
+        '  <textarea id="dyn-monaco-input" data-testid="dyn-monaco-input" data-monaco-uri="inmemory://model/main" placeholder="Monaco plain text"></textarea>',
+        '</div>',
+        '<button id="dyn-monaco-share" data-testid="dyn-monaco-share" type="button">Monaco Share</button>',
+        '<div id="dyn-monaco-out">monaco:idle</div>',
+        '<a id="dyn-monaco-link" data-testid="dyn-monaco-link" href="" rel="noopener">monaco:link:idle</a>'
+      ].join("");
+
+      const uri = "inmemory://model/main";
+      const models = new Map();
+      const model = {
+        _value: "",
+        setValue(next) { this._value = String(next || ""); },
+        getValue() { return this._value; }
+      };
+      models.set(uri, model);
+
+      const monacoGlobal = globalThis.monaco || {};
+      monacoGlobal.Uri = monacoGlobal.Uri || {
+        parse(input) {
+          const raw = String(input || "");
+          return { toString: () => raw };
+        }
+      };
+      monacoGlobal.editor = monacoGlobal.editor || {};
+      monacoGlobal.editor.getModel = (input) => {
+        const key = input && typeof input.toString === "function" ? String(input.toString()) : String(input || "");
+        return models.get(key) || null;
+      };
+      monacoGlobal.editor.getModels = () => Array.from(models.values());
+      globalThis.monaco = monacoGlobal;
+
+      const shareBtn = root.querySelector("#dyn-monaco-share");
+      if (shareBtn) {
+        shareBtn.addEventListener("click", () => {
+          const text = String(model.getValue() || "");
+          const encoded = encodeURIComponent(text);
+          const shareUrl = "https://plain.example/share#monaco-share=" + encoded;
+          const out = root.querySelector("#dyn-monaco-out");
+          if (out) out.textContent = "monaco:shared:" + text;
+          const link = root.querySelector("#dyn-monaco-link");
+          if (link) {
+            link.setAttribute("href", shareUrl);
+            link.textContent = "monaco:link:" + shareUrl;
+          }
+          const shareOut = document.querySelector("#share-out");
+          if (shareOut) shareOut.textContent = "share-link:" + shareUrl;
+        });
+      }
+    };
+    setTimeout(mountMonacoLike, 480);
     return { ok: true, title: document.title };
   })()`;
 }
@@ -1870,6 +1928,57 @@ async function main() {
           action: { textIncludes: `dyn:shared:${marker}` }
         });
         assert(verifyResp.ok === true && verifyResp.data?.ok === true, "dynamic vue-like 输入后验证失败");
+      });
+    });
+
+    await runCase("service-worker API", "fill 支持 monaco-like 受控输入（model.setValue）", async () => {
+      await acquireAndUseLease("owner-dyn-monaco-fill", async (owner) => {
+        const marker = `mono-${Date.now()}`;
+        await waitFor(
+          "dynamic monaco-like input mounted",
+          async () => {
+            const verify = await sendBgMessage(sidepanelClient!, {
+              type: "cdp.verify",
+              tabId: testTabId,
+              action: { selectorExists: 'textarea[data-testid="dyn-monaco-input"]' }
+            });
+            if (!verify.ok) return null;
+            return verify.data?.ok === true ? true : null;
+          },
+          8_000,
+          120
+        );
+
+        const fillResp = await sendBgMessage(sidepanelClient!, {
+          type: "cdp.action",
+          tabId: testTabId,
+          owner,
+          sessionId: "session-owner-dyn-monaco-fill",
+          agentId: "owner-dyn-monaco-fill",
+          action: {
+            kind: "fill",
+            selector: 'textarea[data-testid="dyn-monaco-input"]',
+            value: marker
+          }
+        });
+        assert(fillResp.ok === true, `dynamic monaco-like fill 失败: ${fillResp.error || "unknown"}`);
+
+        const clickShare = await sendBgMessage(sidepanelClient!, {
+          type: "cdp.action",
+          tabId: testTabId,
+          owner,
+          sessionId: "session-owner-dyn-monaco-fill",
+          agentId: "owner-dyn-monaco-fill",
+          action: { kind: "click", selector: 'button[data-testid="dyn-monaco-share"]' }
+        });
+        assert(clickShare.ok === true, `dynamic monaco-like share click 失败: ${clickShare.error || "unknown"}`);
+
+        const verifyResp = await sendBgMessage(sidepanelClient!, {
+          type: "cdp.verify",
+          tabId: testTabId,
+          action: { textIncludes: `monaco:shared:${marker}` }
+        });
+        assert(verifyResp.ok === true && verifyResp.data?.ok === true, "dynamic monaco-like 输入后验证失败");
       });
     });
 

@@ -1517,12 +1517,66 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         const value = ${JSON.stringify(input.value)};
         if (!this || this.nodeType !== 1) return { ok: false, error: "backend node is not element" };
         const el = this;
+        const dispatchInputLikeEvents = (target, text, mode) => {
+          try {
+            target.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, data: text, inputType: "insertText" }));
+          } catch {
+            // ignore unsupported InputEvent ctor
+          }
+          let inputSent = false;
+          try {
+            target.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
+            inputSent = true;
+          } catch {
+            // fallback below
+          }
+          if (!inputSent) target.dispatchEvent(new Event("input", { bubbles: true }));
+          if (mode === "fill") target.dispatchEvent(new Event("change", { bubbles: true }));
+          target.dispatchEvent(new Event("keyup", { bubbles: true }));
+        };
+        const tryMonacoModelSet = (target, text, mode) => {
+          try {
+            const root =
+              target.closest?.(".monaco-editor")
+              || (target.classList?.contains?.("monaco-editor") ? target : null);
+            if (!root) return null;
+            const monaco = globalThis.monaco || window.monaco;
+            const editor = monaco?.editor;
+            if (!editor) return null;
+            const uriRaw = String(
+              target.getAttribute?.("data-monaco-uri")
+              || root.getAttribute?.("data-monaco-uri")
+              || ""
+            ).trim();
+            let model = null;
+            if (uriRaw && monaco?.Uri?.parse && typeof editor.getModel === "function") {
+              try {
+                model = editor.getModel(monaco.Uri.parse(uriRaw));
+              } catch {
+                // keep fallback
+              }
+            }
+            if (!model && typeof editor.getModels === "function") {
+              const models = editor.getModels();
+              if (Array.isArray(models) && models.length > 0) model = models[0];
+            }
+            if (!model || typeof model.setValue !== "function") return null;
+            model.setValue(text);
+            if ("value" in target) target.value = text;
+            dispatchInputLikeEvents(target, text, mode);
+            return { ok: true, typed: text.length, mode, via: "backend-node-monaco", url: location.href, title: document.title };
+          } catch {
+            return null;
+          }
+        };
         const applyTextToElement = (target, text, mode) => {
           if ("disabled" in target && !!target.disabled) return { ok: false, error: "element is disabled" };
           if ("readOnly" in target && !!target.readOnly) return { ok: false, error: "element is readonly" };
           if ("focus" in target) {
             try { target.focus({ preventScroll: true }); } catch { target.focus(); }
           }
+          const monacoApplied = tryMonacoModelSet(target, text, mode);
+          if (monacoApplied) return monacoApplied;
           if ("value" in target) {
             let setter = null;
             try {
@@ -1534,22 +1588,12 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
             } catch {}
             if (setter) setter.call(target, text);
             else target.value = text;
-            try {
-              target.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
-            } catch {
-              target.dispatchEvent(new Event("input", { bubbles: true }));
-            }
-            if (mode === "fill") target.dispatchEvent(new Event("change", { bubbles: true }));
+            dispatchInputLikeEvents(target, text, mode);
             return { ok: true, typed: text.length, mode, via: "backend-node-value", url: location.href, title: document.title };
           }
           if (target.isContentEditable) {
             target.textContent = text;
-            try {
-              target.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
-            } catch {
-              target.dispatchEvent(new Event("input", { bubbles: true }));
-            }
-            if (mode === "fill") target.dispatchEvent(new Event("change", { bubbles: true }));
+            dispatchInputLikeEvents(target, text, mode);
             return { ok: true, typed: text.length, mode, via: "backend-node-contenteditable", url: location.href, title: document.title };
           }
           return { ok: false, error: "element is not typable" };
@@ -1704,6 +1748,58 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         }
         return null;
       };
+      const dispatchInputLikeEvents = (target, text, mode) => {
+        try {
+          target.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, data: text, inputType: "insertText" }));
+        } catch {
+          // ignore unsupported InputEvent ctor
+        }
+        let inputSent = false;
+        try {
+          target.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
+          inputSent = true;
+        } catch {
+          // fallback below
+        }
+        if (!inputSent) target.dispatchEvent(new Event("input", { bubbles: true }));
+        if (mode === "fill") target.dispatchEvent(new Event("change", { bubbles: true }));
+        target.dispatchEvent(new Event("keyup", { bubbles: true }));
+      };
+      const tryMonacoModelSet = (target, text, mode) => {
+        try {
+          const root =
+            target.closest?.(".monaco-editor")
+            || (target.classList?.contains?.("monaco-editor") ? target : null);
+          if (!root) return null;
+          const monaco = globalThis.monaco || window.monaco;
+          const editor = monaco?.editor;
+          if (!editor) return null;
+          const uriRaw = String(
+            target.getAttribute?.("data-monaco-uri")
+            || root.getAttribute?.("data-monaco-uri")
+            || ""
+          ).trim();
+          let model = null;
+          if (uriRaw && monaco?.Uri?.parse && typeof editor.getModel === "function") {
+            try {
+              model = editor.getModel(monaco.Uri.parse(uriRaw));
+            } catch {
+              // keep fallback
+            }
+          }
+          if (!model && typeof editor.getModels === "function") {
+            const models = editor.getModels();
+            if (Array.isArray(models) && models.length > 0) model = models[0];
+          }
+          if (!model || typeof model.setValue !== "function") return null;
+          model.setValue(text);
+          if ("value" in target) target.value = text;
+          dispatchInputLikeEvents(target, text, mode);
+          return { ok: true, typed: text.length, mode, via: "monaco-model", url: location.href, title: document.title };
+        } catch {
+          return null;
+        }
+      };
       const applyTextToElement = (el, text, mode) => {
         if (!el) return { ok: false, error: "element missing" };
         if ("disabled" in el && !!el.disabled) return { ok: false, error: "element is disabled" };
@@ -1711,6 +1807,8 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         if ("focus" in el) {
           try { el.focus({ preventScroll: true }); } catch { el.focus(); }
         }
+        const monacoApplied = tryMonacoModelSet(el, text, mode);
+        if (monacoApplied) return monacoApplied;
         if ("value" in el) {
           let setter = null;
           try {
@@ -1725,12 +1823,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           } else {
             el.value = text;
           }
-          try {
-            el.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
-          } catch {
-            el.dispatchEvent(new Event("input", { bubbles: true }));
-          }
-          if (mode === "fill") el.dispatchEvent(new Event("change", { bubbles: true }));
+          dispatchInputLikeEvents(el, text, mode);
           return { ok: true, typed: text.length, mode, via: "value-setter", url: location.href, title: document.title };
         }
         if (el.isContentEditable) {
@@ -1744,12 +1837,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           } catch {
             el.textContent = text;
           }
-          try {
-            el.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
-          } catch {
-            el.dispatchEvent(new Event("input", { bubbles: true }));
-          }
-          if (mode === "fill") el.dispatchEvent(new Event("change", { bubbles: true }));
+          dispatchInputLikeEvents(el, text, mode);
           return { ok: true, typed: text.length, mode, via: "contenteditable", url: location.href, title: document.title };
         }
         return { ok: false, error: "element is not typable", mode };
