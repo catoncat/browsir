@@ -1,7 +1,7 @@
 import "./test-setup";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { archiveLegacyState, initSessionIndex, resetSessionStore } from "../storage-reset.browser";
+import { initSessionIndex, resetSessionStore } from "../storage-reset.browser";
 import { readSessionIndex } from "../session-store.browser";
 
 type Store = Record<string, unknown>;
@@ -19,75 +19,6 @@ afterEach(() => {
 });
 
 describe("storage-reset.browser", () => {
-  it("archiveLegacyState 会归档 legacy key 并保留 session store key", async () => {
-    await setStore({
-      chatState: { stage: 1 },
-      "runtime:planner": { enabled: true },
-      "trace:legacyRun": { status: "done" },
-      "trace:legacyRun:events": [{ type: "step" }],
-      "session:index": {
-        version: 1,
-        sessions: [{ id: "s1", createdAt: "2024-01-01T00:00:00.000Z", updatedAt: "2024-01-01T00:00:00.000Z" }],
-        updatedAt: "2024-01-01T00:00:00.000Z"
-      },
-      "session:s1:meta": { ok: true },
-      "trace:keep:0": [{ ok: true }],
-      "archive:legacy:seed": { keep: true },
-      "archive:legacy:index": ["archive:legacy:seed", "archive:legacy:seed", 1]
-    });
-
-    const result = await archiveLegacyState();
-
-    expect(result.archiveKey).toMatch(/^archive:legacy:\d+$/);
-    expect(result.archivedKeys.slice().sort()).toEqual(
-      ["chatState", "runtime:planner", "trace:legacyRun", "trace:legacyRun:events"].sort()
-    );
-    expect(result.archivedCount).toBe(4);
-    expect(result.archiveIndexSize).toBe(2);
-
-    const all = await getStore();
-    const archiveKey = result.archiveKey as string;
-    const archiveRecord = all[archiveKey] as Record<string, unknown>;
-
-    expect(archiveRecord.source).toBe("pr-5-legacy-reset");
-    expect((archiveRecord.keys as string[]).slice().sort()).toEqual(result.archivedKeys.slice().sort());
-    expect((archiveRecord.data as Record<string, unknown>).chatState).toEqual({ stage: 1 });
-
-    expect(all["chatState"]).toBeUndefined();
-    expect(all["runtime:planner"]).toBeUndefined();
-    expect(all["trace:legacyRun"]).toBeUndefined();
-    expect(all["trace:legacyRun:events"]).toBeUndefined();
-
-    expect(all["session:index"]).toBeDefined();
-    expect(all["session:s1:meta"]).toBeDefined();
-    expect(all["trace:keep:0"]).toBeDefined();
-    expect(all["archive:legacy:index"]).toEqual(["archive:legacy:seed", archiveKey]);
-    expect(all["archive:legacy:seed"]).toEqual({ keep: true });
-  });
-
-  it("archiveLegacyState 在无 legacy key 时返回 no-op", async () => {
-    await setStore({
-      "session:index": { version: 1, sessions: [], updatedAt: "2024-01-01T00:00:00.000Z" },
-      "session:s1:meta": { ok: true },
-      "trace:keep:0": [{ ok: true }],
-      "archive:legacy:index": ["archive:legacy:seed"],
-      "archive:legacy:seed": { keep: true }
-    });
-
-    const result = await archiveLegacyState();
-
-    expect(result).toEqual({
-      archiveKey: null,
-      archivedKeys: [],
-      archivedCount: 0,
-      archiveIndexSize: 1
-    });
-
-    const all = await getStore();
-    expect(all["session:index"]).toBeDefined();
-    expect(all["archive:legacy:index"]).toEqual(["archive:legacy:seed"]);
-  });
-
   it("resetSessionStore 支持 includeTrace/preserveArchive 开关并重建索引", async () => {
     await setStore({
       "session:index": {

@@ -23,18 +23,6 @@ function baseConfig(): BridgeConfig {
 }
 
 describe("llm-profile-resolver.browser", () => {
-  it("falls back to legacy config when llmProfiles is absent", () => {
-    const out = resolveLlmRoute({
-      config: baseConfig()
-    });
-    expect(out.ok).toBe(true);
-    if (!out.ok) return;
-    expect(out.route.profile).toBe("default");
-    expect(out.route.provider).toBe("openai_compatible");
-    expect(out.route.llmModel).toBe("gpt-legacy");
-    expect(out.route.fromLegacy).toBe(true);
-  });
-
   it("resolves explicit profile and ordered chain", () => {
     const config = baseConfig();
     (config as BridgeConfig & { llmProfiles?: unknown; llmDefaultProfile?: string; llmProfileChains?: unknown }).llmProfiles = [

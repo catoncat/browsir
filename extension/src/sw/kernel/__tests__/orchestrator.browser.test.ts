@@ -120,58 +120,6 @@ describe("orchestrator.browser", () => {
     expect(typeCounts.loop_done).toBe(1);
   });
 
-  it("script 成功时不走 fallback", async () => {
-    const orchestrator = new BrainOrchestrator();
-    orchestrator.registerToolProvider(
-      "script",
-      {
-        id: "test.script.success",
-        invoke: async () => ({ ok: true, source: "script" })
-      },
-      { replace: true }
-    );
-    const created = await orchestrator.createSession({ title: "script-success" });
-
-    const result = await orchestrator.executeStep({
-      sessionId: created.sessionId,
-      mode: "script",
-      action: "click",
-      args: { ref: "a1" }
-    });
-
-    expect(result.ok).toBe(true);
-    expect(result.modeUsed).toBe("script");
-    expect(result.fallbackFrom).toBeUndefined();
-    expect(result.data).toEqual({ ok: true, source: "script" });
-  });
-
-  it("script 失败时直接返回失败（不做 cdp fallback）", async () => {
-    const orchestrator = new BrainOrchestrator();
-    orchestrator.registerToolProvider(
-      "script",
-      {
-        id: "test.script.fail",
-        invoke: async () => {
-          throw new Error("script-failed");
-        }
-      },
-      { replace: true }
-    );
-    const created = await orchestrator.createSession({ title: "script-fallback" });
-
-    const result = await orchestrator.executeStep({
-      sessionId: created.sessionId,
-      mode: "script",
-      action: "click",
-      args: { ref: "a1" }
-    });
-
-    expect(result.ok).toBe(false);
-    expect(result.modeUsed).toBe("script");
-    expect(result.fallbackFrom).toBeUndefined();
-    expect(String(result.error || "")).toContain("script-failed");
-  });
-
   it("cdp 失败时直接返回失败", async () => {
     const orchestrator = new BrainOrchestrator();
     orchestrator.registerToolProvider(
@@ -197,33 +145,6 @@ describe("orchestrator.browser", () => {
     expect(result.modeUsed).toBe("cdp");
     expect(result.verified).toBe(false);
     expect(result.error).toContain("cdp-failed");
-  });
-
-  it("script 失败且无 cdp provider 时保持失败结果语义", async () => {
-    const orchestrator = new BrainOrchestrator();
-    orchestrator.registerToolProvider(
-      "script",
-      {
-        id: "test.script.only",
-        invoke: async () => {
-          throw new Error("script-failed");
-        }
-      },
-      { replace: true }
-    );
-    const created = await orchestrator.createSession({ title: "missing-cdp-provider" });
-
-    const result = await orchestrator.executeStep({
-      sessionId: created.sessionId,
-      mode: "script",
-      action: "click",
-      args: { ref: "a1" }
-    });
-
-    expect(result.ok).toBe(false);
-    expect(result.modeUsed).toBe("script");
-    expect(result.fallbackFrom).toBeUndefined();
-    expect(String(result.error || "")).toContain("script-failed");
   });
 
   it("tool.before_call hook 可阻断执行", async () => {

@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  buildCompactionSummaryLlmMessage,
-  convertSessionContextMessagesToLlm,
-  transformMessagesForLlm
-} from "../llm-message-model.browser";
+import { buildCompactionSummaryLlmMessage, transformMessagesForLlm } from "../llm-message-model.browser";
 
 function asMessages(value: unknown): Array<Record<string, unknown>> {
   return Array.isArray(value) ? (value as Array<Record<string, unknown>>) : [];
@@ -73,29 +69,4 @@ describe("llm-message-model.browser", () => {
     expect(String(message.content || "")).toContain("line-a");
   });
 
-  it("session context 转换保留 tool role 语义（不再兼容旧 summary 消息）", () => {
-    const out = asMessages(
-      convertSessionContextMessagesToLlm([
-        {
-          role: "tool",
-          content: "{\"ok\":true}",
-          toolName: "read_file",
-          toolCallId: "call_read_1"
-        },
-        {
-          role: "tool",
-          content: "legacy content",
-          toolName: "write_file"
-        }
-      ])
-    );
-
-    expect(out).toHaveLength(2);
-    expect(String(out[0]?.role || "")).toBe("tool");
-    expect(String(out[0]?.tool_call_id || "")).toBe("call_read_1");
-    expect(String(out[0]?.name || "")).toBe("read_file");
-
-    expect(String(out[1]?.role || "")).toBe("user");
-    expect(String(out[1]?.content || "")).toContain("Tool result (write_file)");
-  });
 });
