@@ -82,6 +82,10 @@
       "category": "protocol"
     },
     {
+      "contractId": "BHV-SUBAGENT-RUN-MODES",
+      "category": "protocol"
+    },
+    {
       "contractId": "BHV-LLM-LIVE-CAPABILITY",
       "category": "protocol"
     },

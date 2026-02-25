@@ -31,6 +31,8 @@ const DEFAULT_STEP_STREAM_MAX_EVENTS = 240;
 const DEFAULT_STEP_STREAM_MAX_BYTES = 256 * 1024;
 const MAX_STEP_STREAM_MAX_EVENTS = 5000;
 const MAX_STEP_STREAM_MAX_BYTES = 4 * 1024 * 1024;
+const MAX_SUBAGENT_PARALLEL_TASKS = 8;
+const MAX_SUBAGENT_PARALLEL_CONCURRENCY = 4;
 
 function ok<T>(data: T): RuntimeResult<T> {
   return { ok: true, data };
@@ -336,6 +338,154 @@ async function buildConversationView(
     lastStatus: orchestrator.getRunState(sessionId),
     updatedAt: nowIso()
   };
+}
+
+interface AgentRunTaskInput {
+  agent: string;
+  role: string;
+  task: string;
+  profile?: string;
+  sessionId?: string;
+  sessionOptions: Record<string, unknown>;
+  autoRun: boolean;
+}
+
+function parseAgentRunTask(raw: unknown, defaultAutoRun: boolean): { ok: true; task: AgentRunTaskInput } | { ok: false; error: string } {
+  const source = toRecord(raw);
+  const agent = String(source.agent || source.name || "").trim();
+  const role = String(source.role || agent).trim();
+  const task = String(source.task || source.prompt || "").trim();
+  if (!agent) {
+    return { ok: false, error: "brain.agent.run 需要 agent" };
+  }
+  if (!task) {
+    return { ok: false, error: `brain.agent.run(${agent}) 需要非空 task` };
+  }
+  const profile = String(source.profile || "").trim();
+  const sessionId = String(source.sessionId || "").trim();
+  const sessionOptions = source.sessionOptions ? toRecord(source.sessionOptions) : {};
+  const autoRun = source.autoRun === false ? false : defaultAutoRun;
+  return {
+    ok: true,
+    task: {
+      agent,
+      role: role || agent,
+      task,
+      profile: profile || undefined,
+      sessionId: sessionId || undefined,
+      sessionOptions,
+      autoRun
+    }
+  };
+}
+
+async function startAgentRunTask(
+  runtimeLoop: ReturnType<typeof createRuntimeLoopController>,
+  task: AgentRunTaskInput,
+  parentSessionId?: string
+): Promise<Record<string, unknown>> {
+  const sessionOptions = {
+    ...toRecord(task.sessionOptions)
+  };
+  const metadata = {
+    ...toRecord(sessionOptions.metadata),
+    agent: task.agent,
+    agentRole: task.role,
+    llmRole: task.role
+  } as Record<string, unknown>;
+  if (task.profile) metadata.llmProfile = task.profile;
+  sessionOptions.metadata = metadata;
+  if (parentSessionId && !String(sessionOptions.parentSessionId || "").trim()) {
+    sessionOptions.parentSessionId = parentSessionId;
+  }
+
+  const started = await runtimeLoop.startFromPrompt({
+    sessionId: task.sessionId || "",
+    sessionOptions,
+    prompt: task.task,
+    autoRun: task.autoRun
+  });
+  return {
+    agent: task.agent,
+    role: task.role,
+    profile: task.profile || "",
+    task: task.task,
+    sessionId: started.sessionId,
+    runtime: started.runtime
+  };
+}
+
+async function handleBrainAgentRun(
+  orchestrator: BrainOrchestrator,
+  runtimeLoop: ReturnType<typeof createRuntimeLoopController>,
+  message: unknown
+): Promise<RuntimeResult> {
+  const payload = toRecord(message);
+  const source = payload.payload ? toRecord(payload.payload) : payload;
+  const modeRaw = String(source.mode || "").trim().toLowerCase();
+  const mode = modeRaw || (Array.isArray(source.tasks) ? "parallel" : "single");
+  const parentSessionId = String(source.parentSessionId || source.sessionId || "").trim();
+  const defaultAutoRun = source.autoRun === false ? false : true;
+
+  if (parentSessionId) {
+    await orchestrator.sessions.ensureSession(parentSessionId);
+  }
+
+  if (mode === "single") {
+    const rawSingle = source.single !== undefined ? source.single : source;
+    const parsed = parseAgentRunTask(rawSingle, defaultAutoRun);
+    if (!parsed.ok) return fail(parsed.error);
+    return ok({
+      mode: "single",
+      result: await startAgentRunTask(runtimeLoop, parsed.task, parentSessionId || undefined)
+    });
+  }
+
+  if (mode === "parallel") {
+    const rawTasks = Array.isArray(source.tasks) ? source.tasks : [];
+    if (rawTasks.length === 0) {
+      return fail("brain.agent.run parallel 需要非空 tasks");
+    }
+    if (rawTasks.length > MAX_SUBAGENT_PARALLEL_TASKS) {
+      return fail(`brain.agent.run parallel tasks 不能超过 ${MAX_SUBAGENT_PARALLEL_TASKS}`);
+    }
+    const concurrency = normalizeIntInRange(
+      source.concurrency,
+      Math.min(MAX_SUBAGENT_PARALLEL_CONCURRENCY, rawTasks.length),
+      1,
+      MAX_SUBAGENT_PARALLEL_CONCURRENCY
+    );
+    const parsedTasks: AgentRunTaskInput[] = [];
+    for (let i = 0; i < rawTasks.length; i += 1) {
+      const parsed = parseAgentRunTask(rawTasks[i], defaultAutoRun);
+      if (!parsed.ok) {
+        return fail(`brain.agent.run tasks[${i}] 无效: ${parsed.error}`);
+      }
+      parsedTasks.push(parsed.task);
+    }
+
+    const results: Array<Record<string, unknown>> = new Array(parsedTasks.length);
+    let cursor = 0;
+    const workerCount = Math.min(concurrency, parsedTasks.length);
+    await Promise.all(
+      Array.from({ length: workerCount }, async () => {
+        while (true) {
+          const index = cursor;
+          cursor += 1;
+          if (index >= parsedTasks.length) break;
+          results[index] = await startAgentRunTask(runtimeLoop, parsedTasks[index], parentSessionId || undefined);
+        }
+      })
+    );
+
+    return ok({
+      mode: "parallel",
+      concurrency: workerCount,
+      results
+    });
+  }
+
+  return fail("brain.agent.run 仅支持 mode=single|parallel");
 }
 
 async function handleBrainRun(
@@ -824,6 +974,10 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
 
         if (type.startsWith("brain.debug.")) {
           return await applyAfter(await handleBrainDebug(orchestrator, infra, routeMessage));
+        }
+
+        if (type === "brain.agent.run") {
+          return await applyAfter(await handleBrainAgentRun(orchestrator, runtimeLoop, routeMessage));
         }
 
         if (type === "brain.agent.end") {

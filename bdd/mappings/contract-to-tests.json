@@ -173,7 +173,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/__tests__/tool-provider-registry.browser.test.ts::falls back to capability default provider when strict mode hint has no match + attaches mode and capability metadata when capability provider throws"
+          "target": "extension/src/sw/kernel/__tests__/llm-provider-registry.browser.test.ts::registers and resolves providers by id + extension/src/sw/kernel/__tests__/llm-profile-resolver.browser.test.ts::falls back to legacy config when llmProfiles is absent + extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts::使用 profile 配置时应发出 llm.route.selected 并命中 provider/model + profile 指向未注册 provider 时应 llm.route.blocked 并 failed_execute"
         },
         {
           "layer": "browser-cdp",
@@ -186,11 +186,24 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/llm-profile-policy.ts::decideProfileEscalation + extension/src/sw/kernel/__tests__/llm-profile-policy.browser.test.ts::upgrade_only policy branches"
+          "target": "extension/src/sw/kernel/llm-profile-policy.ts::decideProfileEscalation + extension/src/sw/kernel/__tests__/llm-profile-policy.browser.test.ts::escalates to next profile when repeated failure happens + blocks escalation when current profile is already highest + extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts::LLM 重复失败后应升级 profile 并发出 llm.route.escalated"
         },
         {
           "layer": "browser-cdp",
           "target": "bdd/features/technical/chat/llm-profile-escalation.feature"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-SUBAGENT-RUN-MODES",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/runtime-router.ts::handleBrainAgentRun + extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts::supports brain.agent.run single and binds role/profile into route selection + supports brain.agent.run parallel with per-task role/profile routing + brain.agent.run parallel rejects oversized task list"
+        },
+        {
+          "layer": "browser-cdp",
+          "target": "bdd/features/technical/chat/subagent-run-modes.feature"
         }
       ]
     },

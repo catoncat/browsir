@@ -11,6 +11,14 @@ import {
   transformMessagesForLlm,
   type SessionContextMessageLike
 } from "./llm-message-model.browser";
+import { decideProfileEscalation, type LlmProfileEscalationPolicy } from "./llm-profile-policy";
+import {
+  DEFAULT_LLM_PROVIDER_ID,
+  type LlmResolvedRoute
+} from "./llm-provider";
+import { LlmProviderRegistry } from "./llm-provider-registry";
+import { createOpenAiCompatibleLlmProvider } from "./llm-openai-compatible-provider";
+import { resolveLlmRoute } from "./llm-profile-resolver";
 import { writeSessionMeta } from "./session-store.browser";
 import { type BridgeConfig, type RuntimeInfraHandler } from "./runtime-infra.browser";
 import { type CapabilityExecutionPolicy, type StepVerifyPolicy } from "./capability-policy";
@@ -68,11 +76,8 @@ interface RegenerateRunInput {
 
 interface LlmRequestInput {
   sessionId: string;
-  llmBase: string;
-  llmKey: string;
-  llmModel: string;
-  llmTimeoutMs: number;
-  llmMaxRetryDelayMs: number;
+  route: LlmResolvedRoute;
+  providerRegistry: LlmProviderRegistry;
   step: number;
   messages: JsonRecord[];
   toolChoice?: "auto" | "required";
@@ -476,6 +481,67 @@ function withSessionTitleMeta(meta: SessionMeta, title: string, source: string):
     },
     updatedAt: nowIso()
   };
+}
+
+interface SessionLlmRoutePrefs {
+  profile?: string;
+  role?: string;
+  escalationPolicy?: LlmProfileEscalationPolicy;
+}
+
+function readSessionLlmRoutePrefs(meta: SessionMeta | null): SessionLlmRoutePrefs {
+  const metadata = toRecord(meta?.header?.metadata);
+  const profile = String(metadata.llmProfile || "").trim();
+  const role = String(metadata.llmRole || "").trim();
+  const escalationPolicyRaw = String(metadata.llmEscalationPolicy || "").trim().toLowerCase();
+  const escalationPolicy: LlmProfileEscalationPolicy | undefined =
+    escalationPolicyRaw === "disabled" ? "disabled" : escalationPolicyRaw === "upgrade_only" ? "upgrade_only" : undefined;
+  return {
+    profile: profile || undefined,
+    role: role || undefined,
+    escalationPolicy
+  };
+}
+
+function withSessionLlmRouteMeta(meta: SessionMeta, route: LlmResolvedRoute): SessionMeta {
+  const metadata = {
+    ...toRecord(meta.header.metadata),
+    llmProfile: route.profile,
+    llmProvider: route.provider,
+    llmModel: route.llmModel,
+    llmRole: route.role,
+    llmEscalationPolicy: route.escalationPolicy
+  };
+  return {
+    ...meta,
+    header: {
+      ...meta.header,
+      metadata
+    },
+    updatedAt: nowIso()
+  };
+}
+
+function buildLlmRoutePayload(route: LlmResolvedRoute, extra: JsonRecord = {}): JsonRecord {
+  return {
+    profile: route.profile,
+    provider: route.provider,
+    model: route.llmModel,
+    role: route.role,
+    fromLegacy: route.fromLegacy,
+    ...extra
+  };
+}
+
+function buildLlmFailureSignature(error: unknown): string {
+  const err = asRuntimeErrorWithMeta(error);
+  const code = normalizeErrorCode(err.code);
+  const status = Number(err.status || 0);
+  const msg = String(err.message || "")
+    .trim()
+    .toLowerCase()
+    .slice(0, 180);
+  return `${code || "E_UNKNOWN"}|${status || 0}|${msg}`;
 }
 
 function parseLlmContent(message: unknown): string {
@@ -1090,6 +1156,10 @@ function extractLlmConfig(raw: JsonRecord): BridgeConfig {
     llmApiBase: String(raw.llmApiBase || ""),
     llmApiKey: String(raw.llmApiKey || ""),
     llmModel: String(raw.llmModel || "gpt-5.3-codex"),
+    llmDefaultProfile: String(raw.llmDefaultProfile || "default"),
+    llmProfiles: raw.llmProfiles,
+    llmProfileChains: raw.llmProfileChains,
+    llmEscalationPolicy: String(raw.llmEscalationPolicy || "upgrade_only"),
     maxSteps: normalizeIntInRange(raw.maxSteps, 100, 1, 500),
     autoTitleInterval: normalizeIntInRange(raw.autoTitleInterval, 10, 0, 100),
     bridgeInvokeTimeoutMs: normalizeIntInRange(raw.bridgeInvokeTimeoutMs, DEFAULT_BASH_TIMEOUT_MS, 1_000, MAX_BASH_TIMEOUT_MS),
@@ -1107,14 +1177,14 @@ function extractLlmConfig(raw: JsonRecord): BridgeConfig {
 }
 
 async function requestSessionTitleFromLlm(input: {
-  llmBase: string;
-  llmKey: string;
-  llmModel: string;
-  llmTimeoutMs: number;
+  providerRegistry: LlmProviderRegistry;
+  route: LlmResolvedRoute;
   messages: { role: string; content: string }[];
 }): Promise<string> {
-  const { llmBase, llmKey, llmModel, llmTimeoutMs, messages } = input;
-  if (!llmBase || !llmKey || messages.length === 0) return "";
+  const { providerRegistry, route, messages } = input;
+  if (!messages.length) return "";
+  const provider = providerRegistry.get(String(route.provider || "").trim());
+  if (!provider) return "";
 
   const systemPrompt = "你是一个专业助手。请根据提供的对话内容，生成一个非常简短、精准的标题（不超过 10 个字）。直接返回标题文本，不要包含引号、序号或任何解释。";
   const userContent = messages
@@ -1124,24 +1194,21 @@ async function requestSessionTitleFromLlm(input: {
 
   try {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort("title-timeout"), Math.min(30_000, llmTimeoutMs));
+    const timer = setTimeout(() => ctrl.abort("title-timeout"), Math.min(30_000, route.llmTimeoutMs));
     try {
-      const response = await fetch(`${llmBase.replace(/\/+$/, "")}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${llmKey}`
-        },
+      const response = await provider.send({
+        route,
         signal: ctrl.signal,
-        body: JSON.stringify({
-          model: llmModel,
+        payload: {
+          model: route.llmModel,
           messages: [
             { role: "system", content: systemPrompt },
             { role: "user", content: `请总结以下对话的标题：\n\n${userContent}` }
           ],
           max_tokens: 30,
-          temperature: 0.3
-        })
+          temperature: 0.3,
+          stream: false
+        }
       });
       if (!response.ok) return "";
       const contentType = String(response.headers.get("content-type") || "");
@@ -1164,6 +1231,7 @@ async function requestSessionTitleFromLlm(input: {
 async function requestCompactionSummaryFromLlm(input: {
   orchestrator: BrainOrchestrator;
   infra: RuntimeInfraHandler;
+  providerRegistry: LlmProviderRegistry;
   sessionId: string;
   mode: "history" | "turn_prefix";
   promptText: string;
@@ -1171,22 +1239,33 @@ async function requestCompactionSummaryFromLlm(input: {
 }): Promise<string> {
   const cfgRaw = await callInfra(input.infra, { type: "config.get" });
   const config = extractLlmConfig(cfgRaw);
-  const llmBase = String(config.llmApiBase || "").trim();
-  const llmKey = String(config.llmApiKey || "").trim();
-  const llmModel = String(config.llmModel || "gpt-5.3-codex").trim();
-  const llmTimeoutMs = normalizeIntInRange(config.llmTimeoutMs, DEFAULT_LLM_TIMEOUT_MS, MIN_LLM_TIMEOUT_MS, MAX_LLM_TIMEOUT_MS);
-  const llmRetryMaxAttempts = normalizeIntInRange(config.llmRetryMaxAttempts, MAX_LLM_RETRIES, 0, 6);
+  const meta = await input.orchestrator.sessions.getMeta(input.sessionId);
+  const prefs = readSessionLlmRoutePrefs(meta);
+  const resolvedRoute = resolveLlmRoute({
+    config,
+    profile: prefs.profile,
+    role: prefs.role,
+    escalationPolicy: prefs.escalationPolicy
+  });
+  if (!resolvedRoute.ok) {
+    throw new Error(resolvedRoute.message);
+  }
+  const route = resolvedRoute.route;
+  const provider = input.providerRegistry.get(String(route.provider || "").trim());
+  if (!provider) {
+    throw new Error(`未找到 LLM provider: ${route.provider}`);
+  }
+
+  const llmModel = String(route.llmModel || "gpt-5.3-codex").trim() || "gpt-5.3-codex";
+  const llmTimeoutMs = normalizeIntInRange(route.llmTimeoutMs, DEFAULT_LLM_TIMEOUT_MS, MIN_LLM_TIMEOUT_MS, MAX_LLM_TIMEOUT_MS);
+  const llmRetryMaxAttempts = normalizeIntInRange(route.llmRetryMaxAttempts, MAX_LLM_RETRIES, 0, 6);
   const llmMaxRetryDelayMs = normalizeIntInRange(
-    config.llmMaxRetryDelayMs,
+    route.llmMaxRetryDelayMs,
     DEFAULT_LLM_MAX_RETRY_DELAY_MS,
     MIN_LLM_MAX_RETRY_DELAY_MS,
     MAX_LLM_MAX_RETRY_DELAY_MS
   );
-  if (!llmBase || !llmKey) {
-    throw new Error("compaction summary 需要可用 LLM（llmApiBase/llmApiKey）");
-  }
-
-  const baseUrl = `${llmBase.replace(/\/$/, "")}/chat/completions`;
+  const baseUrl = provider.resolveRequestUrl(route);
   const basePayload: JsonRecord = {
     model: llmModel,
     messages: [
@@ -1230,6 +1309,8 @@ async function requestCompactionSummaryFromLlm(input: {
         summaryMode: input.mode,
         url: requestUrl,
         model: llmModel,
+        profile: route.profile,
+        provider: route.provider,
         ...summarizeLlmRequestPayload(requestPayload)
       });
 
@@ -1237,14 +1318,11 @@ async function requestCompactionSummaryFromLlm(input: {
       const timer = setTimeout(() => ctrl.abort("compaction-summary-timeout"), llmTimeoutMs);
       let response: Response;
       try {
-        response = await fetch(requestUrl, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            authorization: `Bearer ${llmKey}`
-          },
-          body: JSON.stringify(requestPayload),
-          signal: ctrl.signal
+        response = await provider.send({
+          route,
+          requestUrl,
+          signal: ctrl.signal,
+          payload: requestPayload
         });
       } finally {
         clearTimeout(timer);
@@ -1334,6 +1412,7 @@ async function refreshSessionTitleAuto(
   orchestrator: BrainOrchestrator,
   sessionId: string,
   infra: RuntimeInfraHandler,
+  providerRegistry: LlmProviderRegistry,
   options: { force?: boolean } = {}
 ): Promise<void> {
   const meta = await orchestrator.sessions.getMeta(sessionId);
@@ -1355,6 +1434,15 @@ async function refreshSessionTitleAuto(
 
   const cfgRaw = await callInfra(infra, { type: "config.get" });
   const config = extractLlmConfig(cfgRaw);
+  const prefs = readSessionLlmRoutePrefs(meta);
+  const resolvedRoute = resolveLlmRoute({
+    config,
+    profile: prefs.profile,
+    role: prefs.role,
+    escalationPolicy: prefs.escalationPolicy
+  });
+  if (!resolvedRoute.ok) return;
+  const route = resolvedRoute.route;
   const interval = config.autoTitleInterval;
 
   // 触发逻辑：
@@ -1371,10 +1459,8 @@ async function refreshSessionTitleAuto(
   if (!shouldRefresh) return;
 
   const derived = await requestSessionTitleFromLlm({
-    llmBase: config.llmApiBase,
-    llmKey: config.llmApiKey,
-    llmModel: config.llmModel,
-    llmTimeoutMs: config.llmTimeoutMs,
+    providerRegistry,
+    route,
     messages: contextMessages
   });
 
@@ -1386,6 +1472,9 @@ async function refreshSessionTitleAuto(
 }
 
 export function createRuntimeLoopController(orchestrator: BrainOrchestrator, infra: RuntimeInfraHandler): RuntimeLoopController {
+  const llmProviders = new LlmProviderRegistry();
+  llmProviders.register(createOpenAiCompatibleLlmProvider(DEFAULT_LLM_PROVIDER_ID), { replace: true });
+
   orchestrator.onHook(
     "compaction.summary",
     async (payload) => {
@@ -1397,6 +1486,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const summary = await requestCompactionSummaryFromLlm({
           orchestrator,
           infra,
+          providerRegistry: llmProviders,
           sessionId: String(payload.sessionId || ""),
           mode: payload.mode === "turn_prefix" ? "turn_prefix" : "history",
           promptText,
@@ -2588,9 +2678,24 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
   }
 
   async function requestLlmWithRetry(input: LlmRequestInput): Promise<JsonRecord> {
-    const { sessionId, llmBase, llmKey, llmModel, llmTimeoutMs, llmMaxRetryDelayMs, step, messages } = input;
+    const { sessionId, route, providerRegistry, step, messages } = input;
     const toolChoice = input.toolChoice === "required" ? "required" : "auto";
     const toolScope = input.toolScope === "browser_only" ? "browser_only" : "all";
+    const llmModel = String(route.llmModel || "gpt-5.3-codex").trim() || "gpt-5.3-codex";
+    const llmTimeoutMs = normalizeIntInRange(route.llmTimeoutMs, DEFAULT_LLM_TIMEOUT_MS, MIN_LLM_TIMEOUT_MS, MAX_LLM_TIMEOUT_MS);
+    const llmMaxRetryDelayMs = normalizeIntInRange(
+      route.llmMaxRetryDelayMs,
+      DEFAULT_LLM_MAX_RETRY_DELAY_MS,
+      MIN_LLM_MAX_RETRY_DELAY_MS,
+      MAX_LLM_MAX_RETRY_DELAY_MS
+    );
+    const provider = providerRegistry.get(String(route.provider || "").trim());
+    if (!provider) {
+      throw createNonRetryableRuntimeError("E_LLM_PROVIDER_NOT_FOUND", `未找到 LLM provider: ${route.provider}`, {
+        provider: route.provider,
+        profile: route.profile
+      });
+    }
     let lastError: unknown = null;
     const configuredMaxAttempts = Number(orchestrator.getRunState(sessionId).retry.maxAttempts ?? MAX_LLM_RETRIES);
     const maxAttempts = Number.isFinite(configuredMaxAttempts)
@@ -2631,12 +2736,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           temperature: 0.2,
           stream: true
         };
-        const baseUrl = `${llmBase.replace(/\/$/, "")}/chat/completions`;
+        const baseUrl = provider.resolveRequestUrl(route);
         const beforeRequest = await orchestrator.runHook("llm.before_request", {
           request: {
             sessionId,
             step,
             attempt,
+            profile: route.profile,
+            provider: route.provider,
             url: baseUrl,
             payload: basePayload
           }
@@ -2673,17 +2780,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         orchestrator.events.emit("llm.request", sessionId, {
           step,
           url: requestUrl,
-          model: llmModel,
+          model: String(requestPayload.model || llmModel),
+          profile: route.profile,
+          provider: route.provider,
           ...summarizeLlmRequestPayload(requestPayload)
         });
 
-        const resp = await fetch(requestUrl, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            authorization: `Bearer ${llmKey}`
-          },
-          body: JSON.stringify(requestPayload),
+        const resp = await provider.send({
+          route,
+          requestUrl,
+          payload: requestPayload,
           signal: ctrl.signal
         });
         status = resp.status;
@@ -2768,6 +2874,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             sessionId,
             step,
             attempt,
+            profile: route.profile,
+            provider: route.provider,
             url: requestUrl,
             payload: requestPayload,
             status,
@@ -2806,6 +2914,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             : isRetryableLlmStatus(statusCode) || /timeout|network|temporar|unavailable|rate limit/i.test(`${errText} ${signalReason}`);
         const canRetry = retryable && attempt <= maxAttempts;
         if (!canRetry) {
+          err.details = {
+            ...toRecord(err.details),
+            retryAttempts: attempt,
+            totalAttempts,
+            status: statusCode || null,
+            profile: route.profile,
+            provider: route.provider
+          };
           const state = orchestrator.getRunState(sessionId);
           if (state.retry.active) {
             orchestrator.events.emit("auto_retry_end", sessionId, {
@@ -2838,7 +2954,15 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       }
     }
 
-    throw lastError || new Error("LLM request failed");
+    const finalError = asRuntimeErrorWithMeta(lastError || new Error("LLM request failed"));
+    finalError.details = {
+      ...toRecord(finalError.details),
+      retryAttempts: totalAttempts,
+      totalAttempts,
+      profile: route.profile,
+      provider: route.provider
+    };
+    throw finalError;
   }
 
   async function runAgentLoop(sessionId: string, prompt: string): Promise<void> {
@@ -2852,32 +2976,26 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
     const cfgRaw = await callInfra(infra, { type: "config.get" });
     const config = extractLlmConfig(cfgRaw);
-    const llmBase = String(config.llmApiBase || "").trim();
-    const llmKey = String(config.llmApiKey || "").trim();
-    const llmModel = String(config.llmModel || "gpt-5.3-codex").trim();
     const maxLoopSteps = normalizeIntInRange(config.maxSteps, 100, 1, 500);
-    const llmTimeoutMs = normalizeIntInRange(config.llmTimeoutMs, DEFAULT_LLM_TIMEOUT_MS, MIN_LLM_TIMEOUT_MS, MAX_LLM_TIMEOUT_MS);
-    const llmRetryMaxAttempts = normalizeIntInRange(config.llmRetryMaxAttempts, MAX_LLM_RETRIES, 0, 6);
-    const llmMaxRetryDelayMs = normalizeIntInRange(
-      config.llmMaxRetryDelayMs,
-      DEFAULT_LLM_MAX_RETRY_DELAY_MS,
-      MIN_LLM_MAX_RETRY_DELAY_MS,
-      MAX_LLM_MAX_RETRY_DELAY_MS
-    );
-    orchestrator.updateRetryState(sessionId, {
-      maxAttempts: llmRetryMaxAttempts
+    const sessionMeta = await orchestrator.sessions.getMeta(sessionId);
+    const routePrefs = readSessionLlmRoutePrefs(sessionMeta);
+    const routeResolved = resolveLlmRoute({
+      config,
+      profile: routePrefs.profile,
+      role: routePrefs.role,
+      escalationPolicy: routePrefs.escalationPolicy
     });
-
-    orchestrator.events.emit("loop_start", sessionId, {
-      prompt: clipText(prompt, 3000)
-    });
-
-    if (!llmBase || !llmKey) {
-      const text = "执行失败：当前未配置可用 LLM（llmApiBase/llmApiKey）。";
+    if (!routeResolved.ok) {
+      const text = routeResolved.message;
+      orchestrator.events.emit("llm.route.blocked", sessionId, {
+        reason: routeResolved.reason,
+        profile: routeResolved.profile,
+        role: routeResolved.role
+      });
       orchestrator.events.emit("llm.skipped", sessionId, {
-        reason: "missing_llm_config",
-        hasBase: !!llmBase,
-        hasKey: !!llmKey
+        reason: routeResolved.reason,
+        profile: routeResolved.profile,
+        role: routeResolved.role
       });
       await orchestrator.sessions.appendMessage({
         sessionId,
@@ -2892,6 +3010,45 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       });
       return;
     }
+    let activeRoute = routeResolved.route;
+    if (!llmProviders.has(activeRoute.provider)) {
+      const text = `执行失败：未找到 LLM provider（${activeRoute.provider}）。`;
+      orchestrator.events.emit("llm.route.blocked", sessionId, {
+        reason: "provider_not_found",
+        ...buildLlmRoutePayload(activeRoute)
+      });
+      orchestrator.events.emit("llm.skipped", sessionId, {
+        reason: "provider_not_found",
+        ...buildLlmRoutePayload(activeRoute)
+      });
+      await orchestrator.sessions.appendMessage({
+        sessionId,
+        role: "assistant",
+        text
+      });
+      orchestrator.setRunning(sessionId, false);
+      orchestrator.events.emit("loop_done", sessionId, {
+        status: "failed_execute",
+        llmSteps: 0,
+        toolSteps: 0
+      });
+      return;
+    }
+    orchestrator.updateRetryState(sessionId, {
+      maxAttempts: activeRoute.llmRetryMaxAttempts
+    });
+
+    orchestrator.events.emit("loop_start", sessionId, {
+      prompt: clipText(prompt, 3000)
+    });
+    orchestrator.events.emit("llm.route.selected", sessionId, buildLlmRoutePayload(activeRoute, { source: "run_start" }));
+    if (sessionMeta) {
+      try {
+        await writeSessionMeta(sessionId, withSessionLlmRouteMeta(sessionMeta, activeRoute));
+      } catch {
+        // ignore metadata write failures
+      }
+    }
 
     const context = await orchestrator.sessions.buildSessionContext(sessionId);
     const meta = await orchestrator.sessions.getMeta(sessionId);
@@ -2902,6 +3059,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     let finalStatus = "done";
     const requireBrowserProof = shouldRequireBrowserProof(prompt);
     let browserProofSatisfied = false;
+    const llmFailureBySignature = new Map<string, number>();
     const retryableFailureBySignature = new Map<string, number>();
     let retryableFailureTotal = 0;
 
@@ -2931,22 +3089,121 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               maxLoopSteps,
               toolStep,
               retryAttempt: Number(state.retry.attempt || 0),
-              retryMaxAttempts: Number(state.retry.maxAttempts || llmRetryMaxAttempts)
+              retryMaxAttempts: Number(state.retry.maxAttempts || activeRoute.llmRetryMaxAttempts)
             })
           }
         ];
-        const message = await requestLlmWithRetry({
-          sessionId,
-          llmBase,
-          llmKey,
-          llmModel,
-          llmTimeoutMs,
-          llmMaxRetryDelayMs,
-          step: llmStep,
-          messages: requestMessages,
-          toolChoice: requireBrowserProof && !browserProofSatisfied ? "required" : "auto",
-          toolScope: requireBrowserProof ? "browser_only" : "all"
-        });
+        let message: JsonRecord;
+        try {
+          message = await requestLlmWithRetry({
+            sessionId,
+            route: activeRoute,
+            providerRegistry: llmProviders,
+            step: llmStep,
+            messages: requestMessages,
+            toolChoice: requireBrowserProof && !browserProofSatisfied ? "required" : "auto",
+            toolScope: requireBrowserProof ? "browser_only" : "all"
+          });
+          llmFailureBySignature.clear();
+        } catch (error) {
+          const signature = buildLlmFailureSignature(error);
+          const signatureHits = (llmFailureBySignature.get(signature) || 0) + 1;
+          llmFailureBySignature.set(signature, signatureHits);
+          const runtimeError = asRuntimeErrorWithMeta(error);
+          const details = toRecord(runtimeError.details);
+          const retryAttempts = Number(details.retryAttempts || 0);
+          const repeatedFailure = retryAttempts > 1 || signatureHits > 1;
+          if (repeatedFailure) {
+            const decision = decideProfileEscalation({
+              orderedProfiles: activeRoute.orderedProfiles,
+              currentProfile: activeRoute.profile,
+              repeatedFailure: true,
+              policy: activeRoute.escalationPolicy
+            });
+            if (decision.type === "escalate") {
+              const nextResolved = resolveLlmRoute({
+                config,
+                profile: decision.nextProfile,
+                role: activeRoute.role,
+                escalationPolicy: activeRoute.escalationPolicy
+              });
+              if (nextResolved.ok && llmProviders.has(nextResolved.route.provider)) {
+                const fromRoute = activeRoute;
+                activeRoute = nextResolved.route;
+                llmFailureBySignature.clear();
+                retryableFailureBySignature.clear();
+                retryableFailureTotal = 0;
+                orchestrator.updateRetryState(sessionId, {
+                  active: false,
+                  attempt: 0,
+                  delayMs: 0,
+                  maxAttempts: activeRoute.llmRetryMaxAttempts
+                });
+                orchestrator.events.emit("llm.route.escalated", sessionId, {
+                  signature,
+                  signatureHits,
+                  retryAttempts,
+                  reason: decision.reason,
+                  fromProfile: fromRoute.profile,
+                  toProfile: activeRoute.profile,
+                  fromProvider: fromRoute.provider,
+                  toProvider: activeRoute.provider,
+                  fromModel: fromRoute.llmModel,
+                  toModel: activeRoute.llmModel
+                });
+                orchestrator.events.emit("llm.route.selected", sessionId, buildLlmRoutePayload(activeRoute, {
+                  source: "escalation",
+                  reason: decision.reason,
+                  signature
+                }));
+                const latestMeta = await orchestrator.sessions.getMeta(sessionId);
+                if (latestMeta) {
+                  try {
+                    await writeSessionMeta(sessionId, withSessionLlmRouteMeta(latestMeta, activeRoute));
+                  } catch {
+                    // ignore metadata write failures
+                  }
+                }
+                continue;
+              }
+              orchestrator.events.emit("llm.route.blocked", sessionId, {
+                reason: "provider_not_found",
+                signature,
+                requestedProfile: decision.nextProfile,
+                ...buildLlmRoutePayload(activeRoute)
+              });
+              const blockedMessage = `执行失败：升级到 profile ${decision.nextProfile} 时未找到可用 provider。`;
+              await orchestrator.sessions.appendMessage({
+                sessionId,
+                role: "assistant",
+                text: blockedMessage
+              });
+              finalStatus = "failed_execute";
+              throw new Error(blockedMessage);
+            }
+            if (decision.type === "blocked") {
+              orchestrator.events.emit("llm.route.blocked", sessionId, {
+                reason: decision.reason,
+                signature,
+                signatureHits,
+                retryAttempts,
+                ...buildLlmRoutePayload(activeRoute)
+              });
+              const blockedMessage =
+                decision.reason === "no_higher_profile"
+                  ? "执行失败：已达到当前角色可升级的最高 profile，无法继续自动升级。"
+                  : `执行失败：当前 profile 未被升级链识别（${activeRoute.profile}）。`;
+              await orchestrator.sessions.appendMessage({
+                sessionId,
+                role: "assistant",
+                text: blockedMessage
+              });
+              finalStatus = "failed_execute";
+              throw new Error(blockedMessage);
+            }
+          }
+          throw error;
+        }
 
         const assistantText = parseLlmContent(message).trim();
         const toolCalls = normalizeToolCalls(message.tool_calls);
@@ -3145,7 +3402,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       });
     } finally {
       try {
-        await refreshSessionTitleAuto(orchestrator, sessionId, infra);
+        await refreshSessionTitleAuto(orchestrator, sessionId, infra, llmProviders);
       } catch (titleError) {
         orchestrator.events.emit("session_title_auto_update_failed", sessionId, {
           error: titleError instanceof Error ? titleError.message : String(titleError)
@@ -3312,7 +3569,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     startFromRegenerate,
     executeStep,
     async refreshSessionTitle(sessionId: string, options: { force?: boolean } = {}): Promise<string> {
-      await refreshSessionTitleAuto(orchestrator, sessionId, infra, options);
+      await refreshSessionTitleAuto(orchestrator, sessionId, infra, llmProviders, options);
       const meta = await orchestrator.sessions.getMeta(sessionId);
       return normalizeSessionTitle(meta?.header.title, "");
     }

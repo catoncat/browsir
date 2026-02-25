@@ -152,7 +152,8 @@ describe("runtime-router.browser", () => {
 
     const started = await invokeRuntime({
       type: "brain.run.start",
-      prompt: "初始问题"
+      prompt: "初始问题",
+      autoRun: false
     });
     expect(started.ok).toBe(true);
     const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
@@ -169,7 +170,8 @@ describe("runtime-router.browser", () => {
       sessionId,
       sourceEntryId: assistantEntry.id,
       requireSourceIsLeaf: true,
-      rebaseLeafToPreviousUser: true
+      rebaseLeafToPreviousUser: true,
+      autoRun: false
     });
     expect(regenerated.ok).toBe(true);
 
@@ -197,6 +199,200 @@ describe("runtime-router.browser", () => {
     });
     expect(invalid.ok).toBe(false);
     expect(String(invalid.error || "")).toContain("仅最后一条 assistant");
+  });
+
+  it("supports brain.agent.run single and binds role/profile into route selection", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const capturedBodies: Array<Record<string, unknown>> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const body = (JSON.parse(String(init?.body || "{}")) || {}) as Record<string, unknown>;
+      capturedBodies.push(body);
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "agent-single-ok"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-legacy",
+        llmDefaultProfile: "worker.basic",
+        llmProfiles: [
+          {
+            id: "worker.basic",
+            provider: "openai_compatible",
+            llmApiBase: "https://example.ai/v1",
+            llmApiKey: "sk-demo",
+            llmModel: "gpt-worker-basic",
+            role: "worker"
+          }
+        ],
+        llmProfileChains: {
+          worker: ["worker.basic"]
+        }
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.agent.run",
+      mode: "single",
+      agent: "worker",
+      profile: "worker.basic",
+      task: "请完成一次 single 子任务"
+    });
+    expect(started.ok).toBe(true);
+    const startedData = (started.data || {}) as Record<string, unknown>;
+    expect(String(startedData.mode || "")).toBe("single");
+    const result = (startedData.result || {}) as Record<string, unknown>;
+    const sessionId = String(result.sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId);
+    const selected = stream.find((item) => String(item.type || "") === "llm.route.selected") as Record<string, unknown> | undefined;
+    const selectedPayload = (selected?.payload || {}) as Record<string, unknown>;
+    expect(String(selectedPayload.role || "")).toBe("worker");
+    expect(String(selectedPayload.profile || "")).toBe("worker.basic");
+
+    const runRequest = capturedBodies.find((body) => Array.isArray(body.tools) && body.stream === true);
+    expect(runRequest).toBeDefined();
+    expect(String(runRequest?.model || "")).toBe("gpt-worker-basic");
+  });
+
+  it("supports brain.agent.run parallel with per-task role/profile routing", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const runModels: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const body = (JSON.parse(String(init?.body || "{}")) || {}) as Record<string, unknown>;
+      if (Array.isArray(body.tools) && body.stream === true) {
+        runModels.push(String(body.model || ""));
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "agent-parallel-ok"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-legacy",
+        llmDefaultProfile: "worker.basic",
+        llmProfiles: [
+          {
+            id: "worker.basic",
+            provider: "openai_compatible",
+            llmApiBase: "https://example.ai/v1",
+            llmApiKey: "sk-demo",
+            llmModel: "gpt-worker-basic",
+            role: "worker"
+          },
+          {
+            id: "reviewer.basic",
+            provider: "openai_compatible",
+            llmApiBase: "https://example.ai/v1",
+            llmApiKey: "sk-demo",
+            llmModel: "gpt-reviewer-basic",
+            role: "reviewer"
+          }
+        ],
+        llmProfileChains: {
+          worker: ["worker.basic"],
+          reviewer: ["reviewer.basic"]
+        }
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.agent.run",
+      mode: "parallel",
+      tasks: [
+        {
+          agent: "worker",
+          role: "worker",
+          profile: "worker.basic",
+          task: "子任务A"
+        },
+        {
+          agent: "reviewer",
+          role: "reviewer",
+          profile: "reviewer.basic",
+          task: "子任务B"
+        }
+      ]
+    });
+    expect(started.ok).toBe(true);
+    const startedData = (started.data || {}) as Record<string, unknown>;
+    expect(String(startedData.mode || "")).toBe("parallel");
+    const results = Array.isArray(startedData.results) ? (startedData.results as Array<Record<string, unknown>>) : [];
+    expect(results.length).toBe(2);
+    const sessionIds = results.map((item) => String(item.sessionId || ""));
+    expect(sessionIds[0]).not.toBe("");
+    expect(sessionIds[1]).not.toBe("");
+    expect(sessionIds[0]).not.toBe(sessionIds[1]);
+
+    const streamA = await waitForLoopDone(sessionIds[0]);
+    const streamB = await waitForLoopDone(sessionIds[1]);
+    const selectedA = streamA.find((item) => String(item.type || "") === "llm.route.selected") as Record<string, unknown> | undefined;
+    const selectedB = streamB.find((item) => String(item.type || "") === "llm.route.selected") as Record<string, unknown> | undefined;
+    const payloadA = (selectedA?.payload || {}) as Record<string, unknown>;
+    const payloadB = (selectedB?.payload || {}) as Record<string, unknown>;
+    const selectedProfiles = [String(payloadA.profile || ""), String(payloadB.profile || "")].sort();
+    expect(selectedProfiles).toEqual(["reviewer.basic", "worker.basic"]);
+    expect(runModels.sort()).toEqual(["gpt-reviewer-basic", "gpt-worker-basic"]);
+  });
+
+  it("brain.agent.run parallel rejects oversized task list", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const tasks = Array.from({ length: 9 }).map((_, i) => ({
+      agent: "worker",
+      task: `task-${i + 1}`
+    }));
+    const out = await invokeRuntime({
+      type: "brain.agent.run",
+      mode: "parallel",
+      tasks
+    });
+    expect(out.ok).toBe(false);
+    expect(String(out.error || "")).toContain("不能超过 8");
   });
 
   it("supports edit_rerun for latest user in current session", async () => {
@@ -1325,6 +1521,216 @@ describe("runtime-router.browser", () => {
     const skipped = stream.find((item) => String(item.type || "") === "llm.skipped") as Record<string, unknown> | undefined;
     const skippedPayload = (skipped?.payload || {}) as Record<string, unknown>;
     expect(String(skippedPayload.reason || "")).toBe("missing_llm_config");
+  });
+
+  it("使用 profile 配置时应发出 llm.route.selected 并命中 provider/model", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const capturedBodies: Array<Record<string, unknown>> = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const body = (JSON.parse(String(init?.body || "{}")) || {}) as Record<string, unknown>;
+      capturedBodies.push(body);
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "profile-route-ok"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-legacy",
+        llmDefaultProfile: "worker.basic",
+        llmProfiles: [
+          {
+            id: "worker.basic",
+            provider: "openai_compatible",
+            llmApiBase: "https://example.ai/v1",
+            llmApiKey: "sk-demo",
+            llmModel: "gpt-worker-basic",
+            role: "worker"
+          }
+        ],
+        llmProfileChains: {
+          worker: ["worker.basic"]
+        }
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "测试 profile 选路事件"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId);
+    expect(fetchSpy).toHaveBeenCalled();
+    const runRequest = capturedBodies.find((body) => Array.isArray(body.tools) && body.stream === true);
+    expect(runRequest).toBeDefined();
+    expect(String(runRequest?.model || "")).toBe("gpt-worker-basic");
+    const selected = stream.find((item) => String(item.type || "") === "llm.route.selected") as Record<string, unknown> | undefined;
+    const payload = (selected?.payload || {}) as Record<string, unknown>;
+    expect(String(payload.profile || "")).toBe("worker.basic");
+    expect(String(payload.provider || "")).toBe("openai_compatible");
+    expect(String(payload.model || "")).toBe("gpt-worker-basic");
+  });
+
+  it("profile 指向未注册 provider 时应 llm.route.blocked 并 failed_execute", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmDefaultProfile: "worker.basic",
+        llmProfiles: [
+          {
+            id: "worker.basic",
+            provider: "missing_provider",
+            llmApiBase: "https://example.ai/v1",
+            llmApiKey: "sk-demo",
+            llmModel: "gpt-worker-basic",
+            role: "worker"
+          }
+        ]
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "测试 provider 缺失失败语义"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId);
+    const blocked = stream.find((item) => String(item.type || "") === "llm.route.blocked") as Record<string, unknown> | undefined;
+    const blockedPayload = (blocked?.payload || {}) as Record<string, unknown>;
+    expect(String(blockedPayload.reason || "")).toBe("provider_not_found");
+    const done = stream.find((item) => String(item.type || "") === "loop_done") as Record<string, unknown> | undefined;
+    const donePayload = (done?.payload || {}) as Record<string, unknown>;
+    expect(String(donePayload.status || "")).toBe("failed_execute");
+  });
+
+  it("LLM 重复失败后应升级 profile 并发出 llm.route.escalated", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const body = (JSON.parse(String(init?.body || "{}")) || {}) as Record<string, unknown>;
+      const model = String(body.model || "");
+      if (model === "gpt-worker-basic") {
+        return new Response(
+          JSON.stringify({
+            error: {
+              message: "temporary unavailable"
+            }
+          }),
+          {
+            status: 503,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "escalation-ok"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmDefaultProfile: "worker.basic",
+        llmProfiles: [
+          {
+            id: "worker.basic",
+            provider: "openai_compatible",
+            llmApiBase: "https://example.ai/v1",
+            llmApiKey: "sk-demo",
+            llmModel: "gpt-worker-basic",
+            role: "worker",
+            llmRetryMaxAttempts: 1
+          },
+          {
+            id: "worker.pro",
+            provider: "openai_compatible",
+            llmApiBase: "https://example.ai/v1",
+            llmApiKey: "sk-demo",
+            llmModel: "gpt-worker-pro",
+            role: "worker",
+            llmRetryMaxAttempts: 0
+          }
+        ],
+        llmProfileChains: {
+          worker: ["worker.basic", "worker.pro"]
+        },
+        llmEscalationPolicy: "upgrade_only"
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "测试 profile 自动升级"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId, 5000);
+    expect(fetchSpy).toHaveBeenCalled();
+    const escalated = stream.find((item) => String(item.type || "") === "llm.route.escalated") as Record<string, unknown> | undefined;
+    const escalatedPayload = (escalated?.payload || {}) as Record<string, unknown>;
+    expect(String(escalatedPayload.fromProfile || "")).toBe("worker.basic");
+    expect(String(escalatedPayload.toProfile || "")).toBe("worker.pro");
+
+    const selectedEvents = stream.filter((item) => String(item.type || "") === "llm.route.selected");
+    expect(selectedEvents.length).toBeGreaterThanOrEqual(2);
+    const afterEscalation = selectedEvents[selectedEvents.length - 1] as Record<string, unknown>;
+    const afterEscalationPayload = (afterEscalation.payload || {}) as Record<string, unknown>;
+    expect(String(afterEscalationPayload.profile || "")).toBe("worker.pro");
+    expect(String(afterEscalationPayload.source || "")).toBe("escalation");
+
+    const done = stream.find((item) => String(item.type || "") === "loop_done") as Record<string, unknown> | undefined;
+    const donePayload = (done?.payload || {}) as Record<string, unknown>;
+    expect(String(donePayload.status || "")).toBe("done");
   });
 
   it("llm.before_request patch 会改写真实请求 body", async () => {

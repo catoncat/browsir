@@ -11,13 +11,15 @@
 3. 默认不做黑盒自动降级；允许“可解释升级”，禁止“静默降级”。
 4. 场景尚未最终拍板，先按候选场景与评估维度推进。
 
-## 1. 当前基线（必须承认的现实）
+## 1. 当前基线（2026-02-25）
 
-- 当前是单 LLM 入口：`llmApiBase/llmApiKey/llmModel`（`extension/src/sw/kernel/runtime-infra.browser.ts`）。
-- 运行时在 `runtime-loop` 直接发 `/chat/completions`（`extension/src/sw/kernel/runtime-loop.browser.ts`）。
-- 现有 Provider 抽象主要是工具执行 Provider（`ToolProviderRegistry`），不是 LLM Provider。
+- Phase 1 Provider 已落地：`runtime-loop` 已改为走 `LlmProviderRegistry + LlmProviderAdapter`，不再硬编码直接请求。
+- 已支持 profile 路由与升级策略骨架：`llmDefaultProfile/llmProfiles/llmProfileChains/llmEscalationPolicy`。
+- 已补齐关键观测事件：`llm.route.selected`、`llm.route.escalated`、`llm.route.blocked`。
+- Phase 2 已有最小落地：新增 `brain.agent.run`，支持 `single/parallel` 子任务启动，并将 `agent/role/profile` 绑定到会话路由元数据。
+- 仍未完成的 Agents 能力：尚无 `chain` 原语、跨子任务汇总/回填、独立子 agent 生命周期管理与更细粒度观测。
 
-结论：现在还没有 LLM Provider 抽象和 profile 路由，因此多 Agent 选模暂不具备实现基础。
+结论：Provider 基础已完成，可进入 Agents 阶段实现。
 
 ## 2. 范围与非目标
 
@@ -49,7 +51,7 @@
 - 保持行为等价：现有成功/失败语义不回归。
 - 引入 profile 路由骨架：默认 profile + 同角色升级链（显式配置）。
 
-### 4.2 代码落点（建议）
+### 4.2 代码落点（已落地）
 
 - 新增 `extension/src/sw/kernel/llm-provider.ts`
   - 定义 `LlmProviderAdapter`、`LlmRequest`、`LlmResponse`。
@@ -112,17 +114,19 @@
 3. 失败是否可解释（含路由原因）。
 4. 用户是否感知到“能力变弱”。
 
-## 7. 对应测试与 BDD（本次先落 Provider）
+## 7. 对应测试与 BDD（Provider 已落地）
 
 ## 7.1 单元测试
 
-- `extension/src/sw/kernel/__tests__/tool-provider-registry.browser.test.ts`
-  - 补充 mode hint 严格匹配与回退行为。
-  - 补充 capability provider 抛错元信息保留（`modeUsed/capabilityUsed`）。
-  - 补充 `resolveMode` 在 `mode + capability` 共存时优先级。
+- `extension/src/sw/kernel/__tests__/llm-provider-registry.browser.test.ts`
+  - Provider 注册、替换与卸载语义。
+- `extension/src/sw/kernel/__tests__/llm-profile-resolver.browser.test.ts`
+  - legacy 兼容、profile 解析、链路顺序、缺配置失败语义。
 - `extension/src/sw/kernel/__tests__/llm-profile-policy.browser.test.ts`
   - 验证 `upgrade_only`：只允许向上升级。
   - 验证无上级 profile 时显式 `blocked`，不隐式降级。
+- `extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts`
+  - 覆盖 `llm.route.selected/blocked/escalated` 事件与 profile/provider 命中。
 
 ## 7.2 新增 BDD 契约（Provider 阶段）
 
@@ -130,28 +134,32 @@
   - 约束 provider 路由、显式选模与错误语义稳定。
 - `BHV-LLM-PROFILE-ESCALATION`
   - 约束仅允许升级、不允许静默降级。
+- `BHV-SUBAGENT-RUN-MODES`
+  - 约束 `brain.agent.run` 的 `single/parallel` 入口语义与 role/profile 路由绑定。
 
 ## 7.3 新增 BDD 场景（technical/chat）
 
 - `bdd/features/technical/chat/llm-provider-adapter-routing.feature`
 - `bdd/features/technical/chat/llm-profile-escalation.feature`
+- `bdd/features/technical/chat/subagent-run-modes.feature`
 
 ## 7.4 验证命令
 
 ```bash
-bun test extension/src/sw/kernel/__tests__/tool-provider-registry.browser.test.ts extension/src/sw/kernel/__tests__/llm-profile-policy.browser.test.ts
+bun test extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts extension/src/sw/kernel/__tests__/runtime-infra.browser.test.ts extension/src/sw/kernel/__tests__/plugin-runtime.browser.test.ts extension/src/sw/kernel/__tests__/llm-profile-policy.browser.test.ts extension/src/sw/kernel/__tests__/llm-profile-resolver.browser.test.ts extension/src/sw/kernel/__tests__/llm-provider-registry.browser.test.ts
 bun run bdd:lint:features
 bun run bdd:validate
 ```
 
 ## 8. 实施清单（按顺序）
 
-1. 完成 Provider Adapter/Registry 代码骨架。
-2. 把 runtime-loop 切到 Provider 调用，但保持现有行为。
-3. 接 profile resolver 与兼容配置。
-4. 补齐可观测事件。
-5. 跑通 unit + bdd validate。
-6. 再进入 Agents 编排阶段。
+1. 完成 Provider Adapter/Registry 代码骨架。`[done]`
+2. 把 runtime-loop 切到 Provider 调用，但保持现有行为。`[done]`
+3. 接 profile resolver 与兼容配置。`[done]`
+4. 补齐可观测事件。`[done]`
+5. 跑通 unit + bdd validate。`[done]`
+6. 进入 Agents 编排阶段（single/parallel + role 绑定 profile）。`[done-mvp]`
+7. 完成 Agents 全量能力（chain + fan-in 汇总 + 生命周期与门禁）。`[next]`
 
 ## 9. 参考资料
 

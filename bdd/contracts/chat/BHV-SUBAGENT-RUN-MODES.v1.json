@@ -1,0 +1,44 @@
+{
+  "id": "BHV-SUBAGENT-RUN-MODES",
+  "intent": "子 Agent 运行入口必须支持 single/parallel 两种编排原语，并保持角色与 profile 路由可观测",
+  "context": {
+    "surface": "sidepanel.chat.loop",
+    "runtime_layer": "service-worker.kernel.runtime_router",
+    "entry": "brain.agent.run",
+    "modes": ["single", "parallel"],
+    "routing_signals": ["llm.route.selected"]
+  },
+  "steps": [
+    "accept_single_agent_task_with_agent_and_task_fields",
+    "accept_parallel_agent_tasks_with_bounded_concurrency",
+    "bind_agent_role_profile_into_session_route_metadata",
+    "reject_invalid_or_oversized_parallel_tasks_explicitly"
+  ],
+  "observables": [
+    "brain_agent_run_single_returns_new_session_runtime",
+    "brain_agent_run_parallel_returns_task_result_list",
+    "llm_route_selected_contains_bound_role_and_profile",
+    "invalid_parallel_input_returns_explicit_error"
+  ],
+  "risk": "medium",
+  "allowed_side_effects": [
+    "session_create",
+    "loop_event(llm.route.selected)",
+    "loop_status_transition(done|failed_execute|failed_verify)"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "browser-cdp"],
+    "min_layers": 2
+  },
+  "degrade_policy": {
+    "on_invalid_parallel_input": [
+      "return_explicit_error",
+      "do_not_start_any_subagent_session"
+    ]
+  },
+  "rollback_or_compensation": [
+    "disable_brain_agent_run_entry_and_fallback_to_brain_run_start",
+    "retain_route_events_for_postmortem"
+  ],
+  "version": "1.0.0"
+}

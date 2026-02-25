@@ -19,6 +19,10 @@ export interface BridgeConfig {
   llmApiBase: string;
   llmApiKey: string;
   llmModel: string;
+  llmDefaultProfile?: string;
+  llmProfiles?: unknown;
+  llmProfileChains?: unknown;
+  llmEscalationPolicy?: string;
   maxSteps: number;
   autoTitleInterval: number;
   bridgeInvokeTimeoutMs: number;
@@ -372,6 +376,10 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       "llmApiBase",
       "llmApiKey",
       "llmModel",
+      "llmDefaultProfile",
+      "llmProfiles",
+      "llmProfileChains",
+      "llmEscalationPolicy",
       "maxSteps",
       "autoTitleInterval",
       "bridgeInvokeTimeoutMs",
@@ -387,6 +395,10 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       llmApiBase: String(data.llmApiBase || "https://ai.chen.rs/v1"),
       llmApiKey: String(data.llmApiKey || ""),
       llmModel: String(data.llmModel || "gpt-5.3-codex"),
+      llmDefaultProfile: String(data.llmDefaultProfile || "default"),
+      llmProfiles: data.llmProfiles,
+      llmProfileChains: data.llmProfileChains,
+      llmEscalationPolicy: String(data.llmEscalationPolicy || "upgrade_only"),
       maxSteps: toIntInRange(data.maxSteps, 100, 1, 500),
       autoTitleInterval: toIntInRange(data.autoTitleInterval, 10, 0, 100),
       bridgeInvokeTimeoutMs: toIntInRange(
@@ -423,6 +435,10 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       llmApiBase: String(source.llmApiBase || current.llmApiBase || "https://ai.chen.rs/v1").trim(),
       llmApiKey: String(source.llmApiKey ?? current.llmApiKey ?? ""),
       llmModel: String(source.llmModel || current.llmModel || "gpt-5.3-codex").trim(),
+      llmDefaultProfile: String(source.llmDefaultProfile || current.llmDefaultProfile || "default").trim() || "default",
+      llmProfiles: source.llmProfiles !== undefined ? source.llmProfiles : current.llmProfiles,
+      llmProfileChains: source.llmProfileChains !== undefined ? source.llmProfileChains : current.llmProfileChains,
+      llmEscalationPolicy: String(source.llmEscalationPolicy || current.llmEscalationPolicy || "upgrade_only").trim() || "upgrade_only",
       maxSteps: toIntInRange(source.maxSteps, current.maxSteps || 100, 1, 500),
       autoTitleInterval: toIntInRange(source.autoTitleInterval, current.autoTitleInterval ?? 10, 0, 100),
       bridgeInvokeTimeoutMs: toIntInRange(
