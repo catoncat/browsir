@@ -1,140 +1,161 @@
-# 多 Provider 与 Sub-Agent 设计沉淀（面向 Browser Brain Loop）
+# LLM 实施蓝图：先 Provider，后 Agents（Browser Brain Loop）
 
-> 日期：2026-02-24  
-> 目的：沉淀本轮讨论结论，指导后续实现，避免“能力扩展”与“体验退化”冲突。
+> 日期：2026-02-25  
+> 目标：把“多 LLM Provider + 多 Agent”讨论收敛为可执行方案。  
+> 主线：必须先完成 Provider 层，再进入 Agents 编排层。
 
-## 1. 背景
+## 0. 实施铁律
 
-我们最初讨论的是「是否引入 Pi 式多 LLM Provider 兼容与注册机制」，随后延伸到「未来多 Agent 协作时如何分配模型」。
+1. 先 Provider，后 Agents。
+2. 大脑只在浏览器侧（SW/SidePanel），Bridge 只做执行代理。
+3. 默认不做黑盒自动降级；允许“可解释升级”，禁止“静默降级”。
+4. 场景尚未最终拍板，先按候选场景与评估维度推进。
 
-这份文档只保留对本产品有效的结论，不做泛化。
+## 1. 当前基线（必须承认的现实）
 
-## 2. 当前现状（BBL）
+- 当前是单 LLM 入口：`llmApiBase/llmApiKey/llmModel`（`extension/src/sw/kernel/runtime-infra.browser.ts`）。
+- 运行时在 `runtime-loop` 直接发 `/chat/completions`（`extension/src/sw/kernel/runtime-loop.browser.ts`）。
+- 现有 Provider 抽象主要是工具执行 Provider（`ToolProviderRegistry`），不是 LLM Provider。
 
-当前 runtime 是单模型入口：
+结论：现在还没有 LLM Provider 抽象和 profile 路由，因此多 Agent 选模暂不具备实现基础。
 
-- 配置仅有 `llmApiBase/llmApiKey/llmModel`：`extension/src/sw/kernel/runtime-infra.browser.ts`
-- 请求直接调用 `/chat/completions`：`extension/src/sw/kernel/runtime-loop.browser.ts`
-- 主循环在浏览器内（正确），Bridge 只执行工具（正确）
+## 2. 范围与非目标
 
-结论：当前还没有 Provider 抽象，也没有按任务/角色选模能力。
+### 本轮范围
 
-## 3. 已确认事实（外部参考）
+- 建立 LLM Provider Adapter/Registry 的最小闭环。
+- 建立 profile 解析与“升级优先”策略骨架（不含自动降级）。
+- 用 BDD 与单测锁住语义，确保后续接 Agents 不漂移。
 
-### 3.1 Pi 的能力边界
+### 明确不做
 
-Pi 的 `pi-ai` 有完整 Provider 抽象、注册和跨 Provider 消息兼容；`coding-agent` 支持手动选模与扩展注册 Provider。  
-但 Pi 主体并没有做“通用运行时自动选模主循环”（更多是手动切换 + 恢复时 fallback）。
+- 不做按价格自动切模。
+- 不做全局静默降级。
+- 不把 Provider 路由下沉到 Bridge。
+- 不在本阶段引入复杂学习型路由。
 
-### 3.2 Claude Code 的思路
+## 3. 阶段门禁（Entry / Exit / Blocker）
 
-Claude Code 更接近「可解释自动化」：
+| 阶段 | Entry（进入条件） | Exit（完成条件） | Blocker（阻塞） |
+| --- | --- | --- | --- |
+| Phase 1 Provider | 单模型链路稳定、BDD 门禁可跑 | 具备 `ProviderAdapter + Registry + ProfileResolver` 最小闭环；新增合同通过 | 出现“无提示降级”或 Bridge 承担决策 |
+| Phase 2 Agents | Phase 1 全部 Exit 满足 | 角色绑定 profile、支持最小 `single/parallel` 子任务编排、可观测路由 | Provider 选路不稳定、失败语义不可解释 |
 
-- 有模型别名与有限的自动回退策略
-- 支持 Sub-Agent 绑定模型
-- 不是黑盒式每步随机切模型
+## 4. Phase 1：Provider（先做）
 
-### 3.3 社区实践（Pi 生态）
+### 4.1 目标
 
-高质量实现普遍遵循：
+- 把 LLM 调用从“硬编码 HTTP”改为“Provider Adapter 调用”。
+- 保持行为等价：现有成功/失败语义不回归。
+- 引入 profile 路由骨架：默认 profile + 同角色升级链（显式配置）。
 
-- 子 Agent 隔离执行（独立进程/独立上下文）
-- 编排原语明确（single / parallel / chain / wave）
-- 可恢复（重试、退避、resume）
-- 模型选择可见、可控
+### 4.2 代码落点（建议）
 
-## 4. 产品级决策（本项目）
+- 新增 `extension/src/sw/kernel/llm-provider.ts`
+  - 定义 `LlmProviderAdapter`、`LlmRequest`、`LlmResponse`。
+- 新增 `extension/src/sw/kernel/llm-provider-registry.ts`
+  - 注册/替换/查询 provider。
+- 新增 `extension/src/sw/kernel/llm-openai-compatible-provider.ts`
+  - 封装当前 `/chat/completions` 行为，作为第一个 provider。
+- 新增 `extension/src/sw/kernel/llm-profile-resolver.ts`
+  - 解析 profile -> `{ provider, model, base, key, retry/timeout }`。
+- 修改 `extension/src/sw/kernel/runtime-loop.browser.ts`
+  - `requestLlmWithRetry` 与 title 生成改为通过 registry/provider。
+- 修改 `extension/src/sw/kernel/runtime-infra.browser.ts`
+  - 配置结构从单 model 扩展为 profile（兼容旧字段）。
 
-### 决策 D1：要做多 Provider 抽象，但不是为“按价自动降级”
+### 4.3 可观测事件（最小集）
 
-目标是支持未来多 Agent 协作和能力分工，不是做“便宜模型优先”的成本调度器。
+- `llm.route.selected`：本轮选中的 `profile/provider/model`。
+- `llm.route.escalated`：升级触发原因（如重复失败签名）。
+- `llm.route.blocked`：需要升级但无可用上级模型。
 
-### 决策 D2：默认不做“黑盒自动降级”
+### 4.4 DoD（完成定义）
 
-用户对“能力被悄悄降低”体验敏感。默认策略应是：
+1. 旧配置仍可运行（向后兼容）。
+2. 新配置可指定不同 provider/model。
+3. 失败时不静默降级，行为是“保留原配置并失败”或“显式升级”。
+4. 日志可以还原每次选路原因。
+5. Provider 相关 contract + feature + unit 都通过。
 
-- 角色绑定模型（显式）
-- 失败优先升级，不做静默降级
-- 所有切模行为可观测、可解释
+## 5. Phase 2：Agents（后做）
 
-### 决策 D3：架构铁律保持不变
+### 5.1 前置条件
 
-- 大脑决策必须留在浏览器侧 runtime
-- Bridge 继续只做执行代理，不承载 Provider 选择逻辑
+- Phase 1 Exit 全量满足。
+- profile 与选路事件在实测中稳定。
 
-## 5. 目标架构（契合 BBL）
+### 5.2 目标
 
-### 5.1 新增 LLM Provider Adapter 层（在 SW kernel）
+- 引入子 Agent 角色：`scout / worker / reviewer`（初版）。
+- 角色绑定 profile，不允许角色外静默切模。
+- 支持最小编排原语：`single`、`parallel`。
 
-在 `runtime-loop` 与 HTTP 之间增加适配层：
+### 5.3 失败策略
 
-- `ProviderAdapter`：统一 `complete/stream` 调用接口
-- `ProviderRegistry`：注册内置 provider 与扩展 provider
-- `MessageTransform`：跨 provider 的 message/tool_call/tool_result 兼容转换
+- 只允许同角色升级链（例如 `worker.basic -> worker.pro`）。
+- 无上级模型时显式失败并返回原因。
+- 不自动降级到弱模型。
 
-### 5.2 新增 Model Profile（而不是裸 model）
+## 6. 候选应用场景（尚未拍板）
 
-会话不再只存 `llmModel`，而是存 profile：
+> 这些是候选，不是最终承诺。先按评估维度筛选。
 
-- `default`
-- `planner`
-- `worker`
-- `scout`
-- `reviewer`
+1. Repo 探索：`scout` 快速定位，`worker` 实施改动。
+2. 代码评审：`worker` 产出后由 `reviewer` 复核风险。
+3. 长链路任务：浏览器动作和文件操作由现有 tool provider 执行，LLM 只负责编排。
 
-每个 profile 显式定义 provider/model/timeout/retry，不隐式猜测。
+### 评估维度
 
-### 5.3 为 Sub-Agent 预留角色选模
+1. 成功率是否提升。
+2. 平均轮次是否下降。
+3. 失败是否可解释（含路由原因）。
+4. 用户是否感知到“能力变弱”。
 
-后续多 Agent 协作时，采用“角色 -> profile”路由：
+## 7. 对应测试与 BDD（本次先落 Provider）
 
-- 简单探测类任务：`scout`（可配小模型）
-- 主执行类任务：`worker`（主力模型）
-- 评审类任务：`reviewer`（高可靠模型）
+## 7.1 单元测试
 
-## 6. 明确不做（当前阶段）
+- `extension/src/sw/kernel/__tests__/tool-provider-registry.browser.test.ts`
+  - 补充 mode hint 严格匹配与回退行为。
+  - 补充 capability provider 抛错元信息保留（`modeUsed/capabilityUsed`）。
+  - 补充 `resolveMode` 在 `mode + capability` 共存时优先级。
+- `extension/src/sw/kernel/__tests__/llm-profile-policy.browser.test.ts`
+  - 验证 `upgrade_only`：只允许向上升级。
+  - 验证无上级 profile 时显式 `blocked`，不隐式降级。
 
-- 不做全局自动降级（silent downgrade）
-- 不做按 token 单价自动切换
-- 不在 Bridge 实现 Provider 选择
-- 不把 tool provider 路由和 llm provider 路由耦合成同一个逻辑块
+## 7.2 新增 BDD 契约（Provider 阶段）
 
-## 7. 分阶段落地计划
+- `BHV-LLM-PROVIDER-ADAPTER-ROUTING`
+  - 约束 provider 路由、显式选模与错误语义稳定。
+- `BHV-LLM-PROFILE-ESCALATION`
+  - 约束仅允许升级、不允许静默降级。
 
-### Phase A：Provider 抽象最小闭环
+## 7.3 新增 BDD 场景（technical/chat）
 
-- 抽出 `ProviderAdapter` 接口
-- 先落一个 `openai-chat` 适配器，行为与当前一致
-- 加 `ProviderRegistry`（先静态注册）
+- `bdd/features/technical/chat/llm-provider-adapter-routing.feature`
+- `bdd/features/technical/chat/llm-profile-escalation.feature`
 
-### Phase B：Profile 化与可观测
+## 7.4 验证命令
 
-- 配置从单 `llmModel` 升级为 profile
-- 在事件流新增：`llm.route.selected` / `llm.route.fallback`
-- UI 透出“本轮使用模型/Provider”
+```bash
+bun test extension/src/sw/kernel/__tests__/tool-provider-registry.browser.test.ts extension/src/sw/kernel/__tests__/llm-profile-policy.browser.test.ts
+bun run bdd:lint:features
+bun run bdd:validate
+```
 
-### Phase C：Sub-Agent 角色路由
+## 8. 实施清单（按顺序）
 
-- 增加子 Agent 任务编排（single/parallel 起步）
-- 角色绑定 profile
-- 失败策略仅允许“同角色升级”，禁止静默降级
+1. 完成 Provider Adapter/Registry 代码骨架。
+2. 把 runtime-loop 切到 Provider 调用，但保持现有行为。
+3. 接 profile resolver 与兼容配置。
+4. 补齐可观测事件。
+5. 跑通 unit + bdd validate。
+6. 再进入 Agents 编排阶段。
 
-## 8. 验收标准（BDD/运行态）
+## 9. 参考资料
 
-- 同一会话内可按 profile 稳定切换 provider/model
-- 跨 provider 继续对话不破坏 tool_call 链路
-- `loop_done` 成功率提升，且错误可解释
-- 日志中可还原每次选模与切换原因
-- 未配置次级模型时行为可预期（明确报错或停留原模型）
-
-## 9. 参考实现与资料
-
-- Pi monorepo（固定本地路径）：`~/work/repos/_research/pi-mono/`
-- Pi 官方仓库：<https://github.com/badlogic/pi-mono>
-- Pi 官方 subagent 示例：
+- Pi 本地仓库（固定路径）：`~/work/repos/_research/pi-mono/`
+- Pi 官方：<https://github.com/badlogic/pi-mono>
+- Pi subagent 示例：
   - <https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent/examples/extensions/subagent>
-- 社区参考：
-  - task-tool（single/parallel/chain）：<https://github.com/richardgill/pi-extensions/tree/main/extensions/task-tool>
-  - PiSwarm（wave + resume + retry）：<https://github.com/lsj5031/PiSwarm>
-  - task-factory（queue + profile + fallback chain）：<https://github.com/patleeman/task-factory>
-  - 社区索引 awesome-pi-agent：<https://github.com/qualisero/awesome-pi-agent>

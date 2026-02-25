@@ -15,6 +15,7 @@
 文档入口：
 
 - 总索引：`docs/README.md`
+- 当前实现基线（必读）：`docs/kernel-alignment-2026-02-25.md`
 - 非 UI 架构蓝图：`docs/non-ui-architecture-blueprint.md`
 - pi-mono runtime 对比：`docs/pi-mono-runtime-comparison.md`
 - BDD 总览：`bdd/README.md`
@@ -69,8 +70,9 @@ BRIDGE_TOKEN="replace-me" bun run start
 
 - `Bridge URL`: `ws://127.0.0.1:8787/ws`
 - `Bridge Token`: 与环境变量一致
-- 可选填 LLM（不填则规则 planner）：
+- 必填 LLM（当前缺配置会直接 `failed_execute`）：
   - `LLM Base`: `https://ai.chen.rs/v1`
+  - `LLM Key`: `<your-api-key>`
   - `Model`: `gpt-5.3-codex`
 
 4. 启动扩展自动热重载（可选，开发推荐）
@@ -115,7 +117,7 @@ bdd/
 
 ```bash
 bun run brain:e2e
-bun run brain:e2e:live   # 真实 LLM 冒烟（需配置环境变量）
+bun run brain:e2e:live   # 真实 LLM 冒烟（默认读取 .env.live.local）
 bun run bdd:lint:features
 bun run bdd:validate
 bun run bdd:gate
@@ -145,9 +147,9 @@ bun run bdd:gate:live    # 检查 live profile 契约
 - sidepanel 在 `stopped` 状态下优先返回状态文案，不应回显大段 snapshot JSON
 - sidepanel 的 LLM 能力门禁：
   - LLM 可用时可完成 `tool_call -> tool_result -> done` 闭环
-  - LLM 不可用且规则可解析时应降级成功
-  - LLM 不可用且规则不可解析时应返回 `failed_execute`
-  - LLM HTTP 失败时可回退到规则 planner
+  - 缺少 LLM 配置时应返回 `failed_execute`（`reason=missing_llm_config`）
+  - LLM HTTP 失败按 retryable 语义重试；超限或不可重试时返回 `failed_execute`
+  - 不再以规则 planner 作为“成功降级”路径
 - sidepanel 的真实 LLM 能力冒烟（live suite）：
   - 在浏览器任务上进行多次尝试并用 `cdp.verify` 断言结果
   - 通过阈值：`passedAttempts >= minPass`（默认 `ceil(attempts*0.67)`）
@@ -164,11 +166,12 @@ bdd/evidence/brain-e2e.latest.json
 运行 live 套件示例：
 
 ```bash
-BRAIN_E2E_LIVE_LLM_BASE="https://ai.chen.rs/v1" \
-BRAIN_E2E_LIVE_LLM_KEY="<key>" \
-BRAIN_E2E_LIVE_LLM_MODEL="gpt-5.3-codex" \
-bun run brain:e2e:live
+# .env.live.local 示例
+# BRAIN_E2E_LIVE_LLM_BASE="https://ai.chen.rs/v1"
+# BRAIN_E2E_LIVE_LLM_KEY="<key>"
+# BRAIN_E2E_LIVE_LLM_MODEL="gpt-5.3-codex"
 
+bun run brain:e2e:live
 bun run bdd:gate:live
 ```
 
@@ -179,7 +182,7 @@ bun run bdd:gate:live
 > CHROME_BIN="/path/to/chrome-for-testing" bun run brain:e2e
 > ```
 
-### 最近进展（2026-02-24）
+### 最近进展（2026-02-25）
 
 vNext 已切到 `sidepanel.html + service-worker.js` 主路径：
 
@@ -189,6 +192,9 @@ vNext 已切到 `sidepanel.html + service-worker.js` 主路径：
 - `brain.step.execute` 已从占位实现改为真实执行（`script/cdp/bridge` + verify）
 - 主 sidepanel 已重构为聊天产品界面（多会话、会话内连续发送、设置抽屉）
 - 调试能力迁移到独立页面：`extension/debug.html`（`Live Events / Step Stream / Debug Dump`）
+- LLM 请求前统一消息 transform（tool_call/tool_result 配对、tool_call_id 归一）
+- `brain.step.stream` / `brain.debug.dump` 支持 `maxEvents/maxBytes` 限流并返回 `streamMeta`
+- `llm.response.raw` 已瘦身为 `bodyPreview/bodyLength/bodyTruncated`，避免大 payload 进入 trace
 - e2e 已覆盖 sidepanel + debug 工作台，并断言 `brain.runtime` 可观测性（`llm.request/llm.response.raw/auto_retry_*`）
 
 当前校验方式：
