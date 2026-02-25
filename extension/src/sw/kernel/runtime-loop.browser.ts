@@ -4316,67 +4316,12 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               action: tc.function.name,
               error: String(result.error)
             });
-            if (result.retryable === true) {
-              const failureSignature = [
-                String(tc.function.name || "").trim().toLowerCase(),
-                String(failurePayload.errorCode || "").trim().toUpperCase(),
-                String(failurePayload.target || "").trim().toLowerCase()
-              ].join("|");
-              const currentSignatureHits = (retryableFailureBySignature.get(failureSignature) || 0) + 1;
-              retryableFailureBySignature.set(failureSignature, currentSignatureHits);
-              retryableFailureTotal += 1;
-
-              if (currentSignatureHits > TOOL_RETRYABLE_FAILURE_MAX_PER_SIGNATURE) {
-                const circuitMessage = `工具 ${tc.function.name} 在同一目标连续失败，已停止自动重试。`;
-                orchestrator.events.emit("retry_circuit_open", sessionId, {
-                  tool: tc.function.name,
-                  signature: failureSignature,
-                  hits: currentSignatureHits,
-                  maxPerSignature: TOOL_RETRYABLE_FAILURE_MAX_PER_SIGNATURE,
-                  total: retryableFailureTotal
-                });
-                await orchestrator.sessions.appendMessage({
-                  sessionId,
-                  role: "assistant",
-                  text: circuitMessage
-                });
-                finalStatus = mapToolErrorReasonToTerminalStatus(result.errorReason);
-                throw new Error(circuitMessage);
-              }
-
-              if (retryableFailureTotal > TOOL_RETRYABLE_FAILURE_MAX_TOTAL) {
-                const budgetMessage = "可恢复失败次数已超出预算，已停止自动重试并结束本轮。";
-                orchestrator.events.emit("retry_budget_exhausted", sessionId, {
-                  total: retryableFailureTotal,
-                  maxTotal: TOOL_RETRYABLE_FAILURE_MAX_TOTAL
-                });
-                await orchestrator.sessions.appendMessage({
-                  sessionId,
-                  role: "assistant",
-                  text: budgetMessage
-                });
-                finalStatus = mapToolErrorReasonToTerminalStatus(result.errorReason);
-                throw new Error(budgetMessage);
-              }
-            }
             // PI 对齐：工具失败写入 tool_result 后继续当前 loop，由后续 LLM 结合失败结果重规划。
             continue;
           }
 
           const responsePayload = toRecord(result.response);
           const rawToolData = responsePayload.data ?? result;
-          const toolName = canonicalToolName;
-          if (
-            ["click", "fill_element_by_uid", "browser_verify", "fill_form"].includes(
-              toolName
-            )
-          ) {
-            const verified = result.verified === true || String(result.verifyReason || "").trim() === "verified";
-            if (verified || toolName === "browser_verify" || toolName === "fill_form") {
-              browserProofSatisfied = true;
-              browserProofMissingStreak = 0;
-            }
-          }
           const llmToolContent = safeStringify(rawToolData, 12_000);
           const uiToolPayload = buildToolSuccessPayload(tc, rawToolData);
           messages.push({
@@ -4420,11 +4365,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       }
 
       if (llmStep >= maxLoopSteps) {
-        finalStatus = requireBrowserProof && !browserProofSatisfied
-          ? "progress_uncertain"
-          : noProgressObserved
-            ? "progress_uncertain"
-            : "max_steps";
+        finalStatus = "max_steps";
         await orchestrator.sessions.appendMessage({
           sessionId,
           role: "assistant",
