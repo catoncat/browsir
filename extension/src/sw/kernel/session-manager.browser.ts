@@ -244,14 +244,6 @@ export class BrowserSessionManager {
     })();
 
     const messages = [] as SessionContext["messages"];
-    if (previousSummary) {
-      messages.push({
-        role: "system",
-        content: `Previous summary:\n${previousSummary}`,
-        entryId: `summary:${sessionId}`
-      });
-    }
-
     for (const entry of postCompactionEntries) {
       if (entry.type !== "message") continue;
       messages.push({

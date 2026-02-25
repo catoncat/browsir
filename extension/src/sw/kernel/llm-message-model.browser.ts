@@ -37,6 +37,15 @@ const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point wa
 const COMPACTION_SUMMARY_SUFFIX = `
 </summary>`;
 
+export function buildCompactionSummaryLlmMessage(previousSummary: string): JsonRecord | null {
+  const summary = String(previousSummary || "").trim();
+  if (!summary) return null;
+  return {
+    role: "user",
+    content: `${COMPACTION_SUMMARY_PREFIX}${summary}${COMPACTION_SUMMARY_SUFFIX}`
+  };
+}
+
 function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" ? (value as JsonRecord) : {};
 }
@@ -388,10 +397,8 @@ export function convertSessionContextMessagesToLlm(messages: SessionContextMessa
     if (role === "system" && String(item.entryId || "").startsWith("summary:")) {
       const summary = readSummaryBody(content);
       if (!summary) continue;
-      out.push({
-        role: "user",
-        content: `${COMPACTION_SUMMARY_PREFIX}${summary}${COMPACTION_SUMMARY_SUFFIX}`
-      });
+      const summaryMessage = buildCompactionSummaryLlmMessage(summary);
+      if (summaryMessage) out.push(summaryMessage);
       continue;
     }
 

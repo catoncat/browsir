@@ -1,6 +1,7 @@
 import "./test-setup";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { compact, prepareCompaction } from "../compaction.browser";
 import { BrainOrchestrator } from "../orchestrator.browser";
 import { registerRuntimeRouter } from "../runtime-router";
 
@@ -167,6 +168,90 @@ describe("runtime-router.browser", () => {
     expect(String(conversationView.parentSessionId || "")).toBe(sourceSessionId);
     const viewForkedFrom = (conversationView.forkedFrom || {}) as Record<string, unknown>;
     expect(String(viewForkedFrom.sessionId || "")).toBe(sourceSessionId);
+  });
+
+  it("fork 后应保留 compaction 上下文供 LLM 使用，但 conversation view 不应出现摘要消息", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const sourceMeta = await orchestrator.sessions.createSession({ title: "compaction-fork-source" });
+    const sourceSessionId = sourceMeta.header.id;
+
+    const user1 = await orchestrator.sessions.appendMessage({
+      sessionId: sourceSessionId,
+      role: "user",
+      text: "Q1"
+    });
+    await orchestrator.sessions.appendMessage({
+      sessionId: sourceSessionId,
+      role: "assistant",
+      text: "A1"
+    });
+    await orchestrator.sessions.appendMessage({
+      sessionId: sourceSessionId,
+      role: "user",
+      text: "Q2"
+    });
+    await orchestrator.sessions.appendMessage({
+      sessionId: sourceSessionId,
+      role: "assistant",
+      text: "A2"
+    });
+
+    const beforeCompaction = await orchestrator.sessions.buildSessionContext(sourceSessionId);
+    const preparation = prepareCompaction({
+      reason: "threshold",
+      entries: beforeCompaction.entries,
+      previousSummary: beforeCompaction.previousSummary,
+      keepTail: 2,
+      splitTurn: true
+    });
+    const draft = await compact(preparation, async () => "mock-compaction-summary");
+    await orchestrator.sessions.appendCompaction(sourceSessionId, "threshold", draft);
+
+    await orchestrator.sessions.appendMessage({
+      sessionId: sourceSessionId,
+      role: "user",
+      text: "Q3"
+    });
+    const sourceLeafAssistant = await orchestrator.sessions.appendMessage({
+      sessionId: sourceSessionId,
+      role: "assistant",
+      text: "A3"
+    });
+
+    const sourceContextAtLeaf = await orchestrator.sessions.buildSessionContext(sourceSessionId, sourceLeafAssistant.id);
+    expect(sourceContextAtLeaf.previousSummary.length).toBeGreaterThan(0);
+    expect(sourceContextAtLeaf.messages.some((msg) => msg.role === "system")).toBe(false);
+
+    const forked = await invokeRuntime({
+      type: "brain.session.fork",
+      sessionId: sourceSessionId,
+      leafId: sourceLeafAssistant.id,
+      sourceEntryId: user1.id,
+      reason: "compaction-fork-regression"
+    });
+    expect(forked.ok).toBe(true);
+    const forkedSessionId = String(((forked.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(forkedSessionId).not.toBe("");
+
+    const forkContext = await orchestrator.sessions.buildSessionContext(forkedSessionId);
+    expect(forkContext.previousSummary).toBe(sourceContextAtLeaf.previousSummary);
+    expect(forkContext.messages.map((msg) => `${msg.role}:${msg.content}`)).toEqual(
+      sourceContextAtLeaf.messages.map((msg) => `${msg.role}:${msg.content}`)
+    );
+    expect(forkContext.messages.some((msg) => msg.role === "system")).toBe(false);
+
+    const viewed = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId: forkedSessionId
+    });
+    expect(viewed.ok).toBe(true);
+    const viewMessages = readConversationMessages(viewed);
+    expect(viewMessages.some((item) => String(item.role || "") === "system")).toBe(false);
+    expect(viewMessages.map((item) => `${String(item.role || "")}:${String(item.content || "")}`)).toEqual(
+      sourceContextAtLeaf.messages.map((msg) => `${msg.role}:${msg.content}`)
+    );
   });
 
   it("supports regenerate and emits input.regenerate stream event", async () => {

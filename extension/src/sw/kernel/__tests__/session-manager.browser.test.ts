@@ -49,6 +49,6 @@ describe("session-manager.browser", () => {
     const after = await manager.buildSessionContext(meta.header.id);
 
     expect(after.previousSummary.length).toBeGreaterThan(0);
-    expect(after.messages[0]?.role).toBe("system");
+    expect(after.messages.some((msg) => msg.role === "system")).toBe(false);
   });
 });
