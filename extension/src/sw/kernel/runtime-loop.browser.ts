@@ -48,6 +48,10 @@ const LLM_TRACE_BODY_PREVIEW_MAX_CHARS = 1_200;
 const LLM_TRACE_USER_SNIPPET_MAX_CHARS = 420;
 const TOOL_RETRYABLE_FAILURE_MAX_TOTAL = 8;
 const TOOL_RETRYABLE_FAILURE_MAX_PER_SIGNATURE = 3;
+const NO_PROGRESS_REPEAT_SIGNATURE_LIMIT = 3;
+const NO_PROGRESS_PING_PONG_LIMIT = 2;
+const NO_PROGRESS_SIGNATURE_WINDOW = 6;
+const NO_PROGRESS_BROWSER_PROOF_MISSING_LIMIT = 3;
 
 type ToolRetryAction = "auto_replay" | "llm_replan" | "fail_fast";
 
@@ -632,6 +636,102 @@ function normalizeToolCalls(rawToolCalls: unknown): ToolCallItem[] {
       };
     })
     .filter((item): item is ToolCallItem => item !== null);
+}
+
+function sortJsonForSignature(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => sortJsonForSignature(item));
+  if (!value || typeof value !== "object") return value;
+  const source = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(source).sort()) {
+    out[key] = sortJsonForSignature(source[key]);
+  }
+  return out;
+}
+
+function normalizeToolArgsForSignature(rawArgs: unknown): string {
+  const text = String(rawArgs || "").trim();
+  if (!text) return "{}";
+  const parsed = safeJsonParse(text);
+  if (parsed !== null) {
+    return clipText(safeStringify(sortJsonForSignature(parsed), 1200), 1200);
+  }
+  return clipText(text.replace(/\s+/g, " "), 1200);
+}
+
+function buildNoProgressSignature(toolCalls: ToolCallItem[]): string {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) return "";
+  const segments = toolCalls.map((call) => {
+    const name = String(call.function?.name || "").trim().toLowerCase() || "unknown";
+    const args = normalizeToolArgsForSignature(call.function?.arguments);
+    return `${name}:${args}`;
+  });
+  return clipText(segments.join("||"), 3600);
+}
+
+function detectNoProgressPattern(input: {
+  recentSignatures: string[];
+  signature: string;
+  sameSignatureStreak: number;
+  pingPongStreak: number;
+}): {
+  recentSignatures: string[];
+  sameSignatureStreak: number;
+  pingPongStreak: number;
+  reason: "repeat_signature" | "ping_pong" | null;
+} {
+  const signature = String(input.signature || "").trim();
+  const prevRecent = Array.isArray(input.recentSignatures) ? input.recentSignatures : [];
+  if (!signature) {
+    return {
+      recentSignatures: prevRecent.slice(0),
+      sameSignatureStreak: 0,
+      pingPongStreak: 0,
+      reason: null
+    };
+  }
+
+  const last = prevRecent.length > 0 ? prevRecent[prevRecent.length - 1] : "";
+  const sameSignatureStreak = last && last === signature ? input.sameSignatureStreak + 1 : 1;
+  const recentSignatures = [...prevRecent, signature];
+  if (recentSignatures.length > NO_PROGRESS_SIGNATURE_WINDOW) {
+    recentSignatures.splice(0, recentSignatures.length - NO_PROGRESS_SIGNATURE_WINDOW);
+  }
+
+  let pingPongStreak = 0;
+  if (recentSignatures.length >= 4) {
+    const n = recentSignatures.length;
+    const a = recentSignatures[n - 4];
+    const b = recentSignatures[n - 3];
+    const c = recentSignatures[n - 2];
+    const d = recentSignatures[n - 1];
+    if (a === c && b === d && c !== d) {
+      pingPongStreak = input.pingPongStreak + 1;
+    }
+  }
+
+  if (sameSignatureStreak >= NO_PROGRESS_REPEAT_SIGNATURE_LIMIT) {
+    return {
+      recentSignatures,
+      sameSignatureStreak,
+      pingPongStreak,
+      reason: "repeat_signature"
+    };
+  }
+  if (pingPongStreak >= NO_PROGRESS_PING_PONG_LIMIT) {
+    return {
+      recentSignatures,
+      sameSignatureStreak,
+      pingPongStreak,
+      reason: "ping_pong"
+    };
+  }
+  return {
+    recentSignatures,
+    sameSignatureStreak,
+    pingPongStreak,
+    reason: null
+  };
 }
 
 function parseToolCallArgs(raw: string): JsonRecord | null {
@@ -3075,9 +3175,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     let finalStatus = "done";
     const requireBrowserProof = shouldRequireBrowserProof(prompt);
     let browserProofSatisfied = false;
+    let browserProofMissingStreak = 0;
     const llmFailureBySignature = new Map<string, number>();
     const retryableFailureBySignature = new Map<string, number>();
     let retryableFailureTotal = 0;
+    let noProgressSameSignatureStreak = 0;
+    let noProgressPingPongStreak = 0;
+    let noProgressSignatures: string[] = [];
 
     try {
       while (llmStep < maxLoopSteps) {
@@ -3223,6 +3327,42 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
         const assistantText = parseLlmContent(message).trim();
         const toolCalls = normalizeToolCalls(message.tool_calls);
+        if (toolCalls.length > 0) {
+          const signature = buildNoProgressSignature(toolCalls);
+          const noProgress = detectNoProgressPattern({
+            recentSignatures: noProgressSignatures,
+            signature,
+            sameSignatureStreak: noProgressSameSignatureStreak,
+            pingPongStreak: noProgressPingPongStreak
+          });
+          noProgressSignatures = noProgress.recentSignatures;
+          noProgressSameSignatureStreak = noProgress.sameSignatureStreak;
+          noProgressPingPongStreak = noProgress.pingPongStreak;
+          if (noProgress.reason) {
+            orchestrator.events.emit("loop_no_progress", sessionId, {
+              reason: noProgress.reason,
+              signature,
+              sameSignatureStreak: noProgress.sameSignatureStreak,
+              pingPongStreak: noProgress.pingPongStreak,
+              recentSignatures: noProgress.recentSignatures
+            });
+            const noProgressMessage =
+              noProgress.reason === "ping_pong"
+                ? "工具调用出现往返震荡（ping-pong），已提前结束本轮。"
+                : "工具调用连续重复且无进展，已提前结束本轮。";
+            await orchestrator.sessions.appendMessage({
+              sessionId,
+              role: "assistant",
+              text: noProgressMessage
+            });
+            finalStatus = "progress_uncertain";
+            throw new Error(noProgressMessage);
+          }
+        } else {
+          noProgressSameSignatureStreak = 0;
+          noProgressPingPongStreak = 0;
+          noProgressSignatures = [];
+        }
         orchestrator.events.emit("llm.response.parsed", sessionId, {
           step: llmStep,
           toolCalls: toolCalls.length,
@@ -3247,6 +3387,21 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
         if (toolCalls.length === 0) {
           if (requireBrowserProof && !browserProofSatisfied) {
+            browserProofMissingStreak += 1;
+            if (browserProofMissingStreak >= NO_PROGRESS_BROWSER_PROOF_MISSING_LIMIT) {
+              const noProgressMessage = "工具调用未产生可验证页面进展，已提前结束本轮。";
+              orchestrator.events.emit("loop_no_progress", sessionId, {
+                reason: "browser_proof_missing",
+                streak: browserProofMissingStreak
+              });
+              await orchestrator.sessions.appendMessage({
+                sessionId,
+                role: "assistant",
+                text: noProgressMessage
+              });
+              finalStatus = "progress_uncertain";
+              throw new Error(noProgressMessage);
+            }
             messages.push({
               role: "system",
               content:
@@ -3257,6 +3412,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             });
             continue;
           }
+          browserProofMissingStreak = 0;
           orchestrator.events.emit("step_finished", sessionId, {
             step: llmStep,
             ok: true,
@@ -3365,6 +3521,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             const verified = result.verified === true || String(result.verifyReason || "").trim() === "verified";
             if (verified || toolName === "browser_verify") {
               browserProofSatisfied = true;
+              browserProofMissingStreak = 0;
             }
           }
           const llmToolContent = safeStringify(rawToolData, 12_000);

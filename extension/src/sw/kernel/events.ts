@@ -26,6 +26,7 @@ export type BrainEventType =
   | "loop_start"
   | "loop_error"
   | "loop_done"
+  | "loop_no_progress"
   | "loop_skip_stopped"
   | "loop_internal_error"
   | "loop_restart"

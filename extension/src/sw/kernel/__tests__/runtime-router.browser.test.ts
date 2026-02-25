@@ -1354,6 +1354,98 @@ describe("runtime-router.browser", () => {
     expect(String(donePayload.status || "")).toBe("progress_uncertain");
   });
 
+  it("重复同签名 tool_calls 时应触发 loop_no_progress 并 progress_uncertain 收口", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.no-progress.read",
+        name: "no-progress-read",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["fs.read"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "fs.read": {
+            id: "plugin.no-progress.read.provider",
+            mode: "script",
+            priority: 80,
+            invoke: async () => ({
+              text: "no-progress"
+            })
+          }
+        }
+      }
+    });
+
+    let llmCall = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "",
+                tool_calls: [
+                  {
+                    id: `call_read_file_repeat_${llmCall}`,
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({
+                        path: "/tmp/no-progress.txt"
+                      })
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test",
+        autoTitleInterval: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "请查看当前标签页并继续执行"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId, 5000);
+    const done = stream.find((item) => String(item.type || "") === "loop_done") as Record<string, unknown> | undefined;
+    const donePayload = (done?.payload || {}) as Record<string, unknown>;
+    expect(String(donePayload.status || "")).toBe("progress_uncertain");
+
+    const noProgress = stream.find((item) => String(item.type || "") === "loop_no_progress") as Record<string, unknown> | undefined;
+    expect(noProgress).toBeDefined();
+    const noProgressPayload = (noProgress?.payload || {}) as Record<string, unknown>;
+    expect(String(noProgressPayload.reason || "")).toBe("repeat_signature");
+    expect(String(noProgressPayload.signature || "")).toContain("read_file");
+    expect(Number(noProgressPayload.sameSignatureStreak || 0)).toBeGreaterThanOrEqual(3);
+  });
+
   it("同一会话二轮请求会保留历史 tool role 并补齐 assistant/tool_call 配对", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
