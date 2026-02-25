@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, h } from "vue";
+import { ref, computed, watch, nextTick } from "vue";
+import { usePreferredDark } from "@vueuse/core";
 import {
   Sparkles,
   ChevronDown,
@@ -17,7 +18,8 @@ import {
   X
 } from "lucide-vue-next";
 import { resolveToolRender } from "../utils/tool-renderers";
-import { IncremarkContent } from "@incremark/vue";
+import { IncremarkContent, ThemeProvider } from "@incremark/vue";
+import IncremarkCodeBlock from "./IncremarkCodeBlock.vue";
 
 interface ToolPendingStepData {
   step: number;
@@ -30,6 +32,7 @@ const props = defineProps<{
   role: string;
   content: string;
   entryId: string;
+  streamingMode?: "markdown" | "plain";
   toolName?: string;
   toolCallId?: string;
   toolPending?: boolean;
@@ -73,32 +76,17 @@ const isUser = computed(() => props.role === "user");
 const isAssistant = computed(() => props.role === "assistant");
 const isAssistantStreaming = computed(() => props.role === "assistant_streaming");
 const isAssistantLike = computed(() => isAssistant.value || isAssistantStreaming.value);
+const isStreamingPlainText = computed(() => isAssistantStreaming.value && props.streamingMode === "plain");
 const isAssistantPlaceholder = computed(() => props.role === "assistant_placeholder" || props.busyPlaceholder === true);
 const isTool = computed(() => props.role === "tool");
 const isToolPending = computed(() => props.role === "tool_pending" || props.toolPending === true);
 
-// Custom Link component for Incremark to ensure target="_blank"
-const IncremarkLink = (props: any, { slots }: any) => {
-  return h('a', { 
-    href: props.href, 
-    title: props.title, 
-    target: '_blank', 
-    rel: 'noopener noreferrer' 
-  }, slots.default?.());
-};
-
 const incremarkComponents = {
-  a: IncremarkLink
+  code: IncremarkCodeBlock
 };
 
-const incremarkOptions = {
-  shiki: {
-    themes: {
-      light: 'github-light',
-      dark: 'github-dark'
-    }
-  }
-};
+const isDark = usePreferredDark();
+const incremarkTheme = computed(() => isDark.value ? "dark" : "default");
 
 const isFinished = computed(() => props.role !== "assistant_streaming");
 
@@ -306,7 +294,9 @@ watch(
         :class="props.forking ? 'border-ui-accent/45 scale-[0.99] -translate-y-0.5 shadow-[0_0_0_1px_rgba(37,99,235,0.06)]' : ''"
         data-testid="user-message-bubble"
       >
-        <IncremarkContent :content="props.content" :is-finished="true" :components="incremarkComponents" :options="incremarkOptions" />
+        <ThemeProvider :theme="incremarkTheme">
+          <IncremarkContent :content="props.content" :is-finished="true" :components="incremarkComponents" />
+        </ThemeProvider>
       </div>
       <div
         v-else
@@ -389,7 +379,15 @@ watch(
         class="prose max-w-none text-[14px] text-ui-text font-normal focus:outline-none"
         tabindex="0"
       >
-        <IncremarkContent :content="props.content" :is-finished="isFinished" :components="incremarkComponents" :options="incremarkOptions" />
+        <div
+          v-if="isStreamingPlainText"
+          class="whitespace-pre-wrap break-all font-mono text-[13px] leading-relaxed"
+        >
+          {{ props.content }}
+        </div>
+        <ThemeProvider v-else :theme="incremarkTheme">
+          <IncremarkContent :content="props.content" :is-finished="isFinished" :components="incremarkComponents" />
+        </ThemeProvider>
       </div>
 
       <div

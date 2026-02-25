@@ -43,6 +43,9 @@
     --incremark-color-text-primary: #ffffff !important;
     --incremark-color-text-secondary: #bdc1c6 !important;
     --incremark-color-background-base: transparent !important;
+    --incremark-color-background-elevated: var(--surface) !important;
+    --incremark-color-border-default: var(--border) !important;
+    --incremark-color-border-subtle: var(--border) !important;
     --incremark-color-interactive-link: #8ab4f8;
     --incremark-color-interactive-link-hover: #aecbfa;
   }
@@ -66,7 +69,7 @@
 
   body {
     @apply bg-ui-bg text-ui-text antialiased;
-    font-size: 14px; /* 提升至 14px */
+    font-size: 14px;
     line-height: 1.5;
   }
 }
@@ -79,9 +82,53 @@
     background-color: transparent !important; 
   }
 
-  /* 代码块装饰微调 */
+  /* 代码块容器样式微调 */
   .incremark-code {
-    @apply shadow-sm transition-all;
+    @apply border border-ui-border/40 shadow-sm transition-all;
+  }
+
+  .shiki-wrapper pre,
+  .shiki-wrapper .shiki {
+    background: transparent !important;
+  }
+
+  /* 彻底解决深色模式下引用背景变白的问题 */
+  .incremark blockquote,
+  .incremark-blockquote {
+    @apply my-4 pl-4 border-l-2;
+    border-left-color: var(--incremark-color-interactive-link) !important;
+    color: var(--incremark-color-text-secondary) !important;
+    background-color: var(--incremark-color-background-elevated) !important;
+    padding-top: 0.1px;
+    padding-bottom: 0.1px;
+  }
+
+  /* 表格样式适配 */
+  .incremark table,
+  .incremark-table {
+    @apply my-4 w-full border-collapse border border-ui-border/60;
+    background-color: var(--incremark-color-background-base) !important;
+  }
+
+  .incremark th,
+  .incremark td {
+    @apply p-2 border border-ui-border/60 text-left;
+    color: var(--incremark-color-text-primary) !important;
+    border-color: var(--incremark-color-border-default) !important;
+  }
+
+  .incremark th {
+    @apply font-semibold;
+    background-color: var(--incremark-color-background-elevated) !important;
+  }
+
+  .incremark td {
+    background-color: var(--incremark-color-background-base) !important;
+  }
+
+  .incremark-theme-provider[data-theme="dark"] .incremark-table tbody tr:nth-child(even) td,
+  .incremark-theme-provider.theme-dark .incremark-table tbody tr:nth-child(even) td {
+    background-color: var(--incremark-color-background-elevated) !important;
   }
 
   /* 链接微调 */

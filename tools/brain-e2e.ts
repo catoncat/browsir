@@ -838,6 +838,39 @@ async function startMockLlmServer(port: number): Promise<MockLlmServer> {
         ]);
       }
 
+      if (userText.includes("#LLM_MARKDOWN_VISUAL")) {
+        const markerMatch = /VISUAL_MARKER=([A-Za-z0-9._:-]+)/.exec(userText);
+        const marker = markerMatch?.[1] || "visual-marker-default";
+        const markdown = [
+          `# 视觉回归 ${marker}`,
+          "",
+          "```python",
+          "def hello():",
+          "    print(\"Hello, Markdown!\")",
+          "```",
+          "",
+          "> 这是一段引用文本",
+          "",
+          "| 列1 | 列2 | 列3 |",
+          "| --- | --- | --- |",
+          "| A | B | C |",
+          "| D | E | F |"
+        ].join("\n");
+
+        return buildSseResponse([
+          {
+            choices: [
+              {
+                delta: {
+                  content: markdown
+                }
+              }
+            ]
+          },
+          "[DONE]"
+        ]);
+      }
+
       return buildSseResponse([
         {
           choices: [
@@ -1089,6 +1122,7 @@ async function main() {
   const evidencePath = resolveEvidencePath(useLiveLlmSuite);
   const startedAt = Date.now();
   const testResults: TestCaseResult[] = [];
+  const visualScreenshots: string[] = [];
   const bridgeLogs: string[] = [];
   const chromeLogs: string[] = [];
 
@@ -1318,6 +1352,234 @@ async function main() {
       } finally {
         await distClient.close().catch(() => {});
         await closeTarget(chromePort, distTarget.id).catch(() => {});
+      }
+    });
+
+    await runCase("panel.vnext", "Markdown 视觉回归：亮/暗主题可读 + Shiki 高亮", async () => {
+      mockLlm?.clearRequests();
+      const saveConfig = await sendBgMessage(sidepanelClient!, {
+        type: "config.save",
+        payload: {
+          bridgeUrl: `ws://${BRIDGE_HOST}:${bridgePort}/ws`,
+          bridgeToken,
+          llmApiBase: mockLlm!.baseUrl,
+          llmApiKey: "mock-key",
+          llmModel: "gpt-5.3-codex"
+        }
+      });
+      assert(saveConfig.ok === true, `config.save 失败: ${saveConfig.error || "unknown"}`);
+
+      const connect = await sendBgMessage(sidepanelClient!, { type: "bridge.connect" });
+      assert(connect.ok === true, `bridge.connect 失败: ${connect.error || "unknown"}`);
+
+      const marker = `visual-${Date.now()}`;
+      const started = await sendBgMessage(sidepanelClient!, {
+        type: "brain.run.start",
+        prompt: `请输出固定 markdown 用于视觉回归 #LLM_MARKDOWN_VISUAL VISUAL_MARKER=${marker}`
+      });
+      assert(started.ok === true, `brain.run.start 失败: ${started.error || "unknown"}`);
+      const sessionId = String(started.data?.sessionId || "");
+      assert(sessionId.length > 0, "视觉回归 sessionId 为空");
+
+      await waitFor(
+        "visual markdown loop_done",
+        async () => {
+          const dump = await sendBgMessage(sidepanelClient!, { type: "brain.debug.dump", sessionId });
+          if (!dump.ok) return null;
+          const stream = Array.isArray(dump.data?.stepStream) ? dump.data.stepStream : [];
+          const doneItem = [...stream].reverse().find((item: any) => item?.type === "loop_done");
+          if (!doneItem) return null;
+          const status = String(doneItem?.payload?.status || "");
+          if (status !== "done") return null;
+          const messages = Array.isArray(dump.data?.conversationView?.messages) ? dump.data.conversationView.messages : [];
+          const hasMarker = messages.some((item: any) => String(item?.content || "").includes(marker));
+          return hasMarker ? true : null;
+        },
+        35_000,
+        250
+      );
+
+      await waitFor(
+        "visual markdown render ready",
+        async () => {
+          const out = await sidepanelClient!.evaluate(`(() => {
+            const marker = ${JSON.stringify(marker)};
+            const roots = Array.from(document.querySelectorAll(".incremark"));
+            const target = roots.reverse().find((el) => String(el.textContent || "").includes(marker));
+            if (!target) return null;
+            const hasQuote = !!target.querySelector("blockquote, .incremark-blockquote");
+            const hasTable = !!target.querySelector("table, .incremark-table");
+            const hasCode = !!target.querySelector(".incremark-code");
+            return hasQuote && hasTable && hasCode ? true : null;
+          })()`);
+          return out ? true : null;
+        },
+        20_000,
+        200
+      );
+
+      await sidepanelClient!.send("Page.enable").catch(() => null);
+
+      const captureThemeScreenshot = async (theme: "light" | "dark", suffix = "") => {
+        const screenshot = await sidepanelClient!.send("Page.captureScreenshot", {
+          format: "png",
+          fromSurface: true,
+          captureBeyondViewport: true
+        });
+        assert(typeof screenshot?.data === "string" && screenshot.data.length > 1000, `截图失败(${theme}${suffix ? `:${suffix}` : ""})`);
+
+        const screenshotDir = path.join(evidenceDir, "screenshots");
+        await mkdir(screenshotDir, { recursive: true });
+        const fileName = `panel-markdown-visual-${theme}${suffix ? `-${suffix}` : ""}-${Date.now()}.png`;
+        const filePath = path.join(screenshotDir, fileName);
+        await writeFile(filePath, Buffer.from(String(screenshot.data), "base64"));
+        const relativePath = path.relative(ROOT_DIR, filePath);
+        visualScreenshots.push(relativePath);
+        return relativePath;
+      };
+
+      const assertAndCaptureTheme = async (theme: "light" | "dark") => {
+        await sidepanelClient!.send("Emulation.setEmulatedMedia", {
+          media: "",
+          features: [{ name: "prefers-color-scheme", value: theme }]
+        });
+
+        await waitFor(
+          `theme switched ${theme}`,
+          async () => {
+            const out = await sidepanelClient!.evaluate(`(() => {
+              const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+              return ${JSON.stringify(theme)} === "dark" ? dark : !dark;
+            })()`);
+            return out ? true : null;
+          },
+          8_000,
+          120
+        );
+
+        const readVisualState = async () =>
+          await sidepanelClient!.evaluate(`(() => {
+            const marker = ${JSON.stringify(marker)};
+            const roots = Array.from(document.querySelectorAll(".incremark"));
+            const matchedRoots = roots.filter((el) => String(el.textContent || "").includes(marker));
+            const target = [...matchedRoots].reverse().find(Boolean) || null;
+            if (!target) {
+              return {
+                targetFound: false,
+                rootCount: roots.length,
+                markerRootCount: matchedRoots.length
+              };
+            }
+
+            const codeRoot = target.querySelector(".incremark-code");
+            const shiki = codeRoot ? codeRoot.querySelector(".shiki") : target.querySelector(".shiki");
+            const code = shiki ? shiki.querySelector("code") : codeRoot ? codeRoot.querySelector("pre code, code") : null;
+            const fallbackCode = codeRoot ? codeRoot.querySelector(".code-fallback code") : null;
+            const quote = target.querySelector("blockquote, .incremark-blockquote");
+            const th = target.querySelector("table th, .incremark-table th");
+            const td = target.querySelector("table td, .incremark-table td");
+
+            const readStyle = (el) => {
+              if (!el) return null;
+              const s = getComputedStyle(el);
+              return {
+                color: s.color || "",
+                backgroundColor: s.backgroundColor || "",
+                borderColor: s.borderColor || ""
+              };
+            };
+
+            const clip = (value, max = 260) => String(value || "").replace(/\\s+/g, " ").slice(0, max);
+            const norm = (value) => String(value || "").replace(/\\s+/g, "").toLowerCase();
+            const isDistinct = (a, b) => norm(a) !== norm(b);
+            const isWhiteLike = (value) => {
+              const v = norm(value);
+              return v === "rgb(255,255,255)" || v === "rgba(255,255,255,1)" || v === "#fff" || v === "#ffffff";
+            };
+            const isTransparent = (value) => {
+              const v = norm(value);
+              return v === "transparent" || v === "rgba(0,0,0,0)";
+            };
+
+            const quoteStyle = readStyle(quote);
+            const thStyle = readStyle(th);
+            const tdStyle = readStyle(td);
+            const tokenSpanCount = shiki ? shiki.querySelectorAll("span").length : 0;
+            const styledTokenCount = shiki ? shiki.querySelectorAll("span[style]").length : 0;
+            const lineCount = shiki ? shiki.querySelectorAll(".line").length : 0;
+            const shikiInnerHtml = shiki ? String(shiki.innerHTML || "") : "";
+            const shikiHasTokenizedHtml = shiki ? /<span\\b/i.test(shikiInnerHtml) : false;
+            const shikiReady = !!shiki && (styledTokenCount > 0 || lineCount > 0 || shikiHasTokenizedHtml || tokenSpanCount > 1);
+
+            return {
+              ok: true,
+              targetFound: true,
+              hasShiki: !!shiki,
+              shikiReady,
+              tokenSpanCount,
+              coloredTokenCount: styledTokenCount,
+              lineCount,
+              quoteStyle,
+              thStyle,
+              tdStyle,
+              quoteDistinct: quoteStyle ? isDistinct(quoteStyle.color, quoteStyle.backgroundColor) : false,
+              thDistinct: thStyle ? isDistinct(thStyle.color, thStyle.backgroundColor) : false,
+              tdDistinct: tdStyle ? isDistinct(tdStyle.color, tdStyle.backgroundColor) : false,
+              quoteBgWhiteLike: quoteStyle ? isWhiteLike(quoteStyle.backgroundColor) : true,
+              quoteBgTransparent: quoteStyle ? isTransparent(quoteStyle.backgroundColor) : true,
+              thBgWhiteLike: thStyle ? isWhiteLike(thStyle.backgroundColor) : true,
+              snippet: {
+                targetText: clip(target.textContent),
+                codeText: clip(code ? code.textContent : fallbackCode ? fallbackCode.textContent : ""),
+                targetHtml: clip(target.innerHTML),
+                shikiHtml: clip(shiki ? shiki.innerHTML : ""),
+                fallbackHtml: clip(codeRoot ? codeRoot.innerHTML : "")
+              }
+            };
+          })()`);
+
+        let lastVisualState: any = null;
+        const visualCheck = await waitFor(
+          `visual style ready ${theme}`,
+          async () => {
+            const out = await readVisualState();
+            lastVisualState = out;
+            if (!out?.targetFound) return null;
+            if (!out?.shikiReady) return null;
+            return out;
+          },
+          15_000,
+          220
+        ).catch(async (error) => {
+          const diagnosticState = await readVisualState().catch(() => lastVisualState || null);
+          await captureThemeScreenshot(theme, "debug-timeout").catch(() => null);
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          throw new Error(`${errorMessage}; diag=${JSON.stringify(diagnosticState)}`);
+        });
+
+        await captureThemeScreenshot(theme);
+
+        assert(visualCheck?.ok === true, `样式检查失败(${theme}): ${JSON.stringify(visualCheck)}`);
+        assert(visualCheck.hasShiki === true, `代码块未启用 Shiki(${theme}): ${JSON.stringify(visualCheck)}`);
+        assert(
+          visualCheck.shikiReady === true,
+          `Shiki 未产生有效 token 分段(${theme}): ${JSON.stringify(visualCheck)}`
+        );
+        assert(visualCheck.quoteDistinct === true, `引用区前景/背景对比不足(${theme}): ${JSON.stringify(visualCheck.quoteStyle)}`);
+        assert(visualCheck.thDistinct === true, `表头前景/背景对比不足(${theme}): ${JSON.stringify(visualCheck.thStyle)}`);
+        assert(visualCheck.tdDistinct === true, `表格单元前景/背景对比不足(${theme}): ${JSON.stringify(visualCheck.tdStyle)}`);
+        if (theme === "dark") {
+          assert(visualCheck.quoteBgWhiteLike === false, `暗色引用背景不应接近白色: ${JSON.stringify(visualCheck.quoteStyle)}`);
+          assert(visualCheck.quoteBgTransparent === false, `暗色引用背景不应透明: ${JSON.stringify(visualCheck.quoteStyle)}`);
+          assert(visualCheck.thBgWhiteLike === false, `暗色表头背景不应接近白色: ${JSON.stringify(visualCheck.thStyle)}`);
+        }
+      };
+
+      try {
+        await assertAndCaptureTheme("light");
+        await assertAndCaptureTheme("dark");
+      } finally {
+        await sidepanelClient!.send("Emulation.setEmulatedMedia", { media: "", features: [] }).catch(() => null);
       }
     });
 
@@ -4650,7 +4912,8 @@ async function main() {
       fatalError: fatalError || null,
       debug: {
         bridgeLogsTail: bridgeLogs.slice(-80),
-        chromeLogsTail: chromeLogs.slice(-80)
+        chromeLogsTail: chromeLogs.slice(-80),
+        visualScreenshots
       }
     };
 
