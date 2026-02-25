@@ -1065,7 +1065,7 @@ function buildStepFailureEnvelope(
   retryHint: string,
   options: {
     defaultRetryable?: boolean;
-    errorReason?: "failed_execute" | "failed_verify";
+    errorReason?: "failed_execute" | "failed_verify" | "progress_uncertain";
   } = {}
 ): JsonRecord {
   const errorCode = normalizeErrorCode(out.errorCode);
@@ -1078,6 +1078,21 @@ function buildStepFailureEnvelope(
     retryHint,
     details: out.errorDetails || null
   };
+}
+
+function mapToolErrorReasonToTerminalStatus(rawReason: unknown): "failed_execute" | "failed_verify" | "progress_uncertain" {
+  const reason = String(rawReason || "").trim().toLowerCase();
+  if (reason === "failed_verify") return "failed_verify";
+  if (reason === "progress_uncertain") return "progress_uncertain";
+  return "failed_execute";
+}
+
+function mapVerifyReasonToFailureReason(rawVerifyReason: unknown): "failed_verify" | "progress_uncertain" {
+  const verifyReason = String(rawVerifyReason || "").trim().toLowerCase();
+  if (["verify_skipped", "verify_policy_off", "verify_not_supported_for_bridge", "verify_missing_tab_id"].includes(verifyReason)) {
+    return "progress_uncertain";
+  }
+  return "failed_verify";
 }
 
 async function queryAllTabsForRuntime(): Promise<Array<{ id: number; windowId: number; index: number; active: boolean; pinned: boolean; title: string; url: string }>> {
@@ -2605,10 +2620,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const explicitExpect = normalizeVerifyExpect(plan.expect || null);
         const hardFail = !!explicitExpect || plan.kindValue === "navigate";
         if (!verified && hardFail) {
+          const errorReason = mapVerifyReasonToFailureReason(verifyReason);
           return {
             error: "browser_action 执行成功但未通过验证",
             errorCode: "E_VERIFY_FAILED",
-            errorReason: "failed_verify",
+            errorReason,
             retryable: true,
             retryHint: "Adjust action args/expect and retry the browser action.",
             details: {
@@ -2653,7 +2669,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           return {
             error: "browser_verify 未通过",
             errorCode: "E_VERIFY_FAILED",
-            errorReason: "failed_verify",
+            errorReason: mapVerifyReasonToFailureReason(out.verifyReason),
             retryable: true,
             retryHint: "Refine expect conditions and re-run browser_verify.",
             details: verifyData
@@ -3310,7 +3326,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                   role: "assistant",
                   text: circuitMessage
                 });
-                finalStatus = result.errorReason === "failed_verify" ? "failed_verify" : "failed_execute";
+                finalStatus = mapToolErrorReasonToTerminalStatus(result.errorReason);
                 throw new Error(circuitMessage);
               }
 
@@ -3325,7 +3341,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                   role: "assistant",
                   text: budgetMessage
                 });
-                finalStatus = result.errorReason === "failed_verify" ? "failed_verify" : "failed_execute";
+                finalStatus = mapToolErrorReasonToTerminalStatus(result.errorReason);
                 throw new Error(budgetMessage);
               }
 
@@ -3338,7 +3354,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               role: "assistant",
               text: failureText
             });
-            finalStatus = result.errorReason === "failed_verify" ? "failed_verify" : "failed_execute";
+            finalStatus = mapToolErrorReasonToTerminalStatus(result.errorReason);
             throw new Error(failureText);
           }
 
@@ -3380,7 +3396,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       }
 
       if (llmStep >= maxLoopSteps) {
-        finalStatus = "max_steps";
+        finalStatus = requireBrowserProof && !browserProofSatisfied ? "progress_uncertain" : "max_steps";
         await orchestrator.sessions.appendMessage({
           sessionId,
           role: "assistant",
