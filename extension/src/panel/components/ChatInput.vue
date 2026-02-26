@@ -574,20 +574,21 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
             <button
               v-if="selectedTabs.length > 1"
               @click="isContextExpanded = !isContextExpanded"
-              class="h-6 px-1.5 inline-flex items-center gap-1 hover:bg-black/5 rounded-md text-ui-text-muted transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent"
+              class="h-5 w-5 inline-flex items-center justify-center hover:bg-black/5 rounded-md text-ui-text-muted transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent"
               :aria-label="isContextExpanded ? '收起详情' : '查看共享详情'"
               :aria-expanded="isContextExpanded"
+              :title="isContextExpanded ? '收起详情' : '管理共享标签页'"
             >
-              <span class="text-[10px] leading-none">{{ isContextExpanded ? "收起" : "管理" }}</span>
-              <ChevronDown v-if="!isContextExpanded" :size="12" aria-hidden="true" />
-              <ChevronUp v-else :size="12" aria-hidden="true" />
+              <ChevronDown v-if="!isContextExpanded" :size="11" aria-hidden="true" />
+              <ChevronUp v-else :size="11" aria-hidden="true" />
             </button>
             <button
               @click="selectedTabs = []; isContextExpanded = false"
-              class="h-6 w-6 inline-flex items-center justify-center hover:bg-black/5 rounded-md text-ui-text-muted transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent"
+              class="h-5 w-5 inline-flex items-center justify-center hover:bg-black/5 rounded-md text-ui-text-muted transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent"
               aria-label="移除所有共享标签页"
+              title="移除所有共享标签页"
             >
-              <X :size="13" aria-hidden="true" />
+              <X :size="11" aria-hidden="true" />
             </button>
           </div>
         </div>
