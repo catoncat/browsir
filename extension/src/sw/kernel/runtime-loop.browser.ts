@@ -1758,7 +1758,6 @@ function buildBrowserAgentSystemPrompt(config: BridgeConfig, toolDefinitions: To
     "Guidelines:",
     guidelines,
     "",
-    `Current date and time: ${nowIso()}`,
     "Runtime: Browser extension agent (Chrome MV3)."
   ].join("\n");
 }

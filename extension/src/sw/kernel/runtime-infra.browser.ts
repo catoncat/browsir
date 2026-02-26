@@ -307,14 +307,52 @@ function summarizeSnapshotNode(node: JsonRecord): string {
   return `${String(node.role || "")}|${String(node.name || "")}|${String(node.selector || "")}|${String(node.value || "")}`;
 }
 
+const ROLE_SHORTHAND: Record<string, string> = {
+  button: "btn",
+  link: "lnk",
+  textbox: "txt",
+  searchbox: "search",
+  combobox: "combo",
+  checkbox: "chk",
+  radio: "radio",
+  switch: "sw",
+  menuitem: "item",
+  option: "opt",
+  slider: "sld",
+  tab: "tab",
+  spinbutton: "spin",
+  listbox: "list",
+  treeitem: "tree",
+  textarea: "area"
+};
+
 function formatNodeCompact(node: JsonRecord): string {
-  const role = String(node.role || "node");
-  const label = String(node.name || node.value || "").replace(/\s+/g, " ").trim();
+  const rawRole = String(node.role || "node").toLowerCase();
+  const role = ROLE_SHORTHAND[rawRole] || rawRole;
+  const name = String(node.name || "").replace(/\s+/g, " ").trim();
+  const value = String(node.value || "").replace(/\s+/g, " ").trim();
+  const placeholder = String(node.placeholder || "").replace(/\s+/g, " ").trim();
+
+  let label = name;
+  if (!label || (value && value !== name)) {
+    if (label && value) {
+      label = `${label} (${value})`;
+    } else {
+      label = value || placeholder || label;
+    }
+  }
+
   const showLabel = label ? ` "${label.slice(0, 80)}"` : "";
   const flags: string[] = [];
-  if (node.disabled) flags.push("disabled");
-  if (node.focused) flags.push("focused");
-  if (node.selector) flags.push(`sel=${String(node.selector).slice(0, 36)}`);
+  if (node.disabled) flags.push("off");
+  if (node.focused) flags.push("focus");
+  if (node.required) flags.push("*");
+  if (node.expanded === true) flags.push("open");
+  if (node.expanded === false) flags.push("closed");
+  if (node.checked === true) flags.push("on");
+  if (node.checked === false) flags.push("off");
+  if (node.selected === true) flags.push("sel");
+
   const flagText = flags.length > 0 ? ` [${flags.join(",")}]` : "";
   return `${String(node.ref || "")}:${role}${showLabel}${flagText}`;
 }
@@ -1159,6 +1197,24 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           role === "combobox";
         const text = String(this.textContent || "").replace(/\\s+/g, " ").trim();
         const value = "value" in this ? String(this.value || "") : "";
+
+        const brainUid = "brain-" + Math.random().toString(36).slice(2, 10) + "-" + Date.now().toString(36);
+        if (!this.getAttribute("data-brain-uid")) {
+          this.setAttribute("data-brain-uid", brainUid);
+        }
+        const effectiveUid = this.getAttribute("data-brain-uid");
+
+        const checkVisible = (el) => {
+          if (typeof el.checkVisibility === "function") return el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+          const rect = el.getBoundingClientRect();
+          return !!(rect.width && rect.height && rect.top < window.innerHeight && rect.left < window.innerWidth && rect.bottom > 0 && rect.right > 0);
+        };
+        const getAriaBool = (name) => {
+          const v = this.getAttribute(name);
+          if (v === "true") return true;
+          if (v === "false") return false;
+          return undefined;
+        };
         return {
           ok: true,
           matchesScope,
@@ -1170,8 +1226,14 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           ariaLabel: String(this.getAttribute("aria-label") || "").slice(0, 180),
           editable,
           selector: makeSelector(this),
-          disabled: !!this.disabled,
-          focused: document.activeElement === this
+          disabled: !!this.disabled || getAriaBool("aria-disabled") === true,
+          focused: document.activeElement === this,
+          visible: checkVisible(this),
+          expanded: getAriaBool("aria-expanded"),
+          checked: getAriaBool("aria-checked") ?? (typeof this.checked === "boolean" ? this.checked : undefined),
+          selected: getAriaBool("aria-selected") ?? (typeof this.selected === "boolean" ? this.selected : undefined),
+          required: !!this.required || getAriaBool("aria-required") === true,
+          brainUid: effectiveUid
         };
       }`;
       const result = (await sendCdpCommand(tabId, "Runtime.callFunctionOn", {
@@ -1276,15 +1338,39 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       const meta = await resolveElementMetaByBackendNode(tabId, backendNodeId, scopeSelector);
       if (!meta) continue;
       if (scopeSelector && meta.matchesScope !== true) continue;
+
+      const hasMeaningfulLabel = !!(
+        meta.name ||
+        meta.value ||
+        meta.ariaLabel ||
+        meta.placeholder ||
+        item.name ||
+        item.value
+      );
+      if (!allowAll && meta.visible === false && !hasMeaningfulLabel && !meta.focused) {
+        continue;
+      }
+
       seenBackendNodeIds.add(backendNodeId);
       enrichedNodes.push({
         ...item,
         ...meta
       });
-      if (enrichedNodes.length >= maxNodes) break;
+      if (enrichedNodes.length >= Math.max(maxNodes * 1.5, 180)) break;
     }
 
-    if (enrichedNodes.length === 0) {
+    const finalEnriched = enrichedNodes
+      .sort((a, b) => {
+        if (a.focused !== b.focused) return a.focused ? -1 : 1;
+        if (a.visible !== b.visible) return a.visible ? -1 : 1;
+        const aHasLabel = !!(a.name || a.value || a.ariaLabel || a.placeholder);
+        const bHasLabel = !!(b.name || b.value || b.ariaLabel || b.placeholder);
+        if (aHasLabel !== bHasLabel) return aHasLabel ? -1 : 1;
+        return 0;
+      })
+      .slice(0, maxNodes);
+
+    if (finalEnriched.length === 0) {
       throw toRuntimeError("AXTree produced no actionable nodes", {
         code: "E_CDP_AXTREE_NO_NODES",
         retryable: true,
@@ -1296,7 +1382,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       });
     }
 
-    const nodes = enrichSnapshotNodes(state, enrichedNodes, key, snapshotId, "ax");
+    const nodes = enrichSnapshotNodes(state, finalEnriched, key, snapshotId, "ax");
 
     return {
       ...base,
@@ -1384,6 +1470,26 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
             role === "textbox" ||
             role === "searchbox" ||
             role === "combobox";
+
+          const brainUid = "brain-" + Math.random().toString(36).slice(2, 10) + "-" + Date.now().toString(36);
+          if (!el.getAttribute("data-brain-uid")) {
+            el.setAttribute("data-brain-uid", brainUid);
+          }
+          const effectiveUid = el.getAttribute("data-brain-uid");
+
+          const checkVisible = (node) => {
+            if (typeof node.checkVisibility === "function") return node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+            const rect = node.getBoundingClientRect();
+            return !!(rect.width && rect.height && rect.top < window.innerHeight && rect.left < window.innerWidth && rect.bottom > 0 && rect.right > 0);
+          };
+
+          const getAriaBool = (name) => {
+            const v = el.getAttribute(name);
+            if (v === "true") return true;
+            if (v === "false") return false;
+            return undefined;
+          };
+
           return {
             role,
             name: text.slice(0, 180),
@@ -1392,9 +1498,15 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
             ariaLabel: ariaLabel.slice(0, 180),
             editable,
             selector: makeSelector(el),
-            disabled: !!el.disabled,
+            disabled: !!el.disabled || getAriaBool("aria-disabled") === true,
             focused: document.activeElement === el,
-            tag: el.tagName.toLowerCase()
+            tag: el.tagName.toLowerCase(),
+            visible: checkVisible(el),
+            expanded: getAriaBool("aria-expanded"),
+            checked: getAriaBool("aria-checked") ?? (typeof el.checked === "boolean" ? el.checked : undefined),
+            selected: getAriaBool("aria-selected") ?? (typeof el.selected === "boolean" ? el.selected : undefined),
+            required: !!el.required || getAriaBool("aria-required") === true,
+            brainUid: effectiveUid
           };
         });
         return {
@@ -1587,6 +1699,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       kind: string;
       value: string;
       waitForMs: number;
+      brainUid?: string;
     }
   ): Promise<JsonRecord> {
     const kind = input.kind;
@@ -1595,18 +1708,30 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     let objectId = "";
 
     const resolveObject = async (): Promise<string> => {
-      const resolved = (await sendCdpCommand(tabId, "DOM.resolveNode", {
-        backendNodeId: input.backendNodeId
-      })) as JsonRecord;
-      const nextObjectId = String(asRecord(resolved.object).objectId || "");
-      if (!nextObjectId) {
-        throw toRuntimeError(`backendNodeId ${input.backendNodeId} resolve failed`, {
-          code: "E_CDP_RESOLVE_NODE",
-          retryable: true,
-          details: { tabId, backendNodeId: input.backendNodeId }
-        });
+      try {
+        const resolved = (await sendCdpCommand(tabId, "DOM.resolveNode", {
+          backendNodeId: input.backendNodeId
+        })) as JsonRecord;
+        const nextObjectId = String(asRecord(resolved.object).objectId || "");
+        if (nextObjectId) return nextObjectId;
+      } catch {
+        // fallback to UID lookup
       }
-      return nextObjectId;
+
+      if (input.brainUid) {
+        const uidEval = (await sendCdpCommand(tabId, "Runtime.evaluate", {
+          expression: `document.querySelector('[data-brain-uid="${input.brainUid}"]')`,
+          includeCommandLineAPI: true
+        })) as JsonRecord;
+        const nextObjectId = String(asRecord(uidEval.result).objectId || "");
+        if (nextObjectId) return nextObjectId;
+      }
+
+      throw toRuntimeError(`backendNodeId ${input.backendNodeId} resolve failed`, {
+        code: "E_CDP_RESOLVE_NODE",
+        retryable: true,
+        details: { tabId, backendNodeId: input.backendNodeId, brainUid: input.brainUid }
+      });
     };
 
     while (true) {
@@ -1775,9 +1900,30 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           }
           return { ok: true, hovered: true, via: "backend-node", url: location.href, title: document.title };
         }
+        const getFrameOffsets = () => {
+          let x = 0;
+          let y = 0;
+          let cur = window;
+          try {
+            while (cur && cur !== window.top) {
+              const frameEl = cur.frameElement;
+              if (!frameEl) break;
+              const rect = frameEl.getBoundingClientRect();
+              x += rect.left;
+              y += rect.top;
+              cur = cur.parent;
+            }
+          } catch {
+            // ignore cross-origin access issues, coords will be best-effort
+          }
+          return { x, y };
+        };
         if (kind === "click") {
-          el.click?.();
-          return { ok: true, clicked: true, via: "backend-node", url: location.href, title: document.title };
+          const rect = el.getBoundingClientRect();
+          const offsets = getFrameOffsets();
+          const centerX = offsets.x + rect.left + rect.width / 2;
+          const centerY = offsets.y + rect.top + rect.height / 2;
+          return { ok: true, shouldNativeClick: true, x: centerX, y: centerY, url: location.href, title: document.title };
         }
         if (kind === "type" || kind === "fill") {
           const target = isTypableElement(el) ? el : findTypableNear(el);
@@ -1819,6 +1965,23 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           retryable: true,
           details: { tabId, backendNodeId: input.backendNodeId, kind }
         });
+      }
+      if (value.shouldNativeClick === true) {
+        try {
+          const x = Number(value.x);
+          const y = Number(value.y);
+          await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+          await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+          return { ok: true, clicked: true, via: "cdp-native", url: value.url, title: value.title };
+        } catch {
+          // fallback to JS click via callFunctionOn
+          await sendCdpCommand(tabId, "Runtime.callFunctionOn", {
+            objectId,
+            functionDeclaration: "function() { this.click?.(); }",
+            awaitPromise: true
+          });
+          return { ok: true, clicked: true, via: "cdp-js-fallback", url: value.url, title: value.title };
+        }
       }
       return value;
     } finally {
@@ -1877,6 +2040,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     const explicitSelector = typeof rawAction.selector === "string" ? rawAction.selector.trim() : "";
     const fromRef = ref ? resolveRefEntry(tabId, ref) : {};
     const selector = String(explicitSelector || fromRef.selector || "").trim();
+    const brainUid = String(fromRef.brainUid || "").trim();
     const backendNodeId =
       toPositiveInteger(rawAction.backendNodeId) || toPositiveInteger(fromRef.backendNodeId) || toPositiveInteger(fromRef.nodeId);
     const waitForMsRaw = Number(rawAction.waitForMs);
@@ -1892,7 +2056,8 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           backendNodeId,
           kind,
           value,
-          waitForMs: selector ? 0 : waitForMs
+          waitForMs: selector ? 0 : waitForMs,
+          brainUid: brainUid || undefined
         });
         return {
           tabId,

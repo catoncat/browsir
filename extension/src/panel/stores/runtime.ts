@@ -194,6 +194,44 @@ export interface SkillDiscoverResult {
   skills?: SkillMetadata[];
 }
 
+export interface PluginMetadata {
+  id: string;
+  name: string;
+  version: string;
+  enabled: boolean;
+  timeoutMs: number;
+  lastError?: string;
+  errorCount: number;
+  hooks: string[];
+  modes: string[];
+  capabilities: string[];
+  policyCapabilities: string[];
+  tools: string[];
+  llmProviders: string[];
+}
+
+export interface PluginListResult {
+  plugins: PluginMetadata[];
+  modeProviders: Array<Record<string, unknown>>;
+  toolContracts: Array<Record<string, unknown>>;
+  llmProviders: Array<Record<string, unknown>>;
+  capabilityProviders: Array<Record<string, unknown>>;
+  capabilityPolicies: Array<Record<string, unknown>>;
+}
+
+export interface PluginRegisterResult {
+  pluginId: string;
+  enabled: boolean;
+  plugin: PluginMetadata | null;
+  llmProviders: Array<Record<string, unknown>>;
+}
+
+export interface PluginUnregisterResult {
+  pluginId: string;
+  removed: boolean;
+  llmProviders: Array<Record<string, unknown>>;
+}
+
 async function sendMessage<T = any>(type: string, payload: Record<string, unknown> = {}): Promise<T> {
   const response = (await chrome.runtime.sendMessage({ type, ...payload })) as RuntimeResponse<T>;
   if (!response?.ok) {
@@ -213,6 +251,70 @@ function toIntInRange(raw: unknown, fallback: number, min: number, max: number):
   if (rounded < min) return min;
   if (rounded > max) return max;
   return rounded;
+}
+
+function toStringArray(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of input) {
+    const text = String(item || "").trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+  }
+  return out;
+}
+
+function normalizePluginMetadata(input: unknown): PluginMetadata {
+  const row = toRecord(input);
+  return {
+    id: String(row.id || "").trim(),
+    name: String(row.name || "").trim(),
+    version: String(row.version || "").trim(),
+    enabled: row.enabled === true,
+    timeoutMs: toIntInRange(row.timeoutMs, 1500, 50, 10000),
+    lastError: String(row.lastError || "").trim() || undefined,
+    errorCount: toIntInRange(row.errorCount, 0, 0, Number.MAX_SAFE_INTEGER),
+    hooks: toStringArray(row.hooks),
+    modes: toStringArray(row.modes),
+    capabilities: toStringArray(row.capabilities),
+    policyCapabilities: toStringArray(row.policyCapabilities),
+    tools: toStringArray(row.tools),
+    llmProviders: toStringArray(row.llmProviders)
+  };
+}
+
+function normalizePluginListResult(input: unknown): PluginListResult {
+  const row = toRecord(input);
+  return {
+    plugins: Array.isArray(row.plugins) ? row.plugins.map((item) => normalizePluginMetadata(item)) : [],
+    modeProviders: Array.isArray(row.modeProviders) ? row.modeProviders.map((item) => toRecord(item)) : [],
+    toolContracts: Array.isArray(row.toolContracts) ? row.toolContracts.map((item) => toRecord(item)) : [],
+    llmProviders: Array.isArray(row.llmProviders) ? row.llmProviders.map((item) => toRecord(item)) : [],
+    capabilityProviders: Array.isArray(row.capabilityProviders) ? row.capabilityProviders.map((item) => toRecord(item)) : [],
+    capabilityPolicies: Array.isArray(row.capabilityPolicies) ? row.capabilityPolicies.map((item) => toRecord(item)) : []
+  };
+}
+
+function normalizePluginRegisterResult(input: unknown): PluginRegisterResult {
+  const row = toRecord(input);
+  const pluginRaw = toRecord(row.plugin);
+  return {
+    pluginId: String(row.pluginId || "").trim(),
+    enabled: row.enabled === true,
+    plugin: Object.keys(pluginRaw).length > 0 ? normalizePluginMetadata(pluginRaw) : null,
+    llmProviders: Array.isArray(row.llmProviders) ? row.llmProviders.map((item) => toRecord(item)) : []
+  };
+}
+
+function normalizePluginUnregisterResult(input: unknown): PluginUnregisterResult {
+  const row = toRecord(input);
+  return {
+    pluginId: String(row.pluginId || "").trim(),
+    removed: row.removed === true,
+    llmProviders: Array.isArray(row.llmProviders) ? row.llmProviders.map((item) => toRecord(item)) : []
+  };
 }
 
 function normalizeEscalationPolicy(raw: unknown): "upgrade_only" | "disabled" {
@@ -621,6 +723,45 @@ export const useRuntimeStore = defineStore("runtime", () => {
     await sendPrompt(prompt);
   }
 
+  async function listPlugins(): Promise<PluginListResult> {
+    const out = await sendMessage<Record<string, unknown>>("brain.plugin.list");
+    return normalizePluginListResult(out);
+  }
+
+  async function registerPlugin(
+    plugin: Record<string, unknown>,
+    options: { replace?: boolean; enable?: boolean } = {}
+  ): Promise<PluginRegisterResult> {
+    const payload: Record<string, unknown> = {
+      plugin
+    };
+    if (options.replace === true) payload.replace = true;
+    if (options.enable === false) payload.enable = false;
+    const out = await sendMessage<Record<string, unknown>>("brain.plugin.register", payload);
+    return normalizePluginRegisterResult(out);
+  }
+
+  async function enablePlugin(pluginId: string): Promise<PluginRegisterResult> {
+    const out = await sendMessage<Record<string, unknown>>("brain.plugin.enable", {
+      pluginId: String(pluginId || "").trim()
+    });
+    return normalizePluginRegisterResult(out);
+  }
+
+  async function disablePlugin(pluginId: string): Promise<PluginRegisterResult> {
+    const out = await sendMessage<Record<string, unknown>>("brain.plugin.disable", {
+      pluginId: String(pluginId || "").trim()
+    });
+    return normalizePluginRegisterResult(out);
+  }
+
+  async function unregisterPlugin(pluginId: string): Promise<PluginUnregisterResult> {
+    const out = await sendMessage<Record<string, unknown>>("brain.plugin.unregister", {
+      pluginId: String(pluginId || "").trim()
+    });
+    return normalizePluginUnregisterResult(out);
+  }
+
   function findAssistantMessageIndex(entryId: string) {
     return messages.value.findIndex((msg) => msg.entryId === entryId && msg.role === "assistant");
   }
@@ -958,6 +1099,11 @@ export const useRuntimeStore = defineStore("runtime", () => {
     uninstallSkill,
     discoverSkills,
     runSkill,
+    listPlugins,
+    registerPlugin,
+    enablePlugin,
+    disablePlugin,
+    unregisterPlugin,
     forkFromAssistantEntry,
     retryLastAssistantEntry,
     regenerateFromAssistantEntry,
