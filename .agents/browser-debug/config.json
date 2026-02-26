@@ -16,6 +16,14 @@
     "startCommand": "bun run brain:dev",
     "healthUrl": "http://127.0.0.1:4173/"
   },
+  "cdpMcp": {
+    "channel": "beta",
+    "headless": false,
+    "autoConnect": false,
+    "isolated": false,
+    "slim": true,
+    "acceptInsecureCerts": false
+  },
   "targets": {
     "main": "http://127.0.0.1:4173/",
     "sidepanel": "http://127.0.0.1:4173/sidepanel.html"
