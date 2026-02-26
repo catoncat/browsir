@@ -124,7 +124,6 @@ describe("bridge server", () => {
   test("dedup race-free and dedup responses use current request metadata", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "bridge-server-dedup-"));
     const canonicalTool = "test.delay.echo";
-    const aliasTool = "test_delay_echo";
     const port = await getFreePort();
     const config = createTestConfig(root, port, 4);
 
@@ -134,7 +133,7 @@ describe("bridge server", () => {
       releaseGate = resolve;
     });
 
-    registerToolContract({ name: canonicalTool, aliases: [aliasTool] }, { replace: true });
+    registerToolContract({ name: canonicalTool }, { replace: true });
     registerInvokeToolHandler(
       canonicalTool,
       async () => {
@@ -153,7 +152,7 @@ describe("bridge server", () => {
       client.send({
         type: "invoke",
         id: "dup-1",
-        tool: aliasTool,
+        tool: ` ${canonicalTool} `,
         args: {},
         sessionId: "logical-1",
         agentId: "agent-1",
@@ -161,7 +160,7 @@ describe("bridge server", () => {
       client.send({
         type: "invoke",
         id: "dup-1",
-        tool: aliasTool,
+        tool: ` ${canonicalTool} `,
         args: {},
         sessionId: "logical-1",
         agentId: "agent-2",
@@ -178,11 +177,30 @@ describe("bridge server", () => {
         2,
         3000,
       );
+      const [startedEvent] = await waitForMessages(
+        client.messages,
+        (item) => item?.type === "event" && item?.event === "invoke.started" && item?.id === "dup-1",
+        1,
+        3000,
+      );
+      const [finishedWithMetrics] = await waitForMessages(
+        client.messages,
+        (item) =>
+          item?.type === "event" &&
+          item?.event === "invoke.finished" &&
+          item?.id === "dup-1" &&
+          typeof item?.data?.metrics === "object",
+        1,
+        3000,
+      );
 
       const agentIds = outputs.map((item) => item.agentId).sort();
       expect(agentIds).toEqual(["agent-1", "agent-2"]);
       expect(outputs.every((item) => item.sessionId === "logical-1")).toBe(true);
       expect(outputs.every((item) => item.ok === true)).toBe(true);
+      expect(startedEvent.data?.tool).toBe(canonicalTool);
+      expect(startedEvent.data?.canonicalTool).toBe(canonicalTool);
+      expect(finishedWithMetrics.data?.metrics?.tool).toBe(canonicalTool);
     } finally {
       await client.close();
       await server.stop(true);
@@ -195,7 +213,6 @@ describe("bridge server", () => {
   test("duplicate invoke id with mismatched args should fail instead of reusing wrong result", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "bridge-server-dedup-conflict-"));
     const canonicalTool = "test.dedup.guard";
-    const aliasTool = "test_dedup_guard";
     const port = await getFreePort();
     const config = createTestConfig(root, port, 4);
 
@@ -205,7 +222,7 @@ describe("bridge server", () => {
       releaseGate = resolve;
     });
 
-    registerToolContract({ name: canonicalTool, aliases: [aliasTool] }, { replace: true });
+    registerToolContract({ name: canonicalTool }, { replace: true });
     registerInvokeToolHandler(
       canonicalTool,
       async (req) => {
@@ -224,7 +241,7 @@ describe("bridge server", () => {
       client.send({
         type: "invoke",
         id: "conflict-1",
-        tool: aliasTool,
+        tool: canonicalTool,
         args: { value: "a" },
         sessionId: "logical-conflict",
         agentId: "agent-a",
@@ -240,7 +257,7 @@ describe("bridge server", () => {
       client.send({
         type: "invoke",
         id: "conflict-1",
-        tool: aliasTool,
+        tool: canonicalTool,
         args: { value: "b" },
         sessionId: "logical-conflict",
         agentId: "agent-b",
@@ -271,7 +288,7 @@ describe("bridge server", () => {
       client.send({
         type: "invoke",
         id: "conflict-1",
-        tool: aliasTool,
+        tool: canonicalTool,
         args: { value: "b" },
         sessionId: "logical-conflict",
         agentId: "agent-c",
@@ -293,7 +310,7 @@ describe("bridge server", () => {
       client.send({
         type: "invoke",
         id: "conflict-1",
-        tool: aliasTool,
+        tool: canonicalTool,
         args: { value: "a" },
         sessionId: "logical-conflict",
         agentId: "agent-d",
@@ -318,7 +335,6 @@ describe("bridge server", () => {
   test("E_BUSY response carries logical session id consistently", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "bridge-server-busy-"));
     const canonicalTool = "test.block.busy";
-    const aliasTool = "test_block_busy";
     const port = await getFreePort();
     const config = createTestConfig(root, port, 1);
 
@@ -327,7 +343,7 @@ describe("bridge server", () => {
       releaseGate = resolve;
     });
 
-    registerToolContract({ name: canonicalTool, aliases: [aliasTool] }, { replace: true });
+    registerToolContract({ name: canonicalTool }, { replace: true });
     registerInvokeToolHandler(
       canonicalTool,
       async () => {
@@ -345,7 +361,7 @@ describe("bridge server", () => {
       client.send({
         type: "invoke",
         id: "hold-1",
-        tool: aliasTool,
+        tool: canonicalTool,
         args: {},
         sessionId: "logical-busy",
         agentId: "agent-hold",
@@ -361,7 +377,7 @@ describe("bridge server", () => {
       client.send({
         type: "invoke",
         id: "busy-2",
-        tool: aliasTool,
+        tool: canonicalTool,
         args: {},
         sessionId: "logical-busy",
         agentId: "agent-busy",
@@ -398,7 +414,6 @@ describe("bridge server", () => {
   test("audit write failure degrades gracefully and remains observable", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "bridge-server-audit-"));
     const canonicalTool = "test.audit.safe";
-    const aliasTool = "test_audit_safe";
     const port = await getFreePort();
     const config = createTestConfig(root, port, 2);
 
@@ -410,7 +425,7 @@ describe("bridge server", () => {
       },
     };
 
-    registerToolContract({ name: canonicalTool, aliases: [aliasTool] }, { replace: true });
+    registerToolContract({ name: canonicalTool }, { replace: true });
     registerInvokeToolHandler(
       canonicalTool,
       async () => {
@@ -427,7 +442,7 @@ describe("bridge server", () => {
       client.send({
         type: "invoke",
         id: "audit-1",
-        tool: aliasTool,
+        tool: canonicalTool,
         args: {},
         sessionId: "logical-audit",
         agentId: "agent-audit",

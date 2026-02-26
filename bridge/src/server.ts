@@ -569,7 +569,7 @@ export function startBridgeServer(options: StartBridgeServerOptions = {}): Bun.S
               };
 
               const durationMs = Date.now() - startedAt;
-              const metrics = summarizeInvokeMetrics(frame.canonicalTool || frame.tool, data, durationMs);
+              const metrics = summarizeInvokeMetrics(frame.canonicalTool, data, durationMs);
               sendJson(
                 ws,
                 eventFrame(
@@ -623,7 +623,7 @@ export function startBridgeServer(options: StartBridgeServerOptions = {}): Bun.S
               };
 
               const durationMs = Date.now() - startedAt;
-              const metrics = summarizeInvokeMetrics(frame.canonicalTool || frame.tool, null, durationMs);
+              const metrics = summarizeInvokeMetrics(frame.canonicalTool, null, durationMs);
               sendJson(
                 ws,
                 eventFrame(

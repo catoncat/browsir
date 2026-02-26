@@ -28,7 +28,7 @@ function createTestConfig(root: string): BridgeConfig {
 }
 
 describe("dispatchInvoke", () => {
-  test("routes read_file alias to read tool handler", async () => {
+  test("routes canonical read tool to read handler", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "bridge-dispatch-"));
     try {
       const filePath = path.join(root, "sample.txt");
@@ -37,7 +37,7 @@ describe("dispatchInvoke", () => {
       const req = parseInvokeFrame(JSON.stringify({
         id: "i1",
         type: "invoke",
-        tool: "read_file",
+        tool: "read",
         args: {
           path: "sample.txt",
           cwd: root,
@@ -60,7 +60,6 @@ describe("dispatchInvoke", () => {
     try {
       registerToolContract({
         name: "memory.read",
-        aliases: ["memory_read"]
       }, { replace: true });
       registerInvokeToolHandler(
         "memory.read",
@@ -75,7 +74,7 @@ describe("dispatchInvoke", () => {
       const req = parseInvokeFrame(JSON.stringify({
         id: "i2",
         type: "invoke",
-        tool: "memory_read",
+        tool: " memory.read ",
         args: {},
       }));
 
@@ -84,7 +83,7 @@ describe("dispatchInvoke", () => {
         fsGuard: new FsGuard("strict", [root]),
       });
       expect(String(out.source || "")).toBe("custom-memory");
-      expect(String(out.requestedTool || "")).toBe("memory_read");
+      expect(String(out.requestedTool || "")).toBe("memory.read");
       expect(String(out.canonicalTool || "")).toBe("memory.read");
     } finally {
       unregisterInvokeToolHandler("memory.read");
@@ -99,7 +98,7 @@ describe("dispatchInvoke", () => {
       const req: InvokeRequest = {
         id: "i3",
         type: "invoke",
-        tool: "read_file",
+        tool: "read",
         canonicalTool: "",
         args: {
           path: "sample.txt",

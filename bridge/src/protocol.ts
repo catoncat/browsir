@@ -48,7 +48,7 @@ export function parseInvokeFrame(raw: string | Buffer): InvokeRequest {
   const out: InvokeRequest = {
     id: frame.id,
     type: "invoke",
-    tool: requestedTool as ToolName,
+    tool: canonicalTool as ToolName,
     canonicalTool,
     args: frame.args as Record<string, unknown>,
   };
