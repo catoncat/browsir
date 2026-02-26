@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "projectType": "chrome-extension",
+  "enginePolicy": {
+    "defaultEngine": "playwright",
+    "fallbackEngine": "playwriter"
+  },
+  "browser": {
+    "appName": "Google Chrome Beta",
+    "browserPath": "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+    "userDataDir": "/Users/envvar/Library/Application Support/Google/Chrome Beta",
+    "profileDirectory": "Default",
+    "extensionId": "jfeammnjpkecdekppnclgkkffahnhfhe"
+  },
+  "dev": {
+    "startCommand": "bun run brain:dev",
+    "healthUrl": "http://127.0.0.1:4173/"
+  },
+  "targets": {
+    "main": "http://127.0.0.1:4173/",
+    "sidepanel": "http://127.0.0.1:4173/sidepanel.html"
+  },
+  "artifactsDir": ".agents/browser-debug/artifacts"
+}
