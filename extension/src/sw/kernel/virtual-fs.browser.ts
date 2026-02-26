@@ -18,6 +18,7 @@ function toInt(value: unknown, fallback: number): number {
 function normalizeRuntimeHint(value: unknown): "browser" | "local" | undefined {
   const text = String(value || "").trim().toLowerCase();
   if (text === "browser") return "browser";
+  if (text === "host") return "local";
   if (text === "local") return "local";
   return undefined;
 }
@@ -335,4 +336,3 @@ export async function invokeVirtualFrame(frameRaw: JsonRecord): Promise<JsonReco
   }
   throw new Error(`virtual frame 不支持 tool: ${tool}`);
 }
-

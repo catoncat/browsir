@@ -157,7 +157,11 @@ export class BrainOrchestrator {
       this.registerCapabilityPolicy(capability, policy, options),
     unregisterCapabilityPolicy: (capability, expectedPolicyId) =>
       this.unregisterCapabilityPolicy(capability, expectedPolicyId),
-    getCapabilityPolicy: (capability) => this.getCapabilityPolicy(capability)
+    getCapabilityPolicy: (capability) => this.getCapabilityPolicy(capability),
+    registerToolContract: (contract, options) => this.registerToolContract(contract, options),
+    unregisterToolContract: (name) => this.unregisterToolContract(name),
+    resolveToolContract: (name) => this.resolveToolContract(name),
+    listToolContracts: () => this.listToolContracts()
   });
   private readonly runStateBySession = new Map<string, RunState>();
   private readonly streamBySession = new Map<string, StepTraceRecord[]>();
@@ -516,14 +520,23 @@ export class BrainOrchestrator {
     return this.getRunState(sessionId);
   }
 
-  enqueueQueuedPrompt(sessionId: string, behavior: StreamingBehavior, text: string): RuntimeView {
+  enqueueQueuedPrompt(
+    sessionId: string,
+    behavior: StreamingBehavior,
+    text: string,
+    options: { skillIds?: string[] } = {}
+  ): RuntimeView {
     const normalizedText = String(text || "").trim();
-    if (!normalizedText) return this.getRunState(sessionId);
+    const skillIds = Array.isArray(options.skillIds)
+      ? Array.from(new Set(options.skillIds.map((id) => String(id || "").trim()).filter((id) => id.length > 0)))
+      : [];
+    if (!normalizedText && skillIds.length === 0) return this.getRunState(sessionId);
     const state = this.ensureRunState(sessionId);
     const item: QueuedRuntimePrompt = {
       id: randomId("queued_prompt"),
       behavior,
       text: normalizedText,
+      ...(skillIds.length > 0 ? { skillIds } : {}),
       timestamp: nowIso()
     };
     if (behavior === "steer") {

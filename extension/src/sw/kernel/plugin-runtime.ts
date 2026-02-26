@@ -3,12 +3,15 @@ import type { OrchestratorHookMap } from "./orchestrator-hooks";
 import type { ExecuteCapability, ExecuteMode } from "./types";
 import type { CapabilityExecutionPolicy, RegisterCapabilityPolicyOptions } from "./capability-policy";
 import type { RegisterProviderOptions, StepToolProvider } from "./tool-provider-registry";
+import type { ToolContract, ToolContractView } from "./tool-contract-registry";
 
 export interface AgentPluginPermissions {
   hooks?: string[];
   modes?: ExecuteMode[];
   capabilities?: ExecuteCapability[];
   replaceProviders?: boolean;
+  tools?: string[];
+  replaceToolContracts?: boolean;
 }
 
 export interface AgentPluginManifest {
@@ -38,6 +41,7 @@ export interface AgentPluginDefinition {
   policies?: {
     capabilities?: Record<ExecuteCapability, CapabilityExecutionPolicy>;
   };
+  tools?: ToolContract[];
 }
 
 export interface PluginRuntimeView {
@@ -52,6 +56,7 @@ export interface PluginRuntimeView {
   modes: ExecuteMode[];
   capabilities: ExecuteCapability[];
   policyCapabilities: ExecuteCapability[];
+  tools: string[];
 }
 
 interface RuntimeHost {
@@ -79,6 +84,10 @@ interface RuntimeHost {
     id: string;
     policy: CapabilityExecutionPolicy;
   } | null;
+  registerToolContract(contract: ToolContract, options?: { replace?: boolean }): void;
+  unregisterToolContract(name: string): boolean;
+  resolveToolContract(name: string): ToolContract | null;
+  listToolContracts(): ToolContractView[];
 }
 
 interface ReplacedModeProvider {
@@ -97,6 +106,11 @@ interface ReplacedCapabilityPolicy {
   policy: CapabilityExecutionPolicy;
 }
 
+interface ReplacedToolContract {
+  name: string;
+  contract: ToolContract;
+}
+
 interface PluginState {
   definition: AgentPluginDefinition;
   enabled: boolean;
@@ -104,9 +118,11 @@ interface PluginState {
   ownedModeProviders: Array<{ mode: ExecuteMode; providerId: string }>;
   ownedCapabilityProviders: Array<{ capability: ExecuteCapability; providerId: string }>;
   ownedCapabilityPolicies: Array<{ capability: ExecuteCapability; policyId: string }>;
+  ownedToolContracts: string[];
   replacedModeProviders: ReplacedModeProvider[];
   replacedCapabilityProviders: ReplacedCapabilityProvider[];
   replacedCapabilityPolicies: ReplacedCapabilityPolicy[];
+  replacedToolContracts: ReplacedToolContract[];
   errorCount: number;
   lastError?: string;
 }
@@ -155,9 +171,11 @@ export class PluginRuntime {
       ownedModeProviders: [],
       ownedCapabilityProviders: [],
       ownedCapabilityPolicies: [],
+      ownedToolContracts: [],
       replacedModeProviders: [],
       replacedCapabilityProviders: [],
       replacedCapabilityPolicies: [],
+      replacedToolContracts: [],
       errorCount: 0
     };
     this.plugins.set(id, state);
@@ -184,6 +202,7 @@ export class PluginRuntime {
     const manifest = state.definition.manifest;
     const permissions = manifest.permissions ?? {};
     const allowReplace = permissions.replaceProviders === true;
+    const allowReplaceTools = permissions.replaceToolContracts === true;
     const timeoutMs = Math.max(50, Math.min(10_000, Number(manifest.timeoutMs || 1500)));
 
     try {
@@ -298,6 +317,38 @@ export class PluginRuntime {
         });
       }
 
+      for (const toolContract of Array.isArray(state.definition.tools) ? state.definition.tools : []) {
+        const toolName = String(toolContract?.name || "").trim();
+        if (!toolName) {
+          throw new Error(`plugin ${id} tool contract name 不能为空`);
+        }
+        if (!isAllowed(permissions.tools, toolName)) {
+          throw new Error(`plugin ${id} 未授权 tool contract: ${toolName}`);
+        }
+        if (allowReplaceTools) {
+          const previousView = this.host.listToolContracts().find((item) => String(item.name || "") === toolName);
+          if (previousView?.source === "override") {
+            const previous = this.host.resolveToolContract(toolName);
+            if (previous) {
+              state.replacedToolContracts.push({
+                name: toolName,
+                contract: previous
+              });
+            }
+          }
+        }
+        this.host.registerToolContract(
+          {
+            ...toolContract,
+            name: toolName
+          },
+          {
+            replace: allowReplaceTools
+          }
+        );
+        state.ownedToolContracts.push(toolName);
+      }
+
       state.enabled = true;
       state.lastError = undefined;
     } catch (error) {
@@ -351,9 +402,17 @@ export class PluginRuntime {
         id: replaced.policyId
       });
     }
+    for (const toolName of state.ownedToolContracts.splice(0)) {
+      const removed = this.host.unregisterToolContract(toolName);
+      if (!removed) continue;
+      const replaced = state.replacedToolContracts.find((entry) => entry.name === toolName);
+      if (!replaced) continue;
+      this.host.registerToolContract(replaced.contract, { replace: true });
+    }
     state.replacedModeProviders = [];
     state.replacedCapabilityProviders = [];
     state.replacedCapabilityPolicies = [];
+    state.replacedToolContracts = [];
 
     state.enabled = false;
   }
@@ -372,7 +431,10 @@ export class PluginRuntime {
         hooks: Object.keys(state.definition.hooks || {}),
         modes: Object.keys(state.definition.providers?.modes || {}) as ExecuteMode[],
         capabilities: Object.keys(state.definition.providers?.capabilities || {}),
-        policyCapabilities: Object.keys(state.definition.policies?.capabilities || {})
+        policyCapabilities: Object.keys(state.definition.policies?.capabilities || {}),
+        tools: (Array.isArray(state.definition.tools) ? state.definition.tools : [])
+          .map((item) => String(item?.name || "").trim())
+          .filter(Boolean)
       };
     });
   }

@@ -155,6 +155,7 @@ export interface QueuedRuntimePrompt {
   id: string;
   behavior: StreamingBehavior;
   text: string;
+  skillIds?: string[];
   timestamp: string;
 }
 

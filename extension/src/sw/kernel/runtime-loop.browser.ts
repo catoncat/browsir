@@ -3,7 +3,9 @@ import {
   type ExecuteCapability,
   type ExecuteMode,
   type ExecuteStepResult,
-  type RuntimeView
+  type RuntimeView,
+  type ToolContract,
+  type ToolDefinition
 } from "./orchestrator.browser";
 import { SUMMARIZATION_SYSTEM_PROMPT } from "./compaction.browser";
 import {
@@ -76,6 +78,7 @@ interface RunStartInput {
   sessionOptions?: JsonRecord;
   prompt?: string;
   tabIds?: unknown[];
+  skillIds?: unknown[];
   autoRun?: boolean;
   streamingBehavior?: StreamingBehavior;
 }
@@ -123,6 +126,14 @@ const TOOL_CAPABILITIES = {
   read_file: "fs.read",
   write_file: "fs.write",
   edit_file: "fs.edit",
+  host_bash: "process.exec",
+  browser_bash: "process.exec",
+  host_read_file: "fs.read",
+  browser_read_file: "fs.read",
+  host_write_file: "fs.write",
+  browser_write_file: "fs.write",
+  host_edit_file: "fs.edit",
+  browser_edit_file: "fs.edit",
   search_elements: "browser.snapshot",
   click: "browser.action",
   fill_element_by_uid: "browser.action",
@@ -228,6 +239,14 @@ const BUILTIN_BROWSER_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapabilit
 ];
 
 const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
+  "host_bash",
+  "browser_bash",
+  "host_read_file",
+  "browser_read_file",
+  "host_write_file",
+  "browser_write_file",
+  "host_edit_file",
+  "browser_edit_file",
   "bash",
   "read_file",
   "write_file",
@@ -318,8 +337,34 @@ function safeJsonParse(raw: unknown): unknown {
 function normalizeRuntimeHint(raw: unknown): "browser" | "local" | undefined {
   const value = String(raw || "").trim().toLowerCase();
   if (value === "browser") return "browser";
+  if (value === "host") return "local";
   if (value === "local") return "local";
   return undefined;
+}
+
+function readContractExecution(contract: ToolContract | null): {
+  capability: string;
+  mode?: ExecuteMode;
+  action?: string;
+  verifyPolicy?: StepVerifyPolicy;
+} | null {
+  if (!contract?.execution) return null;
+  const capability = String(contract.execution.capability || "").trim();
+  if (!capability) return null;
+  const modeRaw = String(contract.execution.mode || "").trim();
+  const mode = modeRaw === "script" || modeRaw === "cdp" || modeRaw === "bridge" ? modeRaw : undefined;
+  const action = String(contract.execution.action || "").trim() || undefined;
+  const verifyRaw = String(contract.execution.verifyPolicy || "").trim();
+  const verifyPolicy =
+    verifyRaw === "off" || verifyRaw === "on_critical" || verifyRaw === "always"
+      ? (verifyRaw as StepVerifyPolicy)
+      : undefined;
+  return {
+    capability,
+    ...(mode ? { mode } : {}),
+    ...(action ? { action } : {}),
+    ...(verifyPolicy ? { verifyPolicy } : {})
+  };
 }
 
 function estimateJsonBytes(value: unknown): number {
@@ -356,6 +401,12 @@ function extractContentText(content: unknown): string {
   return parts.join("");
 }
 
+function sanitizePromptForTrace(text: string): string {
+  return String(text || "")
+    .replace(/<skill_command\b[\s\S]*?<\/skill_command>/gi, "[skill command omitted]")
+    .replace(/<skill\b[\s\S]*?<\/skill>/gi, "[skill omitted]");
+}
+
 function summarizeLlmRequestPayload(payload: JsonRecord): JsonRecord {
   const messages = Array.isArray(payload.messages) ? payload.messages : [];
   let messageChars = 0;
@@ -376,7 +427,7 @@ function summarizeLlmRequestPayload(payload: JsonRecord): JsonRecord {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = toRecord(messages[i]);
     if (String(message.role || "") !== "user") continue;
-    const text = extractContentText(message.content).trim();
+    const text = sanitizePromptForTrace(extractContentText(message.content)).trim();
     if (!text) continue;
     lastUserSnippet = clipText(text, LLM_TRACE_USER_SNIPPET_MAX_CHARS);
     break;
@@ -459,6 +510,10 @@ function normalizeErrorCode(code: unknown): string {
 function isSideEffectingToolName(toolName: string): boolean {
   const normalized = String(toolName || "").trim().toLowerCase();
   return [
+    "host_write_file",
+    "browser_write_file",
+    "host_edit_file",
+    "browser_edit_file",
     "write_file",
     "edit_file",
     "create_new_tab",
@@ -513,8 +568,8 @@ function classifyToolRetryDecision(toolName: string, errorCode: string): {
       action: "llm_replan",
       retryable: true,
       retryHint:
-        String(toolName || "").trim().toLowerCase() === "bash"
-          ? "Increase bash.timeoutMs and retry the same goal."
+        ["bash", "host_bash", "browser_bash"].includes(String(toolName || "").trim().toLowerCase())
+          ? "Increase timeoutMs and retry the same goal."
           : "Operation timed out; adjust parameters and retry the same goal."
     };
   }
@@ -1059,7 +1114,7 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
   const raw = String(rawArgs || "").trim();
   const pick = (key: string) => String(args?.[key] || "").trim();
 
-  if (normalized === "bash") {
+  if (["bash", "host_bash", "browser_bash"].includes(normalized)) {
     const command = pick("command") || raw;
     return command ? `命令：${clipText(command, 220)}` : "";
   }
@@ -1078,7 +1133,19 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
   if (normalized === "ungroup_tabs") {
     return "取消标签页分组";
   }
-  if (["read_file", "write_file", "edit_file"].includes(normalized)) {
+  if (
+    [
+      "read_file",
+      "write_file",
+      "edit_file",
+      "host_read_file",
+      "browser_read_file",
+      "host_write_file",
+      "browser_write_file",
+      "host_edit_file",
+      "browser_edit_file"
+    ].includes(normalized)
+  ) {
     const path = pick("path");
     return path ? `路径：${clipText(path, 220)}` : "";
   }
@@ -1561,7 +1628,7 @@ function buildAvailableSkillsSystemMessage(skills: SkillMetadata[]): string {
 
   return [
     "Available skills are instruction resources (not executable sandboxes).",
-    "When a skill is relevant, use read_file with its location to load SKILL.md.",
+    "When a skill is relevant, use browser_read_file (mem://, vfs://) or host_read_file (host path) to load SKILL.md.",
     "<available_skills>",
     ...lines,
     "</available_skills>"
@@ -1569,10 +1636,14 @@ function buildAvailableSkillsSystemMessage(skills: SkillMetadata[]): string {
 }
 
 const EXTENSION_AGENT_PROMPT_TOOL_ORDER = [
-  "read_file",
-  "write_file",
-  "edit_file",
-  "bash",
+  "host_read_file",
+  "host_write_file",
+  "host_edit_file",
+  "host_bash",
+  "browser_read_file",
+  "browser_write_file",
+  "browser_edit_file",
+  "browser_bash",
   "get_all_tabs",
   "get_current_tab",
   "create_new_tab",
@@ -1613,10 +1684,14 @@ const EXTENSION_AGENT_PROMPT_TOOL_ORDER = [
 ] as const;
 
 const EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS: Record<string, string> = {
-  read_file: "Read file contents from local FS or browser virtual FS (mem://, vfs://).",
-  write_file: "Create or overwrite files on local FS or browser virtual FS.",
-  edit_file: "Patch files with exact oldText/newText replacement.",
-  bash: "Execute shell commands through bridge bash.exec (supports runtime + timeoutMs).",
+  host_read_file: "Read file contents from host filesystem.",
+  host_write_file: "Create or overwrite files on host filesystem.",
+  host_edit_file: "Patch host files with exact replacements (and unified patch where supported).",
+  host_bash: "Execute shell commands on host runtime via bridge bash.exec.",
+  browser_read_file: "Read file contents from browser virtual FS (mem://, vfs://).",
+  browser_write_file: "Create or overwrite files on browser virtual FS.",
+  browser_edit_file: "Patch browser virtual files with exact replacements (no unified patch).",
+  browser_bash: "Execute limited virtual-shell commands against browser virtual FS.",
   get_all_tabs: "List currently open browser tabs.",
   get_current_tab: "Get the active browser tab context.",
   create_new_tab: "Open a new browser tab when task flow requires it.",
@@ -1659,8 +1734,9 @@ const EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS: Record<string, string> = {
 
 const EXTENSION_AGENT_PROMPT_BASE_GUIDELINES = [
   "Use tools instead of guessing. Ground decisions in tool outputs.",
-  "For file tasks, read_file before edit_file/write_file.",
-  "Prefer edit_file for surgical changes; use write_file for new files or full rewrites.",
+  "For host file tasks, call host_read_file before host_edit_file/host_write_file.",
+  "For virtual file tasks, call browser_read_file before browser_edit_file/browser_write_file.",
+  "Prefer *_edit_file for surgical changes; use *_write_file for new files or full rewrites.",
   "For browser tasks, enforce: semantic search -> action -> browser_verify.",
   "Use user-visible query words in search_elements (placeholder/label/text), avoid implementation-only query text.",
   "For click/fill/select/hover/get_editor_value/scroll_to/highlight, prefer uid/ref/backendNodeId from latest search_elements; selector is fallback only.",
@@ -1673,20 +1749,32 @@ const EXTENSION_AGENT_PROMPT_BASE_GUIDELINES = [
   "For toggle-like controls (like/follow/bookmark), read current label/state first to avoid accidental flip.",
   "If browser_verify fails, do not claim done; re-observe and retry with updated target or expectation.",
   "Do not invent selectors, URLs, tab state, or command output; re-observe when uncertain.",
-  "Use mem:// or vfs:// paths (or runtime=browser) for browser virtual files; use regular paths (or runtime=local) for local files.",
+  "Do not use legacy runtime hints when split tools are available. Choose explicit host_* or browser_* tools.",
   "When tab context is ambiguous, query get_current_tab/get_all_tabs before acting.",
   "Be concise. Show key file paths, tab context, and blockers clearly."
 ];
 
-function buildBrowserAgentSystemPrompt(config: BridgeConfig): string {
+function buildBrowserAgentSystemPrompt(config: BridgeConfig, toolDefinitions: ToolDefinition[] = []): string {
   const overridePrompt = String(config.llmSystemPromptCustom || "");
   if (overridePrompt.trim()) {
     return overridePrompt;
   }
 
-  const tools = EXTENSION_AGENT_PROMPT_TOOL_ORDER
-    .map((name) => `- ${name}: ${EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS[name] || "Use when needed."}`)
-    .join("\n");
+  const dynamicToolLines = (Array.isArray(toolDefinitions) ? toolDefinitions : [])
+    .map((def) => {
+      const fn = toRecord(def.function);
+      const name = String(fn.name || "").trim();
+      if (!name) return "";
+      const description = String(fn.description || "").trim() || "Use when needed.";
+      return `- ${name}: ${description}`;
+    })
+    .filter(Boolean);
+  const tools =
+    dynamicToolLines.length > 0
+      ? dynamicToolLines.join("\n")
+      : EXTENSION_AGENT_PROMPT_TOOL_ORDER
+          .map((name) => `- ${name}: ${EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS[name] || "Use when needed."}`)
+          .join("\n");
   const guidelines = EXTENSION_AGENT_PROMPT_BASE_GUIDELINES.map((line) => `- ${line}`).join("\n");
   return [
     "You are an expert coding assistant operating inside Browser Brain Loop, a browser-extension agent harness.",
@@ -1734,24 +1822,25 @@ function buildLlmMessagesFromContext(
   meta: SessionMeta | null,
   contextMessages: SessionContextMessageLike[],
   previousSummary = "",
-  availableSkillsPrompt = ""
+  availableSkillsPrompt = "",
+  toolDefinitions: ToolDefinition[] = []
 ): JsonRecord[] {
   const out: JsonRecord[] = [];
   out.push({
     role: "system",
-    content: buildBrowserAgentSystemPrompt(config)
+    content: buildBrowserAgentSystemPrompt(config, toolDefinitions)
   });
   out.push({
     role: "system",
     content: [
       "Tool retry policy:",
       "1) For transient tool errors (retryable=true), retry the same goal with adjusted parameters.",
-      "2) bash supports optional timeoutMs (milliseconds). Increase timeoutMs when timeout-related failures happen.",
+      "2) host_bash/browser_bash support optional timeoutMs (milliseconds). Increase timeoutMs when timeout-related failures happen.",
       "3) For non-retryable errors, stop retrying and explain the blocker clearly.",
       "4) A short task progress note will be provided each round via system message.",
       "5) For browser tasks, prefer actions grounded in observed page state and tool results.",
       "6) Do not invent site selectors/URLs; re-observe when uncertain.",
-      "7) File runtime routing policy: use mem:// or vfs:// path (or runtime=browser) for browser virtual files; use regular/absolute paths (or runtime=local) for local files.",
+      "7) Prefer explicit split tools: host_* for host execution, browser_* for virtual-fs execution.",
       "8) Temporary policy: do NOT run tests (e.g., bun test/pnpm test/npm test/pytest/go test) unless the user explicitly requests tests."
     ].join("\n")
   });
@@ -1780,6 +1869,29 @@ function buildLlmMessagesFromContext(
   }
 
   return out;
+}
+
+function applyLatestUserPromptOverride(messages: JsonRecord[], prompt: string): JsonRecord[] {
+  const promptText = String(prompt || "").trim();
+  if (!promptText) return messages;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const item = toRecord(messages[i]);
+    if (String(item.role || "") !== "user") continue;
+    const next = [...messages];
+    next[i] = {
+      ...item,
+      role: "user",
+      content: promptText
+    };
+    return next;
+  }
+  return [
+    ...messages,
+    {
+      role: "user",
+      content: promptText
+    }
+  ];
 }
 
 function shouldVerifyStep(action: string, verifyPolicy: unknown): boolean {
@@ -3171,14 +3283,41 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     resolvedTool: string;
     executionTool: string;
     args: JsonRecord;
+    customExecution?: {
+      capability: ExecuteCapability;
+      mode?: ExecuteMode;
+      action?: string;
+      verifyPolicy?: StepVerifyPolicy;
+    };
   }
 
   type ToolPlan =
     | {
         kind: "bridge";
-        toolName: "bash" | "read_file" | "write_file" | "edit_file";
+        toolName:
+          | "host_bash"
+          | "browser_bash"
+          | "host_read_file"
+          | "browser_read_file"
+          | "host_write_file"
+          | "browser_write_file"
+          | "host_edit_file"
+          | "browser_edit_file"
+          | "bash"
+          | "read_file"
+          | "write_file"
+          | "edit_file";
         capability: ExecuteCapability;
         frame: JsonRecord;
+      }
+    | {
+        kind: "custom.invoke";
+        toolName: string;
+        capability: ExecuteCapability;
+        mode?: ExecuteMode;
+        action: string;
+        args: JsonRecord;
+        verifyPolicy?: StepVerifyPolicy;
       }
     | {
         kind: "local.get_all_tabs";
@@ -3398,7 +3537,12 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
     const contract = orchestrator.resolveToolContract(requestedTool);
     const resolvedTool = String(contract?.name || requestedTool).trim();
-    const executionTool = RUNTIME_EXECUTABLE_TOOL_NAMES.has(resolvedTool) ? resolvedTool : "";
+    const customExecutionRaw = readContractExecution(contract);
+    const customExecution =
+      customExecutionRaw && orchestrator.hasCapabilityProvider(customExecutionRaw.capability)
+        ? customExecutionRaw
+        : null;
+    const executionTool = RUNTIME_EXECUTABLE_TOOL_NAMES.has(resolvedTool) || customExecution ? resolvedTool : "";
     if (!executionTool) {
       return {
         ok: false,
@@ -3416,7 +3560,17 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         requestedTool,
         resolvedTool,
         executionTool,
-        args
+        args,
+        ...(customExecution
+          ? {
+              customExecution: {
+                capability: customExecution.capability,
+                ...(customExecution.mode ? { mode: customExecution.mode } : {}),
+                ...(customExecution.action ? { action: customExecution.action } : {}),
+                ...(customExecution.verifyPolicy ? { verifyPolicy: customExecution.verifyPolicy } : {})
+              }
+            }
+          : {})
       }
     };
   }
@@ -3709,10 +3863,18 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       };
     };
     switch (context.executionTool) {
+      case "host_bash":
+      case "browser_bash":
       case "bash": {
         const command = String(args.command || "").trim();
-        if (!command) return { ok: false, error: { error: "bash 需要 command" } };
-        const runtimeHint = normalizeRuntimeHint(args.runtime);
+        if (!command) return { ok: false, error: { error: `${context.executionTool} 需要 command` } };
+        const forcedRuntime =
+          context.executionTool === "host_bash"
+            ? "local"
+            : context.executionTool === "browser_bash"
+              ? "browser"
+              : undefined;
+        const runtimeHint = forcedRuntime || normalizeRuntimeHint(args.runtime);
         const timeoutMs =
           args.timeoutMs == null
             ? undefined
@@ -3721,7 +3883,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           ok: true,
           plan: {
             kind: "bridge",
-            toolName: "bash",
+            toolName: context.executionTool as
+              | "host_bash"
+              | "browser_bash"
+              | "bash",
             capability: TOOL_CAPABILITIES.bash,
             frame: {
               tool: "bash",
@@ -3735,11 +3900,19 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           }
         };
       }
+      case "host_read_file":
+      case "browser_read_file":
       case "read_file": {
         const path = String(args.path || "").trim();
-        if (!path) return { ok: false, error: { error: "read_file 需要 path" } };
+        if (!path) return { ok: false, error: { error: `${context.executionTool} 需要 path` } };
+        const forcedRuntime =
+          context.executionTool === "host_read_file"
+            ? "local"
+            : context.executionTool === "browser_read_file"
+              ? "browser"
+              : undefined;
+        const runtimeHint = forcedRuntime || normalizeRuntimeHint(args.runtime);
         const invokeArgs: JsonRecord = { path };
-        const runtimeHint = normalizeRuntimeHint(args.runtime);
         if (args.offset != null) invokeArgs.offset = args.offset;
         if (args.limit != null) invokeArgs.limit = args.limit;
         if (runtimeHint) invokeArgs.runtime = runtimeHint;
@@ -3747,7 +3920,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           ok: true,
           plan: {
             kind: "bridge",
-            toolName: "read_file",
+            toolName: context.executionTool as
+              | "host_read_file"
+              | "browser_read_file"
+              | "read_file",
             capability: TOOL_CAPABILITIES.read_file,
             frame: {
               tool: "read",
@@ -3756,15 +3932,26 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           }
         };
       }
+      case "host_write_file":
+      case "browser_write_file":
       case "write_file": {
         const path = String(args.path || "").trim();
-        if (!path) return { ok: false, error: { error: "write_file 需要 path" } };
-        const runtimeHint = normalizeRuntimeHint(args.runtime);
+        if (!path) return { ok: false, error: { error: `${context.executionTool} 需要 path` } };
+        const forcedRuntime =
+          context.executionTool === "host_write_file"
+            ? "local"
+            : context.executionTool === "browser_write_file"
+              ? "browser"
+              : undefined;
+        const runtimeHint = forcedRuntime || normalizeRuntimeHint(args.runtime);
         return {
           ok: true,
           plan: {
             kind: "bridge",
-            toolName: "write_file",
+            toolName: context.executionTool as
+              | "host_write_file"
+              | "browser_write_file"
+              | "write_file",
             capability: TOOL_CAPABILITIES.write_file,
             frame: {
               tool: "write",
@@ -3778,15 +3965,26 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           }
         };
       }
+      case "host_edit_file":
+      case "browser_edit_file":
       case "edit_file": {
         const path = String(args.path || "").trim();
-        if (!path) return { ok: false, error: { error: "edit_file 需要 path" } };
-        const runtimeHint = normalizeRuntimeHint(args.runtime);
+        if (!path) return { ok: false, error: { error: `${context.executionTool} 需要 path` } };
+        const forcedRuntime =
+          context.executionTool === "host_edit_file"
+            ? "local"
+            : context.executionTool === "browser_edit_file"
+              ? "browser"
+              : undefined;
+        const runtimeHint = forcedRuntime || normalizeRuntimeHint(args.runtime);
         return {
           ok: true,
           plan: {
             kind: "bridge",
-            toolName: "edit_file",
+            toolName: context.executionTool as
+              | "host_edit_file"
+              | "browser_edit_file"
+              | "edit_file",
             capability: TOOL_CAPABILITIES.edit_file,
             frame: {
               tool: "edit",
@@ -4595,6 +4793,20 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         };
       }
       default:
+        if (context.customExecution) {
+          return {
+            ok: true,
+            plan: {
+              kind: "custom.invoke",
+              toolName: context.resolvedTool,
+              capability: context.customExecution.capability,
+              ...(context.customExecution.mode ? { mode: context.customExecution.mode } : {}),
+              action: String(context.customExecution.action || context.resolvedTool || context.requestedTool).trim(),
+              args,
+              ...(context.customExecution.verifyPolicy ? { verifyPolicy: context.customExecution.verifyPolicy } : {})
+            }
+          };
+        }
         return {
           ok: false,
           error: buildUnsupportedToolError({
@@ -4610,6 +4822,32 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     switch (plan.kind) {
       case "bridge":
         return await invokeBridgeFrameWithRetry(sessionId, plan.toolName, plan.frame, plan.capability);
+      case "custom.invoke": {
+        const out = await executeStep({
+          sessionId,
+          ...(plan.mode ? { mode: plan.mode } : {}),
+          capability: plan.capability,
+          action: plan.action,
+          args: plan.args,
+          verifyPolicy: plan.verifyPolicy || "off"
+        });
+        if (!out.ok) {
+          return buildStepFailureEnvelope(
+            plan.toolName,
+            out,
+            `${plan.toolName} 执行失败`,
+            `Retry ${plan.toolName} with valid arguments/capability provider.`,
+            {
+              phase: "execute",
+              resumeStrategy: "replan"
+            }
+          );
+        }
+        return buildToolResponseEnvelope("invoke", out.data, {
+          capabilityUsed: out.capabilityUsed || plan.capability,
+          modeUsed: out.modeUsed
+        });
+      }
       case "local.get_all_tabs": {
         const tabs = await queryAllTabsForRuntime();
         const activeTabId = await getActiveTabIdForRuntime();
@@ -4912,7 +5150,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             errorCode: "E_TOOL_UNSUPPORTED",
             errorReason: "failed_execute",
             retryable: false,
-            retryHint: "Move script to local path or execute equivalent steps via bash/read_file.",
+            retryHint: "Move script to host path or execute equivalent steps via host_bash/host_read_file.",
             details: {
               location,
               sourcePreview: clipText(source, 1200)
@@ -5441,8 +5679,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 usedInsertText = false;
               }
               if (!usedInsertText) target.textContent = text;
-              target.dispatchEvent(new Event('input', { bubbles: true }));
-              return { success: true, action: 'type', typed: text.length, via: usedInsertText ? 'execCommand' : 'textContent' };
+              dispatchInputLikeEvents(target, text, 'type');
+              return {
+                success: true,
+                action: 'type',
+                typed: text.length,
+                via: usedInsertText ? 'contenteditable-inserttext' : 'contenteditable-textContent'
+              };
             }
             return { success: false, error: 'active_element_not_typable' };
           })()`;
@@ -5919,6 +6162,35 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     return mergeStepRef(dispatched, planStepRef);
   }
 
+  function listRuntimeLlmToolDefinitions(toolScope: "all" | "browser_only" = "all"): ToolDefinition[] {
+    return orchestrator
+      .listLlmToolDefinitions()
+      .filter((definition) => {
+        const toolName = String(definition.function?.name || "").trim();
+        if (!toolName) return false;
+        const contract = orchestrator.resolveToolContract(toolName);
+        const canonical = String(contract?.name || toolName).trim();
+        if (RUNTIME_EXECUTABLE_TOOL_NAMES.has(canonical)) return true;
+        const execution = readContractExecution(contract);
+        if (!execution) return false;
+        return orchestrator.hasCapabilityProvider(execution.capability);
+      })
+      .filter((definition) => {
+        if (toolScope !== "browser_only") return true;
+        const toolName = String(definition.function?.name || "").trim();
+        const contract = orchestrator.resolveToolContract(toolName);
+        const canonical = String(contract?.name || toolName).trim();
+        if (CANONICAL_BROWSER_TOOL_NAMES.includes(canonical as (typeof CANONICAL_BROWSER_TOOL_NAMES)[number])) {
+          return true;
+        }
+        if (canonical.startsWith("browser_")) return true;
+        const execution = readContractExecution(contract);
+        if (!execution) return false;
+        if (execution.mode === "cdp") return true;
+        return String(execution.capability || "").startsWith("browser.");
+      });
+  }
+
   async function requestLlmWithRetry(input: LlmRequestInput): Promise<JsonRecord> {
     const { sessionId, route, providerRegistry, step, messages } = input;
     const toolChoice = input.toolChoice === "required" ? "required" : "auto";
@@ -5953,24 +6225,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       let rawBody = "";
       let contentType = "";
       try {
-        const browserOnlyTools = new Set(CANONICAL_BROWSER_TOOL_NAMES);
-        const llmToolDefs = orchestrator
-          .listLlmToolDefinitions()
-          .filter((definition) => {
-            const toolName = String(definition.function?.name || "").trim();
-            if (!toolName) return false;
-            const contract = orchestrator.resolveToolContract(toolName);
-            const canonical = String(contract?.name || toolName).trim();
-            return RUNTIME_EXECUTABLE_TOOL_NAMES.has(canonical);
-          })
-          .filter((definition) => {
-            if (toolScope !== "browser_only") return true;
-            const toolName = String(definition.function?.name || "").trim();
-            const contract = orchestrator.resolveToolContract(toolName);
-            const canonical = String(contract?.name || toolName).trim();
-            return browserOnlyTools.has(canonical);
-          })
-          .map((definition) => sanitizeLlmToolDefinitionForProvider(definition, route.provider));
+        const llmToolDefs = listRuntimeLlmToolDefinitions(toolScope).map((definition) =>
+          sanitizeLlmToolDefinitionForProvider(definition, route.provider)
+        );
         const basePayload: JsonRecord = {
           model: llmModel,
           messages,
@@ -6283,7 +6540,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     });
 
     orchestrator.events.emit("loop_start", sessionId, {
-      prompt: clipText(prompt, 3000)
+      prompt: clipText(sanitizePromptForTrace(prompt), 3000)
     });
     orchestrator.events.emit("llm.route.selected", sessionId, buildLlmRoutePayload(activeRoute, { source: "run_start" }));
     if (sessionMeta) {
@@ -6311,7 +6568,17 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       } catch {
         availableSkillsPrompt = "";
       }
-      const messages = buildLlmMessagesFromContext(config, meta, context.messages, context.previousSummary, availableSkillsPrompt);
+      const messages = applyLatestUserPromptOverride(
+        buildLlmMessagesFromContext(
+          config,
+          meta,
+          context.messages,
+          context.previousSummary,
+          availableSkillsPrompt,
+          listRuntimeLlmToolDefinitions("all")
+        ),
+        prompt
+      );
 
       while (llmStep < maxLoopSteps) {
         let state = orchestrator.getRunState(sessionId);
@@ -6330,24 +6597,33 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
         const dequeuedSteers = orchestrator.dequeueQueuedPrompts(sessionId, "steer");
         for (const steer of dequeuedSteers) {
-          const steerText = await expandSkillSlashPrompt(sessionId, steer.text);
-          await orchestrator.appendUserMessage(sessionId, steerText);
+          const steerRawText = String(steer.text || "").trim();
+          const steerSkillIds = normalizeExplicitSkillIds(steer.skillIds);
+          if (!steerRawText && steerSkillIds.length === 0) continue;
+          const steerPromptWithSelectedSkills = await expandExplicitSelectedSkillsPrompt(
+            sessionId,
+            steerRawText,
+            steerSkillIds
+          );
+          const steerExpandedText = await expandSkillSlashPrompt(sessionId, steerPromptWithSelectedSkills);
+          const steerStoredText = steerRawText || formatSkillSelectionSummary(steerSkillIds);
+          await orchestrator.appendUserMessage(sessionId, steerStoredText);
           await orchestrator.preSendCompactionCheck(sessionId);
           messages.push({
             role: "user",
-            content: steerText
+            content: steerExpandedText
           });
           const runtimeAfterDequeue = orchestrator.getRunState(sessionId);
           orchestrator.events.emit("message.dequeued", sessionId, {
             behavior: "steer",
             id: steer.id,
-            text: clipText(steerText, 3000),
+            text: clipText(steerStoredText, 3000),
             total: runtimeAfterDequeue.queue.total,
             steer: runtimeAfterDequeue.queue.steer,
             followUp: runtimeAfterDequeue.queue.followUp
           });
           orchestrator.events.emit("input.steer", sessionId, {
-            text: clipText(steerText, 3000),
+            text: clipText(steerStoredText, 3000),
             id: steer.id
           });
         }
@@ -6775,6 +7051,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           void startFromPrompt({
             sessionId,
             prompt: nextFollowUp.text,
+            skillIds: nextFollowUp.skillIds,
             autoRun: true
           }).catch((error) => {
             orchestrator.events.emit("loop_internal_error", sessionId, {
@@ -6850,6 +7127,25 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     };
   }
 
+  function normalizeExplicitSkillIds(input: unknown): string[] {
+    if (!Array.isArray(input)) return [];
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const item of input) {
+      const skillId = String(item || "").trim();
+      if (!skillId || seen.has(skillId)) continue;
+      seen.add(skillId);
+      out.push(skillId);
+      if (out.length >= MAX_PROMPT_SKILL_ITEMS) break;
+    }
+    return out;
+  }
+
+  function formatSkillSelectionSummary(skillIds: string[]): string {
+    if (!skillIds.length) return "";
+    return skillIds.map((id) => `[skill:${id}]`).join(" ");
+  }
+
   function buildSkillCommandPrompt(input: {
     promptBlock: string;
     argsText: string;
@@ -6864,6 +7160,35 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       parts.push(`<skill_args>\n${input.argsText}\n</skill_args>`);
     }
     parts.push(`说明：你当前执行的技能是 ${input.skillName}（id=${input.skillId}）。`);
+    return parts.join("\n\n");
+  }
+
+  async function expandExplicitSelectedSkillsPrompt(
+    sessionId: string,
+    prompt: string,
+    skillIds: string[]
+  ): Promise<string> {
+    const normalizedPrompt = String(prompt || "").trim();
+    if (!skillIds.length) return normalizedPrompt;
+
+    const promptBlocks: string[] = [];
+    const selectedLabels: string[] = [];
+    for (const skillId of skillIds) {
+      const resolved = await orchestrator.resolveSkillContent(skillId, {
+        sessionId,
+        capability: TOOL_CAPABILITIES.read_file
+      });
+      promptBlocks.push(resolved.promptBlock);
+      selectedLabels.push(`${resolved.skill.name}（id=${resolved.skill.id}）`);
+    }
+
+    const parts = ["以下是用户在输入框中显式选择的技能，请先阅读并按技能流程执行：", ...promptBlocks];
+    if (normalizedPrompt) {
+      parts.push(`<skill_args>\n${normalizedPrompt}\n</skill_args>`);
+    } else {
+      parts.push("说明：用户未提供额外文本，请按所选技能流程完成任务。");
+    }
+    parts.push(`说明：本次显式选择技能：${selectedLabels.join("，")}。`);
     return parts.join("\n\n");
   }
 
@@ -6938,13 +7263,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
 
     const rawPrompt = String(input.prompt || "").trim();
-    if (!rawPrompt) {
+    const explicitSkillIds = normalizeExplicitSkillIds(input.skillIds);
+    if (!rawPrompt && explicitSkillIds.length === 0) {
       return {
         sessionId,
         runtime: orchestrator.getRunState(sessionId)
       };
     }
-    const prompt = await expandSkillSlashPrompt(sessionId, rawPrompt);
+    const promptWithSelectedSkills = await expandExplicitSelectedSkillsPrompt(sessionId, rawPrompt, explicitSkillIds);
+    const promptForModel = await expandSkillSlashPrompt(sessionId, promptWithSelectedSkills);
+    const storedPrompt = rawPrompt || formatSkillSelectionSummary(explicitSkillIds);
 
     const behavior = normalizeStreamingBehavior(input.streamingBehavior);
     const state = orchestrator.getRunState(sessionId);
@@ -6952,17 +7280,19 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       if (!behavior) {
         throw new Error("会话正在运行中；请显式指定 streamingBehavior=steer|followUp");
       }
-      const queuedRuntime = orchestrator.enqueueQueuedPrompt(sessionId, behavior, prompt);
+      const queuedRuntime = orchestrator.enqueueQueuedPrompt(sessionId, behavior, rawPrompt, {
+        skillIds: explicitSkillIds
+      });
       orchestrator.events.emit("message.queued", sessionId, {
         behavior,
-        text: clipText(prompt, 3000),
+        text: clipText(storedPrompt, 3000),
         total: queuedRuntime.queue.total,
         steer: queuedRuntime.queue.steer,
         followUp: queuedRuntime.queue.followUp
       });
       if (behavior === "followUp") {
         orchestrator.events.emit("loop_follow_up_queued", sessionId, {
-          text: clipText(prompt, 3000),
+          text: clipText(storedPrompt, 3000),
           total: queuedRuntime.queue.followUp
         });
       }
@@ -6972,9 +7302,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       };
     }
 
-    await orchestrator.appendUserMessage(sessionId, prompt);
+    await orchestrator.appendUserMessage(sessionId, storedPrompt);
     orchestrator.events.emit("input.user", sessionId, {
-      text: clipText(prompt, 3000)
+      text: clipText(storedPrompt, 3000)
     });
 
     if (input.autoRun === false) {
@@ -6986,7 +7316,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
     return {
       sessionId,
-      runtime: await startLoopIfNeeded(sessionId, prompt, "restart_after_stop")
+      runtime: await startLoopIfNeeded(sessionId, promptForModel, "restart_after_stop")
     };
   }
 
@@ -7022,7 +7352,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     async getSystemPromptPreview(): Promise<string> {
       const cfgRaw = await callInfra(infra, { type: "config.get" });
       const cfg = extractLlmConfig(cfgRaw);
-      return buildBrowserAgentSystemPrompt(cfg);
+      return buildBrowserAgentSystemPrompt(cfg, listRuntimeLlmToolDefinitions("all"));
     }
   };
 }

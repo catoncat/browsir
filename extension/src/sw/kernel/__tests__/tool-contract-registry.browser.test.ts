@@ -43,11 +43,26 @@ const CANONICAL_BROWSER_TOOLS = [
   "get_skill_info"
 ] as const;
 
+const SPLIT_FILE_TOOLS = [
+  "host_bash",
+  "browser_bash",
+  "host_read_file",
+  "browser_read_file",
+  "host_write_file",
+  "browser_write_file",
+  "host_edit_file",
+  "browser_edit_file"
+] as const;
+
 describe("tool-contract-registry", () => {
   it("exports canonical tool surface without alias entries", () => {
     const registry = new ToolContractRegistry();
     const defs = registry.listLlmToolDefinitions();
     const names = defs.map((item) => item.function.name);
+
+    for (const toolName of SPLIT_FILE_TOOLS) {
+      expect(names).toContain(toolName);
+    }
 
     expect(names).toContain("bash");
     expect(names).toContain("read_file");
@@ -99,6 +114,14 @@ describe("tool-contract-registry", () => {
     const defs = registry.listLlmToolDefinitions();
 
     const requiredByTool: Record<string, string[]> = {
+      host_bash: ["command"],
+      browser_bash: ["command"],
+      host_read_file: ["path"],
+      browser_read_file: ["path"],
+      host_write_file: ["path", "content"],
+      browser_write_file: ["path", "content"],
+      host_edit_file: ["path", "edits"],
+      browser_edit_file: ["path", "edits"],
       create_new_tab: ["url"],
       get_tab_info: ["tabId"],
       fill_element_by_uid: ["value"],
@@ -131,7 +154,7 @@ describe("tool-contract-registry", () => {
     const original = registry
       .listLlmToolDefinitions()
       .find((item) => item.function.name === "bash")?.function.description;
-    expect(String(original || "")).toContain("Execute a shell command");
+    expect(String(original || "")).toContain("Legacy mixed-backend shell tool");
 
     registry.register(
       {
@@ -158,7 +181,7 @@ describe("tool-contract-registry", () => {
     const restored = registry
       .listLlmToolDefinitions()
       .find((item) => item.function.name === "bash")?.function.description;
-    expect(String(restored || "")).toContain("Execute a shell command");
+    expect(String(restored || "")).toContain("Legacy mixed-backend shell tool");
     expect(registry.listContracts().find((item) => item.name === "bash")?.source).toBe("builtin");
   });
 });

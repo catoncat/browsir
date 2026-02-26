@@ -4146,6 +4146,107 @@ describe("runtime-router.browser", () => {
     expect(String(started.error || "")).toContain("skill 不存在");
   });
 
+  it("brain.run.start 支持通过 skillIds 显式选择技能（会话保留原始用户消息）", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    orchestrator.registerCapabilityProvider(
+      "fs.read",
+      {
+        id: "test.skill.selected.fs.read",
+        mode: "script",
+        priority: 100,
+        invoke: async () => ({
+          content: "# SKILL\n1. 先执行选择的技能\n2. 再处理用户文本"
+        })
+      },
+      { replace: true }
+    );
+
+    const capturedBodies: Array<Record<string, unknown>> = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const bodyText = String(init?.body || "");
+      const body = (JSON.parse(bodyText || "{}") || {}) as Record<string, unknown>;
+      capturedBodies.push(body);
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "selected-skill-ok"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: "sk-demo",
+        llmModel: "gpt-test"
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const installed = await invokeRuntime({
+      type: "brain.skill.install",
+      skill: {
+        id: "skill.selected.demo",
+        name: "Selected Demo",
+        location: "mem://skills/selected-demo/SKILL.md",
+        source: "project",
+        enabled: true
+      }
+    });
+    expect(installed.ok).toBe(true);
+
+    const userPrompt = "请输出 hello";
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: userPrompt,
+      skillIds: ["skill.selected.demo"]
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    expect(fetchSpy).toHaveBeenCalled();
+    const runBody = capturedBodies.find((item) => item.stream === true) || {};
+    const runMessages = Array.isArray(runBody.messages) ? (runBody.messages as Array<Record<string, unknown>>) : [];
+    const userText = runMessages
+      .filter((item) => String(item.role || "") === "user")
+      .map((item) => String(item.content || ""))
+      .join("\n");
+    expect(userText).toContain('<skill id="skill.selected.demo"');
+    expect(userText).toContain("<skill_args>");
+    expect(userText).toContain(userPrompt);
+    expect(userText).toContain("1. 先执行选择的技能");
+
+    const conversation = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(conversation.ok).toBe(true);
+    const messages = Array.isArray(((conversation.data as Record<string, unknown>)?.conversationView as Record<string, unknown>)?.messages)
+      ? ((((conversation.data as Record<string, unknown>).conversationView as Record<string, unknown>).messages as unknown[]) as Array<Record<string, unknown>>)
+      : [];
+    const lastUserText = messages
+      .filter((item) => String(item.role || "") === "user")
+      .map((item) => String(item.content || ""))
+      .pop();
+    expect(String(lastUserText || "")).toBe(userPrompt);
+  });
+
   it("supports brain.debug.plugins view", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);

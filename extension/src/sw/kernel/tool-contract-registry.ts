@@ -1,9 +1,17 @@
 type JsonRecord = Record<string, unknown>;
 
+export interface ToolExecutionSpec {
+  capability: string;
+  mode?: "script" | "cdp" | "bridge";
+  action?: string;
+  verifyPolicy?: "off" | "on_critical" | "always";
+}
+
 export interface ToolContract {
   name: string;
   description: string;
   parameters: JsonRecord;
+  execution?: ToolExecutionSpec;
 }
 
 export interface RegisterToolContractOptions {
@@ -51,17 +59,151 @@ const TARGET_ANY_OF = [
 
 const FILE_TOOL_CONTRACTS: ToolContract[] = [
   {
+    name: "host_bash",
+    description:
+      "Execute shell command on host machine via bridge bash.exec. Use for project inspection/build/test commands.",
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "Shell command to execute on host machine." },
+        timeoutMs: {
+          type: "number",
+          description: "Execution timeout in milliseconds."
+        }
+      },
+      required: ["command"]
+    }
+  },
+  {
+    name: "browser_bash",
+    description:
+      "Execute command in browser virtual runtime (limited command set over mem:// or vfs:// virtual files).",
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "Virtual shell command to execute." },
+        timeoutMs: {
+          type: "number",
+          description: "Execution timeout in milliseconds."
+        }
+      },
+      required: ["command"]
+    }
+  },
+  {
+    name: "host_read_file",
+    description:
+      "Read text file from host filesystem.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Host file path." },
+        offset: { type: "number" },
+        limit: { type: "number" }
+      },
+      required: ["path"]
+    }
+  },
+  {
+    name: "browser_read_file",
+    description:
+      "Read text file from browser virtual filesystem. Path should use mem:// or vfs://.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Virtual file path (mem:// or vfs://)." },
+        offset: { type: "number" },
+        limit: { type: "number" }
+      },
+      required: ["path"]
+    }
+  },
+  {
+    name: "host_write_file",
+    description:
+      "Write file content on host filesystem (overwrite/append/create).",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Host destination path." },
+        content: { type: "string", description: "Text content to write." },
+        mode: { type: "string", enum: ["overwrite", "append", "create"] }
+      },
+      required: ["path", "content"]
+    }
+  },
+  {
+    name: "browser_write_file",
+    description:
+      "Write file content in browser virtual filesystem (overwrite/append/create).",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Virtual destination path (mem:// or vfs://)." },
+        content: { type: "string", description: "Text content to write." },
+        mode: { type: "string", enum: ["overwrite", "append", "create"] }
+      },
+      required: ["path", "content"]
+    }
+  },
+  {
+    name: "host_edit_file",
+    description:
+      "Patch host file with exact replacements (and unified patch where supported).",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Host target file path." },
+        edits: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              old: { type: "string" },
+              new: { type: "string" }
+            },
+            required: ["old", "new"]
+          }
+        }
+      },
+      required: ["path", "edits"]
+    }
+  },
+  {
+    name: "browser_edit_file",
+    description:
+      "Patch virtual file with exact replacements (unified patch is not supported in browser virtual fs).",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Virtual target file path (mem:// or vfs://)." },
+        edits: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              old: { type: "string" },
+              new: { type: "string" }
+            },
+            required: ["old", "new"]
+          }
+        }
+      },
+      required: ["path", "edits"]
+    }
+  },
+  {
     name: "bash",
     description:
-      "Execute a shell command via bash.exec. Use bridge runtime for command-line inspection/build tasks. On timeout, increase timeoutMs and retry the same goal.",
+      "Legacy mixed-backend shell tool. Prefer host_bash or browser_bash.",
     parameters: {
       type: "object",
       properties: {
         command: { type: "string", description: "Shell command to execute." },
         runtime: {
           type: "string",
-          enum: ["browser", "local"],
-          description: "browser=virtual fs runtime, local=host shell runtime."
+          enum: ["browser", "local", "host"],
+          description: "Legacy runtime hint. Prefer explicit host_bash/browser_bash."
         },
         timeoutMs: {
           type: "number",
@@ -74,15 +216,15 @@ const FILE_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "read_file",
     description:
-      "Read file text content. Use before edit/write to ground changes. On path error, fix path and retry.",
+      "Legacy mixed-backend read tool. Prefer host_read_file or browser_read_file.",
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string", description: "File path. mem:// or vfs:// routes to browser virtual fs." },
+        path: { type: "string", description: "File path." },
         runtime: {
           type: "string",
-          enum: ["browser", "local"],
-          description: "Optional runtime hint."
+          enum: ["browser", "local", "host"],
+          description: "Legacy runtime hint. Prefer explicit host_read_file/browser_read_file."
         },
         offset: { type: "number" },
         limit: { type: "number" }
@@ -93,15 +235,15 @@ const FILE_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "write_file",
     description:
-      "Write file content (overwrite/append/create). Use for new files or full rewrites. Prefer edit_file for surgical patching.",
+      "Legacy mixed-backend write tool. Prefer host_write_file or browser_write_file.",
     parameters: {
       type: "object",
       properties: {
         path: { type: "string", description: "Destination path." },
         runtime: {
           type: "string",
-          enum: ["browser", "local"],
-          description: "Optional runtime hint."
+          enum: ["browser", "local", "host"],
+          description: "Legacy runtime hint. Prefer explicit host_write_file/browser_write_file."
         },
         content: { type: "string", description: "Text content to write." },
         mode: { type: "string", enum: ["overwrite", "append", "create"] }
@@ -112,15 +254,15 @@ const FILE_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "edit_file",
     description:
-      "Apply exact text replacements. Use when patching existing file sections. If old text not found, read_file first and retry with exact context.",
+      "Legacy mixed-backend patch tool. Prefer host_edit_file or browser_edit_file.",
     parameters: {
       type: "object",
       properties: {
         path: { type: "string", description: "Target file path." },
         runtime: {
           type: "string",
-          enum: ["browser", "local"],
-          description: "Optional runtime hint."
+          enum: ["browser", "local", "host"],
+          description: "Legacy runtime hint. Prefer explicit host_edit_file/browser_edit_file."
         },
         edits: {
           type: "array",
@@ -741,10 +883,19 @@ function cloneRecord(input: JsonRecord): JsonRecord {
 }
 
 function cloneContract(contract: ToolContract): ToolContract {
+  const execution = contract.execution
+    ? {
+        capability: String(contract.execution.capability || "").trim(),
+        ...(contract.execution.mode ? { mode: contract.execution.mode } : {}),
+        ...(contract.execution.action ? { action: String(contract.execution.action || "").trim() } : {}),
+        ...(contract.execution.verifyPolicy ? { verifyPolicy: contract.execution.verifyPolicy } : {})
+      }
+    : undefined;
   return {
     name: contract.name,
     description: contract.description,
-    parameters: cloneRecord(contract.parameters)
+    parameters: cloneRecord(contract.parameters),
+    ...(execution ? { execution } : {})
   };
 }
 
@@ -757,10 +908,37 @@ function validateContract(contract: ToolContract): ToolContract {
   if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) {
     throw new Error(`tool contract parameters 必须是 object: ${name}`);
   }
+  const executionRaw = contract.execution;
+  let execution: ToolExecutionSpec | undefined;
+  if (executionRaw != null) {
+    const capability = String(executionRaw.capability || "").trim();
+    if (!capability) {
+      throw new Error(`tool contract execution.capability 不能为空: ${name}`);
+    }
+    const modeText = String(executionRaw.mode || "").trim();
+    const mode = modeText === "script" || modeText === "cdp" || modeText === "bridge" ? modeText : undefined;
+    if (modeText && !mode) {
+      throw new Error(`tool contract execution.mode 非法: ${name}`);
+    }
+    const verifyText = String(executionRaw.verifyPolicy || "").trim();
+    const verifyPolicy =
+      verifyText === "off" || verifyText === "on_critical" || verifyText === "always" ? verifyText : undefined;
+    if (verifyText && !verifyPolicy) {
+      throw new Error(`tool contract execution.verifyPolicy 非法: ${name}`);
+    }
+    const action = String(executionRaw.action || "").trim();
+    execution = {
+      capability,
+      ...(mode ? { mode } : {}),
+      ...(action ? { action } : {}),
+      ...(verifyPolicy ? { verifyPolicy } : {})
+    };
+  }
   return {
     name,
     description,
-    parameters: cloneRecord(parameters)
+    parameters: cloneRecord(parameters),
+    ...(execution ? { execution } : {})
   };
 }
 

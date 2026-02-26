@@ -53,6 +53,35 @@ function invokeRuntime(message: Record<string, unknown>): Promise<Record<string,
   });
 }
 
+function registerSkillReadProvider(orchestrator: BrainOrchestrator): void {
+  orchestrator.registerCapabilityProvider(
+    "fs.read",
+    {
+      id: "test.interruption.skill.fs.read",
+      mode: "script",
+      priority: 100,
+      invoke: async () => ({
+        content: "# SKILL\n1. interruption test skill"
+      })
+    },
+    { replace: true }
+  );
+}
+
+async function installSkill(skillId: string): Promise<void> {
+  const installed = await invokeRuntime({
+    type: "brain.skill.install",
+    skill: {
+      id: skillId,
+      name: skillId,
+      location: `mem://skills/${skillId}/SKILL.md`,
+      source: "project",
+      enabled: true
+    }
+  });
+  expect(installed.ok).toBe(true);
+}
+
 describe("runtime-router interruption boundary", () => {
   beforeEach(() => {
     runtimeListeners = [];
@@ -243,6 +272,9 @@ describe("runtime-router interruption boundary", () => {
   it("running 时 steer/followUp 入队，并在 stop 时清空队列", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
+    registerSkillReadProvider(orchestrator);
+    await installSkill("skill.steer.a");
+    await installSkill("skill.follow.b");
 
     const started = await invokeRuntime({
       type: "brain.run.start",
@@ -259,25 +291,33 @@ describe("runtime-router interruption boundary", () => {
       type: "brain.run.start",
       sessionId,
       prompt: "steer-a",
+      skillIds: ["skill.steer.a"],
       streamingBehavior: "steer"
     });
     expect(steered.ok).toBe(true);
     const steerRuntime = ((steered.data as Record<string, unknown>)?.runtime || {}) as Record<string, unknown>;
     const steerQueue = (steerRuntime.queue || {}) as Record<string, unknown>;
+    const steerItems = Array.isArray(steerQueue.items) ? (steerQueue.items as Array<Record<string, unknown>>) : [];
     expect(Number(steerQueue.steer || 0)).toBe(1);
     expect(Number(steerQueue.total || 0)).toBe(1);
+    expect(Array.isArray(steerItems[0]?.skillIds)).toBe(true);
+    expect((steerItems[0]?.skillIds as unknown[] | undefined)?.map((item) => String(item || ""))).toEqual(["skill.steer.a"]);
 
     const followUp = await invokeRuntime({
       type: "brain.run.start",
       sessionId,
       prompt: "follow-b",
+      skillIds: ["skill.follow.b"],
       streamingBehavior: "followUp"
     });
     expect(followUp.ok).toBe(true);
     const followRuntime = ((followUp.data as Record<string, unknown>)?.runtime || {}) as Record<string, unknown>;
     const followQueue = (followRuntime.queue || {}) as Record<string, unknown>;
+    const followItems = Array.isArray(followQueue.items) ? (followQueue.items as Array<Record<string, unknown>>) : [];
     expect(Number(followQueue.followUp || 0)).toBe(1);
     expect(Number(followQueue.total || 0)).toBe(2);
+    expect(Array.isArray(followItems[1]?.skillIds)).toBe(true);
+    expect((followItems[1]?.skillIds as unknown[] | undefined)?.map((item) => String(item || ""))).toEqual(["skill.follow.b"]);
 
     const stopResult = await invokeRuntime({
       type: "brain.run.stop",
@@ -322,6 +362,51 @@ describe("runtime-router interruption boundary", () => {
     const followQueue = (((follow.data as Record<string, unknown>)?.runtime as Record<string, unknown>)?.queue ||
       {}) as Record<string, unknown>;
     expect(Number(followQueue.followUp || 0)).toBe(1);
+  });
+
+  it("显式 brain.run.steer / brain.run.follow_up 支持仅 skillIds 入队", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    registerSkillReadProvider(orchestrator);
+    await installSkill("skill.only.steer");
+    await installSkill("skill.only.follow");
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "seed",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    orchestrator.setRunning(sessionId, true);
+
+    const steer = await invokeRuntime({
+      type: "brain.run.steer",
+      sessionId,
+      skillIds: ["skill.only.steer"]
+    });
+    expect(steer.ok).toBe(true);
+    const steerQueue = (((steer.data as Record<string, unknown>)?.runtime as Record<string, unknown>)?.queue ||
+      {}) as Record<string, unknown>;
+    const steerItems = Array.isArray(steerQueue.items) ? (steerQueue.items as Array<Record<string, unknown>>) : [];
+    expect(Number(steerQueue.steer || 0)).toBe(1);
+    expect((steerItems[0]?.skillIds as unknown[] | undefined)?.map((item) => String(item || ""))).toEqual(["skill.only.steer"]);
+
+    const follow = await invokeRuntime({
+      type: "brain.run.follow_up",
+      sessionId,
+      skillIds: ["skill.only.follow"]
+    });
+    expect(follow.ok).toBe(true);
+    const followQueue = (((follow.data as Record<string, unknown>)?.runtime as Record<string, unknown>)?.queue ||
+      {}) as Record<string, unknown>;
+    const followItems = Array.isArray(followQueue.items) ? (followQueue.items as Array<Record<string, unknown>>) : [];
+    expect(Number(followQueue.followUp || 0)).toBe(1);
+    expect((followItems[1]?.skillIds as unknown[] | undefined)?.map((item) => String(item || ""))).toEqual([
+      "skill.only.follow"
+    ]);
   });
 
   it("running 时可把 followUp 队列项直接插入为 steer", async () => {

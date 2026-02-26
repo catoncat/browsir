@@ -861,6 +861,7 @@ async function handleBrainRun(
       sessionOptions: payload.sessionOptions ? toRecord(payload.sessionOptions) : {},
       prompt: typeof payload.prompt === "string" ? payload.prompt : "",
       tabIds: Array.isArray(payload.tabIds) ? payload.tabIds : undefined,
+      skillIds: Array.isArray(payload.skillIds) ? payload.skillIds : undefined,
       autoRun: payload.autoRun === false ? false : true,
       streamingBehavior
     });
@@ -870,12 +871,14 @@ async function handleBrainRun(
   if (action === "brain.run.steer" || action === "brain.run.follow_up") {
     const sessionId = requireSessionId(payload);
     const prompt = String(payload.prompt || "").trim();
-    if (!prompt) {
-      return fail(`${action} 需要非空 prompt`);
+    const skillIds = Array.isArray(payload.skillIds) ? payload.skillIds : undefined;
+    if (!prompt && (!skillIds || skillIds.length === 0)) {
+      return fail(`${action} 需要非空 prompt 或 skillIds`);
     }
     const out = await runtimeLoop.startFromPrompt({
       sessionId,
       prompt,
+      skillIds,
       autoRun: true,
       streamingBehavior: action === "brain.run.steer" ? "steer" : "followUp"
     });
