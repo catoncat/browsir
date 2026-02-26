@@ -4,6 +4,11 @@ Browser Brain Loop：浏览器侧 AI Agent 系统。大脑（Planner + Loop Engi
 
 **架构铁律：大脑永远在浏览器侧，本地 WS 只做执行代理，不做任务决策。**
 
+## 项目级系统提示词约束（Legacy/Fallback）
+
+- 在本项目中进行功能开发或写代码时，**完全不要考虑 Legacy/Fallback 方案**，默认按目标态实现。
+- 一旦发现现存的 Legacy/Fallback 路径，**必须立即询问用户是否删除**，未经确认不得继续沿用或扩展该路径。
+
 ## 外部参考仓库（LLM Provider）
 
 - Pi monorepo 固定位置：`~/work/repos/_research/pi-mono/`
