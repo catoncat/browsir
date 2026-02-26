@@ -2,7 +2,8 @@ import "./test-setup";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { initSessionIndex, resetSessionStore } from "../storage-reset.browser";
-import { readSessionIndex } from "../session-store.browser";
+import { SESSION_INDEX_KEY, readSessionIndex } from "../session-store.browser";
+import { kvSet } from "../idb-storage";
 
 type Store = Record<string, unknown>;
 
@@ -19,7 +20,7 @@ afterEach(() => {
 });
 
 describe("storage-reset.browser", () => {
-  it("resetSessionStore 支持 includeTrace/preserveArchive 开关并重建索引", async () => {
+  it("resetSessionStore 仅重置 session store（includeTrace 可选）并重建索引", async () => {
     await setStore({
       "session:index": {
         version: 1,
@@ -36,25 +37,24 @@ describe("storage-reset.browser", () => {
     });
 
     const result = await resetSessionStore({
-      includeTrace: false,
-      preserveArchive: false,
-      archiveLegacyBeforeReset: true
+      includeTrace: false
     });
 
-    expect(result.archived?.archivedKeys).toEqual(["chatState"]);
-    expect(result.archived?.archiveKey).toMatch(/^archive:legacy:\d+$/);
+    expect(result.removedCount).toBe(3);
     expect(result.removedKeys).toContain("session:index");
     expect(result.removedKeys).toContain("session:s1:meta");
     expect(result.removedKeys).toContain("session:s1:entries:0");
-    expect(result.removedKeys).toContain("archive:legacy:index");
-    expect(result.removedKeys).toContain("archive:legacy:old");
-    expect(result.removedKeys).toContain(result.archived?.archiveKey as string);
+    expect(result.removedKeys).not.toContain("trace:keep:0");
+    expect(result.removedKeys).not.toContain("archive:legacy:index");
+    expect(result.removedKeys).not.toContain("archive:legacy:old");
+    expect(result.removedKeys).not.toContain("chatState");
 
     const all = await getStore();
     expect(all["trace:keep:0"]).toEqual([{ ok: true }]);
     expect(all["safe:key"]).toBe("keep");
-    expect(all["chatState"]).toBeUndefined();
-    expect(Object.keys(all).some((key) => key === "archive:legacy:index" || key.startsWith("archive:legacy:"))).toBe(false);
+    expect(all["chatState"]).toEqual({ old: true });
+    expect(all["archive:legacy:index"]).toEqual(["archive:legacy:old"]);
+    expect(all["archive:legacy:old"]).toEqual({ payload: true });
 
     expect(result.index.version).toBe(1);
     expect(result.index.sessions).toEqual([]);
@@ -62,19 +62,17 @@ describe("storage-reset.browser", () => {
   });
 
   it("initSessionIndex 会清洗无效索引并持久化", async () => {
-    await setStore({
-      "session:index": {
-        version: 999,
-        sessions: [
-          { id: "", createdAt: "bad", updatedAt: "bad" },
-          { id: "with:colon", createdAt: "bad", updatedAt: "bad" },
-          { id: " keep ", createdAt: "2024-01-01T00:00:00.000Z", updatedAt: "2024-01-02T00:00:00.000Z" },
-          { id: "keep", createdAt: "2024-09-01T00:00:00.000Z", updatedAt: "2024-09-02T00:00:00.000Z" },
-          { id: "trimmed ", createdAt: "bad", updatedAt: "bad" },
-          { id: "s2", createdAt: "bad", updatedAt: "2024-06-01T00:00:00.000Z" }
-        ],
-        updatedAt: "bad"
-      }
+    await kvSet(SESSION_INDEX_KEY, {
+      version: 999,
+      sessions: [
+        { id: "", createdAt: "bad", updatedAt: "bad" },
+        { id: "with:colon", createdAt: "bad", updatedAt: "bad" },
+        { id: " keep ", createdAt: "2024-01-01T00:00:00.000Z", updatedAt: "2024-01-02T00:00:00.000Z" },
+        { id: "keep", createdAt: "2024-09-01T00:00:00.000Z", updatedAt: "2024-09-02T00:00:00.000Z" },
+        { id: "trimmed ", createdAt: "bad", updatedAt: "bad" },
+        { id: "s2", createdAt: "bad", updatedAt: "2024-06-01T00:00:00.000Z" }
+      ],
+      updatedAt: "bad"
     });
 
     const result = await initSessionIndex();

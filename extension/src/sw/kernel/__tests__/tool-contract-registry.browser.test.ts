@@ -64,10 +64,10 @@ describe("tool-contract-registry", () => {
       expect(names).toContain(toolName);
     }
 
-    expect(names).toContain("bash");
-    expect(names).toContain("read_file");
-    expect(names).toContain("write_file");
-    expect(names).toContain("edit_file");
+    expect(names).not.toContain("bash");
+    expect(names).not.toContain("read_file");
+    expect(names).not.toContain("write_file");
+    expect(names).not.toContain("edit_file");
 
     for (const toolName of CANONICAL_BROWSER_TOOLS) {
       expect(names).toContain(toolName);
@@ -153,12 +153,12 @@ describe("tool-contract-registry", () => {
     const registry = new ToolContractRegistry();
     const original = registry
       .listLlmToolDefinitions()
-      .find((item) => item.function.name === "bash")?.function.description;
-    expect(String(original || "")).toContain("Legacy mixed-backend shell tool");
+      .find((item) => item.function.name === "host_bash")?.function.description;
+    expect(String(original || "")).toContain("Execute shell command on host machine");
 
     registry.register(
       {
-        name: "bash",
+        name: "host_bash",
         description: "Run command through provider-registry.",
         parameters: {
           type: "object",
@@ -173,15 +173,15 @@ describe("tool-contract-registry", () => {
 
     const overridden = registry
       .listLlmToolDefinitions()
-      .find((item) => item.function.name === "bash")?.function.description;
+      .find((item) => item.function.name === "host_bash")?.function.description;
     expect(overridden).toBe("Run command through provider-registry.");
-    expect(registry.listContracts().find((item) => item.name === "bash")?.source).toBe("override");
+    expect(registry.listContracts().find((item) => item.name === "host_bash")?.source).toBe("override");
 
-    expect(registry.unregister("bash")).toBe(true);
+    expect(registry.unregister("host_bash")).toBe(true);
     const restored = registry
       .listLlmToolDefinitions()
-      .find((item) => item.function.name === "bash")?.function.description;
-    expect(String(restored || "")).toContain("Legacy mixed-backend shell tool");
-    expect(registry.listContracts().find((item) => item.name === "bash")?.source).toBe("builtin");
+      .find((item) => item.function.name === "host_bash")?.function.description;
+    expect(String(restored || "")).toContain("Execute shell command on host machine");
+    expect(registry.listContracts().find((item) => item.name === "host_bash")?.source).toBe("builtin");
   });
 });

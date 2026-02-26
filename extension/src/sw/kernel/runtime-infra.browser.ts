@@ -20,9 +20,6 @@ type JsonRecord = Record<string, unknown>;
 export interface BridgeConfig {
   bridgeUrl: string;
   bridgeToken: string;
-  llmApiBase: string;
-  llmApiKey: string;
-  llmModel: string;
   llmDefaultProfile?: string;
   llmProfiles?: unknown;
   llmProfileChains?: unknown;
@@ -556,9 +553,6 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     const data = await chrome.storage.local.get([
       "bridgeUrl",
       "bridgeToken",
-      "llmApiBase",
-      "llmApiKey",
-      "llmModel",
       "llmDefaultProfile",
       "llmProfiles",
       "llmProfileChains",
@@ -576,9 +570,6 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     bridgeConfigCache = {
       bridgeUrl: String(data.bridgeUrl || DEFAULT_BRIDGE_URL),
       bridgeToken: String(data.bridgeToken || DEFAULT_BRIDGE_TOKEN),
-      llmApiBase: String(data.llmApiBase || "https://ai.chen.rs/v1"),
-      llmApiKey: String(data.llmApiKey || ""),
-      llmModel: String(data.llmModel || "gpt-5.3-codex"),
       llmDefaultProfile: String(data.llmDefaultProfile || "default"),
       llmProfiles: data.llmProfiles,
       llmProfileChains: data.llmProfileChains,
@@ -617,9 +608,6 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     const next: BridgeConfig = {
       bridgeUrl: String(source.bridgeUrl || current.bridgeUrl || DEFAULT_BRIDGE_URL).trim(),
       bridgeToken: String(source.bridgeToken ?? current.bridgeToken ?? DEFAULT_BRIDGE_TOKEN),
-      llmApiBase: String(source.llmApiBase || current.llmApiBase || "https://ai.chen.rs/v1").trim(),
-      llmApiKey: String(source.llmApiKey ?? current.llmApiKey ?? ""),
-      llmModel: String(source.llmModel || current.llmModel || "gpt-5.3-codex").trim(),
       llmDefaultProfile: String(source.llmDefaultProfile || current.llmDefaultProfile || "default").trim() || "default",
       llmProfiles: source.llmProfiles !== undefined ? source.llmProfiles : current.llmProfiles,
       llmProfileChains: source.llmProfileChains !== undefined ? source.llmProfileChains : current.llmProfileChains,

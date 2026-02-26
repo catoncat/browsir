@@ -68,6 +68,26 @@ async function flushMicrotasks(turns = 2): Promise<void> {
   }
 }
 
+function buildWorkerLlmConfig(options?: { id?: string; model?: string; apiKey?: string }): Record<string, unknown> {
+  const id = String(options?.id || "default");
+  return {
+    llmDefaultProfile: id,
+    llmProfiles: [
+      {
+        id,
+        provider: "openai_compatible",
+        llmApiBase: "https://example.com/v1",
+        llmApiKey: options?.apiKey ?? "k1",
+        llmModel: options?.model || "gpt-test",
+        role: "worker"
+      }
+    ],
+    llmProfileChains: {
+      worker: [id]
+    }
+  };
+}
+
 describe("runtime infra handler", () => {
   const originalWebSocket = globalThis.WebSocket;
 
@@ -147,6 +167,46 @@ describe("runtime infra handler", () => {
           return { frameId: "frame-1" };
         }
 
+        if (method === "Accessibility.getFullAXTree") {
+          return {
+            nodes: [
+              {
+                nodeId: "ax-1",
+                backendDOMNodeId: 101,
+                role: { value: "button" },
+                name: { value: "提交" },
+                properties: [{ name: "focusable", value: { value: true } }]
+              }
+            ]
+          };
+        }
+
+        if (method === "DOM.resolveNode") {
+          const backendNodeId = Number(params.backendNodeId || 101);
+          return { object: { objectId: `obj-${backendNodeId}` } };
+        }
+
+        if (method === "Runtime.callFunctionOn") {
+          return {
+            result: {
+              value: {
+                ok: true,
+                matchesScope: true,
+                tag: "button",
+                role: "button",
+                name: "提交",
+                value: "",
+                placeholder: "",
+                ariaLabel: "",
+                editable: false,
+                selector: "#submit",
+                disabled: false,
+                focused: false
+              }
+            }
+          };
+        }
+
         return {};
       },
       onEvent: {
@@ -176,9 +236,7 @@ describe("runtime infra handler", () => {
       payload: {
         bridgeUrl: "ws://127.0.0.1:18787/ws",
         bridgeToken: "token-x",
-        llmApiBase: "https://example.com/v1",
-        llmApiKey: "k1",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         llmSystemPromptCustom: "Always provide concise evidence.",
         autoTitleInterval: 7,
         bridgeInvokeTimeoutMs: 180000,
@@ -195,7 +253,8 @@ describe("runtime infra handler", () => {
     const updated = (after.data ?? {}) as Record<string, unknown>;
     expect(updated.bridgeUrl).toBe("ws://127.0.0.1:18787/ws");
     expect(updated.bridgeToken).toBe("token-x");
-    expect(updated.llmModel).toBe("gpt-test");
+    const profiles = Array.isArray(updated.llmProfiles) ? (updated.llmProfiles as Array<Record<string, unknown>>) : [];
+    expect(String((profiles[0] || {}).llmModel || "")).toBe("gpt-test");
     expect(updated.llmSystemPromptCustom).toBe("Always provide concise evidence.");
     expect(updated.autoTitleInterval).toBe(7);
     expect(updated.bridgeInvokeTimeoutMs).toBe(180000);

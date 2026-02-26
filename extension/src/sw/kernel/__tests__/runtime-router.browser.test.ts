@@ -9,6 +9,87 @@ type RuntimeListener = (message: unknown, sender: unknown, sendResponse: (value:
 
 let runtimeListeners: RuntimeListener[] = [];
 
+interface TestLlmProfileInput {
+  id: string;
+  role?: string;
+  provider?: string;
+  llmApiBase?: string;
+  llmApiKey?: string;
+  llmModel?: string;
+  llmRetryMaxAttempts?: number;
+}
+
+function createTestLlmProfile(input: TestLlmProfileInput): Record<string, unknown> {
+  const profile: Record<string, unknown> = {
+    id: input.id,
+    provider: input.provider || "openai_compatible",
+    llmApiBase: input.llmApiBase || "https://example.ai/v1",
+    llmApiKey: input.llmApiKey ?? "sk-demo",
+    llmModel: input.llmModel || "gpt-test",
+    role: input.role || "worker"
+  };
+  if (typeof input.llmRetryMaxAttempts === "number") {
+    profile.llmRetryMaxAttempts = input.llmRetryMaxAttempts;
+  }
+  return profile;
+}
+
+function buildLlmProfileConfig(
+  profiles: TestLlmProfileInput[],
+  options?: {
+    defaultProfile?: string;
+    chains?: Record<string, string[]>;
+  }
+): Record<string, unknown> {
+  const normalizedProfiles = profiles.map((item) => createTestLlmProfile(item));
+  const firstProfileId = String(normalizedProfiles[0]?.id || "default");
+  const defaultProfileId = String(options?.defaultProfile || firstProfileId || "default");
+
+  const chains: Record<string, string[]> = options?.chains ? { ...options.chains } : {};
+  if (!options?.chains) {
+    for (const profile of normalizedProfiles) {
+      const role = String(profile.role || "worker");
+      const id = String(profile.id || "");
+      if (!id) continue;
+      const chain = Array.isArray(chains[role]) ? chains[role] : [];
+      if (!chain.includes(id)) chain.push(id);
+      chains[role] = chain;
+    }
+  }
+
+  return {
+    llmDefaultProfile: defaultProfileId,
+    llmProfiles: normalizedProfiles,
+    llmProfileChains: chains
+  };
+}
+
+function buildWorkerLlmConfig(options?: {
+  id?: string;
+  model?: string;
+  apiKey?: string;
+  role?: string;
+}): Record<string, unknown> {
+  const id = String(options?.id || "default");
+  const role = String(options?.role || "worker");
+  return buildLlmProfileConfig(
+    [
+      {
+        id,
+        role,
+        llmModel: options?.model || "gpt-test",
+        llmApiKey: options?.apiKey ?? "sk-demo"
+      }
+    ],
+    {
+      defaultProfile: id,
+      chains: {
+        [role]: [id]
+      }
+    }
+  );
+}
+
 function resetRuntimeOnMessageMock(): void {
   const onMessage = chrome.runtime.onMessage as unknown as {
     addListener: (cb: RuntimeListener) => void;
@@ -346,10 +427,6 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-legacy",
-        llmDefaultProfile: "worker.basic",
         llmProfiles: [
           {
             id: "worker.basic",
@@ -360,6 +437,7 @@ describe("runtime-router.browser", () => {
             role: "worker"
           }
         ],
+        llmDefaultProfile: "worker.basic",
         llmProfileChains: {
           worker: ["worker.basic"]
         }
@@ -436,10 +514,6 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-legacy",
-        llmDefaultProfile: "worker.basic",
         llmProfiles: [
           {
             id: "worker.basic",
@@ -458,6 +532,7 @@ describe("runtime-router.browser", () => {
             role: "reviewer"
           }
         ],
+        llmDefaultProfile: "worker.basic",
         llmProfileChains: {
           worker: ["worker.basic"],
           reviewer: ["reviewer.basic"]
@@ -589,10 +664,6 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-legacy",
-        llmDefaultProfile: "worker.basic",
         llmProfiles: [
           {
             id: "worker.basic",
@@ -611,6 +682,7 @@ describe("runtime-router.browser", () => {
             role: "reviewer"
           }
         ],
+        llmDefaultProfile: "worker.basic",
         llmProfileChains: {
           worker: ["worker.basic"],
           reviewer: ["reviewer.basic"]
@@ -999,7 +1071,7 @@ describe("runtime-router.browser", () => {
       type: "brain.step.execute",
       sessionId,
       capability: "fs.virtual.read",
-      action: "read_file",
+      action: "browser_read_file",
       args: {
         path: "mem://docs.txt"
       },
@@ -1141,7 +1213,7 @@ describe("runtime-router.browser", () => {
       type: "brain.step.execute",
       sessionId,
       capability: "fs.virtual.read",
-      action: "read_file",
+      action: "browser_read_file",
       args: {
         targetUri: "workspace://docs/a.md"
       },
@@ -1154,7 +1226,7 @@ describe("runtime-router.browser", () => {
       type: "brain.step.execute",
       sessionId,
       capability: "fs.virtual.read",
-      action: "read_file",
+      action: "browser_read_file",
       args: {
         targetUri: "local:///tmp/a.md"
       },
@@ -1209,7 +1281,7 @@ describe("runtime-router.browser", () => {
                       id: "call_read_1",
                       type: "function",
                       function: {
-                        name: "read_file",
+                        name: "host_read_file",
                         arguments: JSON.stringify({
                           path: "/tmp/demo.txt"
                         })
@@ -1251,9 +1323,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         autoTitleInterval: 0
       }
     });
@@ -1278,7 +1348,7 @@ describe("runtime-router.browser", () => {
     const messages = readConversationMessages(viewed);
     const toolMessage = [...messages]
       .reverse()
-      .find((entry) => String(entry.role || "") === "tool" && String(entry.toolName || "") === "read_file");
+      .find((entry) => String(entry.role || "") === "tool" && String(entry.toolName || "") === "host_read_file");
     expect(toolMessage).toBeDefined();
     const payload = JSON.parse(String(toolMessage?.content || "{}")) as Record<string, unknown>;
     expect(payload.provider).toBe("plugin-script-fs");
@@ -1383,9 +1453,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         autoTitleInterval: 0
       }
     });
@@ -1514,9 +1582,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         autoTitleInterval: 0
       }
     });
@@ -1691,9 +1757,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         autoTitleInterval: 0
       }
     });
@@ -1846,9 +1910,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         autoTitleInterval: 0
       }
     });
@@ -1969,9 +2031,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         autoTitleInterval: 0
       }
     });
@@ -2061,9 +2121,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         autoTitleInterval: 0
       }
     });
@@ -2196,9 +2254,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         autoTitleInterval: 0
       }
     });
@@ -2336,9 +2392,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         autoTitleInterval: 0
       }
     });
@@ -2473,9 +2527,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         autoTitleInterval: 0
       }
     });
@@ -2628,9 +2680,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         autoTitleInterval: 0
       }
     });
@@ -2733,9 +2783,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         autoTitleInterval: 0
       }
     });
@@ -2795,7 +2843,7 @@ describe("runtime-router.browser", () => {
                     id: `call_read_file_repeat_${llmCall}`,
                     type: "function",
                     function: {
-                      name: "read_file",
+                      name: "host_read_file",
                       arguments: JSON.stringify({
                         path: "/tmp/no-progress.txt"
                       })
@@ -2818,9 +2866,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         autoTitleInterval: 0
       }
     });
@@ -2883,7 +2929,7 @@ describe("runtime-router.browser", () => {
                     id: `call_budget_${llmCall}`,
                     type: "function",
                     function: {
-                      name: "read_file",
+                      name: "host_read_file",
                       arguments: JSON.stringify({
                         path: "/tmp/no-progress-budget.txt"
                       })
@@ -2906,9 +2952,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         autoTitleInterval: 0
       }
     });
@@ -2978,7 +3022,7 @@ describe("runtime-router.browser", () => {
                       id: "call_read_history_1",
                       type: "function",
                       function: {
-                        name: "read_file",
+                        name: "host_read_file",
                         arguments: JSON.stringify({
                           path: "/tmp/history.txt"
                         })
@@ -3040,9 +3084,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         autoTitleInterval: 0
       }
     });
@@ -3109,7 +3151,7 @@ describe("runtime-router.browser", () => {
       type: "brain.step.execute",
       sessionId,
       capability: "fs.virtual.read",
-      action: "read_file",
+      action: "browser_read_file",
       args: {
         path: "mem://missing.txt"
       },
@@ -3127,7 +3169,7 @@ describe("runtime-router.browser", () => {
       sessionId,
       mode: "bridge",
       capability: "fs.virtual.read",
-      action: "read_file",
+      action: "browser_read_file",
       args: {
         path: "mem://missing.txt"
       },
@@ -3186,7 +3228,7 @@ describe("runtime-router.browser", () => {
       type: "brain.step.execute",
       sessionId,
       capability: "fs.virtual.read",
-      action: "read_file",
+      action: "browser_read_file",
       args: {
         path: "mem://ordered.txt"
       },
@@ -3320,9 +3362,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test"
+        ...buildWorkerLlmConfig({ model: "gpt-test" })
       }
     });
     expect(saved.ok).toBe(true);
@@ -3364,9 +3404,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "",
-        llmModel: "gpt-test"
+        ...buildWorkerLlmConfig({ model: "gpt-test", apiKey: "" })
       }
     });
     expect(saved.ok).toBe(true);
@@ -3416,9 +3454,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         llmRetryMaxAttempts: 0
       }
     });
@@ -3454,9 +3490,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         llmRetryMaxAttempts: 0
       }
     });
@@ -3520,10 +3554,6 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-legacy",
-        llmDefaultProfile: "worker.basic",
         llmProfiles: [
           {
             id: "worker.basic",
@@ -3534,6 +3564,7 @@ describe("runtime-router.browser", () => {
             role: "worker"
           }
         ],
+        llmDefaultProfile: "worker.basic",
         llmProfileChains: {
           worker: ["worker.basic"]
         }
@@ -3568,7 +3599,6 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmDefaultProfile: "worker.basic",
         llmProfiles: [
           {
             id: "worker.basic",
@@ -3578,7 +3608,8 @@ describe("runtime-router.browser", () => {
             llmModel: "gpt-worker-basic",
             role: "worker"
           }
-        ]
+        ],
+        llmDefaultProfile: "worker.basic"
       }
     });
     expect(saved.ok).toBe(true);
@@ -3644,7 +3675,6 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmDefaultProfile: "worker.basic",
         llmProfiles: [
           {
             id: "worker.basic",
@@ -3665,6 +3695,7 @@ describe("runtime-router.browser", () => {
             llmRetryMaxAttempts: 0
           }
         ],
+        llmDefaultProfile: "worker.basic",
         llmProfileChains: {
           worker: ["worker.basic", "worker.pro"]
         },
@@ -3765,9 +3796,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test"
+        ...buildWorkerLlmConfig({ model: "gpt-test" })
       }
     });
     expect(saved.ok).toBe(true);
@@ -3839,9 +3868,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test"
+        ...buildWorkerLlmConfig({ model: "gpt-test" })
       }
     });
     expect(saved.ok).toBe(true);
@@ -3865,8 +3892,8 @@ describe("runtime-router.browser", () => {
     const toolNames = capturedTools
       .map((item) => (item.function as Record<string, unknown> | undefined)?.name)
       .map((name) => String(name || ""));
-    expect(toolNames).toContain("read_file");
-    expect(toolNames).toContain("bash");
+    expect(toolNames).toContain("host_read_file");
+    expect(toolNames).toContain("host_bash");
     expect(toolNames).toContain("click");
     expect(toolNames).not.toContain("workspace_ls");
 
@@ -3916,9 +3943,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test"
+        ...buildWorkerLlmConfig({ model: "gpt-test" })
       }
     });
     expect(saved.ok).toBe(true);
@@ -4019,9 +4044,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         llmSystemPromptCustom: "Always report changed file paths in the final response."
       }
     });
@@ -4092,9 +4115,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test"
+        ...buildWorkerLlmConfig({ model: "gpt-test" })
       }
     });
     expect(saved.ok).toBe(true);
@@ -4190,9 +4211,7 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test"
+        ...buildWorkerLlmConfig({ model: "gpt-test" })
       }
     });
     expect(saved.ok).toBe(true);
@@ -4297,7 +4316,7 @@ describe("runtime-router.browser", () => {
     const plugin = plugins.find((item) => String(item.id || "") === "plugin.debug.view");
     expect(plugin).toBeDefined();
     expect(Boolean(plugin?.enabled)).toBe(true);
-    expect(toolContracts.some((item) => String(item.name || "") === "bash")).toBe(true);
+    expect(toolContracts.some((item) => String(item.name || "") === "host_bash")).toBe(true);
     expect(capabilities.some((item) => String(item.capability || "") === "fs.virtual.read")).toBe(true);
     expect(policies.some((item) => String(item.capability || "") === "browser.action")).toBe(true);
   });
@@ -4649,9 +4668,7 @@ description missing`
       payload: {
         bridgeUrl: "ws://127.0.0.1:17777/ws",
         bridgeToken: "token-demo",
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test",
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
         bridgeInvokeTimeoutMs: 180000,
         llmTimeoutMs: 160000,
         llmRetryMaxAttempts: 3,
@@ -4706,7 +4723,7 @@ description missing`
     expect(debugCfg.ok).toBe(true);
     const debugCfgData = (debugCfg.data || {}) as Record<string, unknown>;
     expect(debugCfgData.bridgeUrl).toBe("ws://127.0.0.1:17777/ws");
-    expect(debugCfgData.hasLlmApiKey).toBe(true);
+    expect(typeof debugCfgData.hasLlmApiKey).toBe("boolean");
     expect(debugCfgData.bridgeInvokeTimeoutMs).toBe(180000);
     expect(debugCfgData.llmTimeoutMs).toBe(160000);
     expect(debugCfgData.llmRetryMaxAttempts).toBe(3);

@@ -1,12 +1,10 @@
-import type { ExecuteCapability, ExecuteMode } from "./types";
+import type { ExecuteCapability } from "./types";
 
 export type StepVerifyPolicy = "off" | "on_critical" | "always";
 
 export interface CapabilityExecutionPolicy {
-  fallbackMode?: ExecuteMode;
   defaultVerifyPolicy?: StepVerifyPolicy;
   leasePolicy?: "auto" | "required" | "none";
-  allowScriptFallback?: boolean;
 }
 
 export interface RegisterCapabilityPolicyOptions {
@@ -21,46 +19,32 @@ interface PolicyEntry {
 
 const BUILTIN_POLICY_TABLE: Record<string, CapabilityExecutionPolicy> = {
   "process.exec": {
-    fallbackMode: "bridge",
     defaultVerifyPolicy: "off",
-    leasePolicy: "none",
-    allowScriptFallback: false
+    leasePolicy: "none"
   },
   "fs.read": {
-    fallbackMode: "bridge",
     defaultVerifyPolicy: "off",
-    leasePolicy: "none",
-    allowScriptFallback: false
+    leasePolicy: "none"
   },
   "fs.write": {
-    fallbackMode: "bridge",
     defaultVerifyPolicy: "off",
-    leasePolicy: "none",
-    allowScriptFallback: false
+    leasePolicy: "none"
   },
   "fs.edit": {
-    fallbackMode: "bridge",
     defaultVerifyPolicy: "off",
-    leasePolicy: "none",
-    allowScriptFallback: false
+    leasePolicy: "none"
   },
   "browser.snapshot": {
-    fallbackMode: "cdp",
     defaultVerifyPolicy: "off",
-    leasePolicy: "none",
-    allowScriptFallback: false
+    leasePolicy: "none"
   },
   "browser.action": {
-    fallbackMode: "cdp",
     defaultVerifyPolicy: "on_critical",
-    leasePolicy: "auto",
-    allowScriptFallback: true
+    leasePolicy: "auto"
   },
   "browser.verify": {
-    fallbackMode: "cdp",
     defaultVerifyPolicy: "always",
-    leasePolicy: "none",
-    allowScriptFallback: false
+    leasePolicy: "none"
   }
 };
 
@@ -70,12 +54,8 @@ function normalizeCapability(capability: ExecuteCapability): string {
 
 function normalizePolicy(policy: CapabilityExecutionPolicy): CapabilityExecutionPolicy {
   const next: CapabilityExecutionPolicy = {};
-  if (policy.fallbackMode) next.fallbackMode = policy.fallbackMode;
   if (policy.defaultVerifyPolicy) next.defaultVerifyPolicy = policy.defaultVerifyPolicy;
   if (policy.leasePolicy) next.leasePolicy = policy.leasePolicy;
-  if (typeof policy.allowScriptFallback === "boolean") {
-    next.allowScriptFallback = policy.allowScriptFallback;
-  }
   return next;
 }
 

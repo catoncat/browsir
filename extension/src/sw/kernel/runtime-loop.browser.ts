@@ -121,28 +121,14 @@ export interface RuntimeLoopController {
   getSystemPromptPreview(): Promise<string>;
 }
 
-const TOOL_CAPABILITIES = {
-  bash: "process.exec",
-  read_file: "fs.read",
-  write_file: "fs.write",
-  edit_file: "fs.edit",
-  host_bash: "process.exec",
-  browser_bash: "process.exec",
-  host_read_file: "fs.read",
-  browser_read_file: "fs.read",
-  host_write_file: "fs.write",
-  browser_write_file: "fs.write",
-  host_edit_file: "fs.edit",
-  browser_edit_file: "fs.edit",
-  search_elements: "browser.snapshot",
-  click: "browser.action",
-  fill_element_by_uid: "browser.action",
-  select_option_by_uid: "browser.action",
-  press_key: "browser.action",
-  scroll_page: "browser.action",
-  navigate_tab: "browser.action",
-  fill_form: "browser.action",
-  browser_verify: "browser.verify"
+const CAPABILITIES = {
+  processExec: "process.exec",
+  fsRead: "fs.read",
+  fsWrite: "fs.write",
+  fsEdit: "fs.edit",
+  browserSnapshot: "browser.snapshot",
+  browserAction: "browser.action",
+  browserVerify: "browser.verify"
 } as const;
 
 const CANONICAL_BROWSER_TOOL_NAMES = [
@@ -187,53 +173,53 @@ const CANONICAL_BROWSER_TOOL_NAMES = [
 
 const BUILTIN_BRIDGE_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [
   {
-    capability: TOOL_CAPABILITIES.bash,
+    capability: CAPABILITIES.processExec,
     providerId: "runtime.builtin.capability.process.exec.bridge"
   },
   {
-    capability: TOOL_CAPABILITIES.read_file,
+    capability: CAPABILITIES.fsRead,
     providerId: "runtime.builtin.capability.fs.read.bridge"
   },
   {
-    capability: TOOL_CAPABILITIES.write_file,
+    capability: CAPABILITIES.fsWrite,
     providerId: "runtime.builtin.capability.fs.write.bridge"
   },
   {
-    capability: TOOL_CAPABILITIES.edit_file,
+    capability: CAPABILITIES.fsEdit,
     providerId: "runtime.builtin.capability.fs.edit.bridge"
   }
 ];
 
 const BUILTIN_VIRTUAL_FS_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [
   {
-    capability: TOOL_CAPABILITIES.bash,
+    capability: CAPABILITIES.processExec,
     providerId: "runtime.builtin.capability.process.exec.vfs"
   },
   {
-    capability: TOOL_CAPABILITIES.read_file,
+    capability: CAPABILITIES.fsRead,
     providerId: "runtime.builtin.capability.fs.read.vfs"
   },
   {
-    capability: TOOL_CAPABILITIES.write_file,
+    capability: CAPABILITIES.fsWrite,
     providerId: "runtime.builtin.capability.fs.write.vfs"
   },
   {
-    capability: TOOL_CAPABILITIES.edit_file,
+    capability: CAPABILITIES.fsEdit,
     providerId: "runtime.builtin.capability.fs.edit.vfs"
   }
 ];
 
 const BUILTIN_BROWSER_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [
   {
-    capability: TOOL_CAPABILITIES.search_elements,
+    capability: CAPABILITIES.browserSnapshot,
     providerId: "runtime.builtin.capability.browser.snapshot.cdp"
   },
   {
-    capability: TOOL_CAPABILITIES.click,
+    capability: CAPABILITIES.browserAction,
     providerId: "runtime.builtin.capability.browser.action.cdp"
   },
   {
-    capability: TOOL_CAPABILITIES.browser_verify,
+    capability: CAPABILITIES.browserVerify,
     providerId: "runtime.builtin.capability.browser.verify.cdp"
   }
 ];
@@ -247,10 +233,6 @@ const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
   "browser_write_file",
   "host_edit_file",
   "browser_edit_file",
-  "bash",
-  "read_file",
-  "write_file",
-  "edit_file",
   ...CANONICAL_BROWSER_TOOL_NAMES
 ]);
 
@@ -332,14 +314,6 @@ function safeJsonParse(raw: unknown): unknown {
   } catch {
     return null;
   }
-}
-
-function normalizeRuntimeHint(raw: unknown): "browser" | "local" | undefined {
-  const value = String(raw || "").trim().toLowerCase();
-  if (value === "browser") return "browser";
-  if (value === "host") return "local";
-  if (value === "local") return "local";
-  return undefined;
 }
 
 function readContractExecution(contract: ToolContract | null): {
@@ -514,8 +488,6 @@ function isSideEffectingToolName(toolName: string): boolean {
     "browser_write_file",
     "host_edit_file",
     "browser_edit_file",
-    "write_file",
-    "edit_file",
     "create_new_tab",
     "close_tab",
     "ungroup_tabs",
@@ -568,7 +540,7 @@ function classifyToolRetryDecision(toolName: string, errorCode: string): {
       action: "llm_replan",
       retryable: true,
       retryHint:
-        ["bash", "host_bash", "browser_bash"].includes(String(toolName || "").trim().toLowerCase())
+        ["host_bash", "browser_bash"].includes(String(toolName || "").trim().toLowerCase())
           ? "Increase timeoutMs and retry the same goal."
           : "Operation timed out; adjust parameters and retry the same goal."
     };
@@ -1114,7 +1086,7 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
   const raw = String(rawArgs || "").trim();
   const pick = (key: string) => String(args?.[key] || "").trim();
 
-  if (["bash", "host_bash", "browser_bash"].includes(normalized)) {
+  if (["host_bash", "browser_bash"].includes(normalized)) {
     const command = pick("command") || raw;
     return command ? `命令：${clipText(command, 220)}` : "";
   }
@@ -1135,9 +1107,6 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
   }
   if (
     [
-      "read_file",
-      "write_file",
-      "edit_file",
       "host_read_file",
       "browser_read_file",
       "host_write_file",
@@ -2108,9 +2077,6 @@ function extractLlmConfig(raw: JsonRecord): BridgeConfig {
   return {
     bridgeUrl: String(raw.bridgeUrl || ""),
     bridgeToken: String(raw.bridgeToken || ""),
-    llmApiBase: String(raw.llmApiBase || ""),
-    llmApiKey: String(raw.llmApiKey || ""),
-    llmModel: String(raw.llmModel || "gpt-5.3-codex"),
     llmDefaultProfile: String(raw.llmDefaultProfile || "default"),
     llmProfiles: raw.llmProfiles,
     llmProfileChains: raw.llmProfileChains,
@@ -2799,10 +2765,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             verifyPolicy: stepInput.verifyPolicy,
             capability: stepInput.capability
           };
-          if (item.capability === TOOL_CAPABILITIES.search_elements) {
+          if (item.capability === CAPABILITIES.browserSnapshot) {
             return await invokeBrowserSnapshotCapability(input);
           }
-          if (item.capability === TOOL_CAPABILITIES.click) {
+          if (item.capability === CAPABILITIES.browserAction) {
             return await invokeBrowserActionCapability(input);
           }
           return await invokeBrowserVerifyCapability(input);
@@ -3188,7 +3154,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     for (const item of candidates) {
       if (typeof item === "string") return item;
     }
-    throw new Error(`read_file 未返回 content 文本: ${safeStringify(data, 1200)}`);
+    throw new Error(`文件读取工具未返回 content 文本: ${safeStringify(data, 1200)}`);
   }
 
   orchestrator.setSkillContentReader(async (input) => {
@@ -3198,7 +3164,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
     const location = String(input.location || "").trim();
     const runtime = isVirtualUri(location) ? "browser" : undefined;
-    const readCapability = String(input.capability || TOOL_CAPABILITIES.read_file).trim() || TOOL_CAPABILITIES.read_file;
+    const readCapability = String(input.capability || CAPABILITIES.fsRead).trim() || CAPABILITIES.fsRead;
     const result = await executeStep({
       sessionId,
       capability: readCapability as ExecuteCapability,
@@ -3216,7 +3182,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       verifyPolicy: "off"
     });
     if (!result.ok) {
-      throw new Error(result.error || `read_file 失败: ${location}`);
+      throw new Error(result.error || `文件读取失败: ${location}`);
     }
     return extractSkillReadContent(result.data);
   });
@@ -3302,11 +3268,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           | "host_write_file"
           | "browser_write_file"
           | "host_edit_file"
-          | "browser_edit_file"
-          | "bash"
-          | "read_file"
-          | "write_file"
-          | "edit_file";
+          | "browser_edit_file";
         capability: ExecuteCapability;
         frame: JsonRecord;
       }
@@ -3662,7 +3624,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const runtimeHint = isVirtualUri(location) ? "browser" : "local";
     const result = await executeStep({
       sessionId,
-      capability: TOOL_CAPABILITIES.read_file,
+      capability: CAPABILITIES.fsRead,
       action: "invoke",
       args: {
         path: location,
@@ -3678,7 +3640,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       verifyPolicy: "off"
     });
     if (!result.ok) {
-      throw new Error(result.error || `read_file 失败: ${location}`);
+      throw new Error(result.error || `文件读取失败: ${location}`);
     }
     return extractSkillReadContent(result.data);
   }
@@ -3769,7 +3731,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             | "hover_element_by_uid"
             | "get_editor_value"
             | "scroll_to_element",
-          capability: TOOL_CAPABILITIES.click,
+          capability: CAPABILITIES.browserAction,
           tabId,
           kindValue,
           action: {
@@ -3854,7 +3816,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         plan: {
           kind: "step.element_action",
           toolName,
-          capability: TOOL_CAPABILITIES.click,
+          capability: CAPABILITIES.browserAction,
           tabId,
           kindValue,
           action,
@@ -3864,17 +3826,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     };
     switch (context.executionTool) {
       case "host_bash":
-      case "browser_bash":
-      case "bash": {
+      case "browser_bash": {
         const command = String(args.command || "").trim();
         if (!command) return { ok: false, error: { error: `${context.executionTool} 需要 command` } };
         const forcedRuntime =
           context.executionTool === "host_bash"
             ? "local"
-            : context.executionTool === "browser_bash"
-              ? "browser"
-              : undefined;
-        const runtimeHint = forcedRuntime || normalizeRuntimeHint(args.runtime);
+            : "browser";
         const timeoutMs =
           args.timeoutMs == null
             ? undefined
@@ -3885,15 +3843,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             kind: "bridge",
             toolName: context.executionTool as
               | "host_bash"
-              | "browser_bash"
-              | "bash",
-            capability: TOOL_CAPABILITIES.bash,
+              | "browser_bash",
+            capability: CAPABILITIES.processExec,
             frame: {
               tool: "bash",
               args: {
                 cmdId: "bash.exec",
                 args: [command],
-                ...(runtimeHint ? { runtime: runtimeHint } : {}),
+                runtime: forcedRuntime,
                 ...(timeoutMs == null ? {} : { timeoutMs })
               }
             }
@@ -3901,30 +3858,25 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         };
       }
       case "host_read_file":
-      case "browser_read_file":
-      case "read_file": {
+      case "browser_read_file": {
         const path = String(args.path || "").trim();
         if (!path) return { ok: false, error: { error: `${context.executionTool} 需要 path` } };
         const forcedRuntime =
           context.executionTool === "host_read_file"
             ? "local"
-            : context.executionTool === "browser_read_file"
-              ? "browser"
-              : undefined;
-        const runtimeHint = forcedRuntime || normalizeRuntimeHint(args.runtime);
+            : "browser";
         const invokeArgs: JsonRecord = { path };
         if (args.offset != null) invokeArgs.offset = args.offset;
         if (args.limit != null) invokeArgs.limit = args.limit;
-        if (runtimeHint) invokeArgs.runtime = runtimeHint;
+        invokeArgs.runtime = forcedRuntime;
         return {
           ok: true,
           plan: {
             kind: "bridge",
             toolName: context.executionTool as
               | "host_read_file"
-              | "browser_read_file"
-              | "read_file",
-            capability: TOOL_CAPABILITIES.read_file,
+              | "browser_read_file",
+            capability: CAPABILITIES.fsRead,
             frame: {
               tool: "read",
               args: invokeArgs
@@ -3933,65 +3885,55 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         };
       }
       case "host_write_file":
-      case "browser_write_file":
-      case "write_file": {
+      case "browser_write_file": {
         const path = String(args.path || "").trim();
         if (!path) return { ok: false, error: { error: `${context.executionTool} 需要 path` } };
         const forcedRuntime =
           context.executionTool === "host_write_file"
             ? "local"
-            : context.executionTool === "browser_write_file"
-              ? "browser"
-              : undefined;
-        const runtimeHint = forcedRuntime || normalizeRuntimeHint(args.runtime);
+            : "browser";
         return {
           ok: true,
           plan: {
             kind: "bridge",
             toolName: context.executionTool as
               | "host_write_file"
-              | "browser_write_file"
-              | "write_file",
-            capability: TOOL_CAPABILITIES.write_file,
+              | "browser_write_file",
+            capability: CAPABILITIES.fsWrite,
             frame: {
               tool: "write",
               args: {
                 path,
                 content: String(args.content || ""),
                 mode: String(args.mode || "overwrite"),
-                ...(runtimeHint ? { runtime: runtimeHint } : {})
+                runtime: forcedRuntime
               }
             }
           }
         };
       }
       case "host_edit_file":
-      case "browser_edit_file":
-      case "edit_file": {
+      case "browser_edit_file": {
         const path = String(args.path || "").trim();
         if (!path) return { ok: false, error: { error: `${context.executionTool} 需要 path` } };
         const forcedRuntime =
           context.executionTool === "host_edit_file"
             ? "local"
-            : context.executionTool === "browser_edit_file"
-              ? "browser"
-              : undefined;
-        const runtimeHint = forcedRuntime || normalizeRuntimeHint(args.runtime);
+            : "browser";
         return {
           ok: true,
           plan: {
             kind: "bridge",
             toolName: context.executionTool as
               | "host_edit_file"
-              | "browser_edit_file"
-              | "edit_file",
-            capability: TOOL_CAPABILITIES.edit_file,
+              | "browser_edit_file",
+            capability: CAPABILITIES.fsEdit,
             frame: {
               tool: "edit",
               args: {
                 path,
                 edits: Array.isArray(args.edits) ? args.edits : [],
-                ...(runtimeHint ? { runtime: runtimeHint } : {})
+                runtime: forcedRuntime
               }
             }
           }
@@ -4086,7 +4028,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           ok: true,
           plan: {
             kind: "step.search_elements",
-            capability: TOOL_CAPABILITIES.search_elements,
+            capability: CAPABILITIES.browserSnapshot,
             tabId,
             query: String(args.query || "").trim(),
             maxResults,
@@ -4157,7 +4099,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           plan: {
             kind: "step.script_action",
             toolName: "get_page_metadata",
-            capability: TOOL_CAPABILITIES.click,
+            capability: CAPABILITIES.browserAction,
             tabId,
             expression,
             expect: null
@@ -4227,7 +4169,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           plan: {
             kind: "step.script_action",
             toolName: "highlight_element",
-            capability: TOOL_CAPABILITIES.click,
+            capability: CAPABILITIES.browserAction,
             tabId,
             expression,
             expect: normalizeVerifyExpect(args.expect || null)
@@ -4317,7 +4259,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           plan: {
             kind: "step.script_action",
             toolName: "highlight_text_inline",
-            capability: TOOL_CAPABILITIES.click,
+            capability: CAPABILITIES.browserAction,
             tabId,
             expression,
             expect: normalizeVerifyExpect(args.expect || null)
@@ -4747,7 +4689,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           ok: true,
           plan: {
             kind: "step.fill_form",
-            capability: TOOL_CAPABILITIES.fill_form,
+            capability: CAPABILITIES.browserAction,
             tabId,
             elements,
             submit: Object.keys(toRecord(args.submit)).length > 0 ? toRecord(args.submit) : null,
@@ -4786,7 +4728,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           ok: true,
           plan: {
             kind: "step.browser_verify",
-            capability: TOOL_CAPABILITIES.browser_verify,
+            capability: CAPABILITIES.browserVerify,
             tabId,
             verifyExpect
           }
@@ -5182,7 +5124,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
         const out = await executeStep({
           sessionId: plan.sessionId,
-          capability: TOOL_CAPABILITIES.bash,
+          capability: CAPABILITIES.processExec,
           action: "invoke",
           args: {
             frame: {
@@ -5375,7 +5317,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (expect) {
           const verifyOut = await executeStep({
             sessionId,
-            capability: TOOL_CAPABILITIES.browser_verify,
+            capability: CAPABILITIES.browserVerify,
             action: "verify",
             args: {
               tabId: plan.tabId,
@@ -5730,7 +5672,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           for (const key of keys) {
             await executeStep({
               sessionId,
-              capability: TOOL_CAPABILITIES.click,
+              capability: CAPABILITIES.browserAction,
               action: "action",
               args: {
                 tabId: plan.tabId,
@@ -5761,7 +5703,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           }
           const out = await executeStep({
             sessionId,
-            capability: TOOL_CAPABILITIES.click,
+            capability: CAPABILITIES.browserAction,
             action: "action",
             args: {
               tabId: plan.tabId,
@@ -5996,7 +5938,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (Object.keys(plan.expect || {}).length > 0) {
           const verifyOut = await executeStep({
             sessionId,
-            capability: TOOL_CAPABILITIES.browser_verify,
+            capability: CAPABILITIES.browserVerify,
             action: "verify",
             args: {
               tabId: plan.tabId,
@@ -7176,7 +7118,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     for (const skillId of skillIds) {
       const resolved = await orchestrator.resolveSkillContent(skillId, {
         sessionId,
-        capability: TOOL_CAPABILITIES.read_file
+        capability: CAPABILITIES.fsRead
       });
       promptBlocks.push(resolved.promptBlock);
       selectedLabels.push(`${resolved.skill.name}（id=${resolved.skill.id}）`);
@@ -7197,7 +7139,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     if (!parsed) return String(prompt || "");
     const resolved = await orchestrator.resolveSkillContent(parsed.skillId, {
       sessionId,
-      capability: TOOL_CAPABILITIES.read_file
+      capability: CAPABILITIES.fsRead
     });
     return buildSkillCommandPrompt({
       promptBlock: resolved.promptBlock,

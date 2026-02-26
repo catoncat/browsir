@@ -45,7 +45,7 @@ describe("tool-provider-registry.browser", () => {
     const local = await registry.invoke("bridge", {
       sessionId: "s-local",
       capability: "fs.virtual.read",
-      action: "read_file",
+      action: "browser_read_file",
       args: { targetUri: "local:///tmp/a.txt" }
     });
     expect(local.providerId).toBe("provider.local");
@@ -54,7 +54,7 @@ describe("tool-provider-registry.browser", () => {
     const workspace = await registry.invoke("bridge", {
       sessionId: "s-workspace",
       capability: "fs.virtual.read",
-      action: "read_file",
+      action: "browser_read_file",
       args: { targetUri: "workspace://docs/a.txt" }
     });
     expect(workspace.providerId).toBe("provider.workspace");
@@ -64,7 +64,7 @@ describe("tool-provider-registry.browser", () => {
       registry.invoke("bridge", {
         sessionId: "s-none",
         capability: "fs.virtual.read",
-        action: "read_file",
+        action: "browser_read_file",
         args: { targetUri: "plugin://pkg/data.txt" }
       })
     ).rejects.toThrow("未找到 capability provider");

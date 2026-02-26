@@ -127,7 +127,7 @@ describe("plugin-runtime.browser", () => {
     const result = await orchestrator.executeStep({
       sessionId,
       capability: "fs.virtual.read",
-      action: "read_file",
+      action: "browser_read_file",
       args: { path: "mem://notes.md" },
       verifyPolicy: "off"
     });
@@ -145,7 +145,7 @@ describe("plugin-runtime.browser", () => {
     const disabledResult = await orchestrator.executeStep({
       sessionId,
       capability: "fs.virtual.read",
-      action: "read_file",
+      action: "browser_read_file",
       args: { path: "mem://notes.md" },
       verifyPolicy: "off"
     });
@@ -157,7 +157,6 @@ describe("plugin-runtime.browser", () => {
     const orchestrator = new BrainOrchestrator();
     const before = orchestrator.resolveCapabilityPolicy("browser.action");
     expect(before.defaultVerifyPolicy).toBe("on_critical");
-    expect(before.allowScriptFallback).toBe(true);
 
     orchestrator.registerPlugin({
       manifest: {
@@ -172,8 +171,7 @@ describe("plugin-runtime.browser", () => {
         capabilities: {
           "browser.action": {
             defaultVerifyPolicy: "always",
-            leasePolicy: "required",
-            allowScriptFallback: false
+            leasePolicy: "required"
           }
         }
       }
@@ -182,14 +180,12 @@ describe("plugin-runtime.browser", () => {
     const applied = orchestrator.resolveCapabilityPolicy("browser.action");
     expect(applied.defaultVerifyPolicy).toBe("always");
     expect(applied.leasePolicy).toBe("required");
-    expect(applied.allowScriptFallback).toBe(false);
 
     orchestrator.disablePlugin("plugin.policy.override");
 
     const rolledBack = orchestrator.resolveCapabilityPolicy("browser.action");
     expect(rolledBack.defaultVerifyPolicy).toBe("on_critical");
     expect(rolledBack.leasePolicy).toBe("auto");
-    expect(rolledBack.allowScriptFallback).toBe(true);
   });
 
   it("replaceProviders=true 时 disable 会恢复被替换 provider 与 policy", async () => {

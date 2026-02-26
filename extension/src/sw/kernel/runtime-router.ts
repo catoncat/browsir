@@ -1,14 +1,11 @@
-import { archiveLegacyState, initSessionIndex, resetSessionStore } from "./storage-reset.browser";
+import { initSessionIndex, resetSessionStore } from "./storage-reset.browser";
 import { BrainOrchestrator } from "./orchestrator.browser";
 import { createRuntimeInfraHandler, type RuntimeInfraHandler, type RuntimeInfraResult } from "./runtime-infra.browser";
 import { createRuntimeLoopController, type RuntimeLoopController } from "./runtime-loop.browser";
 import { isVirtualUri } from "./virtual-fs.browser";
 import {
-  listSessionEntryChunkKeys,
-  listTraceChunkKeys,
   removeSessionIndexEntry,
   removeSessionMeta,
-  removeStorageKeys,
   writeSessionMeta
 } from "./session-store.browser";
 import { nowIso, randomId, type MessageEntry, type SessionEntry, type SessionMeta } from "./types";
@@ -371,9 +368,9 @@ interface AgentRunTaskInput {
 
 function parseAgentRunTask(raw: unknown, defaultAutoRun: boolean): { ok: true; task: AgentRunTaskInput } | { ok: false; error: string } {
   const source = toRecord(raw);
-  const agent = String(source.agent || source.name || "").trim();
+  const agent = String(source.agent || "").trim();
   const role = String(source.role || agent).trim();
-  const task = String(source.task || source.prompt || "").trim();
+  const task = String(source.task || "").trim();
   if (!agent) {
     return { ok: false, error: "brain.agent.run 需要 agent" };
   }
@@ -615,8 +612,10 @@ async function handleBrainAgentRun(
   const payload = toRecord(message);
   const source = payload.payload ? toRecord(payload.payload) : payload;
   const modeRaw = String(source.mode || "").trim().toLowerCase();
-  const mode =
-    modeRaw || (Array.isArray(source.chain) ? "chain" : Array.isArray(source.tasks) ? "parallel" : "single");
+  if (modeRaw !== "single" && modeRaw !== "parallel" && modeRaw !== "chain") {
+    return fail("brain.agent.run 需要显式 mode（single|parallel|chain）");
+  }
+  const mode = modeRaw;
   const parentSessionId = String(source.parentSessionId || source.sessionId || "").trim();
   const defaultAutoRun = source.autoRun === false ? false : true;
   const waitTimeoutMs = normalizeIntInRange(
@@ -1176,19 +1175,15 @@ async function handleSession(
 
   if (action === "brain.session.delete") {
     const sessionId = requireSessionId(payload);
-    const entryKeys = await listSessionEntryChunkKeys(sessionId);
-    const traceKeys = await listTraceChunkKeys(`session-${sessionId}`);
     const metaKey = `session:${sessionId}:meta`;
-    const removable = [...entryKeys, ...traceKeys];
-    await removeStorageKeys(removable);
     await removeSessionMeta(sessionId);
     const index = await removeSessionIndexEntry(sessionId, nowIso());
     orchestrator.stop(sessionId);
     return ok({
       sessionId,
       deleted: true,
-      removedCount: removable.length + 1,
-      removedKeys: [metaKey, ...removable],
+      removedCount: 1,
+      removedKeys: [metaKey],
       index
     });
   }
@@ -1240,11 +1235,8 @@ async function handleStep(
 async function handleStorage(message: unknown): Promise<RuntimeResult> {
   const payload = toRecord(message);
   const action = String(payload.type || "");
-  if (action === "brain.storage.archive") {
-    return ok(await archiveLegacyState(toRecord(payload.options)));
-  }
   if (action === "brain.storage.reset") {
-    return ok(await resetSessionStore(toRecord(payload.options) || { archiveLegacyBeforeReset: true }));
+    return ok(await resetSessionStore(toRecord(payload.options)));
   }
   if (action === "brain.storage.init") {
     return ok(await initSessionIndex());
@@ -1494,7 +1486,7 @@ function extractSkillReadContent(data: unknown): string {
   for (const item of candidates) {
     if (typeof item === "string") return item;
   }
-  throw new Error("brain.skill.discover: read_file 未返回文本");
+  throw new Error("brain.skill.discover: 文件读取工具未返回文本");
 }
 
 function extractBashExecResult(data: unknown): { stdout: string; stderr: string; exitCode: number | null } {
@@ -1708,7 +1700,7 @@ async function handleBrainSkill(
           skipped.push({
             location: hit.path,
             source: hit.source,
-            reason: readOut.error || "read_file 失败"
+            reason: readOut.error || "文件读取失败"
           });
           continue;
         }
@@ -1882,16 +1874,21 @@ async function handleBrainDebug(
       return fail(cfgResult?.error || "config.get failed");
     }
     const cfg = toRecord(cfgResult.data);
+    const profiles = Array.isArray(cfg.llmProfiles) ? cfg.llmProfiles : [];
+    const hasAnyLlmApiKey = profiles.some((item) => {
+      const row = toRecord(item);
+      return !!String(row.llmApiKey || "").trim();
+    });
     const systemPromptPreview = await runtimeLoop.getSystemPromptPreview();
     return ok({
       bridgeUrl: String(cfg.bridgeUrl || ""),
-      llmApiBase: String(cfg.llmApiBase || ""),
-      llmModel: String(cfg.llmModel || "gpt-5.3-codex"),
+      llmDefaultProfile: String(cfg.llmDefaultProfile || "default"),
+      llmProfilesCount: profiles.length,
       bridgeInvokeTimeoutMs: Number(cfg.bridgeInvokeTimeoutMs || 0),
       llmTimeoutMs: Number(cfg.llmTimeoutMs || 0),
       llmRetryMaxAttempts: Number(cfg.llmRetryMaxAttempts || 0),
       llmMaxRetryDelayMs: Number(cfg.llmMaxRetryDelayMs || 0),
-      hasLlmApiKey: !!String(cfg.llmApiKey || "").trim(),
+      hasLlmApiKey: hasAnyLlmApiKey,
       systemPromptPreview
     });
   }

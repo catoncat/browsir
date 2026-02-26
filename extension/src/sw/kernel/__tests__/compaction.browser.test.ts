@@ -13,6 +13,23 @@ function message(id: string, role: "user" | "assistant", text: string, parentId:
   };
 }
 
+function toolMessage(
+  id: string,
+  toolName: string,
+  payload: Record<string, unknown>,
+  parentId: string | null
+): SessionEntry {
+  return {
+    id,
+    type: "message",
+    role: "tool",
+    text: JSON.stringify(payload),
+    toolName,
+    parentId,
+    timestamp: new Date().toISOString()
+  };
+}
+
 describe("compaction.browser", () => {
   it("overflow 时必须触发 compaction", () => {
     const entries = [
@@ -85,5 +102,28 @@ describe("compaction.browser", () => {
     expect(draft.summary).toContain("history-summary");
     expect(draft.summary).toContain("turn-prefix-summary");
     expect(draft.tokensAfter).toBeGreaterThan(0);
+  });
+
+  it("compact 会从 host_/browser_ 文件工具结果提取 read/modified 文件清单", async () => {
+    const entries: SessionEntry[] = [
+      message("u1", "user", "先读再改", null),
+      toolMessage("t1", "host_read_file", { tool: "host_read_file", args: { path: "/tmp/a.txt" } }, "u1"),
+      toolMessage("t2", "browser_edit_file", { tool: "browser_edit_file", args: { path: "mem://note.md" } }, "t1"),
+      message("u2", "user", "继续", "t2")
+    ];
+
+    const preparation = prepareCompaction({
+      reason: "threshold",
+      entries,
+      previousSummary: "",
+      keepTail: 1,
+      splitTurn: false
+    });
+    const draft = await compact(preparation, async () => "summary");
+
+    expect(draft.summary).toContain("<read-files>");
+    expect(draft.summary).toContain("/tmp/a.txt");
+    expect(draft.summary).toContain("<modified-files>");
+    expect(draft.summary).toContain("mem://note.md");
   });
 });

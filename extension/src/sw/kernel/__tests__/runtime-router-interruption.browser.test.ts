@@ -53,6 +53,26 @@ function invokeRuntime(message: Record<string, unknown>): Promise<Record<string,
   });
 }
 
+function buildWorkerLlmConfig(options?: { id?: string; model?: string; apiKey?: string }): Record<string, unknown> {
+  const id = String(options?.id || "default");
+  return {
+    llmDefaultProfile: id,
+    llmProfiles: [
+      {
+        id,
+        provider: "openai_compatible",
+        llmApiBase: "https://example.ai/v1",
+        llmApiKey: options?.apiKey ?? "sk-demo",
+        llmModel: options?.model || "gpt-test",
+        role: "worker"
+      }
+    ],
+    llmProfileChains: {
+      worker: [id]
+    }
+  };
+}
+
 function registerSkillReadProvider(orchestrator: BrainOrchestrator): void {
   orchestrator.registerCapabilityProvider(
     "fs.read",
@@ -489,9 +509,7 @@ describe("runtime-router interruption boundary", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "sk-demo",
-        llmModel: "gpt-test"
+        ...buildWorkerLlmConfig({ model: "gpt-test" })
       }
     });
     expect(saved.ok).toBe(true);

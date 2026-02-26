@@ -69,11 +69,11 @@ function toIntInRange(raw: unknown, fallback: number, min: number, max: number):
 }
 
 function normalizeProfileDef(raw: JsonRecord, fallbackId: string, fallbackConfig: BridgeConfig): LlmProfileDef | null {
-  const id = normalizeProfileId(raw.id || raw.profile || fallbackId);
-  const provider = String(raw.provider || raw.providerId || DEFAULT_LLM_PROVIDER_ID).trim() || DEFAULT_LLM_PROVIDER_ID;
-  const llmBase = String(raw.llmApiBase || raw.base || "").trim();
-  const llmKey = String(raw.llmApiKey || raw.key || "").trim();
-  const llmModel = String(raw.llmModel || raw.model || "gpt-5.3-codex").trim() || "gpt-5.3-codex";
+  const id = normalizeProfileId(raw.id || fallbackId);
+  const provider = String(raw.provider || DEFAULT_LLM_PROVIDER_ID).trim() || DEFAULT_LLM_PROVIDER_ID;
+  const llmBase = String(raw.llmApiBase || "").trim();
+  const llmKey = String(raw.llmApiKey || "").trim();
+  const llmModel = String(raw.llmModel || "gpt-5.3-codex").trim() || "gpt-5.3-codex";
   const role = normalizeRole(raw.role);
   const llmTimeoutMs = toIntInRange(raw.llmTimeoutMs, fallbackConfig.llmTimeoutMs, 1_000, 300_000);
   const llmRetryMaxAttempts = toIntInRange(raw.llmRetryMaxAttempts, fallbackConfig.llmRetryMaxAttempts, 0, 6);
@@ -92,46 +92,21 @@ function normalizeProfileDef(raw: JsonRecord, fallbackId: string, fallbackConfig
   };
 }
 
-function collectProfiles(config: BridgeConfig): { profiles: Map<string, LlmProfileDef>; fromLegacy: boolean } {
+function collectProfiles(config: BridgeConfig): Map<string, LlmProfileDef> {
   const map = new Map<string, LlmProfileDef>();
-  let fromLegacy = true;
 
   const rawProfiles = (config as BridgeConfig & { llmProfiles?: unknown }).llmProfiles;
-  if (Array.isArray(rawProfiles)) {
-    for (const item of rawProfiles) {
-      const row = asRecord(item);
-      const fallbackId = normalizeProfileId(row.id || row.profile);
-      const normalized = normalizeProfileDef(row, fallbackId, config);
-      if (!normalized) continue;
-      map.set(normalized.id, normalized);
-      fromLegacy = false;
-    }
-  } else {
-    const profileObject = asRecord(rawProfiles);
-    for (const [profileId, value] of Object.entries(profileObject)) {
-      const normalized = normalizeProfileDef(asRecord(value), profileId, config);
-      if (!normalized) continue;
-      map.set(normalized.id, normalized);
-      fromLegacy = false;
-    }
+  if (!Array.isArray(rawProfiles)) return map;
+
+  for (const item of rawProfiles) {
+    const row = asRecord(item);
+    const fallbackId = normalizeProfileId(row.id);
+    const normalized = normalizeProfileDef(row, fallbackId, config);
+    if (!normalized) continue;
+    map.set(normalized.id, normalized);
   }
 
-  if (map.size === 0) {
-    const legacy: LlmProfileDef = {
-      id: DEFAULT_LLM_PROFILE_ID,
-      provider: DEFAULT_LLM_PROVIDER_ID,
-      llmBase: String(config.llmApiBase || "").trim(),
-      llmKey: String(config.llmApiKey || "").trim(),
-      llmModel: String(config.llmModel || "gpt-5.3-codex").trim() || "gpt-5.3-codex",
-      llmTimeoutMs: toIntInRange(config.llmTimeoutMs, 120_000, 1_000, 300_000),
-      llmRetryMaxAttempts: toIntInRange(config.llmRetryMaxAttempts, 2, 0, 6),
-      llmMaxRetryDelayMs: toIntInRange(config.llmMaxRetryDelayMs, 60_000, 0, 300_000),
-      role: DEFAULT_LLM_ROLE
-    };
-    map.set(legacy.id, legacy);
-  }
-
-  return { profiles: map, fromLegacy };
+  return map;
 }
 
 function resolveOrderedProfiles(
@@ -166,7 +141,7 @@ function resolveOrderedProfiles(
 
 export function resolveLlmRoute(input: ResolveLlmRouteInput): ResolveLlmRouteResult {
   const { config } = input;
-  const { profiles, fromLegacy } = collectProfiles(config);
+  const profiles = collectProfiles(config);
 
   const profile =
     normalizeProfileId(
@@ -214,7 +189,7 @@ export function resolveLlmRoute(input: ResolveLlmRouteInput): ResolveLlmRouteRes
       role,
       escalationPolicy,
       orderedProfiles: resolveOrderedProfiles(config, role, selected.id, profiles),
-      fromLegacy
+      fromLegacy: false
     }
   };
 }

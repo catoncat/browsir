@@ -376,15 +376,15 @@ function extractFileOpsFromMessage(message: ConversationMessage, fileOps: FileOp
   const path = extractPathFromPayload(payload);
   if (!path) return;
 
-  if (toolName === "read" || toolName === "read_file") {
+  if (toolName === "read" || toolName === "host_read_file" || toolName === "browser_read_file") {
     fileOps.read.add(path);
     return;
   }
-  if (toolName === "write" || toolName === "write_file") {
+  if (toolName === "write" || toolName === "host_write_file" || toolName === "browser_write_file") {
     fileOps.written.add(path);
     return;
   }
-  if (toolName === "edit" || toolName === "edit_file") {
+  if (toolName === "edit" || toolName === "host_edit_file" || toolName === "browser_edit_file") {
     fileOps.edited.add(path);
   }
 }

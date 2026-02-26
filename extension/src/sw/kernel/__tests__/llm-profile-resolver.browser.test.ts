@@ -4,13 +4,16 @@ import { describe, expect, it } from "vitest";
 import { resolveLlmRoute } from "../llm-profile-resolver";
 import type { BridgeConfig } from "../runtime-infra.browser";
 
-function baseConfig(): BridgeConfig {
+type TestBridgeConfig = BridgeConfig & {
+  llmProfiles?: unknown;
+  llmProfileChains?: unknown;
+};
+
+function baseConfig(): TestBridgeConfig {
   return {
     bridgeUrl: "ws://127.0.0.1:8787/ws",
     bridgeToken: "dev-token",
-    llmApiBase: "https://example.ai/v1",
-    llmApiKey: "sk-demo",
-    llmModel: "gpt-legacy",
+    llmDefaultProfile: "default",
     maxSteps: 100,
     autoTitleInterval: 10,
     bridgeInvokeTimeoutMs: 120_000,
@@ -25,7 +28,7 @@ function baseConfig(): BridgeConfig {
 describe("llm-profile-resolver.browser", () => {
   it("resolves explicit profile and ordered chain", () => {
     const config = baseConfig();
-    (config as BridgeConfig & { llmProfiles?: unknown; llmDefaultProfile?: string; llmProfileChains?: unknown }).llmProfiles = [
+    config.llmProfiles = [
       {
         id: "worker.basic",
         provider: "openai_compatible",
@@ -43,13 +46,12 @@ describe("llm-profile-resolver.browser", () => {
         role: "worker"
       }
     ];
-    (config as BridgeConfig & { llmDefaultProfile?: string }).llmDefaultProfile = "worker.basic";
-    (config as BridgeConfig & { llmProfileChains?: unknown }).llmProfileChains = {
+    config.llmProfileChains = {
       worker: ["worker.basic", "worker.pro"]
     };
 
     const out = resolveLlmRoute({
-      config,
+      config: config as BridgeConfig,
       profile: "worker.pro",
       role: "worker"
     });
@@ -61,9 +63,17 @@ describe("llm-profile-resolver.browser", () => {
     expect(out.route.fromLegacy).toBe(false);
   });
 
+  it("returns profile_not_found when llmProfiles is missing", () => {
+    const config = baseConfig();
+    const out = resolveLlmRoute({ config: config as BridgeConfig });
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.reason).toBe("profile_not_found");
+  });
+
   it("returns missing_llm_config when selected profile misses base/key", () => {
     const config = baseConfig();
-    (config as BridgeConfig & { llmProfiles?: unknown }).llmProfiles = [
+    config.llmProfiles = [
       {
         id: "worker.basic",
         provider: "openai_compatible",
@@ -74,7 +84,7 @@ describe("llm-profile-resolver.browser", () => {
       }
     ];
     const out = resolveLlmRoute({
-      config,
+      config: config as BridgeConfig,
       profile: "worker.basic",
       role: "worker"
     });
@@ -83,10 +93,10 @@ describe("llm-profile-resolver.browser", () => {
     expect(out.reason).toBe("missing_llm_config");
   });
 
-  it("uses selected profile role when request role is not provided", () => {
+  it("returns profile_not_found when llmProfiles is object (array-only contract)", () => {
     const config = baseConfig();
-    (config as BridgeConfig & { llmProfiles?: unknown; llmDefaultProfile?: string; llmProfileChains?: unknown }).llmProfiles = [
-      {
+    config.llmProfiles = {
+      "reviewer.basic": {
         id: "reviewer.basic",
         provider: "openai_compatible",
         llmApiBase: "https://example.ai/v1",
@@ -94,7 +104,7 @@ describe("llm-profile-resolver.browser", () => {
         llmModel: "gpt-review",
         role: "reviewer"
       },
-      {
+      "reviewer.pro": {
         id: "reviewer.pro",
         provider: "openai_compatible",
         llmApiBase: "https://example.ai/v1",
@@ -102,19 +112,17 @@ describe("llm-profile-resolver.browser", () => {
         llmModel: "gpt-review-pro",
         role: "reviewer"
       }
-    ];
-    (config as BridgeConfig & { llmDefaultProfile?: string }).llmDefaultProfile = "reviewer.basic";
-    (config as BridgeConfig & { llmProfileChains?: unknown }).llmProfileChains = {
+    };
+    config.llmProfileChains = {
       reviewer: ["reviewer.basic", "reviewer.pro"]
     };
 
     const out = resolveLlmRoute({
-      config
+      config: config as BridgeConfig,
+      profile: "reviewer.basic"
     });
-    expect(out.ok).toBe(true);
-    if (!out.ok) return;
-    expect(out.route.profile).toBe("reviewer.basic");
-    expect(out.route.role).toBe("reviewer");
-    expect(out.route.orderedProfiles).toEqual(["reviewer.basic", "reviewer.pro"]);
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.reason).toBe("profile_not_found");
   });
 });

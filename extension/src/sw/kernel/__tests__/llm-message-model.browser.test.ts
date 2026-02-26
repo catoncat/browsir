@@ -13,7 +13,7 @@ describe("llm-message-model.browser", () => {
         {
           role: "tool",
           tool_call_id: "call_read_1",
-          name: "read_file",
+          name: "host_read_file",
           content: "{\"ok\":true}"
         }
       ])
@@ -25,7 +25,7 @@ describe("llm-message-model.browser", () => {
     expect(String(out[2]?.role || "")).toBe("tool");
     const toolCalls = asMessages(out[1]?.tool_calls);
     expect(String(toolCalls[0]?.id || "")).toBe("call_read_1");
-    expect(String((toolCalls[0]?.function as Record<string, unknown> | undefined)?.name || "")).toBe("read_file");
+    expect(String((toolCalls[0]?.function as Record<string, unknown> | undefined)?.name || "")).toBe("host_read_file");
     expect(String(out[2]?.tool_call_id || "")).toBe("call_read_1");
   });
 
@@ -40,7 +40,7 @@ describe("llm-message-model.browser", () => {
               id: "call|bad/id",
               type: "function",
               function: {
-                name: "read_file",
+                name: "host_read_file",
                 arguments: "{\"path\":\"/tmp/a.txt\"}"
               }
             }
