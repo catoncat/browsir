@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref, watch, computed, nextTick } from "vue";
-import { Send, Square, Plus, ChevronDown, ChevronUp, X, Globe, Search, Check, Loader2, Wrench } from "lucide-vue-next";
+import { Send, Square, Plus, ChevronDown, ChevronUp, X, Globe, Search, Check, Loader2, Wand2 } from "lucide-vue-next";
 import { useTextareaAutosize, onClickOutside } from "@vueuse/core";
 import { useRuntimeStore, type SkillMetadata } from "../stores/runtime";
+import DropdownPanel from "./DropdownPanel.vue";
 
 interface TabItem {
   id: number;
@@ -26,6 +27,10 @@ interface SkillOption {
 }
 
 type SkillCommandMode = "select" | "manage";
+
+interface DropdownPanelExpose {
+  getRootEl: () => HTMLElement | null;
+}
 
 const props = defineProps<{
   disabled?: boolean;
@@ -60,8 +65,10 @@ const mentionFilter = ref("");
 const skillFilter = ref("");
 const focusedIndex = ref(0);
 const skillFocusedIndex = ref(0);
-const mentionContainer = ref<HTMLElement | null>(null);
-const skillContainer = ref<HTMLElement | null>(null);
+const mentionPanel = ref<DropdownPanelExpose | null>(null);
+const skillPanel = ref<DropdownPanelExpose | null>(null);
+const mentionContainer = computed(() => mentionPanel.value?.getRootEl() ?? null);
+const skillContainer = computed(() => skillPanel.value?.getRootEl() ?? null);
 const listScrollContainer = ref<HTMLElement | null>(null);
 const skillListScrollContainer = ref<HTMLElement | null>(null);
 const availableSkills = ref<SkillOption[]>([]);
@@ -425,31 +432,33 @@ function handleKeydown(e: KeyboardEvent) {
   if (showSkillList.value) {
     const manageMode = isSkillsManageMode.value;
     const total = filteredSkills.value.length;
-    if (total === 0) {
-      if (e.key === "Escape") showSkillList.value = false;
-      if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Tab") {
-        e.preventDefault();
-        return;
-      }
-      if (e.key === "Enter") {
-        showSkillList.value = false;
-      } else {
-        return;
-      }
-    }
-
-    if (!showSkillList.value) {
-      // fall through to normal submit handling (e.g. Enter)
-    } else if (e.key === "ArrowDown") {
+    if (e.key === "ArrowDown") {
       e.preventDefault();
+      if (total === 0) return;
       skillFocusedIndex.value = (skillFocusedIndex.value + 1) % total;
       scrollToFocusedSkill();
-    } else if (e.key === "ArrowUp") {
+      return;
+    }
+    if (e.key === "ArrowUp") {
       e.preventDefault();
+      if (total === 0) return;
       skillFocusedIndex.value = (skillFocusedIndex.value - 1 + total) % total;
       scrollToFocusedSkill();
-    } else if (e.key === "Enter") {
+      return;
+    }
+    if (e.key === "Escape") {
       e.preventDefault();
+      showSkillList.value = false;
+      skillCommandMode.value = "select";
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (total === 0) {
+        showSkillList.value = false;
+        skillCommandMode.value = "select";
+        return;
+      }
       if (manageMode) {
         if (e.altKey) {
           void toggleSkillEnabled(filteredSkills.value[skillFocusedIndex.value]);
@@ -459,18 +468,6 @@ function handleKeydown(e: KeyboardEvent) {
       } else {
         confirmSkillSelection();
       }
-    } else if (e.key === "Tab") {
-      e.preventDefault();
-      if (manageMode) {
-        void useSkillFromManage(filteredSkills.value[skillFocusedIndex.value]);
-      } else {
-        confirmSkillSelection();
-      }
-    } else if (e.key === "Escape") {
-      showSkillList.value = false;
-      skillCommandMode.value = "select";
-    }
-    if (showSkillList.value) {
       return;
     }
   }
@@ -556,13 +553,15 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
 <template>
   <div class="w-full bg-ui-bg relative px-3 pb-4 pt-2">
     <!-- Skill Slash Dropdown -->
-    <div
+    <DropdownPanel
       v-if="showSkillList"
-      ref="skillContainer"
-      class="absolute bottom-[calc(100%-8px)] left-4 right-4 z-50 bg-ui-bg border border-ui-border rounded-xl shadow-2xl overflow-hidden animate-in slide-in-from-bottom-2 duration-200"
-      role="listbox"
+      ref="skillPanel"
+      title="Skills"
       aria-label="选择 skill"
     >
+      <template #icon>
+        <Wand2 :size="9" class="text-ui-text-muted/70 translate-y-px" aria-hidden="true" />
+      </template>
       <div v-if="skillLoading" class="px-3 py-3 text-[12px] text-ui-text-muted inline-flex items-center gap-2">
         <Loader2 :size="13" class="animate-spin" aria-hidden="true" />
         正在加载 skills...
@@ -571,7 +570,12 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
         {{ skillError }}
       </div>
       <div v-else-if="filteredSkills.length === 0" class="px-3 py-3 text-[12px] text-ui-text-muted">
-        {{ isSkillsManageMode ? "没有匹配的 skills，可先创建或 discover。" : "没有可用的已启用 skills。可输入 /skills 快速启用。" }}
+        <template v-if="isSkillsManageMode">没有匹配的 skills，可先创建或 discover。</template>
+        <template v-else-if="availableSkills.length === 0">快去 skills 管理添加吧</template>
+        <template v-else>
+          <kbd class="shortcut-kbd">/skills</kbd>
+          <span class="ml-1">开启技能</span>
+        </template>
       </div>
       <div v-else ref="skillListScrollContainer" class="max-h-56 overflow-y-auto custom-scrollbar">
         <button
@@ -580,23 +584,20 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
           :key="skill.id"
           role="option"
           :aria-selected="skillFocusedIndex === index"
-          class="w-full flex items-start gap-2 px-3 py-2 transition-colors text-left border-b border-ui-border/30 last:border-0 outline-none"
-          :class="skillFocusedIndex === index ? 'bg-ui-surface' : ''"
+          class="group/skill w-full flex items-start gap-2 px-3 py-2 transition-colors text-left border-b border-ui-border/30 last:border-0 outline-none"
+          :class="[skillFocusedIndex === index ? 'bg-ui-surface' : '', isSkillsManageMode && !skill.enabled ? 'skill-row-disabled' : '']"
           @mouseenter="skillFocusedIndex = index"
           @click="handleSkillRowClick(skill)"
         >
-          <div class="mt-0.5 shrink-0 text-ui-accent">
-            <Wrench :size="14" aria-hidden="true" />
+          <div
+            class="mt-0.5 shrink-0 transition-colors"
+            :class="skillFocusedIndex === index ? 'text-ui-accent' : 'text-ui-text-muted/60'"
+          >
+            <Wand2 :size="14" aria-hidden="true" />
           </div>
           <div class="min-w-0 flex-1">
             <div class="flex items-center gap-2 min-w-0">
               <span class="text-[12px] font-medium text-ui-text truncate">{{ skill.name }}</span>
-              <span
-                v-if="isSkillsManageMode && !skill.enabled"
-                class="text-[9px] font-semibold uppercase tracking-wide rounded px-1 py-0.5 border text-ui-text-muted bg-ui-bg border-ui-border"
-              >
-                off
-              </span>
               <span
                 v-if="skill.disableModelInvocation"
                 class="text-[9px] font-semibold uppercase tracking-wide text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5"
@@ -604,40 +605,104 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
                 manual
               </span>
             </div>
-            <div class="text-[10px] text-ui-text-muted font-mono truncate">/skill:{{ skill.id }}</div>
-            <div v-if="skill.description" class="text-[10px] text-ui-text-muted truncate">{{ skill.description }}</div>
+            <div
+              class="text-[10px] text-ui-text-muted font-mono truncate"
+              :class="isSkillsManageMode && !skill.enabled ? 'opacity-70' : ''"
+            >
+              /skill:{{ skill.id }}
+            </div>
+            <div
+              v-if="skill.description"
+              class="text-[10px] text-ui-text-muted truncate"
+              :class="isSkillsManageMode && !skill.enabled ? 'opacity-70' : ''"
+            >
+              {{ skill.description }}
+            </div>
           </div>
-          <div v-if="isSkillsManageMode" class="shrink-0 flex items-center gap-1">
+          <div
+            v-if="isSkillsManageMode"
+            class="ml-2 shrink-0 self-center"
+          >
             <button
               type="button"
-              class="rounded-md border border-ui-border px-1.5 py-1 text-[10px] text-ui-text-muted hover:bg-ui-bg hover:text-ui-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent disabled:opacity-50"
+              class="relative inline-flex h-6 w-[68px] items-center justify-center overflow-hidden rounded-md text-[10px] font-medium text-ui-text-muted transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent disabled:opacity-50"
               :disabled="isSkillActionPending(skill.id)"
               :aria-label="skill.enabled ? `禁用技能 ${skill.name}` : `启用技能 ${skill.name}`"
               @click.stop="void toggleSkillEnabled(skill)"
             >
               <Loader2 v-if="isSkillActionPending(skill.id)" :size="11" class="inline-block animate-spin" aria-hidden="true" />
-              <span v-else>{{ skill.enabled ? "ON" : "OFF" }}</span>
+              <template v-else>
+                <span
+                  class="pointer-events-none absolute inset-0 inline-flex items-center justify-center transition-all duration-200 ease-out group-hover/skill:-translate-y-1 group-hover/skill:scale-95 group-hover/skill:opacity-0"
+                >
+                  <span v-if="skill.enabled" class="h-2.5 w-2.5 rounded-full bg-ui-accent transition-all duration-200" aria-hidden="true"></span>
+                  <span
+                    v-else
+                    class="inline-flex items-center gap-1 text-[8px] font-semibold uppercase tracking-[0.08em] text-ui-text-muted/75"
+                    aria-hidden="true"
+                  >
+                    <span class="h-2.5 w-2.5 rounded-full border border-ui-border bg-transparent"></span>
+                    <span>OFF</span>
+                  </span>
+                </span>
+                <span
+                  class="pointer-events-none absolute inset-0 inline-flex items-center justify-center opacity-0 transition-all duration-200 ease-out translate-y-1 scale-95 group-hover/skill:translate-y-0 group-hover/skill:scale-100 group-hover/skill:opacity-100"
+                  aria-hidden="true"
+                >
+                  <span
+                    class="relative h-3.5 w-7 rounded-full border transition-colors duration-200"
+                    :class="skill.enabled
+                      ? 'border-ui-accent/50 bg-ui-accent/75'
+                      : 'border-ui-border bg-ui-bg'"
+                  >
+                    <span
+                      class="absolute left-[1px] top-[1px] h-2.5 w-2.5 rounded-full bg-white shadow-sm transition-transform duration-200"
+                      :class="skill.enabled ? 'translate-x-3' : 'translate-x-0'"
+                    ></span>
+                  </span>
+                </span>
+              </template>
             </button>
           </div>
         </button>
       </div>
-    </div>
+      <template #footer>
+        <div class="border-t border-ui-border/40 px-2.5 py-1.5 select-none pointer-events-none">
+          <div class="flex flex-wrap items-center justify-end gap-2 text-[9px] text-ui-text-muted/65">
+            <span class="shortcut-hint-item">
+              <span class="shortcut-keys" role="text" aria-label="回车">
+                <kbd class="shortcut-kbd">↵</kbd>
+              </span>
+              <span>{{ isSkillsManageMode ? "使用" : "选择" }}</span>
+            </span>
+            <span v-if="isSkillsManageMode" class="shortcut-hint-item">
+              <span class="shortcut-keys" role="text" aria-label="Option 加回车">
+                <kbd class="shortcut-kbd">⌥</kbd>
+                <kbd class="shortcut-kbd">↵</kbd>
+              </span>
+              <span>开关</span>
+            </span>
+            <span class="shortcut-hint-item">
+              <span class="shortcut-keys" role="text" aria-label="Esc">
+                <kbd class="shortcut-kbd">⎋</kbd>
+              </span>
+              <span>关闭</span>
+            </span>
+          </div>
+        </div>
+      </template>
+    </DropdownPanel>
 
     <!-- Mention Dropdown -->
-    <div 
-      v-if="showMentionList" 
-      ref="mentionContainer"
-      class="absolute bottom-[calc(100%-8px)] left-4 right-4 z-50 bg-ui-bg border border-ui-border rounded-xl shadow-2xl overflow-hidden animate-in slide-in-from-bottom-2 duration-200"
-      role="listbox"
+    <DropdownPanel
+      v-if="showMentionList"
+      ref="mentionPanel"
+      title="Recent Tabs"
       aria-label="选择标签页进行引用"
     >
-      <div class="px-3 py-1.5 bg-ui-surface border-b border-ui-border flex items-center justify-between">
-        <div class="flex items-center gap-2 text-[10px] font-bold text-ui-text-muted uppercase tracking-widest">
-          <Search :size="10" aria-hidden="true" />
-          Recent Tabs
-        </div>
-      </div>
-      
+      <template #icon>
+        <Search :size="10" aria-hidden="true" />
+      </template>
       <div ref="listScrollContainer" class="max-h-56 overflow-y-auto custom-scrollbar">
         <button 
           v-for="(tab, index) in filteredTabs" 
@@ -668,7 +733,7 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
           </div>
         </button>
       </div>
-    </div>
+    </DropdownPanel>
 
     <!-- GEMINI STYLE CONTAINER -->
     <div class="flex flex-col bg-ui-surface border border-ui-border rounded-2xl shadow-sm overflow-hidden transition-all focus-within:ring-1 focus-within:ring-ui-accent/20 focus-within:border-ui-accent/40">
@@ -758,7 +823,7 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
             class="inline-flex max-w-full items-center gap-1.5 rounded-full border border-ui-border bg-ui-bg px-2 py-1"
             role="listitem"
           >
-            <Wrench :size="11" class="shrink-0 text-ui-accent" aria-hidden="true" />
+            <Wand2 :size="11" class="shrink-0 text-ui-accent" aria-hidden="true" />
             <span class="truncate text-[11px] font-medium text-ui-text">
               {{ skill.name }}
             </span>
@@ -834,7 +899,7 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
           ref="textarea"
           v-model="text"
           class="w-full p-4 pb-2 bg-transparent border-none resize-none text-[15px] leading-relaxed placeholder:text-ui-text-muted/60 font-sans text-ui-text focus:outline-none min-h-[60px]"
-          placeholder="输入 / 选择 skill，输入 /skills 快速开关，输入 @ 引用标签页"
+          placeholder="/技能 @标签"
           :disabled="disabled"
           aria-label="消息输入框"
           @keydown="handleKeydown"
@@ -890,5 +955,34 @@ textarea::-webkit-scrollbar {
 .custom-scrollbar::-webkit-scrollbar-thumb {
   background-color: var(--border);
   border-radius: 10px;
+}
+.shortcut-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.3em;
+  padding: 0 0.35em;
+  border: 1px solid color-mix(in oklab, var(--border) 85%, transparent);
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--card) 92%, var(--bg) 8%);
+  color: color-mix(in oklab, var(--text) 70%, transparent);
+  font-size: 9px;
+  line-height: 1.4;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+.shortcut-hint-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.shortcut-keys {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+}
+.skill-row-disabled {
+  opacity: 0.9;
 }
 </style>
