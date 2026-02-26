@@ -491,7 +491,7 @@ describe("plugin-runtime.browser", () => {
     expect(result.data).toEqual({ chain: ["base", "p1", "p2"] });
   });
 
-  it("hook 异常/超时 fail-open，但 block 仍能阻断执行", async () => {
+  it("hook 异常 fail-open，但 block 仍能阻断执行", async () => {
     let invoked = 0;
     const orchestrator = new BrainOrchestrator();
     orchestrator.registerToolProvider(
@@ -525,12 +525,12 @@ describe("plugin-runtime.browser", () => {
         id: "plugin.before.timeout",
         name: "before-timeout",
         version: "1.0.0",
-        timeoutMs: 5,
+        timeoutMs: 50,
         permissions: { hooks: ["tool.before_call"] }
       },
       hooks: {
         "tool.before_call": async () => {
-          await new Promise((resolve) => setTimeout(resolve, 30));
+          await new Promise((resolve) => setTimeout(resolve, 120));
           return {
             action: "patch",
             patch: {}
@@ -558,5 +558,44 @@ describe("plugin-runtime.browser", () => {
     expect(result.ok).toBe(false);
     expect(String(result.error || "")).toContain("tool.before_call blocked");
     expect(invoked).toBe(0);
+  });
+
+  it("hook timeout 会 fail-open，超时后的 block 不应生效", async () => {
+    const orchestrator = new BrainOrchestrator();
+    orchestrator.registerToolProvider(
+      "script",
+      {
+        id: "test.plugin.timeout.fail-open.script",
+        invoke: async () => ({ source: "script" })
+      },
+      { replace: true }
+    );
+    const { sessionId } = await orchestrator.createSession({ title: "plugin-timeout-fail-open" });
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.timeout.late-block",
+        name: "timeout-late-block",
+        version: "1.0.0",
+        timeoutMs: 50,
+        permissions: { hooks: ["tool.before_call"] }
+      },
+      hooks: {
+        "tool.before_call": async () => {
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          return { action: "block", reason: "late-block" };
+        }
+      }
+    });
+
+    const result = await orchestrator.executeStep({
+      sessionId,
+      mode: "script",
+      action: "click"
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toEqual({ source: "script" });
+    expect(String(result.error || "")).toBe("");
   });
 });

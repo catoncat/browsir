@@ -59,7 +59,7 @@
   },
   "rollback_or_compensation": [
     "disable_new_hook_registration_and_keep_noop_behavior",
-    "retain_legacy_execution_path_for_script_to_cdp_fallback"
+    "retain_existing_execution_pipeline_for_script_to_cdp_fallback"
   ],
   "version": "1.0.0"
 }

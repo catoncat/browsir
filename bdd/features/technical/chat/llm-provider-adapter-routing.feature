@@ -1,11 +1,11 @@
 @contract(BHV-LLM-PROVIDER-ADAPTER-ROUTING)
 Feature: LLM provider adapter routing
 
-  Scenario: 旧单模型配置可兼容到默认 provider
-    Given sidepanel 仅配置 llmApiBase llmApiKey llmModel
+  Scenario: 缺少 profile 配置时返回明确错误
+    Given sidepanel 未配置可用 llmProfiles
     When 用户发起需要 LLM 规划的任务
-    Then 会话应继续可执行且无行为回归
-    And step stream 应可观察到 llm.route.selected
+    Then 会话状态应为 failed_execute 或 failed_verify
+    And 响应中应包含 profile_not_found 或缺少配置提示
 
   Scenario: 指定 profile 时必须显式命中 provider 与 model
     Given sidepanel 配置可用 profile 且绑定 provider/model

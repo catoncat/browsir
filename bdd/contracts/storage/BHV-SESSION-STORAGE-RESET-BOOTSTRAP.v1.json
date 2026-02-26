@@ -1,50 +1,45 @@
 {
   "id": "BHV-SESSION-STORAGE-RESET-BOOTSTRAP",
-  "intent": "Service Worker 启动时应根据 legacy 数据存在与否执行可恢复的初始化流程，并保证 session 索引可用",
+  "intent": "Service Worker 启动时应完成 session 索引初始化，并保证 runtime reset 路由返回稳定结果",
   "context": {
     "surface": "service-worker.kernel.storage",
-    "legacy_state": "optional",
     "startup_event": "onInstalled_or_onStartup",
-    "runtime_actions": ["brain.storage.archive", "brain.storage.reset", "brain.storage.init"]
+    "runtime_actions": ["brain.storage.reset", "brain.storage.init"]
   },
   "steps": [
-    "detect_legacy_state_before_bootstrap",
-    "archive_legacy_state_before_reset_when_present",
-    "reset_session_store_and_initialize_index",
-    "broadcast_bootstrap_reset_signal_when_legacy_present",
-    "bootstrap_without_legacy_initializes_index_only",
+    "bootstrap_session_store_initializes_index",
+    "runtime_storage_reset_cleans_session_store_and_rebuilds_index",
+    "runtime_storage_init_returns_current_index",
     "runtime_storage_reset_route_returns_consistent_result"
   ],
   "observables": [
-    "legacy_state_is_archived_before_destructive_cleanup",
     "session_index_is_available_and_writable_after_bootstrap",
-    "bootstrap_emits_legacy_reset_mode_when_legacy_exists",
-    "bootstrap_without_legacy_skips_reset_and_archive",
+    "runtime_storage_reset_removes_session_namespace_keys",
+    "runtime_storage_init_returns_index_without_reset_side_effect",
     "storage_reset_response_contains_removed_keys_and_index_summary"
   ],
   "risk": "high",
   "allowed_side_effects": [
-    "storage_read(local_keys|legacy_state|session_index)",
-    "storage_write(archive_namespace|session_index)",
-    "storage_remove(session_namespace|trace_namespace|legacy_matched_keys)",
-    "runtime_message(brain.bootstrap|brain.storage.reset|brain.storage.init)"
+    "storage_read(local_keys|session_index)",
+    "storage_write(session_index)",
+    "storage_remove(session_namespace|trace_namespace)",
+    "runtime_message(brain.storage.reset|brain.storage.init)"
   ],
   "proof_requirements": {
     "required_layers": ["unit", "integration", "browser-cdp"],
     "min_layers": 3
   },
   "degrade_policy": {
-    "on_archive_failure": [
-      "abort_reset_and_return_error_to_caller",
-      "avoid_partial_delete_without_archive_confirmation"
+    "on_reset_failure": [
+      "return_error_to_caller",
+      "preserve_existing_index_state_when_possible"
     ],
-    "on_bootstrap_without_legacy": [
-      "skip_reset_sequence",
-      "init_session_index_only"
+    "on_bootstrap": [
+      "always_initialize_index",
+      "avoid_conditional_legacy_branches"
     ]
   },
   "rollback_or_compensation": [
-    "preserve_archive_records_when_archive_enabled",
     "recreate_empty_session_index_after_reset"
   ],
   "version": "1.1.0"

@@ -173,7 +173,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/__tests__/llm-provider-registry.browser.test.ts::registers and resolves providers by id + extension/src/sw/kernel/__tests__/llm-profile-resolver.browser.test.ts::falls back to legacy config when llmProfiles is absent + extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts::使用 profile 配置时应发出 llm.route.selected 并命中 provider/model + profile 指向未注册 provider 时应 llm.route.blocked 并 failed_execute"
+          "target": "extension/src/sw/kernel/__tests__/llm-provider-registry.browser.test.ts::registers and resolves providers by id + extension/src/sw/kernel/__tests__/llm-profile-resolver.browser.test.ts::returns profile_not_found when llmProfiles is missing + extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts::使用 profile 配置时应发出 llm.route.selected 并命中 provider/model + profile 指向未注册 provider 时应 llm.route.blocked 并 failed_execute"
         },
         {
           "layer": "browser-cdp",
@@ -186,7 +186,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/llm-profile-policy.ts::decideProfileEscalation + extension/src/sw/kernel/__tests__/llm-profile-policy.browser.test.ts::escalates to next profile when repeated failure happens + blocks escalation when current profile is already highest + extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts::LLM 重复失败后应升级 profile 并发出 llm.route.escalated"
+          "target": "extension/src/sw/kernel/llm-profile-policy.ts::decideProfileEscalation + extension/src/sw/kernel/__tests__/llm-profile-policy.browser.test.ts::escalates to next profile when repeated failure happens||blocks escalation when current profile is already highest + extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts::LLM 重复失败后应升级 profile 并发出 llm.route.escalated"
         },
         {
           "layer": "browser-cdp",
@@ -246,11 +246,11 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/__tests__/orchestrator.browser.test.ts::handleAgentEnd retry/overflow branches + compaction events"
+          "target": "extension/src/sw/kernel/__tests__/orchestrator.browser.test.ts::retryable 错误先触发 auto_retry_start||overflow 不走 retry，走 compaction"
         },
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/__tests__/compaction.browser.test.ts::shouldCompact + findCutPoint + prepareCompaction"
+          "target": "extension/src/sw/kernel/__tests__/compaction.browser.test.ts::overflow 时必须触发 compaction||split-turn 会把 cut 对齐到用户消息||prepareCompaction 返回 kept/dropped 和 draft"
         },
         {
           "layer": "integration",
@@ -301,11 +301,11 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/__tests__/orchestrator.browser.test.ts::script success/fallback/cdp fail/missing cdp adapter"
+          "target": "extension/src/sw/kernel/__tests__/orchestrator.browser.test.ts::script provider 成功时保持 modeUsed=script 且无 mode 切换||script provider 失败时保持错误语义且不发生 mode 切换||script provider 失败且无 cdp provider 时仍保持 script 错误语义||cdp 失败时直接返回失败"
         },
         {
           "layer": "integration",
-          "target": "extension/src/sw/kernel/orchestrator.browser.ts::wireLegacyAdapters + registerToolProvider + invokeProviderWithHooks + executeStep"
+          "target": "extension/src/sw/kernel/orchestrator.browser.ts::registerToolProvider + invokeProviderWithHooks + executeStep"
         },
         {
           "layer": "browser-cdp",
@@ -335,15 +335,15 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/storage-reset.browser.ts::archiveLegacyState + resetSessionStore"
+          "target": "extension/src/sw/kernel/storage-reset.browser.ts::resetSessionStore + initSessionIndex"
         },
         {
           "layer": "integration",
-          "target": "extension/src/background/sw-main.ts::bootstrapSessionStore + legacy detection + brain.bootstrap broadcast"
+          "target": "extension/src/background/sw-main.ts::bootstrapSessionStore + initSessionIndex"
         },
         {
           "layer": "integration",
-          "target": "extension/src/sw/kernel/runtime-router.ts::handleStorage(brain.storage.archive|brain.storage.reset|brain.storage.init)"
+          "target": "extension/src/sw/kernel/runtime-router.ts::handleStorage(brain.storage.reset|brain.storage.init)"
         },
         {
           "layer": "browser-cdp",
@@ -478,11 +478,11 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::runAgentLoop + retry_circuit_open + retry_budget_exhausted"
+          "target": "extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts::strict verify 不可判定时应以 max_steps 收口（不做 no_progress 早停） + 重复同签名 tool_calls 时不再触发 loop_no_progress，改为 max_steps 收口 + PI 对齐后不再发 loop_no_progress 事件，重复调用由 max_steps 收口"
         },
         {
           "layer": "integration",
-          "target": "extension/src/sw/kernel/events.ts::retry_circuit_open + retry_budget_exhausted"
+          "target": "extension/src/sw/kernel/runtime-router.ts::handleBrainRun + extension/src/sw/kernel/runtime-loop.browser.ts::runAgentLoop"
         },
         {
           "layer": "browser-cdp",
@@ -490,7 +490,7 @@
         },
         {
           "layer": "e2e",
-          "target": "bdd/evidence/brain-e2e.latest.json::brain.reliability :: no-progress 守卫：重复失败触发熔断并终止"
+          "target": "bdd/evidence/brain-e2e.latest.json::brain.reliability :: PI 对齐：重复失败不触发 no-progress 守卫，按 max_steps 收口"
         }
       ]
     },
@@ -617,11 +617,11 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::runAgentLoop + retry_circuit_open + retry_budget_exhausted"
+          "target": "extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts::strict verify 不可判定时应以 max_steps 收口（不做 no_progress 早停） + 重复同签名 tool_calls 时不再触发 loop_no_progress，改为 max_steps 收口 + PI 对齐后不再发 loop_no_progress 事件，重复调用由 max_steps 收口"
         },
         {
           "layer": "integration",
-          "target": "extension/src/sw/kernel/events.ts::retry_circuit_open + retry_budget_exhausted"
+          "target": "extension/src/sw/kernel/runtime-router.ts::handleBrainRun + extension/src/sw/kernel/runtime-loop.browser.ts::runAgentLoop"
         },
         {
           "layer": "browser-cdp",
@@ -629,7 +629,7 @@
         },
         {
           "layer": "e2e",
-          "target": "bdd/evidence/brain-e2e-live.latest.json::brain.reliability :: no-progress 守卫：重复失败触发熔断并终止"
+          "target": "bdd/evidence/brain-e2e-live.latest.json::brain.runtime :: PI 对齐：重复可恢复工具失败不熔断，按 max_steps 收口"
         }
       ]
     },

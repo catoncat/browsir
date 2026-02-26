@@ -1,8 +1,8 @@
 @contract(BHV-CAPABILITY-PROVIDER-ROUTING)
 Feature: Capability provider routing decouples tool contract from execution object
 
-  Scenario: Legacy adapters are routed through provider registry
-    Given orchestrator is created with legacy script and cdp adapters
+  Scenario: 默认 mode providers 通过 provider registry 路由
+    Given orchestrator is created with script and cdp mode providers
     When kernel executes brain.step.execute with capability browser.action and script mode fallback
     Then invoke should be routed via registered script provider
     And fallback should route to cdp provider only when script invocation fails

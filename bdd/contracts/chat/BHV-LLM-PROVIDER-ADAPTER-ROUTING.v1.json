@@ -5,8 +5,8 @@
     "surface": "sidepanel.chat.loop",
     "runtime_layer": "service-worker.kernel.llm_provider",
     "routing_signals": ["llm.route.selected", "llm.route.blocked"],
-    "compat_requirements": [
-      "single_model_legacy_config_is_backward_compatible",
+    "routing_requirements": [
+      "profile_based_selection_is_required",
       "provider_selection_is_observable",
       "provider_missing_has_stable_error"
     ]
@@ -37,10 +37,6 @@
     "on_provider_resolution_failure": [
       "return_stable_error_with_provider_context",
       "do_not_silent_downgrade"
-    ],
-    "on_legacy_config_detected": [
-      "fallback_to_default_openai_compatible_provider",
-      "preserve_existing_behavior"
     ]
   },
   "rollback_or_compensation": [

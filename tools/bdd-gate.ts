@@ -55,6 +55,79 @@ function normalizeCategory(value: unknown): "all" | ContractCategory {
   throw new Error(`BDD_GATE_CATEGORY 非法: ${raw}（允许: all|ux|protocol|storage）`);
 }
 
+function normalizeInlineText(value: unknown): string {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseSelectorTokens(selector: string): string[] {
+  return String(selector || "")
+    .split("||")
+    .flatMap((chunk) => chunk.split(/\s\+\s/))
+    .map((item) => normalizeInlineText(item))
+    .filter(Boolean);
+}
+
+function isTestSourcePath(targetPath: string): boolean {
+  const normalized = String(targetPath || "").replace(/\\/g, "/");
+  return normalized.includes("/__tests__/") || /\.test\.[cm]?[jt]sx?$/.test(normalized) || /\.spec\.[cm]?[jt]sx?$/.test(normalized);
+}
+
+function extractStructuredSelectorTerms(selectorToken: string): string[] {
+  const token = normalizeInlineText(selectorToken);
+  if (!token) return [];
+  if (!/[._()|:-]/.test(token)) return [];
+
+  const rawTerms = token.match(/[A-Za-z_][A-Za-z0-9_.-]*/g) || [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of rawTerms) {
+    const term = raw.trim();
+    if (!term) continue;
+    const looksCodeLike = term.includes(".") || term.includes("_") || /[A-Z]/.test(term);
+    if (!looksCodeLike) continue;
+    const key = term.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(term);
+  }
+  return out;
+}
+
+function validateUnitIntegrationSelector(
+  sourceText: string,
+  selector: string,
+  targetPath: string
+): string | null {
+  const tokens = parseSelectorTokens(selector);
+  if (tokens.length === 0) return null;
+
+  const normalizedSource = normalizeInlineText(sourceText);
+  const testSource = isTestSourcePath(targetPath);
+
+  for (const token of tokens) {
+    const normalizedToken = normalizeInlineText(token);
+    if (!normalizedToken) continue;
+    if (normalizedSource.includes(normalizedToken)) continue;
+
+    const structuredTerms = extractStructuredSelectorTerms(normalizedToken);
+    if (structuredTerms.length === 0) {
+      if (testSource) {
+        return `unit/integration selector 未命中 "${normalizedToken}"`;
+      }
+      continue;
+    }
+
+    const missing = structuredTerms.filter((term) => !normalizedSource.includes(term));
+    if (missing.length > 0) {
+      return `unit/integration selector 未命中 "${normalizedToken}" (missing: ${missing.join(", ")})`;
+    }
+  }
+
+  return null;
+}
+
 function shouldCheckContract(contract: any, gateProfile: string): boolean {
   const ctx = contract?.context;
   const profileField = ctx && typeof ctx === "object" ? (ctx as Record<string, unknown>).gate_profile : null;
@@ -83,6 +156,7 @@ async function main() {
   const gateCategory = normalizeCategory(process.env.BDD_GATE_CATEGORY);
   const snapshot = await runStructuralValidation(repoRoot);
   const gateErrors = [...snapshot.errors];
+  const sourceTextCache = new Map<string, string>();
   const categories = await loadContractCategories(repoRoot, gateErrors);
   let checkedContracts = 0;
 
@@ -173,6 +247,26 @@ async function main() {
           const evidenceError = await validateEvidence(repoRoot, target, targetItem.selector);
           if (evidenceError) {
             gateErrors.push(`gate: contract ${contract.id} layer=${proof.layer} ${evidenceError}`);
+          }
+        }
+
+        if (proof.layer === "unit" || proof.layer === "integration") {
+          const selector = String(targetItem.selector || "").trim();
+          if (selector) {
+            const normalizedTarget = path.normalize(target);
+            let sourceText = sourceTextCache.get(normalizedTarget);
+            if (sourceText == null) {
+              try {
+                sourceText = await readFile(path.join(repoRoot, normalizedTarget), "utf8");
+              } catch {
+                sourceText = "";
+              }
+              sourceTextCache.set(normalizedTarget, sourceText);
+            }
+            const selectorError = validateUnitIntegrationSelector(sourceText, selector, normalizedTarget);
+            if (selectorError) {
+              gateErrors.push(`gate: contract ${contract.id} layer=${proof.layer} ${selectorError}: ${target}`);
+            }
           }
         }
 

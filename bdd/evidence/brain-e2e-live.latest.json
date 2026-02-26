@@ -1,12 +1,12 @@
 {
   "version": "1.0.0",
-  "ts": "2026-02-25T11:31:52.981Z",
+  "ts": "2026-02-26T13:56:18.926Z",
   "passed": true,
   "summary": {
     "total": 40,
     "passed": 40,
     "failed": 0,
-    "durationMs": 265405
+    "durationMs": 107574
   },
   "env": {
     "chromeBin": "/Users/envvar/Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
@@ -23,31 +23,31 @@
       "group": "panel.vnext",
       "name": "dist sidepanel 路径可直接加载",
       "status": "passed",
-      "durationMs": 276
+      "durationMs": 297
     },
     {
       "group": "panel.vnext",
       "name": "Markdown 视觉回归：亮/暗主题可读 + Shiki 高亮",
       "status": "passed",
-      "durationMs": 17277
+      "durationMs": 13958
     },
     {
       "group": "service-worker API",
       "name": "snapshot interactive 返回 ref/node handles",
       "status": "passed",
-      "durationMs": 37
+      "durationMs": 49
     },
     {
       "group": "service-worker API",
       "name": "lease + cdp_action + verify 闭环",
       "status": "passed",
-      "durationMs": 28
+      "durationMs": 31
     },
     {
       "group": "service-worker API",
       "name": "fill 支持无 id 文本框（placeholder/path fallback）",
       "status": "passed",
-      "durationMs": 18
+      "durationMs": 30
     },
     {
       "group": "service-worker API",
@@ -59,25 +59,25 @@
       "group": "service-worker API",
       "name": "fill selector 失效时单候选输入可自动 fallback",
       "status": "passed",
-      "durationMs": 144
+      "durationMs": 148
     },
     {
       "group": "service-worker API",
       "name": "fill 支持动态加载的 vue-like 受控输入",
       "status": "passed",
-      "durationMs": 375
+      "durationMs": 395
     },
     {
       "group": "service-worker API",
       "name": "fill 支持 monaco-like 受控输入（model.setValue）",
       "status": "passed",
-      "durationMs": 131
+      "durationMs": 145
     },
     {
       "group": "service-worker API",
       "name": "ref 存在但句柄过期时可 fallback",
       "status": "passed",
-      "durationMs": 19
+      "durationMs": 29
     },
     {
       "group": "service-worker API",
@@ -89,91 +89,91 @@
       "group": "service-worker API",
       "name": "ref 过期且 selector 无效时返回稳定错误契约",
       "status": "passed",
-      "durationMs": 1580
+      "durationMs": 1596
     },
     {
       "group": "service-worker API",
       "name": "lease 冲突 + release + 过期后可恢复",
       "status": "passed",
-      "durationMs": 2416
+      "durationMs": 2415
     },
     {
       "group": "service-worker API",
       "name": "snapshot 支持 compact/maxTokens/a11y 字段",
       "status": "passed",
-      "durationMs": 169
+      "durationMs": 174
     },
     {
       "group": "service-worker API",
       "name": "cdp.verify 支持 urlChanged 断言",
       "status": "passed",
-      "durationMs": 143
+      "durationMs": 147
     },
     {
       "group": "brain.runtime",
       "name": "brain.step.execute 可执行 cdp action + verify",
       "status": "passed",
-      "durationMs": 157
+      "durationMs": 152
     },
     {
       "group": "brain.runtime",
       "name": "BHV-CAPABILITY-PROVIDER-ROUTING: mode 路由与回退语义可验证",
       "status": "passed",
-      "durationMs": 155
+      "durationMs": 149
     },
     {
       "group": "brain.runtime",
       "name": "BHV-AGENT-HOOK-LIFECYCLE: runtime 路由与步骤生命周期可观测",
       "status": "passed",
-      "durationMs": 145
+      "durationMs": 152
     },
     {
       "group": "brain.runtime",
       "name": "brain.run.start 支持 tool_calls 闭环并写入 step stream",
       "status": "passed",
-      "durationMs": 524
+      "durationMs": 528
     },
     {
       "group": "brain.runtime",
       "name": "同一会话第二轮继续执行不应触发 LLM HTTP 400",
       "status": "passed",
-      "durationMs": 804
+      "durationMs": 818
     },
     {
       "group": "brain.runtime",
       "name": "brain.run.start 注入 shared tabs 上下文并每次覆盖",
       "status": "passed",
-      "durationMs": 823
+      "durationMs": 807
     },
     {
       "group": "brain.runtime",
       "name": "brain.debug.dump 可观测 llm 原始调用与工具步骤",
       "status": "passed",
-      "durationMs": 533
+      "durationMs": 543
     },
     {
       "group": "brain.runtime",
       "name": "LLM HTTP 失败时应产生 auto_retry 事件并失败收口",
       "status": "passed",
-      "durationMs": 1809
+      "durationMs": 1810
     },
     {
       "group": "brain.runtime",
       "name": "LLM 工具超时后可按失败信号调整 timeout 重试成功",
       "status": "passed",
-      "durationMs": 2348
+      "durationMs": 2585
     },
     {
       "group": "brain.runtime",
       "name": "CDP 失败后不中断，LLM 可继续推进并完成",
       "status": "passed",
-      "durationMs": 527
+      "durationMs": 278
     },
     {
       "group": "brain.reliability",
       "name": "strict verify 失败不应 done（failed_verify 收口）",
       "status": "passed",
-      "durationMs": 545
+      "durationMs": 525
     },
     {
       "group": "brain.reliability",
@@ -185,103 +185,99 @@
       "group": "brain.reliability",
       "name": "done 语义严格：verify 失败不可 done",
       "status": "passed",
-      "durationMs": 553
+      "durationMs": 531
     },
     {
       "group": "brain.reliability",
       "name": "auto-repair 边界：execute_error 可重试，max_steps/stopped 不续跑",
       "status": "passed",
-      "durationMs": 2082
+      "durationMs": 2098
     },
     {
       "group": "brain.reliability",
       "name": "background 失败提示切 focus 并续跑当前 step",
       "status": "passed",
-      "durationMs": 581
+      "durationMs": 2111
     },
     {
       "group": "brain.reliability",
-      "name": "no-progress 守卫：重复失败触发熔断并终止",
+      "name": "PI 对齐：重复失败不触发 no-progress 守卫，按 max_steps 收口",
       "status": "passed",
-      "durationMs": 568
+      "durationMs": 541
     },
     {
       "group": "brain.reliability",
       "name": "tab sticky：active tab 漂移后仍命中 primaryTab",
       "status": "passed",
-      "durationMs": 3012
+      "durationMs": 1474
     },
     {
       "group": "panel.vnext",
       "name": "sidepanel 渲染并支持复制/历史分叉/最后一条重试",
       "status": "passed",
-      "durationMs": 9823
+      "durationMs": 8019
     },
     {
       "group": "panel.vnext",
       "name": "user inline 编辑：最后一条重跑，历史消息分叉重跑",
       "status": "passed",
-      "durationMs": 7750
+      "durationMs": 7636
     },
     {
       "group": "brain.runtime",
       "name": "LLM Retry-After 超上限时应快速失败且不进入长等待重试",
       "status": "passed",
-      "durationMs": 265
+      "durationMs": 282
     },
     {
       "group": "brain.runtime",
-      "name": "重复可恢复工具失败应触发熔断并停止循环",
+      "name": "PI 对齐：重复可恢复工具失败不熔断，按 max_steps 收口",
       "status": "passed",
-      "durationMs": 2578
+      "durationMs": 10918
     },
     {
       "group": "debug.console",
       "name": "Live Events 可显示 brain.event",
       "status": "passed",
-      "durationMs": 16
+      "durationMs": 20
     },
     {
       "group": "brain.runtime",
       "name": "brain.run.stop 状态通过 session.view 回显",
       "status": "passed",
-      "durationMs": 8
+      "durationMs": 9
     },
     {
       "group": "brain.session",
       "name": "session 标题生命周期：自动生成 + 菜单重刷 + 列表重命名 + 自动阈值",
       "status": "passed",
-      "durationMs": 4982
+      "durationMs": 1
     },
     {
       "group": "sidepanel llm-live",
       "name": "真实 LLM 在浏览器目标上达到可验证成功率",
       "status": "passed",
-      "durationMs": 197943
+      "durationMs": 41122
     }
   ],
   "fatalError": null,
   "debug": {
     "bridgeLogsTail": [
       "$ bun src/index.ts",
-      "[bridge] ws://127.0.0.1:18787/ws  mode=god  maxConcurrency=6  bash.exec=enabled  audit=/Users/envvar/work/repos/browser-brain-loop/bridge/tmp/browser-bridge/audit-2026-02-25.jsonl",
+      "[bridge] ws://127.0.0.1:18787/ws  mode=god  maxConcurrency=6  bash.exec=enabled  audit=/Users/envvar/work/repos/browser-brain-loop/bridge/tmp/browser-bridge/audit-2026-02-26.jsonl",
       "error: script \"start\" was terminated by signal SIGTERM (Polite quit request)"
     ],
     "chromeLogsTail": [
-      "DevTools listening on ws://127.0.0.1:19333/devtools/browser/ffed3426-9ed0-4a0e-91e1-e3436990af2a",
-      "2026-02-25 19:27:28.605 Google Chrome for Testing[20090:16942011] error messaging the mach port for IMKCFRunLoopWakeUpReliable",
-      "[20090:16942129:0225/192732.149184:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT",
-      "[20090:16942129:0225/192732.789285:ERROR:google_apis/gcm/engine/mcs_client.cc:700]   Error code: 401  Error message: Authentication Failed: wrong_secret",
-      "[20090:16942129:0225/192732.789323:ERROR:google_apis/gcm/engine/mcs_client.cc:702] Failed to log in to GCM, resetting connection.",
-      "[20090:16942129:0225/192759.171004:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT",
-      "[20090:16942129:0225/192850.082512:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT",
-      "[22961:16953417:0225/193028.135916:ERROR:services/on_device_model/ml/gpu_blocklist.cc:118] Unable to get gpu adapter",
-      "[22961:16953470:0225/193028.136519:ERROR:services/on_device_model/ml/gpu_blocklist.cc:118] Unable to get gpu adapter",
-      "[20090:16942129:0225/193037.885078:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT"
+      "DevTools listening on ws://127.0.0.1:19333/devtools/browser/21a01dc7-fc16-40be-af5f-30aaf4097c76",
+      "[7995:20495522:0226/215437.116988:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT",
+      "[7995:20495418:0226/215453.600971:ERROR:mojo/public/cpp/bindings/lib/interface_endpoint_client.cc:748] Message 5 rejected by interface blink.mojom.WidgetHost",
+      "[7995:20495418:0226/215453.600985:ERROR:mojo/public/cpp/bindings/lib/interface_endpoint_client.cc:748] Message 4 rejected by interface blink.mojom.WidgetHost",
+      "[7995:20495522:0226/215459.193221:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT",
+      "[7995:20495522:0226/215547.864155:ERROR:google_apis/gcm/engine/registration_request.cc:290] Registration response error message: DEPRECATED_ENDPOINT"
     ],
     "visualScreenshots": [
-      "bdd/evidence/screenshots/panel-markdown-visual-light-1772018850157.png",
-      "bdd/evidence/screenshots/panel-markdown-visual-dark-1772018850248.png"
+      "bdd/evidence/screenshots/panel-markdown-visual-light-1772114074746.png",
+      "bdd/evidence/screenshots/panel-markdown-visual-dark-1772114074842.png"
     ],
     "visualReview": {
       "mode": "optional",
@@ -302,20 +298,21 @@
             "base": "https://ai.chen.rs/v1",
             "model": "gpt-5.3-codex"
           },
-          "durationMs": 16760,
-          "summary": "亮/暗主题下该 markdown 区域整体可读性良好，代码高亮与布局均满足回归要求。",
+          "durationMs": 13423,
+          "summary": "亮/暗主题下目标 Markdown 的正文、引用、表格与代码块均可读且语法高亮生效，未见明显布局异常。",
           "observations": [
-            "亮色主题中正文标题、引用文本与表格单元格文字对比清晰，未出现白底白字或近似同色。",
-            "暗色主题中正文标题、引用块与表格文本均保持可读，引用/表头/单元格背景与文字区分明确。",
-            "两种主题代码块均检测到 Shiki 高亮（存在多色 token，非纯单色），且可见完整两行结构。",
-            "代码块、引用块、表格在两种主题下均未见坍缩、重叠覆盖或明显样式错位。"
+            "亮色主题中引用文本、表头与表格正文文字颜色与背景区分明显，未出现白底白字或近似同色。",
+            "暗色主题中引用块与表格单元格文本均保持清晰对比，引用左侧强调边与背景层级可辨。",
+            "代码块在两种主题下均为多色 token 高亮（非纯单色），且包含完整两行结构。",
+            "代码块容器、引用块和表格边框在两种主题下均未出现坍缩、遮挡或错位。",
+            "结构化检查显示 light/dark 均 targetFound=true、hasShiki=true、shikiReady=true，且 coloredTokenCount 分别为 6/7。"
           ],
           "issues": [],
           "screenshotPaths": [
-            "bdd/evidence/screenshots/panel-markdown-visual-light-1772018850157.png",
-            "bdd/evidence/screenshots/panel-markdown-visual-dark-1772018850248.png"
+            "bdd/evidence/screenshots/panel-markdown-visual-light-1772114074746.png",
+            "bdd/evidence/screenshots/panel-markdown-visual-dark-1772114074842.png"
           ],
-          "rawResponseText": "{\n  \"verdict\": \"pass\",\n  \"summary\": \"亮/暗主题下该 markdown 区域整体可读性良好，代码高亮与布局均满足回归要求。\",\n  \"observations\": [\n    \"亮色主题中正文标题、引用文本与表格单元格文字对比清晰，未出现白底白字或近似同色。\",\n    \"暗色主题中正文标题、引用块与表格文本均保持可读，引用/表头/单元格背景与文字区分明确。\",\n    \"两种主题代码块均检测到 Shiki 高亮（存在多色 token，非纯单色），且可见完整两行结构。\",\n    \"代码块、引用块、表格在两种主题下均未见坍缩、重叠覆盖或明显样式错位。\"\n  ],\n  \"issues\": []\n}"
+          "rawResponseText": "{\n  \"verdict\": \"pass\",\n  \"summary\": \"亮/暗主题下目标 Markdown 的正文、引用、表格与代码块均可读且语法高亮生效，未见明显布局异常。\",\n  \"observations\": [\n    \"亮色主题中引用文本、表头与表格正文文字颜色与背景区分明显，未出现白底白字或近似同色。\",\n    \"暗色主题中引用块与表格单元格文本均保持清晰对比，引用左侧强调边与背景层级可辨。\",\n    \"代码块在两种主题下均为多色 token 高亮（非纯单色），且包含完整两行结构。\",\n    \"代码块容器、引用块和表格边框在两种主题下均未出现坍缩、遮挡或错位。\",\n    \"结构化检查显示 light/dark 均 targetFound=true、hasShiki=true、shikiReady=true，且 coloredTokenCount 分别为 6/7。\"\n  ],\n  \"issues\": []\n}"
         }
       ]
     }
