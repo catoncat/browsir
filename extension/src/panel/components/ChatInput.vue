@@ -542,58 +542,64 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
     <div class="flex flex-col bg-ui-surface border border-ui-border rounded-2xl shadow-sm overflow-hidden transition-all focus-within:ring-1 focus-within:ring-ui-accent/20 focus-within:border-ui-accent/40">
       
       <!-- Integrated Sharing Header (Top of Card) -->
-      <div 
+      <div
         v-if="selectedTabs.length > 0"
         class="flex flex-col bg-ui-surface/60 border-b border-ui-border/30"
       >
-        <div class="flex items-center justify-between px-4 py-2.5">
-          <div class="flex items-center gap-2 overflow-hidden">
-            <div class="flex -space-x-1 mr-1">
-              <div 
-                v-for="(tab, i) in selectedTabs.slice(0, 3)" 
-                :key="tab.id" 
-                class="w-5 h-5 rounded border border-ui-border bg-white flex items-center justify-center overflow-hidden shrink-0 shadow-sm"
+        <div class="h-8 px-2.5 flex items-center justify-between gap-2">
+          <div class="min-w-0 flex items-center gap-1.5 overflow-hidden">
+            <div class="flex -space-x-1 shrink-0">
+              <div
+                v-for="(tab, i) in selectedTabs.slice(0, 2)"
+                :key="tab.id"
+                class="w-4 h-4 rounded border border-ui-border bg-white flex items-center justify-center overflow-hidden"
                 :style="{ zIndex: 10 - i }"
               >
                 <img v-if="tab.favIconUrl" :src="tab.favIconUrl" class="w-full h-full object-contain" aria-hidden="true" />
-                <Globe v-else :size="10" aria-hidden="true" />
+                <Globe v-else :size="9" aria-hidden="true" />
               </div>
+              <span
+                v-if="selectedTabs.length > 2"
+                class="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-ui-border bg-ui-bg px-1 text-[9px] text-ui-text-muted"
+              >
+                +{{ selectedTabs.length - 2 }}
+              </span>
             </div>
-            <span class="text-[13px] font-medium text-ui-text truncate">
-              {{ selectedTabs.length === 1 ? selectedTabs[0].title : `正在共享 ${selectedTabs.length} 个标签页` }}
+            <span class="truncate text-[11px] font-medium text-ui-text">
+              {{ selectedTabs.length === 1 ? selectedTabs[0].title : `${selectedTabs.length} 个标签页` }}
             </span>
           </div>
-          
+
           <div class="flex items-center gap-0.5 shrink-0">
-            <button 
+            <button
               v-if="selectedTabs.length > 1"
               @click="isContextExpanded = !isContextExpanded"
-              class="p-1.5 hover:bg-black/5 rounded-md text-ui-text-muted transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent"
+              class="h-6 px-1.5 inline-flex items-center gap-1 hover:bg-black/5 rounded-md text-ui-text-muted transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent"
               :aria-label="isContextExpanded ? '收起详情' : '查看共享详情'"
               :aria-expanded="isContextExpanded"
             >
-              <ChevronUp v-if="!isContextExpanded" :size="16" aria-hidden="true" />
-              <ChevronDown v-else :size="16" aria-hidden="true" />
+              <span class="text-[10px] leading-none">{{ isContextExpanded ? "收起" : "管理" }}</span>
+              <ChevronDown v-if="!isContextExpanded" :size="12" aria-hidden="true" />
+              <ChevronUp v-else :size="12" aria-hidden="true" />
             </button>
-            <button 
-              @click="selectedTabs = []; isContextExpanded = false" 
-              class="p-1.5 hover:bg-black/5 rounded-md text-ui-text-muted transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent"
+            <button
+              @click="selectedTabs = []; isContextExpanded = false"
+              class="h-6 w-6 inline-flex items-center justify-center hover:bg-black/5 rounded-md text-ui-text-muted transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent"
               aria-label="移除所有共享标签页"
             >
-              <X :size="16" aria-hidden="true" />
+              <X :size="13" aria-hidden="true" />
             </button>
           </div>
         </div>
 
-        <!-- Expanded Tab Details -->
-        <div v-if="isContextExpanded" class="px-4 pb-3 space-y-1 animate-in slide-in-from-top-1 duration-200" role="list">
-          <div 
-            v-for="tab in selectedTabs" 
+        <div v-if="isContextExpanded" class="px-2.5 pb-2 space-y-1 animate-in slide-in-from-top-1 duration-200" role="list">
+          <div
+            v-for="tab in selectedTabs"
             :key="tab.id"
-            class="flex items-center justify-between group/tab bg-white/50 border border-ui-border/50 px-2 py-1 rounded-md"
+            class="h-7 flex items-center justify-between group/tab bg-white/50 border border-ui-border/50 px-2 rounded-md"
             role="listitem"
           >
-            <div class="flex items-center gap-2 overflow-hidden">
+            <div class="flex items-center gap-1.5 overflow-hidden">
               <img v-if="tab.favIconUrl" :src="tab.favIconUrl" class="w-3 h-3 shrink-0 rounded-sm" aria-hidden="true" />
               <Globe v-else :size="10" class="text-ui-text-muted shrink-0" aria-hidden="true" />
               <span class="text-[11px] text-ui-text truncate">{{ tab.title }}</span>
