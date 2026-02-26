@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, watch, computed, nextTick } from "vue";
-import { Send, Square, Plus, ChevronDown, ChevronUp, X, Globe, Search, Check, Loader2 } from "lucide-vue-next";
+import { Send, Square, Plus, ChevronDown, ChevronUp, X, Globe, Search, Check, Loader2, Wrench } from "lucide-vue-next";
 import { useTextareaAutosize, onClickOutside } from "@vueuse/core";
+import { useRuntimeStore, type SkillMetadata } from "../stores/runtime";
 
 interface TabItem {
   id: number;
@@ -14,6 +15,14 @@ interface QueueItem {
   id: string;
   behavior: "steer" | "followUp";
   text: string;
+}
+
+interface SkillOption {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  disableModelInvocation: boolean;
 }
 
 const props = defineProps<{
@@ -33,23 +42,39 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: "update:modelValue", value: string): void;
-  (e: "send", payload: { text: string; tabIds: number[]; mode: "normal" | "steer" | "followUp" }): void;
+  (e: "send", payload: { text: string; tabIds: number[]; skillIds: string[]; mode: "normal" | "steer" | "followUp" }): void;
   (e: "queue-promote", payload: { id: string }): void;
   (e: "stop"): void;
 }>();
 
 const { textarea, input: text } = useTextareaAutosize();
+const runtimeStore = useRuntimeStore();
 const selectedTabs = ref<TabItem[]>([]);
 const availableTabs = ref<TabItem[]>([]);
 const showMentionList = ref(false);
+const showSkillList = ref(false);
 const isContextExpanded = ref(false);
 const mentionFilter = ref("");
+const skillFilter = ref("");
 const focusedIndex = ref(0);
+const skillFocusedIndex = ref(0);
 const mentionContainer = ref<HTMLElement | null>(null);
+const skillContainer = ref<HTMLElement | null>(null);
 const listScrollContainer = ref<HTMLElement | null>(null);
+const skillListScrollContainer = ref<HTMLElement | null>(null);
+const availableSkills = ref<SkillOption[]>([]);
+const selectedSkills = ref<SkillOption[]>([]);
+const skillLoading = ref(false);
+const skillError = ref("");
+const skillCacheUpdatedAt = ref(0);
+
+const SKILL_CACHE_TTL_MS = 8000;
 
 onClickOutside(mentionContainer, () => {
   showMentionList.value = false;
+});
+onClickOutside(skillContainer, () => {
+  showSkillList.value = false;
 });
 
 async function refreshTabs() {
@@ -70,9 +95,24 @@ const filteredTabs = computed(() => {
     t.title.toLowerCase().includes(q) || t.url.toLowerCase().includes(q)
   );
 });
+const filteredSkills = computed(() => {
+  const q = skillFilter.value.toLowerCase().trim();
+  const selectedIdSet = new Set(selectedSkills.value.map((item) => item.id));
+  const list = availableSkills.value.filter((skill) => skill.enabled && !selectedIdSet.has(skill.id));
+  if (!q) return list;
+  return list.filter((skill) => {
+    return (
+      skill.id.toLowerCase().includes(q) ||
+      skill.name.toLowerCase().includes(q) ||
+      skill.description.toLowerCase().includes(q)
+    );
+  });
+});
 const isCompacting = computed(() => Boolean(props.isCompacting) && Boolean(props.isRunning));
 const isStartingRun = computed(() => Boolean(props.isStartingRun) && !props.isRunning);
-const canSubmit = computed(() => text.value.trim().length > 0 && !props.disabled && !isStartingRun.value);
+const canSubmit = computed(() =>
+  (text.value.trim().length > 0 || selectedSkills.value.length > 0) && !props.disabled && !isStartingRun.value
+);
 const queueItems = computed<QueueItem[]>(() => {
   return Array.isArray(props.queueItems) ? props.queueItems : [];
 });
@@ -105,17 +145,38 @@ watch(
 
 watch(text, (newVal) => {
   emit("update:modelValue", newVal);
+  const slashContext = extractSlashContext(newVal);
+  if (slashContext) {
+    if (!showSkillList.value) {
+      void refreshSkills();
+    }
+    const nextSkillFilter = slashContext.query;
+    if (nextSkillFilter !== skillFilter.value) {
+      skillFocusedIndex.value = 0;
+    }
+    skillFilter.value = nextSkillFilter;
+    showSkillList.value = true;
+    showMentionList.value = false;
+  } else {
+    showSkillList.value = false;
+    skillFilter.value = "";
+  }
+
   const lastChar = newVal.slice(-1);
-  if (lastChar === "@") {
-    void refreshTabs();
-    showMentionList.value = true;
-    mentionFilter.value = "";
-    focusedIndex.value = 0;
-  } else if (showMentionList.value) {
-    const match = /@(\w*)$/.exec(newVal);
-    if (match) {
-      mentionFilter.value = match[1];
+  if (!slashContext) {
+    if (lastChar === "@") {
+      void refreshTabs();
+      showMentionList.value = true;
+      mentionFilter.value = "";
       focusedIndex.value = 0;
+    } else if (showMentionList.value) {
+      const match = /@(\w*)$/.exec(newVal);
+      if (match) {
+        mentionFilter.value = match[1];
+        focusedIndex.value = 0;
+      } else {
+        showMentionList.value = false;
+      }
     } else {
       showMentionList.value = false;
     }
@@ -140,6 +201,18 @@ function removeTab(id: number) {
   if (selectedTabs.value.length === 0) isContextExpanded.value = false;
 }
 
+function removeSkillSelection(id: string) {
+  const normalized = String(id || "").trim();
+  if (!normalized) return;
+  selectedSkills.value = selectedSkills.value.filter((item) => item.id !== normalized);
+}
+
+function addSkillSelection(skill: SkillOption) {
+  if (!skill?.id) return;
+  if (selectedSkills.value.some((item) => item.id === skill.id)) return;
+  selectedSkills.value.push(skill);
+}
+
 function confirmSelection() {
   if (selectedTabs.value.length === 0 && filteredTabs.value[focusedIndex.value]) {
     toggleTabSelection(filteredTabs.value[focusedIndex.value]);
@@ -149,7 +222,131 @@ function confirmSelection() {
   textarea.value?.focus();
 }
 
+function normalizeSkill(input: SkillMetadata): SkillOption | null {
+  const id = String(input.id || "").trim();
+  if (!id) return null;
+  return {
+    id,
+    name: String(input.name || "").trim() || id,
+    description: String(input.description || "").trim(),
+    enabled: input.enabled === true,
+    disableModelInvocation: input.disableModelInvocation === true
+  };
+}
+
+async function refreshSkills(options: { force?: boolean } = {}): Promise<void> {
+  const now = Date.now();
+  if (
+    !options.force &&
+    availableSkills.value.length > 0 &&
+    now - Number(skillCacheUpdatedAt.value || 0) < SKILL_CACHE_TTL_MS
+  ) {
+    return;
+  }
+  if (skillLoading.value) return;
+  skillLoading.value = true;
+  skillError.value = "";
+  try {
+    const listed = await runtimeStore.listSkills();
+    const normalized = listed
+      .map((item) => normalizeSkill(item))
+      .filter((item): item is SkillOption => Boolean(item))
+      .sort((a, b) => {
+        if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+    availableSkills.value = normalized;
+    skillCacheUpdatedAt.value = now;
+  } catch (error) {
+    skillError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    skillLoading.value = false;
+  }
+}
+
+interface SlashContext {
+  start: number;
+  end: number;
+  query: string;
+}
+
+function extractSlashContext(value: string): SlashContext | null {
+  const source = String(value || "");
+  const cursor = Number(textarea.value?.selectionStart ?? source.length);
+  const head = source.slice(0, cursor);
+  const match = /(?:^|\s)\/([^\s/]*)$/.exec(head);
+  if (!match) return null;
+  const whole = match[0];
+  const leadingWhitespaceOffset = whole.startsWith(" ") ? 1 : 0;
+  const start = head.length - whole.length + leadingWhitespaceOffset;
+  const rawQuery = String(match[1] || "");
+  const query = rawQuery.startsWith("skill:") ? rawQuery.slice("skill:".length) : rawQuery;
+  return {
+    start,
+    end: cursor,
+    query
+  };
+}
+
+function confirmSkillSelection(skill = filteredSkills.value[skillFocusedIndex.value]) {
+  if (!skill) return;
+  const context = extractSlashContext(text.value);
+  if (!context) {
+    showSkillList.value = false;
+    return;
+  }
+  addSkillSelection(skill);
+  const before = text.value.slice(0, context.start);
+  const after = text.value.slice(context.end);
+  const merged = before.endsWith(" ") && after.startsWith(" ") ? `${before}${after.slice(1)}` : `${before}${after}`;
+  text.value = merged;
+  showSkillList.value = false;
+  skillFilter.value = "";
+  nextTick(() => {
+    const cursor = before.length;
+    const target = textarea.value;
+    target?.focus();
+    target?.setSelectionRange(cursor, cursor);
+  });
+}
+
 function handleKeydown(e: KeyboardEvent) {
+  if (showSkillList.value) {
+    const total = filteredSkills.value.length;
+    if (total === 0) {
+      if (e.key === "Escape") showSkillList.value = false;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Tab") {
+        e.preventDefault();
+        return;
+      }
+      if (e.key === "Enter") {
+        showSkillList.value = false;
+      } else {
+        return;
+      }
+    }
+
+    if (!showSkillList.value) {
+      // fall through to normal submit handling (e.g. Enter)
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      skillFocusedIndex.value = (skillFocusedIndex.value + 1) % total;
+      scrollToFocusedSkill();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      skillFocusedIndex.value = (skillFocusedIndex.value - 1 + total) % total;
+      scrollToFocusedSkill();
+    } else if (e.key === "Enter" || e.key === "Tab") {
+      e.preventDefault();
+      confirmSkillSelection();
+    } else if (e.key === "Escape") {
+      showSkillList.value = false;
+    }
+    if (showSkillList.value) {
+      return;
+    }
+  }
+
   if (showMentionList.value) {
     const total = filteredTabs.value.length;
     if (total === 0) {
@@ -201,20 +398,99 @@ function scrollToFocused() {
   });
 }
 
+function scrollToFocusedSkill() {
+  nextTick(() => {
+    const el = document.getElementById(`skill-item-${skillFocusedIndex.value}`);
+    if (el && skillListScrollContainer.value) {
+      el.scrollIntoView({ block: "nearest" });
+    }
+  });
+}
+
 function handleSubmit(mode: "normal" | "steer" | "followUp") {
-  if (text.value.trim().length === 0 || props.disabled || isStartingRun.value) return;
+  if ((text.value.trim().length === 0 && selectedSkills.value.length === 0) || props.disabled || isStartingRun.value) return;
   const resolvedMode = props.isRunning ? (mode === "normal" ? "steer" : mode) : "normal";
   emit("send", {
     text: text.value,
     tabIds: selectedTabs.value.map(t => t.id),
+    skillIds: selectedSkills.value.map((item) => item.id),
     mode: resolvedMode
   });
   text.value = "";
+  selectedSkills.value = [];
+  showMentionList.value = false;
+  showSkillList.value = false;
+  skillFilter.value = "";
 }
 </script>
 
 <template>
   <div class="w-full bg-ui-bg relative px-3 pb-4 pt-2">
+    <!-- Skill Slash Dropdown -->
+    <div
+      v-if="showSkillList"
+      ref="skillContainer"
+      class="absolute bottom-[calc(100%-8px)] left-4 right-4 z-50 bg-ui-bg border border-ui-border rounded-xl shadow-2xl overflow-hidden animate-in slide-in-from-bottom-2 duration-200"
+      role="listbox"
+      aria-label="选择 skill"
+    >
+      <div class="px-3 py-1.5 bg-ui-surface border-b border-ui-border flex items-center justify-between">
+        <div class="flex items-center gap-2 text-[10px] font-bold text-ui-text-muted uppercase tracking-widest">
+          <Wrench :size="10" aria-hidden="true" />
+          Skills
+        </div>
+        <button
+          type="button"
+          class="text-[10px] text-ui-text-muted hover:text-ui-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent rounded px-1"
+          aria-label="刷新 skills 列表"
+          @click="void refreshSkills({ force: true })"
+        >
+          刷新
+        </button>
+      </div>
+
+      <div v-if="skillLoading" class="px-3 py-3 text-[12px] text-ui-text-muted inline-flex items-center gap-2">
+        <Loader2 :size="13" class="animate-spin" aria-hidden="true" />
+        正在加载 skills...
+      </div>
+      <div v-else-if="skillError" class="px-3 py-3 text-[12px] text-rose-600">
+        {{ skillError }}
+      </div>
+      <div v-else-if="filteredSkills.length === 0" class="px-3 py-3 text-[12px] text-ui-text-muted">
+        没有可用的已启用 skills。先去“Skills 管理”页启用或创建。
+      </div>
+      <div v-else ref="skillListScrollContainer" class="max-h-56 overflow-y-auto custom-scrollbar">
+        <button
+          v-for="(skill, index) in filteredSkills"
+          :id="`skill-item-${index}`"
+          :key="skill.id"
+          role="option"
+          :aria-selected="skillFocusedIndex === index"
+          class="w-full flex items-start gap-2 px-3 py-2 transition-colors text-left border-b border-ui-border/30 last:border-0 outline-none"
+          :class="skillFocusedIndex === index ? 'bg-ui-surface' : ''"
+          @mouseenter="skillFocusedIndex = index"
+          @click="confirmSkillSelection(skill)"
+        >
+          <div class="mt-0.5 shrink-0 text-ui-accent">
+            <Wrench :size="14" aria-hidden="true" />
+          </div>
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="text-[12px] font-medium text-ui-text truncate">{{ skill.name }}</span>
+              <span
+                v-if="skill.disableModelInvocation"
+                class="text-[9px] font-semibold uppercase tracking-wide text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5"
+              >
+                manual
+              </span>
+            </div>
+            <div class="text-[10px] text-ui-text-muted font-mono truncate">/skill:{{ skill.id }}</div>
+            <div v-if="skill.description" class="text-[10px] text-ui-text-muted truncate">{{ skill.description }}</div>
+          </div>
+        </button>
+      </div>
+    </div>
+
     <!-- Mention Dropdown -->
     <div 
       v-if="showMentionList" 
@@ -332,6 +608,32 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
       <!-- Main Input Flow -->
       <div class="flex flex-col">
         <div
+          v-if="selectedSkills.length > 0"
+          class="flex flex-wrap gap-1.5 px-3 pt-3 pb-2 border-b border-ui-border/30"
+          role="list"
+          aria-label="已选择技能"
+        >
+          <div
+            v-for="skill in selectedSkills"
+            :key="skill.id"
+            class="inline-flex max-w-full items-center gap-1.5 rounded-full border border-ui-border bg-ui-bg px-2 py-1"
+            role="listitem"
+          >
+            <Wrench :size="11" class="shrink-0 text-ui-accent" aria-hidden="true" />
+            <span class="truncate text-[11px] font-medium text-ui-text">
+              {{ skill.name }}
+            </span>
+            <button
+              type="button"
+              class="shrink-0 rounded-full p-0.5 text-ui-text-muted transition-colors hover:bg-ui-surface hover:text-ui-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent"
+              :aria-label="`移除技能 ${skill.name}`"
+              @click="removeSkillSelection(skill.id)"
+            >
+              <X :size="11" aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+        <div
           v-if="isRunning && queueItems.length > 0"
           class="flex flex-col bg-ui-surface/70 border-b border-ui-border/30"
           role="region"
@@ -393,7 +695,7 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
           ref="textarea"
           v-model="text"
           class="w-full p-4 pb-2 bg-transparent border-none resize-none text-[15px] leading-relaxed placeholder:text-ui-text-muted/60 font-sans text-ui-text focus:outline-none min-h-[60px]"
-          placeholder="Type @ to ask about a tab"
+          placeholder="输入 / 选择 skill，输入 @ 引用标签页"
           :disabled="disabled"
           aria-label="消息输入框"
           @keydown="handleKeydown"

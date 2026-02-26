@@ -473,10 +473,13 @@ export const useRuntimeStore = defineStore("runtime", () => {
 
   async function sendPrompt(
     prompt: string,
-    options: { newSession?: boolean; tabIds?: number[]; streamingBehavior?: "steer" | "followUp" } = {}
+    options: { newSession?: boolean; tabIds?: number[]; skillIds?: string[]; streamingBehavior?: "steer" | "followUp" } = {}
   ) {
     const text = prompt.trim();
-    if (!text) return;
+    const skillIds = Array.isArray(options.skillIds)
+      ? Array.from(new Set(options.skillIds.map((id) => String(id || "").trim()).filter((id) => id.length > 0)))
+      : [];
+    if (!text && skillIds.length === 0) return;
     const useCurrentSession = !options.newSession && !!activeSessionId.value;
     const tabIds = Array.isArray(options.tabIds)
       ? options.tabIds.filter((id) => Number.isInteger(id)).map((id) => Number(id))
@@ -485,6 +488,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
       sessionId: useCurrentSession ? activeSessionId.value : undefined,
       prompt: text,
       tabIds,
+      ...(skillIds.length > 0 ? { skillIds } : {}),
       streamingBehavior: options.streamingBehavior
     });
     runtime.value = normalizeRuntimeState(result.runtime);

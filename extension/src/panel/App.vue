@@ -1914,13 +1914,13 @@ async function handlePromoteQueuedPromptToSteer(queuedPromptId: string) {
   }
 }
 
-async function handleSend(payload: { text: string; tabIds: number[]; mode: "normal" | "steer" | "followUp" }) {
+async function handleSend(payload: { text: string; tabIds: number[]; skillIds: string[]; mode: "normal" | "steer" | "followUp" }) {
   if (createSessionTask) {
     await createSessionTask;
   }
   if (startRunPending.value && !isRunActive.value) return;
   const text = String(payload.text || "");
-  if (!text.trim()) return;
+  if (!text.trim() && (!payload.skillIds || payload.skillIds.length === 0)) return;
   const isNew = !activeSessionId.value;
 
   try {
@@ -1928,6 +1928,7 @@ async function handleSend(payload: { text: string; tabIds: number[]; mode: "norm
     await store.sendPrompt(text, {
       newSession: isNew,
       tabIds: Array.isArray(payload.tabIds) ? payload.tabIds : [],
+      skillIds: Array.isArray(payload.skillIds) ? payload.skillIds : [],
       streamingBehavior: payload.mode === "normal" ? undefined : payload.mode
     });
     prompt.value = "";
