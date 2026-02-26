@@ -32,3 +32,5 @@ coverage/
 .brain-loop-trace-latest.json
 brain-trace-*.json
 .dir-2level.txt
+liketweet.json
+replyx.json
