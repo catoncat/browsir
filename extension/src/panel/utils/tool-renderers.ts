@@ -17,6 +17,21 @@ interface ResolveToolRenderInput {
   toolCallId?: string;
 }
 
+const INVOKE_BASH_TOOL_NAMES = new Set(["host_bash", "browser_bash"]);
+const INVOKE_FILE_TOOL_NAMES = new Set([
+  "host_read_file",
+  "browser_read_file",
+  "host_write_file",
+  "browser_write_file",
+  "host_edit_file",
+  "browser_edit_file"
+]);
+const INVOKE_TOOL_NAMES = new Set([
+  ...INVOKE_BASH_TOOL_NAMES,
+  ...INVOKE_FILE_TOOL_NAMES,
+  "invoke"
+]);
+
 function asRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" ? (value as JsonRecord) : {};
 }
@@ -259,11 +274,11 @@ function renderToolTarget(toolName: string, payload: JsonRecord): string {
   const args = asRecord(payload.args);
   const normalized = String(toolName || "").trim().toLowerCase();
 
-  if (normalized === "bash") {
+  if (INVOKE_BASH_TOOL_NAMES.has(normalized)) {
     const command = toText(args.command) || toText(payload.rawArgs);
     return command ? `命令：${command}` : "";
   }
-  if (["read_file", "write_file", "edit_file"].includes(normalized)) {
+  if (INVOKE_FILE_TOOL_NAMES.has(normalized)) {
     const path = toText(args.path);
     return path ? `路径：${path}` : "";
   }
@@ -434,7 +449,7 @@ export function resolveToolRender(input: ResolveToolRenderInput): ToolRenderResu
   if (toolName === "list_tabs") return renderListTabs(payload, detail);
   if (toolName === "open_tab") return renderOpenTab(payload, detail);
   if (toolName === "browser_action" || toolName === "browser_verify") return renderBrowser(payload, detail);
-  if (["bash", "read_file", "write_file", "edit_file", "invoke"].includes(toolName)) {
+  if (INVOKE_TOOL_NAMES.has(toolName)) {
     return renderInvoke(toolName, callId, payload, detail);
   }
   return renderDefault(toolName, callId, payload, detail);

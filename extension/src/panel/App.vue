@@ -501,6 +501,16 @@ function normalizeEventTs(row: Record<string, unknown>): string {
   return String(row.ts || row.timestamp || new Date().toISOString());
 }
 
+const BASH_TOOL_ACTIONS = new Set(["host_bash", "browser_bash"]);
+const FILE_TOOL_ACTIONS = new Set([
+  "host_read_file",
+  "browser_read_file",
+  "host_write_file",
+  "browser_write_file",
+  "host_edit_file",
+  "browser_edit_file"
+]);
+
 function prettyToolAction(action: string): string {
   const normalized = String(action || "").trim().toLowerCase();
   const map: Record<string, string> = {
@@ -509,10 +519,14 @@ function prettyToolAction(action: string): string {
     open_tab: "打开标签页",
     browser_action: "执行浏览器动作",
     browser_verify: "执行页面验证",
-    read_file: "读取文件",
-    write_file: "写入文件",
-    edit_file: "编辑文件",
-    bash: "执行命令"
+    host_read_file: "读取主机文件",
+    browser_read_file: "读取浏览器文件",
+    host_write_file: "写入主机文件",
+    browser_write_file: "写入浏览器文件",
+    host_edit_file: "编辑主机文件",
+    browser_edit_file: "编辑浏览器文件",
+    host_bash: "执行主机命令",
+    browser_bash: "执行浏览器命令"
   };
   return map[normalized] || (normalized ? `执行 ${normalized}` : "执行工具");
 }
@@ -584,11 +598,11 @@ function formatToolPendingDetail(action: string, argsRaw: string): string {
   const args = tryParseArgs(raw);
 
   if (normalized === "list_tabs") return "正在读取当前窗口标签页信息";
-  if (normalized === "bash") {
+  if (BASH_TOOL_ACTIONS.has(normalized)) {
     const command = toScalarText(args?.command) || raw;
     return command ? `命令：${clipText(command, 100)}` : "";
   }
-  if (["read_file", "write_file", "edit_file"].includes(normalized)) {
+  if (FILE_TOOL_ACTIONS.has(normalized)) {
     const path = toScalarText(args?.path);
     return path ? `路径：${clipText(path, 100)}` : "";
   }
@@ -656,7 +670,7 @@ function summarizeToolPendingStep(item: ToolPendingStepState): { label: string; 
     .replace(/^目标：/u, "")
     .trim();
 
-  if (normalizedAction !== "bash") {
+  if (!BASH_TOOL_ACTIONS.has(normalizedAction)) {
     return {
       label: prettyToolAction(item.action),
       detail: compactDetail

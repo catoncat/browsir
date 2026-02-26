@@ -328,7 +328,7 @@ function extractContentFromStepExecuteResult(value: unknown): string {
   for (const item of candidates) {
     if (typeof item === "string") return item;
   }
-  throw new Error("read_file 未返回 content 文本");
+  throw new Error("文件读取工具未返回 content 文本");
 }
 
 function normalizeConfig(raw: Record<string, unknown> | null | undefined): PanelConfig {
@@ -538,7 +538,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
     });
     const result = toRecord(step);
     if (result.ok !== true) {
-      throw new Error(String(result.error || "read_file 失败"));
+      throw new Error(String(result.error || "文件读取失败"));
     }
     return extractContentFromStepExecuteResult(result.data);
   }
@@ -568,7 +568,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
     });
     const result = toRecord(step);
     if (result.ok !== true) {
-      throw new Error(String(result.error || "write_file 失败"));
+      throw new Error(String(result.error || "文件写入失败"));
     }
   }
 
