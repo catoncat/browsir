@@ -230,12 +230,14 @@ describe("runtime infra handler", () => {
     if (!first || first.ok !== true) return;
     const initial = (first.data ?? {}) as Record<string, unknown>;
     expect(String(initial.bridgeUrl || "")).toContain("ws://");
+    expect(String(initial.browserRuntimeStrategy || "")).toBe("host-first");
 
     const saved = await infra.handleMessage({
       type: "config.save",
       payload: {
         bridgeUrl: "ws://127.0.0.1:18787/ws",
         bridgeToken: "token-x",
+        browserRuntimeStrategy: "browser-first",
         ...buildWorkerLlmConfig({ model: "gpt-test" }),
         llmSystemPromptCustom: "Always provide concise evidence.",
         autoTitleInterval: 7,
@@ -253,6 +255,7 @@ describe("runtime infra handler", () => {
     const updated = (after.data ?? {}) as Record<string, unknown>;
     expect(updated.bridgeUrl).toBe("ws://127.0.0.1:18787/ws");
     expect(updated.bridgeToken).toBe("token-x");
+    expect(updated.browserRuntimeStrategy).toBe("browser-first");
     const profiles = Array.isArray(updated.llmProfiles) ? (updated.llmProfiles as Array<Record<string, unknown>>) : [];
     expect(String((profiles[0] || {}).llmModel || "")).toBe("gpt-test");
     expect(updated.llmSystemPromptCustom).toBe("Always provide concise evidence.");
@@ -261,6 +264,19 @@ describe("runtime infra handler", () => {
     expect(updated.llmTimeoutMs).toBe(175000);
     expect(updated.llmRetryMaxAttempts).toBe(4);
     expect(updated.llmMaxRetryDelayMs).toBe(45000);
+
+    const invalidSaved = await infra.handleMessage({
+      type: "config.save",
+      payload: {
+        browserRuntimeStrategy: "invalid"
+      }
+    });
+    expect(invalidSaved?.ok).toBe(true);
+    const afterInvalid = await infra.handleMessage({ type: "config.get" });
+    expect(afterInvalid?.ok).toBe(true);
+    if (!afterInvalid || afterInvalid.ok !== true) return;
+    const afterInvalidData = (afterInvalid.data ?? {}) as Record<string, unknown>;
+    expect(afterInvalidData.browserRuntimeStrategy).toBe("browser-first");
   });
 
   it("supports lease acquire/heartbeat/release contract", async () => {
@@ -807,6 +823,260 @@ describe("runtime infra handler", () => {
     const result = (data.result ?? {}) as Record<string, unknown>;
     expect(result.via).toBe("backend-node");
     expect(backendActionCalled).toBe(true);
+  });
+
+  it("resolves backend target by brainUid without selector string interpolation", async () => {
+    const dangerousUid = `x"] , #evil, [data-x="y`;
+    let uidResolveExpression = "";
+    (chrome as unknown as { debugger: any }).debugger = {
+      attach: async () => {},
+      detach: async () => {},
+      sendCommand: async (_target: any, method: string, params: any = {}) => {
+        if (method === "Accessibility.getFullAXTree") {
+          return { nodes: [] };
+        }
+        if (method === "Runtime.evaluate") {
+          const expression = String(params.expression || "");
+          if (expression.includes("{ url: location.href, title: document.title }")) {
+            return {
+              result: {
+                value: {
+                  url: "https://example.com/uid-fallback",
+                  title: "UID Fallback"
+                }
+              }
+            };
+          }
+          if (expression.includes("nodes") && expression.includes("selector not found")) {
+            return {
+              result: {
+                value: {
+                  ok: true,
+                  url: "https://example.com/uid-fallback",
+                  title: "UID Fallback",
+                  nodes: [
+                    {
+                      role: "button",
+                      name: "Danger",
+                      value: "",
+                      selector: "#danger",
+                      disabled: false,
+                      focused: false,
+                      tag: "button",
+                      brainUid: dangerousUid
+                    }
+                  ]
+                }
+              }
+            };
+          }
+          if (expression.includes('querySelectorAll("[data-brain-uid]")')) {
+            uidResolveExpression = expression;
+            return {
+              result: {
+                objectId: "obj-uid-901"
+              }
+            };
+          }
+          return { result: { value: { ok: true } } };
+        }
+        if (method === "DOM.resolveNode") {
+          throw new Error("resolve failed");
+        }
+        if (method === "Runtime.callFunctionOn") {
+          const fn = String(params.functionDeclaration || "");
+          if (fn.includes("if (kind === \"read\")")) {
+            return {
+              result: {
+                value: {
+                  ok: true,
+                  value: "danger",
+                  length: 6,
+                  via: "backend-node-text",
+                  url: "https://example.com/uid-fallback",
+                  title: "UID Fallback"
+                }
+              }
+            };
+          }
+          return { result: { value: { ok: true } } };
+        }
+        if (method === "Runtime.releaseObject") return {};
+        return {};
+      },
+      onEvent: { addListener: () => {} },
+      onDetach: { addListener: () => {} }
+    };
+
+    const infra = createRuntimeInfraHandler();
+    const snapped = await infra.handleMessage({
+      type: "cdp.snapshot",
+      tabId: 26,
+      options: { mode: "interactive" }
+    });
+    expect(snapped?.ok).toBe(true);
+    if (!snapped || snapped.ok !== true) return;
+    const snapData = (snapped.data ?? {}) as Record<string, unknown>;
+    const snapNodes = Array.isArray(snapData.nodes) ? (snapData.nodes as Array<Record<string, unknown>>) : [];
+    expect(snapNodes.length).toBeGreaterThan(0);
+    const firstRef = String(snapNodes[0].ref || "");
+
+    const acted = await infra.handleMessage({
+      type: "cdp.action",
+      tabId: 26,
+      action: {
+        kind: "read",
+        ref: firstRef,
+        backendNodeId: 901
+      }
+    });
+    expect(acted?.ok).toBe(true);
+    if (!acted || acted.ok !== true) return;
+    const data = (acted.data ?? {}) as Record<string, unknown>;
+    const result = (data.result ?? {}) as Record<string, unknown>;
+    expect(result.via).toBe("backend-node-text");
+    expect(uidResolveExpression).toContain('querySelectorAll("[data-brain-uid]")');
+    expect(uidResolveExpression).toContain('getAttribute?.("data-brain-uid") === uid');
+    expect(uidResolveExpression).not.toContain("document.querySelector('[data-brain-uid=");
+    expect(uidResolveExpression).not.toContain(dangerousUid);
+  });
+
+  it("falls back to JS click when native click hit is untrusted", async () => {
+    let nativeClickDispatches = 0;
+    let jsFallbackClicks = 0;
+    (chrome as unknown as { debugger: any }).debugger = {
+      attach: async () => {},
+      detach: async () => {},
+      sendCommand: async (_target: any, method: string, params: any = {}) => {
+        if (method === "Accessibility.getFullAXTree") {
+          return {
+            nodes: [
+              {
+                nodeId: "ax-1",
+                backendDOMNodeId: 701,
+                role: { value: "button" },
+                name: { value: "提交" },
+                properties: [{ name: "focusable", value: { value: true } }]
+              }
+            ]
+          };
+        }
+        if (method === "Runtime.evaluate") {
+          const expression = String(params.expression || "");
+          if (expression.includes("{ url: location.href, title: document.title }")) {
+            return { result: { value: { url: "https://example.com/click", title: "Click" } } };
+          }
+          if (expression.includes("readyState") && expression.includes("nodeCount")) {
+            return {
+              result: {
+                value: {
+                  url: "https://example.com/click",
+                  title: "Click",
+                  readyState: "complete",
+                  textLength: 10,
+                  nodeCount: 2
+                }
+              }
+            };
+          }
+          return { result: { value: { ok: true } } };
+        }
+        if (method === "DOM.resolveNode") {
+          return { object: { objectId: "obj-701" } };
+        }
+        if (method === "Runtime.callFunctionOn") {
+          const fn = String(params.functionDeclaration || "");
+          if (fn.includes("matchesScope")) {
+            return {
+              result: {
+                value: {
+                  ok: true,
+                  matchesScope: true,
+                  tag: "button",
+                  role: "button",
+                  name: "提交",
+                  value: "",
+                  placeholder: "",
+                  ariaLabel: "",
+                  selector: "#submit",
+                  disabled: false,
+                  focused: false,
+                  brainUid: "brain-click-701"
+                }
+              }
+            };
+          }
+          if (fn.includes("shouldNativeClick")) {
+            return {
+              result: {
+                value: {
+                  ok: true,
+                  shouldNativeClick: false,
+                  nativeReason: "hit-untrusted",
+                  x: 120,
+                  y: 80,
+                  url: "https://example.com/click",
+                  title: "Click"
+                }
+              }
+            };
+          }
+          if (fn.includes("this.click?.();")) {
+            jsFallbackClicks += 1;
+            return { result: { value: { ok: true } } };
+          }
+          return { result: { value: { ok: true } } };
+        }
+        if (method === "Input.dispatchMouseEvent") {
+          nativeClickDispatches += 1;
+          return {};
+        }
+        if (method === "Runtime.releaseObject") return {};
+        return {};
+      },
+      onEvent: { addListener: () => {} },
+      onDetach: { addListener: () => {} }
+    };
+
+    const infra = createRuntimeInfraHandler();
+    const snapped = await infra.handleMessage({
+      type: "cdp.snapshot",
+      tabId: 27,
+      options: { mode: "interactive" }
+    });
+    expect(snapped?.ok).toBe(true);
+    if (!snapped || snapped.ok !== true) return;
+    const snapData = (snapped.data ?? {}) as Record<string, unknown>;
+    const snapNodes = Array.isArray(snapData.nodes) ? (snapData.nodes as Array<Record<string, unknown>>) : [];
+    expect(snapNodes.length).toBeGreaterThan(0);
+    const firstRef = String(snapNodes[0].ref || "");
+    expect(firstRef).toBe("bn-701");
+
+    const acquired = await infra.handleMessage({
+      type: "lease.acquire",
+      tabId: 27,
+      owner: "runner-click-fallback"
+    });
+    expect(acquired?.ok).toBe(true);
+
+    const acted = await infra.handleMessage({
+      type: "cdp.action",
+      tabId: 27,
+      owner: "runner-click-fallback",
+      action: {
+        kind: "click",
+        ref: firstRef
+      }
+    });
+    expect(acted?.ok).toBe(true);
+    if (!acted || acted.ok !== true) return;
+    const data = (acted.data ?? {}) as Record<string, unknown>;
+    const result = (data.result ?? {}) as Record<string, unknown>;
+    expect(result.via).toBe("cdp-js-fallback");
+    expect(result.nativeReason).toBe("hit-untrusted");
+    expect(result.clicked).toBe(true);
+    expect(nativeClickDispatches).toBe(0);
+    expect(jsFallbackClicks).toBe(1);
   });
 
   it("includes frameId in AXTree snapshot nodes when frame trees are available", async () => {

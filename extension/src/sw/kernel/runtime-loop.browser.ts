@@ -24,6 +24,7 @@ import { writeSessionMeta } from "./session-store.browser";
 import { type BridgeConfig, type RuntimeInfraHandler } from "./runtime-infra.browser";
 import { type CapabilityExecutionPolicy, type StepVerifyPolicy } from "./capability-policy";
 import type { SkillMetadata } from "./skill-registry";
+import { normalizeBrowserRuntimeStrategy, resolveBrowserRuntimeHint } from "./browser-runtime-strategy";
 import {
   frameMatchesVirtualCapability,
   invokeVirtualFrame,
@@ -55,12 +56,14 @@ const MAX_LLM_MAX_RETRY_DELAY_MS = 300_000;
 const LLM_TRACE_BODY_PREVIEW_MAX_CHARS = 1_200;
 const LLM_TRACE_USER_SNIPPET_MAX_CHARS = 420;
 const MAX_PROMPT_SKILL_ITEMS = 64;
+const NO_PROGRESS_SIGNATURE_HISTORY_LIMIT = 6;
 
 type ToolRetryAction = "auto_replay" | "llm_replan" | "fail_fast";
 type FailureReason = "failed_execute" | "failed_verify" | "progress_uncertain";
 type FailurePhase = "plan" | "execute" | "verify" | "progress_guard";
 type FailureCategory = "timeout" | "busy" | "missing_target" | "verify_failed" | "focus_required" | "no_progress" | "unknown";
 type ResumeStrategy = "retry_same_args" | "retry_with_fresh_snapshot" | "replan";
+type NoProgressReason = "repeat_signature" | "ping_pong" | "browser_proof_guard";
 
 interface ToolCallItem {
   id: string;
@@ -188,22 +191,22 @@ const BUILTIN_BRIDGE_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability
   }
 ];
 
-const BUILTIN_VIRTUAL_FS_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [
+const BUILTIN_SANDBOX_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [
   {
     capability: CAPABILITIES.processExec,
-    providerId: "runtime.builtin.capability.process.exec.vfs"
+    providerId: "executor.sandbox"
   },
   {
     capability: CAPABILITIES.fsRead,
-    providerId: "runtime.builtin.capability.fs.read.vfs"
+    providerId: "executor.sandbox"
   },
   {
     capability: CAPABILITIES.fsWrite,
-    providerId: "runtime.builtin.capability.fs.write.vfs"
+    providerId: "executor.sandbox"
   },
   {
     capability: CAPABILITIES.fsEdit,
-    providerId: "runtime.builtin.capability.fs.edit.vfs"
+    providerId: "executor.sandbox"
   }
 ];
 
@@ -234,6 +237,33 @@ const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
   ...CANONICAL_BROWSER_TOOL_NAMES
 ]);
 
+const NO_PROGRESS_CONTINUE_BUDGET: Record<NoProgressReason, number> = {
+  repeat_signature: 1,
+  ping_pong: 0,
+  browser_proof_guard: 1
+};
+
+const BROWSER_PROOF_REQUIRED_TOOL_NAMES = new Set([
+  "click",
+  "fill_element_by_uid",
+  "select_option_by_uid",
+  "hover_element_by_uid",
+  "press_key",
+  "scroll_page",
+  "navigate_tab",
+  "fill_form",
+  "browser_verify",
+  "computer",
+  "scroll_to_element",
+  "highlight_element",
+  "highlight_text_inline",
+  "capture_screenshot",
+  "capture_tab_screenshot",
+  "capture_screenshot_with_highlight",
+  "download_image",
+  "download_chat_images"
+]);
+
 function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" ? (value as JsonRecord) : {};
 }
@@ -251,6 +281,56 @@ function normalizeSchemaRequiredList(raw: unknown): string[] {
     out.push(value);
   }
   return out;
+}
+
+function normalizeTopLevelSchemaCombiner(raw: unknown): JsonRecord[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => toRecord(item))
+    .filter((item) => Object.keys(item).length > 0);
+}
+
+function readTopLevelConstraintRequiredSets(raw: unknown): string[][] {
+  const clauses = normalizeTopLevelSchemaCombiner(raw);
+  const out: string[][] = [];
+  for (const clause of clauses) {
+    const required = normalizeSchemaRequiredList(clause.required);
+    if (required.length > 0) out.push(required);
+  }
+  return out;
+}
+
+function formatConstraintRequiredSet(input: string[]): string {
+  if (input.length === 1) return input[0];
+  return input.join(" + ");
+}
+
+function buildTopLevelSchemaConstraintHint(parameters: unknown, providerId: string): string {
+  const provider = String(providerId || "").trim().toLowerCase();
+  if (provider !== "openai_compatible") return "";
+  const schema = toRecord(parameters);
+  const fragments: string[] = [];
+  const topLevelRequired = normalizeSchemaRequiredList(schema.required);
+  if (topLevelRequired.length > 0) {
+    fragments.push(`required: ${topLevelRequired.join(", ")}`);
+  }
+  const combinators: Array<"anyOf" | "oneOf" | "allOf"> = ["anyOf", "oneOf", "allOf"];
+  for (const key of combinators) {
+    const requiredSets = readTopLevelConstraintRequiredSets(schema[key]);
+    if (requiredSets.length === 0) continue;
+    const formatted = requiredSets.map((set) => `(${formatConstraintRequiredSet(set)})`).join(" | ");
+    fragments.push(`${key}: ${formatted}`);
+  }
+  if (fragments.length === 0) return "";
+  return `Schema constraint hints: ${fragments.join("; ")}.`;
+}
+
+function appendConstraintHintToDescription(description: string, hint: string): string {
+  const base = String(description || "").trim();
+  const extra = String(hint || "").trim();
+  if (!extra) return base;
+  if (!base) return extra;
+  return `${base}\n${extra}`;
 }
 
 function sanitizeTopLevelToolSchemaForProvider(parameters: unknown, providerId: string): JsonRecord {
@@ -278,13 +358,14 @@ function sanitizeTopLevelToolSchemaForProvider(parameters: unknown, providerId: 
 function sanitizeLlmToolDefinitionForProvider(definition: unknown, providerId: string): JsonRecord {
   const def = toRecord(definition);
   const fn = toRecord(def.function);
+  const constraintHint = buildTopLevelSchemaConstraintHint(fn.parameters, providerId);
   return {
     ...def,
     type: "function",
     function: {
       ...fn,
       name: String(fn.name || "").trim(),
-      description: String(fn.description || ""),
+      description: appendConstraintHintToDescription(String(fn.description || ""), constraintHint),
       parameters: sanitizeTopLevelToolSchemaForProvider(fn.parameters, providerId)
     }
   };
@@ -946,35 +1027,47 @@ function normalizeVerifyExpect(raw: unknown): JsonRecord | null {
 function buildObserveProgressVerify(beforeObserve: unknown, afterObserve: unknown): JsonRecord {
   const beforePage = toRecord(toRecord(beforeObserve).page);
   const afterPage = toRecord(toRecord(afterObserve).page);
+  
+  const urlChanged = String(beforePage.url || "") !== String(afterPage.url || "");
+  const titleChanged = String(beforePage.title || "") !== String(afterPage.title || "");
+  const textDiff = Math.abs(Number(afterPage.textLength || 0) - Number(beforePage.textLength || 0));
+  const nodeDiff = Math.abs(Number(afterPage.nodeCount || 0) - Number(beforePage.nodeCount || 0));
+  
+  const textLengthChanged = textDiff >= 1; // Any text change is progress
+  const nodeCountChanged = nodeDiff > 10; // Ignore tiny background noise
+
   const checks = [
     {
       name: "urlChanged",
-      pass: String(beforePage.url || "") !== String(afterPage.url || ""),
+      pass: urlChanged,
       before: beforePage.url || "",
       after: afterPage.url || ""
     },
     {
       name: "titleChanged",
-      pass: String(beforePage.title || "") !== String(afterPage.title || ""),
+      pass: titleChanged,
       before: beforePage.title || "",
       after: afterPage.title || ""
     },
     {
       name: "textLengthChanged",
-      pass: Number(beforePage.textLength || 0) !== Number(afterPage.textLength || 0),
+      pass: textLengthChanged,
       before: Number(beforePage.textLength || 0),
       after: Number(afterPage.textLength || 0)
     },
     {
       name: "nodeCountChanged",
-      pass: Number(beforePage.nodeCount || 0) !== Number(afterPage.nodeCount || 0),
+      pass: nodeCountChanged,
       before: Number(beforePage.nodeCount || 0),
       after: Number(afterPage.nodeCount || 0)
     }
   ];
 
+  // Logic: Navigation or significant content structure change
+  const ok = urlChanged || titleChanged || (textLengthChanged && nodeCountChanged);
+
   return {
-    ok: checks.some((item) => item.pass),
+    ok,
     checks,
     observation: afterObserve
   };
@@ -1020,6 +1113,14 @@ function normalizeToolArgsForSignature(rawArgs: unknown): string {
     return clipText(safeStringify(sortJsonForSignature(parsed), 1200), 1200);
   }
   return clipText(text.replace(/\s+/g, " "), 1200);
+}
+
+function isNonEmptyToolArgValue(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(toRecord(value)).length > 0;
+  return true;
 }
 
 function parseToolCallArgs(raw: string): JsonRecord | null {
@@ -1348,6 +1449,9 @@ function buildToolFailurePayload(toolCall: ToolCallItem, result: JsonRecord): Js
     args: args || null,
     rawArgs: args ? undefined : clipText(rawArgs, 1200),
     details: result.details || null,
+    modeUsed: String(result.modeUsed || "") || undefined,
+    providerId: String(result.providerId || "") || undefined,
+    fallbackFrom: String(result.fallbackFrom || "") || undefined,
     failureClass: result.failureClass || undefined,
     modeEscalation: result.modeEscalation || undefined,
     resume: result.resume || undefined,
@@ -1355,7 +1459,11 @@ function buildToolFailurePayload(toolCall: ToolCallItem, result: JsonRecord): Js
   };
 }
 
-function buildToolSuccessPayload(toolCall: ToolCallItem, data: unknown): JsonRecord {
+function buildToolSuccessPayload(
+  toolCall: ToolCallItem,
+  data: unknown,
+  meta: { modeUsed?: unknown; providerId?: unknown; fallbackFrom?: unknown } = {}
+): JsonRecord {
   const toolName = String(toolCall.function.name || "").trim();
   const rawArgs = String(toolCall.function.arguments || "").trim();
   const args = parseToolCallArgs(rawArgs);
@@ -1365,7 +1473,10 @@ function buildToolSuccessPayload(toolCall: ToolCallItem, data: unknown): JsonRec
     ...base,
     tool: toolName,
     target,
-    args: args || null
+    args: args || null,
+    modeUsed: String(meta.modeUsed || "") || undefined,
+    providerId: String(meta.providerId || "") || undefined,
+    fallbackFrom: String(meta.fallbackFrom || "") || undefined
   };
 }
 
@@ -1595,7 +1706,7 @@ function buildAvailableSkillsSystemMessage(skills: SkillMetadata[]): string {
 
   return [
     "Available skills are instruction resources (not executable sandboxes).",
-    "When a skill is relevant, use browser_read_file (mem://, vfs://) or host_read_file (host path) to load SKILL.md.",
+    "When a skill is relevant, use browser_read_file (mem://) or host_read_file (host path) to load SKILL.md.",
     "<available_skills>",
     ...lines,
     "</available_skills>"
@@ -1655,7 +1766,7 @@ const EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS: Record<string, string> = {
   host_write_file: "Create or overwrite files on host filesystem.",
   host_edit_file: "Patch host files with exact replacements (and unified patch where supported).",
   host_bash: "Execute shell commands on host runtime via bridge bash.exec.",
-  browser_read_file: "Read file contents from browser virtual FS (mem://, vfs://).",
+  browser_read_file: "Read file contents from browser lifo sandbox FS (mem://).",
   browser_write_file: "Create or overwrite files on browser virtual FS.",
   browser_edit_file: "Patch browser virtual files with exact replacements (no unified patch).",
   browser_bash: "Execute limited virtual-shell commands against browser virtual FS.",
@@ -1678,7 +1789,7 @@ const EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS: Record<string, string> = {
   fill_form: "Fill multiple form fields in one structured call.",
   computer: "Coordinate-based browser interaction (click/hover/scroll/key/type/wait/drag).",
   get_page_metadata: "Read page metadata (title/url/description/keywords/author/og).",
-  scroll_to_element: "Scroll target element into view by selector or uid/ref/backendNodeId.",
+  scroll_to_element: "Scroll target element into view by uid/ref/backendNodeId (selector is metadata fallback only).",
   highlight_element: "Highlight element for visual confirmation.",
   highlight_text_inline: "Highlight matched text under selector scope.",
   capture_screenshot: "Capture screenshot and return base64 data URL.",
@@ -1706,7 +1817,7 @@ const EXTENSION_AGENT_PROMPT_BASE_GUIDELINES = [
   "Prefer *_edit_file for surgical changes; use *_write_file for new files or full rewrites.",
   "For browser tasks, enforce: semantic search -> action -> browser_verify.",
   "Use user-visible query words in search_elements (placeholder/label/text), avoid implementation-only query text.",
-  "For click/fill/select/hover/get_editor_value/scroll_to/highlight, prefer uid/ref/backendNodeId from latest search_elements; selector is fallback only.",
+  "For click/fill/select/hover/get_editor_value/scroll_to/highlight, prefer uid/ref/backendNodeId from latest search_elements; selector cannot be the sole target.",
   "When goal is typing text, prioritize editable targets only (input/textarea/contenteditable/role=textbox). Avoid label/toolBar/container nodes even if text matches.",
   "For state-changing actions (click/fill/select/press/navigate/fill_form/computer/download/intervention), include expect whenever success criteria is clear.",
   "Never claim done when verify failed, verify skipped, or verify has empty checks.",
@@ -1823,6 +1934,24 @@ function buildLlmMessagesFromContext(
       role: "system",
       content: availableSkillsPrompt
     });
+  }
+
+  const failures = typeof getActionFailures === "function" ? getActionFailures(String(meta?.header?.sessionId || "")) : new Map<string, number>();
+  if (failures.size > 0) {
+    const lines = ["Detected repetitive interaction failures for:"];
+    for (const entry of Array.from(failures.entries())) {
+      const [uid, count] = entry;
+      if (count >= 2) {
+        lines.push(`- element ${uid}: ${count} failures (verification failed).`);
+      }
+    }
+    if (lines.length > 1) {
+      lines.push("STRATEGY HINT: The current interaction path for these elements is not progressing the page state. DO NOT repeat the same action on these UIDs. Try a different anchor (child/parent), or use coordinate-based 'computer' tool, or re-search with a different query.");
+      out.push({
+        role: "system",
+        content: lines.join("\n")
+      });
+    }
   }
 
   const summaryMessage = buildCompactionSummaryLlmMessage(previousSummary);
@@ -1976,7 +2105,7 @@ function buildStepFailureEnvelope(
     stepRef?: JsonRecord | null;
   } = {}
 ): JsonRecord {
-  return attachFailureProtocol(toolName, {
+  const base = attachFailureProtocol(toolName, {
     error: out.error || fallbackError,
     errorCode: normalizeErrorCode(out.errorCode) || undefined,
     errorReason: options.errorReason || "failed_execute",
@@ -1984,6 +2113,12 @@ function buildStepFailureEnvelope(
     retryHint,
     details: out.errorDetails || null
   }, options);
+  return {
+    ...base,
+    modeUsed: out.modeUsed,
+    providerId: out.providerId || undefined,
+    fallbackFrom: out.fallbackFrom || undefined
+  };
 }
 
 function mapToolErrorReasonToTerminalStatus(rawReason: unknown): "failed_execute" | "failed_verify" | "progress_uncertain" {
@@ -2017,12 +2152,26 @@ async function queryAllTabsForRuntime(): Promise<Array<{ id: number; windowId: n
 }
 
 async function getActiveTabIdForRuntime(): Promise<number | null> {
+  const isRestricted = (url: string) => {
+    const u = url.toLowerCase();
+    return (
+      u.startsWith("chrome://") ||
+      u.startsWith("about:") ||
+      u.startsWith("edge://") ||
+      u.startsWith("chrome-extension://") ||
+      u.includes("chrome.google.com/webstore")
+    );
+  };
+
   const focused = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   const active = focused.find((tab) => Number.isInteger(tab?.id));
-  if (active?.id) return Number(active.id);
-  const all = await queryAllTabsForRuntime();
-  const first = all.find((tab) => Number.isInteger(tab.id));
-  return first?.id || null;
+  if (active?.id && active.url && !isRestricted(active.url)) return Number(active.id);
+
+  const all = await chrome.tabs.query({}).catch(() => []);
+  const valid = all.find((tab) => Number.isInteger(tab.id) && tab.url && !isRestricted(tab.url));
+  if (valid?.id) return Number(valid.id);
+
+  return active?.id ? Number(active.id) : all[0]?.id ? Number(all[0].id) : null;
 }
 
 function readSharedTabIds(sharedTabs: unknown): number[] {
@@ -2074,6 +2223,7 @@ function extractLlmConfig(raw: JsonRecord): BridgeConfig {
   return {
     bridgeUrl: String(raw.bridgeUrl || ""),
     bridgeToken: String(raw.bridgeToken || ""),
+    browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(raw.browserRuntimeStrategy, "host-first"),
     llmDefaultProfile: String(raw.llmDefaultProfile || "default"),
     llmProfiles: raw.llmProfiles,
     llmProfileChains: raw.llmProfileChains,
@@ -2501,8 +2651,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
   };
 
-  const ensureBuiltinVirtualFsCapabilityProviders = (): void => {
-    for (const item of BUILTIN_VIRTUAL_FS_CAPABILITY_PROVIDERS) {
+  const ensureBuiltinSandboxCapabilityProviders = (): void => {
+    for (const item of BUILTIN_SANDBOX_CAPABILITY_PROVIDERS) {
       const existed = orchestrator.getCapabilityProviders(item.capability).some((provider) => provider.id === item.providerId);
       if (existed) continue;
       orchestrator.registerCapabilityProvider(item.capability, {
@@ -2599,11 +2749,26 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         retryable: true
       });
     }
-    return await callInfra(infra, {
+    const snapshotResult = (await callInfra(infra, {
       type: "cdp.snapshot",
       tabId,
       options: Object.keys(options).length > 0 ? options : payload
-    });
+    })) as JsonRecord;
+
+    const failures = getActionFailures(stepInput.sessionId);
+    if (failures.size > 0 && Array.isArray(snapshotResult.nodes)) {
+      for (const node of snapshotResult.nodes as JsonRecord[]) {
+        const uid = String(node.uid || node.ref || "");
+        if (uid && failures.has(uid)) {
+          node.failureCount = failures.get(uid);
+        }
+      }
+      if (snapshotResult.compact && typeof snapshotResult.compact === "string") {
+        // regenerate compact to include [failed] markers if needed
+        // but we rely on formatNodeCompact being called by infra
+      }
+    }
+    return snapshotResult;
   };
 
   const invokeBrowserActionCapability = async (stepInput: {
@@ -2696,6 +2861,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
       verified = toRecord(verifyData).ok === true;
       verifyReason = verifyData ? (verified ? "verified" : "verify_failed") : "verify_skipped";
+
+      if (!verified && (kind === "click" || kind === "fill" || kind === "press")) {
+        const targetUid = String(cdpAction.uid || cdpAction.ref || "");
+        if (targetUid) {
+          trackActionFailure(stepInput.sessionId, targetUid);
+        }
+      }
     }
 
     let data: unknown = actionResult;
@@ -2745,6 +2917,25 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     };
   };
 
+  const sessionActionFailures = new Map<string, Map<string, number>>();
+
+  const trackActionFailure = (sessionId: string, targetUid: string) => {
+    if (!targetUid) return;
+    if (!sessionActionFailures.has(sessionId)) {
+      sessionActionFailures.set(sessionId, new Map());
+    }
+    const counts = sessionActionFailures.get(sessionId)!;
+    counts.set(targetUid, (counts.get(targetUid) || 0) + 1);
+  };
+
+  const getActionFailures = (sessionId: string): Map<string, number> => {
+    return sessionActionFailures.get(sessionId) || new Map();
+  };
+
+  const clearActionFailures = (sessionId: string) => {
+    sessionActionFailures.delete(sessionId);
+  };
+
   const ensureBuiltinBrowserCapabilityProviders = (): void => {
     for (const item of BUILTIN_BROWSER_CAPABILITY_PROVIDERS) {
       const existed = orchestrator.getCapabilityProviders(item.capability).some((provider) => provider.id === item.providerId);
@@ -2774,7 +2965,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
   };
 
   ensureBuiltinBridgeCapabilityProviders();
-  ensureBuiltinVirtualFsCapabilityProviders();
+  ensureBuiltinSandboxCapabilityProviders();
   ensureBuiltinBrowserCapabilityProviders();
 
   async function executeStep(input: {
@@ -2796,6 +2987,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const payload = toRecord(input.args);
     const actionPayload = toRecord(payload.action) && Object.keys(toRecord(payload.action)).length > 0 ? toRecord(payload.action) : payload;
     const tabId = parsePositiveInt(payload.tabId || actionPayload.tabId);
+    const capabilityProviderId = normalizedCapability
+      ? String(orchestrator.getCapabilityProvider(normalizedCapability)?.id || "")
+      : "";
 
     if (!normalizedMode && !normalizedCapability) {
       return { ok: false, modeUsed: "bridge", verified: false, error: "mode 或 capability 至少需要一个" };
@@ -2811,6 +3005,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           ok: false,
           modeUsed: "bridge",
           capabilityUsed: normalizedCapability,
+          providerId: capabilityProviderId || undefined,
           verified: false,
           error: `capability provider 已注册但缺少 mode: ${normalizedCapability}`,
           errorCode: "E_RUNTIME_NOT_READY",
@@ -2819,12 +3014,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         orchestrator.events.emit("step_execute", sessionId, {
           mode: "bridge",
           capability: normalizedCapability,
-          action: normalizedAction
+          action: normalizedAction,
+          providerId: capabilityProviderId
         });
         orchestrator.events.emit("step_execute_result", sessionId, {
           ok: result.ok,
           modeUsed: result.modeUsed,
           capabilityUsed: result.capabilityUsed || "",
+          providerId: result.providerId || capabilityProviderId,
           verifyReason: result.verifyReason || "",
           verified: result.verified,
           error: result.error || "",
@@ -2836,7 +3033,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       orchestrator.events.emit("step_execute", sessionId, {
         mode: capabilityMode,
         capability: normalizedCapability,
-        action: normalizedAction
+        action: normalizedAction,
+        providerId: capabilityProviderId
       });
       const result = await orchestrator.executeStep({
         sessionId,
@@ -2850,6 +3048,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         ok: result.ok,
         modeUsed: result.modeUsed,
         capabilityUsed: result.capabilityUsed || normalizedCapability,
+        providerId: result.providerId || capabilityProviderId,
         fallbackFrom: result.fallbackFrom,
         verified: result.verified,
         verifyReason: result.verifyReason,
@@ -2857,7 +3056,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       });
       return {
         ...result,
-        capabilityUsed: result.capabilityUsed || normalizedCapability
+        capabilityUsed: result.capabilityUsed || normalizedCapability,
+        providerId: result.providerId || capabilityProviderId || undefined
       };
     }
 
@@ -2866,6 +3066,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         ok: false,
         modeUsed: "bridge",
         capabilityUsed: normalizedCapability,
+        providerId: capabilityProviderId || undefined,
         verified: false,
         error: `capability provider 未就绪: ${normalizedCapability}`,
         errorCode: "E_RUNTIME_NOT_READY",
@@ -2874,12 +3075,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       orchestrator.events.emit("step_execute", sessionId, {
         mode: "bridge",
         capability: normalizedCapability,
-        action: normalizedAction
+        action: normalizedAction,
+        providerId: capabilityProviderId
       });
       orchestrator.events.emit("step_execute_result", sessionId, {
         ok: result.ok,
         modeUsed: result.modeUsed,
         capabilityUsed: result.capabilityUsed || "",
+        providerId: result.providerId || capabilityProviderId,
         verifyReason: result.verifyReason || "",
         verified: result.verified,
         error: result.error || "",
@@ -2901,14 +3104,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       };
     }
 
+    const modeProvider = orchestrator.getToolProvider(executionMode);
+    const modeProviderId = String(modeProvider?.id || "");
     orchestrator.events.emit("step_execute", sessionId, {
       mode: executionMode,
       capability: normalizedCapability,
-      action: normalizedAction
+      action: normalizedAction,
+      providerId: modeProviderId
     });
 
     // mode provider 已注册时，统一走 orchestrator 执行链，确保 plugin hooks/provider override 生效。
-    const modeProvider = orchestrator.getToolProvider(executionMode);
     if (modeProvider) {
       const result = await orchestrator.executeStep({
         sessionId,
@@ -2922,6 +3127,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         ok: result.ok,
         modeUsed: result.modeUsed,
         capabilityUsed: result.capabilityUsed || normalizedCapability || "",
+        providerId: result.providerId || modeProviderId,
         fallbackFrom: result.fallbackFrom,
         verified: result.verified,
         verifyReason: result.verifyReason,
@@ -2931,7 +3137,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       });
       return {
         ...result,
-        capabilityUsed: result.capabilityUsed || normalizedCapability
+        capabilityUsed: result.capabilityUsed || normalizedCapability,
+        providerId: result.providerId || modeProviderId || undefined
       };
     }
 
@@ -3027,6 +3234,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     };
 
     let modeUsed: ExecuteMode = executionMode;
+    let providerId: string | undefined = modeProviderId || undefined;
     const fallbackFrom: ExecuteMode | undefined = undefined;
     let data: unknown;
     let preObserve: unknown = null;
@@ -3047,6 +3255,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         ok: false,
         modeUsed,
         capabilityUsed: normalizedCapability,
+        providerId,
         verified: false,
         error: runtimeError.message,
         errorCode: normalizeErrorCode(runtimeError.code),
@@ -3057,6 +3266,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         ok: result.ok,
         modeUsed: result.modeUsed,
         capabilityUsed: result.capabilityUsed || "",
+        providerId: result.providerId || "",
         verifyReason: result.verifyReason || "",
         verified: result.verified,
         error: result.error || "",
@@ -3113,6 +3323,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       const result: ExecuteStepResult = {
         ok: false,
         modeUsed,
+        providerId,
         fallbackFrom,
         verified: false,
         error: runtimeVerifyError.message,
@@ -3123,6 +3334,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       orchestrator.events.emit("step_execute_result", sessionId, {
         ok: result.ok,
         modeUsed: result.modeUsed,
+        providerId: result.providerId || "",
         fallbackFrom: result.fallbackFrom || "",
         verifyReason: result.verifyReason || "",
         verified: result.verified,
@@ -3137,6 +3349,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       ok: true,
       modeUsed,
       capabilityUsed: normalizedCapability,
+      providerId,
       fallbackFrom,
       verified,
       verifyReason,
@@ -3146,6 +3359,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       ok: result.ok,
       modeUsed: result.modeUsed,
       capabilityUsed: result.capabilityUsed || "",
+      providerId: result.providerId || "",
       fallbackFrom: result.fallbackFrom || "",
       verifyReason: result.verifyReason || "",
       verified: result.verified
@@ -3239,6 +3453,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         return buildToolResponseEnvelope("invoke", invoke.data, {
           capabilityUsed: invoke.capabilityUsed || capability,
           modeUsed: invoke.modeUsed,
+          providerId: invoke.providerId,
+          fallbackFrom: invoke.fallbackFrom,
           attempt,
           autoRetried: attempt > 1
         });
@@ -3506,17 +3722,156 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     });
   }
 
+  function isElementRefOnlyConstraint(requiredSets: string[][]): boolean {
+    if (requiredSets.length === 0) return false;
+    return requiredSets.every(
+      (set) => set.length === 1 && ["uid", "ref", "backendNodeId"].includes(String(set[0] || "").trim())
+    );
+  }
+
+  function matchesRequiredSet(args: JsonRecord, requiredSet: string[]): boolean {
+    if (requiredSet.length === 0) return true;
+    for (const field of requiredSet) {
+      if (!isNonEmptyToolArgValue(args[field])) return false;
+    }
+    return true;
+  }
+
+  function validateToolCallArgsAgainstSchema(input: {
+    requestedTool: string;
+    resolvedTool: string;
+    args: JsonRecord;
+    contract: ToolContract | null;
+  }): { ok: true } | { ok: false; error: JsonRecord } {
+    const schema = toRecord(input.contract?.parameters);
+    if (Object.keys(schema).length === 0) return { ok: true };
+    const normalizedTool = String(input.resolvedTool || input.requestedTool || "").trim().toLowerCase();
+
+    const requiredFields = normalizeSchemaRequiredList(schema.required);
+    const missingRequired = requiredFields.filter((field) => !isNonEmptyToolArgValue(input.args[field]));
+    if (missingRequired.length > 0) {
+      return {
+        ok: false,
+        error: attachFailureProtocol(input.requestedTool || input.resolvedTool || "unknown_tool", {
+          error: `${input.resolvedTool || input.requestedTool} 缺少必填参数: ${missingRequired.join(", ")}`,
+          errorCode: "E_ARGS",
+          errorReason: "failed_execute",
+          retryable: false,
+          retryHint: `补齐必填参数后重试 ${input.resolvedTool || input.requestedTool}。`,
+          details: {
+            missingRequired,
+            providedKeys: Object.keys(input.args),
+            schemaRequired: requiredFields
+          }
+        }, {
+          phase: "plan",
+          category: "missing_target",
+          resumeStrategy: "replan"
+        })
+      };
+    }
+
+    const combinators: Array<"anyOf" | "oneOf" | "allOf"> = ["anyOf", "oneOf", "allOf"];
+    for (const combinator of combinators) {
+      const requiredSets = readTopLevelConstraintRequiredSets(schema[combinator]);
+      if (requiredSets.length === 0) continue;
+      const matchedCount = requiredSets.filter((set) => matchesRequiredSet(input.args, set)).length;
+      const satisfied =
+        combinator === "anyOf"
+          ? matchedCount >= 1
+          : combinator === "oneOf"
+            ? matchedCount === 1
+            : matchedCount === requiredSets.length;
+      if (satisfied) continue;
+
+      const useRefRequiredCode = combinator === "anyOf" && isElementRefOnlyConstraint(requiredSets);
+      const errorCode = useRefRequiredCode ? "E_REF_REQUIRED" : "E_ARGS";
+      const retryHint = useRefRequiredCode
+        ? `Call search_elements first, then retry ${input.resolvedTool || input.requestedTool} using uid/ref.`
+        : `Adjust arguments to satisfy ${combinator} constraints, then retry ${input.resolvedTool || input.requestedTool}.`;
+      const errorText = useRefRequiredCode
+        ? "元素交互动作需要 uid/ref/backendNodeId（不支持仅 selector）。请先调用 search_elements，再用返回的 uid 执行。"
+        : `${input.resolvedTool || input.requestedTool} 参数未满足 ${combinator} 约束`;
+      return {
+        ok: false,
+        error: attachFailureProtocol(input.requestedTool || input.resolvedTool || "unknown_tool", {
+          error: errorText,
+          errorCode,
+          errorReason: "failed_execute",
+          retryable: true,
+          retryHint,
+          details: {
+            combinator,
+            matchedCount,
+            requiredSets,
+            providedKeys: Object.keys(input.args)
+          }
+        }, {
+          phase: "plan",
+          category: "missing_target",
+          resumeStrategy: "retry_with_fresh_snapshot"
+        })
+      };
+    }
+
+    if (normalizedTool === "fill_element_by_uid" && !isNonEmptyToolArgValue(input.args.value)) {
+      return {
+        ok: false,
+        error: attachFailureProtocol(input.requestedTool || input.resolvedTool || "unknown_tool", {
+          error: "fill_element_by_uid 需要非空 value",
+          errorCode: "E_ARGS",
+          errorReason: "failed_execute",
+          retryable: false,
+          retryHint: "Provide non-empty value and retry fill_element_by_uid."
+        }, {
+          phase: "plan",
+          category: "missing_target",
+          resumeStrategy: "replan"
+        })
+      };
+    }
+
+    return { ok: true };
+  }
+
   function resolveToolCallContext(toolCall: ToolCallItem): { ok: true; value: ResolvedToolCallContext } | { ok: false; error: JsonRecord } {
     const requestedTool = String(toolCall.function.name || "").trim();
     const argsRaw = String(toolCall.function.arguments || "").trim();
     let args: JsonRecord = {};
     if (argsRaw) {
       try {
-        args = toRecord(JSON.parse(argsRaw));
+        const parsed = JSON.parse(argsRaw);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          return {
+            ok: false,
+            error: attachFailureProtocol(requestedTool || "unknown_tool", {
+              error: "工具参数必须是 JSON object",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Pass arguments as JSON object and retry."
+            }, {
+              phase: "plan",
+              category: "missing_target",
+              resumeStrategy: "replan"
+            })
+          };
+        }
+        args = parsed as JsonRecord;
       } catch (error) {
         return {
           ok: false,
-          error: { error: `参数解析失败: ${error instanceof Error ? error.message : String(error)}` }
+          error: attachFailureProtocol(requestedTool || "unknown_tool", {
+            error: `参数解析失败: ${error instanceof Error ? error.message : String(error)}`,
+            errorCode: "E_ARGS",
+            errorReason: "failed_execute",
+            retryable: false,
+            retryHint: "Fix JSON arguments and retry."
+          }, {
+            phase: "plan",
+            category: "missing_target",
+            resumeStrategy: "replan"
+          })
         };
       }
     }
@@ -3538,6 +3893,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           hasContract: Boolean(contract)
         })
       };
+    }
+
+    const schemaValidation = validateToolCallArgsAgainstSchema({
+      requestedTool,
+      resolvedTool,
+      args,
+      contract
+    });
+    if (!schemaValidation.ok) {
+      return schemaValidation;
     }
 
     return {
@@ -3723,7 +4088,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         return {
           ok: false,
           error: attachFailureProtocol(toolName, {
-            error: "元素交互动作需要 uid/ref/backendNodeId。请先调用 search_elements，再用返回的 uid 执行。",
+            error: "元素交互动作需要 uid/ref/backendNodeId（不支持仅 selector）。请先调用 search_elements，再用返回的 uid 执行。",
             errorCode: "E_REF_REQUIRED",
             errorReason: "failed_execute",
             retryable: true,
@@ -3848,6 +4213,18 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         }
       };
     };
+
+    const resolveBrowserRuntime = async (raw: unknown): Promise<"browser" | "sandbox"> => {
+      const cfgRaw = await callInfra(infra, { type: "config.get" }).catch(() => ({} as JsonRecord));
+      const cfg = extractLlmConfig(toRecord(cfgRaw));
+      const strategy = normalizeBrowserRuntimeStrategy(cfg.browserRuntimeStrategy, "host-first");
+      const hint = String(raw || "").trim();
+      if (hint) {
+        return resolveBrowserRuntimeHint(raw, strategy);
+      }
+      return resolveBrowserRuntimeHint(undefined, strategy);
+    };
+
     switch (context.executionTool) {
       case "host_bash":
       case "browser_bash": {
@@ -3856,7 +4233,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const forcedRuntime =
           context.executionTool === "host_bash"
             ? "local"
-            : "browser";
+            : await resolveBrowserRuntime(args.runtime);
         const timeoutMs =
           args.timeoutMs == null
             ? undefined
@@ -3888,7 +4265,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const forcedRuntime =
           context.executionTool === "host_read_file"
             ? "local"
-            : "browser";
+            : await resolveBrowserRuntime(args.runtime);
         const invokeArgs: JsonRecord = { path };
         if (args.offset != null) invokeArgs.offset = args.offset;
         if (args.limit != null) invokeArgs.limit = args.limit;
@@ -3915,7 +4292,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const forcedRuntime =
           context.executionTool === "host_write_file"
             ? "local"
-            : "browser";
+            : await resolveBrowserRuntime(args.runtime);
         return {
           ok: true,
           plan: {
@@ -3943,7 +4320,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const forcedRuntime =
           context.executionTool === "host_edit_file"
             ? "local"
-            : "browser";
+            : await resolveBrowserRuntime(args.runtime);
         return {
           ok: true,
           plan: {
@@ -4811,7 +5188,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         }
         return buildToolResponseEnvelope("invoke", out.data, {
           capabilityUsed: out.capabilityUsed || plan.capability,
-          modeUsed: out.modeUsed
+          modeUsed: out.modeUsed,
+          providerId: out.providerId,
+          fallbackFrom: out.fallbackFrom
         });
       }
       case "local.get_all_tabs": {
@@ -4955,21 +5334,15 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           status: "pending",
           createdAt: nowIso()
         });
-        const summary = [
-          `[Intervention:${plan.interventionType}]`,
-          plan.reason || "Need user intervention to continue.",
-          Object.keys(plan.params || {}).length ? `params=${safeStringify(plan.params, 800)}` : ""
-        ]
-          .filter(Boolean)
-          .join(" ");
-        orchestrator.enqueueQueuedPrompt(plan.sessionId, "followUp", summary);
         return buildToolResponseEnvelope("request_intervention", {
           success: true,
           id: requestId,
           status: "pending",
           intervention: info,
+          reason: plan.reason,
+          params: plan.params,
           timeoutSec: plan.timeoutSec,
-          message: "Intervention request queued as follow-up prompt."
+          message: "User intervention requested. Please wait for human feedback."
         });
       }
       case "local.cancel_intervention": {
@@ -5256,7 +5629,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           title: String(snapshotData.title || "")
         }, {
           capabilityUsed: out.capabilityUsed || plan.capability,
-          modeUsed: out.modeUsed
+          modeUsed: out.modeUsed,
+          providerId: out.providerId,
+          fallbackFrom: out.fallbackFrom
         });
       }
       case "step.element_action": {
@@ -5309,6 +5684,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         return buildToolResponseEnvelope(plan.toolName, actionData, {
           capabilityUsed: out.capabilityUsed || plan.capability,
           modeUsed: out.modeUsed,
+          providerId: out.providerId,
+          fallbackFrom: out.fallbackFrom,
           verifyReason,
           verified
         });
@@ -6044,7 +6421,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         }
         return buildToolResponseEnvelope("cdp", verifyData, {
           capabilityUsed: out.capabilityUsed || plan.capability,
-          modeUsed: out.modeUsed
+          modeUsed: out.modeUsed,
+          providerId: out.providerId,
+          fallbackFrom: out.fallbackFrom
         });
       }
       default:
@@ -6522,6 +6901,89 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     let finalStatus = "done";
     const llmFailureBySignature = new Map<string, number>();
     const focusEscalationReplayKeys = new Set<string>();
+    const noProgressHits = new Map<NoProgressReason, number>();
+    const toolCallSignatureHistory: string[] = [];
+    let noProgressTerminalNotified = false;
+    let browserProofRequired = false;
+    let browserProofSuccessCount = 0;
+
+    const buildToolCallSignature = (toolCalls: ToolCallItem[]): string => {
+      return toolCalls
+        .map((tc) => {
+          const canonical = String(orchestrator.resolveToolContract(tc.function.name)?.name || tc.function.name)
+            .trim()
+            .toLowerCase();
+          return `${canonical}:${normalizeToolArgsForSignature(tc.function.arguments || "")}`;
+        })
+        .join("||");
+    };
+
+    const didToolProvideBrowserProof = (toolName: string, responsePayload: JsonRecord): boolean => {
+      const normalized = String(toolName || "").trim().toLowerCase();
+      const directVerified = responsePayload.verified === true || String(responsePayload.verifyReason || "") === "verified";
+      if (directVerified) return true;
+      if (normalized === "browser_verify") {
+        return toRecord(responsePayload.data).ok === true;
+      }
+      const nestedVerify = toRecord(toRecord(responsePayload.data).verify);
+      return nestedVerify.ok === true;
+    };
+
+    const resolveNoProgressDecision = (reason: NoProgressReason): {
+      hit: number;
+      continueBudget: number;
+      remainingContinueBudget: number;
+      decision: "continue" | "stop";
+    } => {
+      const hit = (noProgressHits.get(reason) || 0) + 1;
+      noProgressHits.set(reason, hit);
+      const continueBudget = NO_PROGRESS_CONTINUE_BUDGET[reason] ?? 0;
+      const remainingContinueBudget = Math.max(0, continueBudget - hit);
+      const decision: "continue" | "stop" = hit <= continueBudget ? "continue" : "stop";
+      return {
+        hit,
+        continueBudget,
+        remainingContinueBudget,
+        decision
+      };
+    };
+
+    const onNoProgressSignal = async (
+      reason: NoProgressReason,
+      details: JsonRecord,
+      options: { emitBrowserGuard?: boolean } = {}
+    ): Promise<boolean> => {
+      const decision = resolveNoProgressDecision(reason);
+      const payload: JsonRecord = {
+        reason,
+        decision: decision.decision,
+        hit: decision.hit,
+        budget: {
+          retry: decision.continueBudget,
+          continue: decision.continueBudget,
+          remainingRetry: decision.remainingContinueBudget,
+          remainingContinue: decision.remainingContinueBudget
+        },
+        ...details
+      };
+      orchestrator.events.emit("loop_no_progress", sessionId, payload);
+      if (options.emitBrowserGuard === true) {
+        orchestrator.events.emit("loop_guard_browser_progress_missing", sessionId, payload);
+      }
+      if (decision.decision === "stop") {
+        finalStatus = "progress_uncertain";
+        if (!noProgressTerminalNotified) {
+          noProgressTerminalNotified = true;
+          await orchestrator.sessions.appendMessage({
+            sessionId,
+            role: "assistant",
+            text: "连续多轮缺乏有效推进，已停止当前执行以避免无效循环。"
+          });
+        }
+        return true;
+      }
+      return false;
+    };
 
     try {
       await orchestrator.preSendCompactionCheck(sessionId);
@@ -6732,17 +7194,28 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           tool_calls: toolCalls
         });
 
-        // 仅在最终回答阶段（无工具调用）写入 assistant 文本。
-        // 含 tool_calls 的中间思考阶段只通过流式态和工具步骤卡展示，避免正文被切碎成多段。
         if (toolCalls.length === 0) {
+          if (browserProofRequired && browserProofSuccessCount === 0) {
+            const shouldStop = await onNoProgressSignal(
+              "browser_proof_guard",
+              {
+                step: llmStep,
+                reasonDetail: "final_answer_without_browser_proof"
+              },
+              { emitBrowserGuard: true }
+            );
+            if (shouldStop) {
+              break;
+            }
+            continue;
+          }
+          // 仅在最终回答阶段（无工具调用）写入 assistant 文本。
+          // 含 tool_calls 的中间思考阶段只通过流式态和工具步骤卡展示，避免正文被切碎成多段。
           await orchestrator.sessions.appendMessage({
             sessionId,
             role: "assistant",
             text: assistantText || "LLM 返回空内容。"
           });
-        }
-
-        if (toolCalls.length === 0) {
           orchestrator.events.emit("step_finished", sessionId, {
             step: llmStep,
             ok: true,
@@ -6752,6 +7225,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           break;
         }
 
+        const toolCallSignature = buildToolCallSignature(toolCalls);
+        let stepUsedBrowserProofRequiredTool = false;
+        let stepObservedBrowserProof = false;
         let skipRemainingToolCallsBySteer = false;
         for (let toolCallIndex = 0; toolCallIndex < toolCalls.length; toolCallIndex += 1) {
           if (orchestrator.getRunState(sessionId).stopped) {
@@ -6772,6 +7248,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           const canonicalToolName = String(orchestrator.resolveToolContract(tc.function.name)?.name || tc.function.name)
             .trim()
             .toLowerCase();
+          if (BROWSER_PROOF_REQUIRED_TOOL_NAMES.has(canonicalToolName)) {
+            browserProofRequired = true;
+            stepUsedBrowserProofRequiredTool = true;
+          }
           toolStep += 1;
           orchestrator.events.emit("step_planned", sessionId, {
             step: toolStep,
@@ -6876,7 +7356,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 ok: false,
                 mode: "tool_call",
                 action: tc.function.name,
-                error: "interrupted_by_steer"
+                error: "interrupted_by_steer",
+                modeUsed: String(result.modeUsed || ""),
+                providerId: String(result.providerId || ""),
+                fallbackFrom: String(result.fallbackFrom || "")
               });
               skipRemainingToolCallsBySteer = true;
               break;
@@ -6902,16 +7385,27 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               ok: false,
               mode: "tool_call",
               action: tc.function.name,
-              error: String(result.error)
+              error: String(result.error),
+              modeUsed: String(result.modeUsed || ""),
+              providerId: String(result.providerId || ""),
+              fallbackFrom: String(result.fallbackFrom || "")
             });
             // PI 对齐：工具失败写入 tool_result 后继续当前 loop，由后续 LLM 结合失败结果重规划。
             continue;
           }
 
           const responsePayload = toRecord(result.response);
+          if (didToolProvideBrowserProof(canonicalToolName, responsePayload)) {
+            stepObservedBrowserProof = true;
+            browserProofSuccessCount += 1;
+          }
           const rawToolData = responsePayload.data ?? result;
           const llmToolContent = safeStringify(rawToolData, 12_000);
-          const uiToolPayload = buildToolSuccessPayload(tc, rawToolData);
+          const uiToolPayload = buildToolSuccessPayload(tc, rawToolData, {
+            modeUsed: result.modeUsed,
+            providerId: result.providerId,
+            fallbackFrom: result.fallbackFrom
+          });
           messages.push({
             role: "tool",
             tool_call_id: tc.id,
@@ -6929,7 +7423,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             ok: true,
             mode: "tool_call",
             action: tc.function.name,
-            preview: clipText(llmToolContent, 800)
+            preview: clipText(llmToolContent, 800),
+            modeUsed: String(result.modeUsed || ""),
+            providerId: String(result.providerId || ""),
+            fallbackFrom: String(result.fallbackFrom || "")
           });
 
           if (toolCallIndex < toolCalls.length - 1 && orchestrator.hasQueuedPrompt(sessionId, "steer")) {
@@ -6944,15 +7441,81 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           }
         }
 
-        if (finalStatus === "stopped") {
+        if (finalStatus === "stopped" || finalStatus === "progress_uncertain") {
           break;
         }
         if (skipRemainingToolCallsBySteer) {
           continue;
         }
+
+        if (stepObservedBrowserProof) {
+          toolCallSignatureHistory.length = 0;
+          noProgressHits.delete("repeat_signature");
+          noProgressHits.delete("ping_pong");
+          noProgressHits.delete("browser_proof_guard");
+        }
+
+        let browserGuardSignaled = false;
+        if (stepUsedBrowserProofRequiredTool && !stepObservedBrowserProof) {
+          browserGuardSignaled = true;
+          const shouldStop = await onNoProgressSignal(
+            "browser_proof_guard",
+            {
+              step: llmStep,
+              toolStep,
+              signature: toolCallSignature
+            },
+            { emitBrowserGuard: true }
+          );
+          if (shouldStop) {
+            break;
+          }
+        }
+
+        if (!browserGuardSignaled && toolCallSignature) {
+          toolCallSignatureHistory.push(toolCallSignature);
+          while (toolCallSignatureHistory.length > NO_PROGRESS_SIGNATURE_HISTORY_LIMIT) {
+            toolCallSignatureHistory.shift();
+          }
+
+          let reason: NoProgressReason | null = null;
+          const len = toolCallSignatureHistory.length;
+          const detail: JsonRecord = {
+            step: llmStep,
+            toolStep,
+            signature: toolCallSignature
+          };
+
+          if (len >= 4) {
+            const a = toolCallSignatureHistory[len - 4];
+            const b = toolCallSignatureHistory[len - 3];
+            const c = toolCallSignatureHistory[len - 2];
+            const d = toolCallSignatureHistory[len - 1];
+            if (a === c && b === d && a !== b) {
+              reason = "ping_pong";
+              detail.sequence = [a, b, c, d];
+            }
+          }
+
+          if (!reason && len >= 2) {
+            const prev = toolCallSignatureHistory[len - 2];
+            const curr = toolCallSignatureHistory[len - 1];
+            if (prev === curr) {
+              reason = "repeat_signature";
+              detail.previousSignature = prev;
+            }
+          }
+
+          if (reason) {
+            const shouldStop = await onNoProgressSignal(reason, detail);
+            if (shouldStop) {
+              break;
+            }
+          }
+        }
       }
 
-      if (llmStep >= maxLoopSteps) {
+      if (llmStep >= maxLoopSteps && finalStatus === "done") {
         finalStatus = "max_steps";
         await orchestrator.sessions.appendMessage({
           sessionId,

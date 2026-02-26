@@ -1,5 +1,9 @@
+import { normalizeBrowserRuntimeStrategy, type BrowserRuntimeStrategy } from "./browser-runtime-strategy";
+import { defaultPipeline as enrichmentPipeline } from "./snapshot-enricher";
+
 const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:8787/ws";
 const DEFAULT_BRIDGE_TOKEN = "dev-token-change-me";
+const DEFAULT_BROWSER_RUNTIME_STRATEGY: BrowserRuntimeStrategy = "host-first";
 const DEFAULT_LEASE_TTL_MS = 30_000;
 const MAX_LEASE_TTL_MS = 5 * 60_000;
 const DEFAULT_BRIDGE_INVOKE_TIMEOUT_MS = 120_000;
@@ -20,6 +24,7 @@ type JsonRecord = Record<string, unknown>;
 export interface BridgeConfig {
   bridgeUrl: string;
   bridgeToken: string;
+  browserRuntimeStrategy: BrowserRuntimeStrategy;
   llmDefaultProfile?: string;
   llmProfiles?: unknown;
   llmProfileChains?: unknown;
@@ -86,6 +91,7 @@ interface SnapshotState {
   byKey: Map<string, JsonRecord>;
   refMap: Map<string, JsonRecord>;
   lastSnapshotId: string | null;
+  failureCounts: Map<string, number>;
 }
 
 interface TelemetryState {
@@ -326,7 +332,7 @@ const ROLE_SHORTHAND: Record<string, string> = {
   textarea: "area"
 };
 
-function formatNodeCompact(node: JsonRecord): string {
+function formatNodeCompact(node: JsonRecord, depth = 0): string {
   const rawRole = String(node.role || "node").toLowerCase();
   const role = ROLE_SHORTHAND[rawRole] || rawRole;
   const name = String(node.name || "").replace(/\s+/g, " ").trim();
@@ -352,9 +358,12 @@ function formatNodeCompact(node: JsonRecord): string {
   if (node.checked === true) flags.push("on");
   if (node.checked === false) flags.push("off");
   if (node.selected === true) flags.push("sel");
+  if (node.navType) flags.push(String(node.navType));
+  if (Number(node.failureCount) > 0) flags.push(`failed:${node.failureCount}`);
 
   const flagText = flags.length > 0 ? ` [${flags.join(",")}]` : "";
-  return `${String(node.ref || "")}:${role}${showLabel}${flagText}`;
+  const indent = "  ".repeat(Math.max(0, depth));
+  return `${indent}${String(node.ref || "")}:${role}${showLabel}${flagText}`;
 }
 
 function buildCompactSnapshot(snapshot: JsonRecord): string {
@@ -366,7 +375,7 @@ function buildCompactSnapshot(snapshot: JsonRecord): string {
   ];
   const nodes = Array.isArray(snapshot.nodes) ? (snapshot.nodes as JsonRecord[]) : [];
   for (const node of nodes) {
-    lines.push(formatNodeCompact(node));
+    lines.push(formatNodeCompact(node, Number(node.depth || 0)));
   }
   return lines.join("\n");
 }
@@ -591,6 +600,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     const data = await chrome.storage.local.get([
       "bridgeUrl",
       "bridgeToken",
+      "browserRuntimeStrategy",
       "llmDefaultProfile",
       "llmProfiles",
       "llmProfileChains",
@@ -608,6 +618,10 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     bridgeConfigCache = {
       bridgeUrl: String(data.bridgeUrl || DEFAULT_BRIDGE_URL),
       bridgeToken: String(data.bridgeToken || DEFAULT_BRIDGE_TOKEN),
+      browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
+        data.browserRuntimeStrategy,
+        DEFAULT_BROWSER_RUNTIME_STRATEGY
+      ),
       llmDefaultProfile: String(data.llmDefaultProfile || "default"),
       llmProfiles: data.llmProfiles,
       llmProfileChains: data.llmProfileChains,
@@ -646,6 +660,10 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     const next: BridgeConfig = {
       bridgeUrl: String(source.bridgeUrl || current.bridgeUrl || DEFAULT_BRIDGE_URL).trim(),
       bridgeToken: String(source.bridgeToken ?? current.bridgeToken ?? DEFAULT_BRIDGE_TOKEN),
+      browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
+        source.browserRuntimeStrategy,
+        current.browserRuntimeStrategy || DEFAULT_BROWSER_RUNTIME_STRATEGY
+      ),
       llmDefaultProfile: String(source.llmDefaultProfile || current.llmDefaultProfile || "default").trim() || "default",
       llmProfiles: source.llmProfiles !== undefined ? source.llmProfiles : current.llmProfiles,
       llmProfileChains: source.llmProfileChains !== undefined ? source.llmProfileChains : current.llmProfileChains,
@@ -865,7 +883,8 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     const created: SnapshotState = {
       byKey: new Map(),
       refMap: new Map(),
-      lastSnapshotId: null
+      lastSnapshotId: null,
+      failureCounts: new Map()
     };
     snapshotStateByTab.set(tabId, created);
     return created;
@@ -1066,6 +1085,23 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
 
     const attachTask = (async () => {
       try {
+        if (typeof chrome !== "undefined" && chrome.tabs && typeof chrome.tabs.get === "function") {
+          const tab = await chrome.tabs.get(tabId).catch(() => null);
+          if (tab?.url) {
+            const url = tab.url.toLowerCase();
+            if (
+              url.startsWith("chrome://") ||
+              url.startsWith("about:") ||
+              url.startsWith("edge://") ||
+              url.startsWith("chrome-extension://") ||
+              url.includes("chrome.google.com/webstore")
+            ) {
+              throw new Error(
+                `Chrome restricts debugger access to this URL (${tab.url}). Please navigate to a standard website or call 'create_new_tab' first.`
+              );
+            }
+          }
+        }
         await chrome.debugger.attach({ tabId }, "1.3");
         attachedTabs.add(tabId);
         enabledDomainsByTab.delete(tabId);
@@ -1197,6 +1233,18 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           role === "combobox";
         const text = String(this.textContent || "").replace(/\\s+/g, " ").trim();
         const value = "value" in this ? String(this.value || "") : "";
+        const href = String(this.getAttribute?.("href") || "").trim();
+        let navType = "";
+        if (href) {
+          try {
+            const url = new URL(href, location.href);
+            const isSameOrigin = url.origin === location.origin;
+            const isLikelyDetail = /[\\/](status|p|item|detail|post|article)[\\/]/i.test(url.pathname);
+            navType = isSameOrigin || isLikelyDetail ? "nav" : "ext";
+          } catch {
+            navType = "ext";
+          }
+        }
 
         const brainUid = "brain-" + Math.random().toString(36).slice(2, 10) + "-" + Date.now().toString(36);
         if (!this.getAttribute("data-brain-uid")) {
@@ -1233,7 +1281,8 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           checked: getAriaBool("aria-checked") ?? (typeof this.checked === "boolean" ? this.checked : undefined),
           selected: getAriaBool("aria-selected") ?? (typeof this.selected === "boolean" ? this.selected : undefined),
           required: !!this.required || getAriaBool("aria-required") === true,
-          brainUid: effectiveUid
+          brainUid: effectiveUid,
+          navType: navType || undefined
         };
       }`;
       const result = (await sendCdpCommand(tabId, "Runtime.callFunctionOn", {
@@ -1318,6 +1367,8 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           backendNodeId,
           frameId: bucket.frameId,
           axNodeId: String(node.nodeId || ""),
+          parentId: node.parentId ? String(node.parentId) : undefined,
+          childIds: Array.isArray(node.childIds) ? node.childIds.map(String) : [],
           role: role || "node",
           name: name.slice(0, 180),
           value: value.slice(0, 180),
@@ -1382,7 +1433,12 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       });
     }
 
-    const nodes = enrichSnapshotNodes(state, finalEnriched, key, snapshotId, "ax");
+    const nodes = (await enrichmentPipeline.run(enrichSnapshotNodes(state, finalEnriched, key, snapshotId, "ax"), {
+      sessionId: String(base.sessionId || ""),
+      origin: String(page.url || ""),
+      location: String(page.url || ""),
+      failureCounts: state.failureCounts
+    })) as JsonRecord[];
 
     return {
       ...base,
@@ -1533,7 +1589,12 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       throw new Error(`cdp.snapshot failed: ${String(value.error || "interactive evaluate failed")}`);
     }
     const rawNodes = Array.isArray(value.nodes) ? (value.nodes as JsonRecord[]) : [];
-    const nodes = enrichSnapshotNodes(state, rawNodes, key, snapshotId, "dom");
+    const nodes = (await enrichmentPipeline.run(enrichSnapshotNodes(state, rawNodes, key, snapshotId, "dom"), {
+      sessionId: String(base.sessionId || ""),
+      origin: String(value.url || ""),
+      location: String(value.url || ""),
+      failureCounts: state.failureCounts
+    })) as JsonRecord[];
     return {
       ...base,
       url: String(value.url || ""),
@@ -1720,7 +1781,15 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
 
       if (input.brainUid) {
         const uidEval = (await sendCdpCommand(tabId, "Runtime.evaluate", {
-          expression: `document.querySelector('[data-brain-uid="${input.brainUid}"]')`,
+          expression: `(() => {
+            const uid = ${JSON.stringify(String(input.brainUid))};
+            if (!uid) return null;
+            const all = document.querySelectorAll("[data-brain-uid]");
+            for (const node of all) {
+              if (node?.getAttribute?.("data-brain-uid") === uid) return node;
+            }
+            return null;
+          })()`,
           includeCommandLineAPI: true
         })) as JsonRecord;
         const nextObjectId = String(asRecord(uidEval.result).objectId || "");
@@ -1805,9 +1874,16 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         const applyTextToElement = (target, text, mode) => {
           if ("disabled" in target && !!target.disabled) return { ok: false, error: "element is disabled" };
           if ("readOnly" in target && !!target.readOnly) return { ok: false, error: "element is readonly" };
+          
           if ("focus" in target) {
             try { target.focus({ preventScroll: true }); } catch { target.focus(); }
           }
+          // Aggressive activation: click and keydown to wake up React listeners
+          try {
+            target.click?.();
+            target.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter" }));
+          } catch {}
+
           const monacoApplied = tryMonacoModelSet(target, text, mode);
           if (monacoApplied) return monacoApplied;
           if ("value" in target) {
@@ -1827,8 +1903,13 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           if (target.isContentEditable) {
             let usedInsertText = false;
             try {
-              // For React/Draft.js-like editors, prefer command-based insertion over raw textContent mutation.
               if (typeof document.execCommand === "function") {
+                const selection = window.getSelection();
+                const range = document.createRange();
+                range.selectNodeContents(target);
+                selection.removeAllRanges();
+                selection.addRange(range);
+                
                 if (mode === "fill") {
                   try { document.execCommand("selectAll", false); } catch {}
                   try { document.execCommand("delete", false); } catch {}
@@ -1903,6 +1984,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         const getFrameOffsets = () => {
           let x = 0;
           let y = 0;
+          let reliable = true;
           let cur = window;
           try {
             while (cur && cur !== window.top) {
@@ -1915,15 +1997,57 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
             }
           } catch {
             // ignore cross-origin access issues, coords will be best-effort
+            reliable = false;
           }
-          return { x, y };
+          if (!Number.isFinite(x) || !Number.isFinite(y)) reliable = false;
+          return { x, y, reliable };
         };
         if (kind === "click") {
           const rect = el.getBoundingClientRect();
           const offsets = getFrameOffsets();
-          const centerX = offsets.x + rect.left + rect.width / 2;
-          const centerY = offsets.y + rect.top + rect.height / 2;
-          return { ok: true, shouldNativeClick: true, x: centerX, y: centerY, url: location.href, title: document.title };
+          const localCenterX = rect.left + rect.width / 2;
+          const localCenterY = rect.top + rect.height / 2;
+          const hasValidRect =
+            Number.isFinite(rect.width) &&
+            Number.isFinite(rect.height) &&
+            rect.width > 0 &&
+            rect.height > 0 &&
+            Number.isFinite(localCenterX) &&
+            Number.isFinite(localCenterY);
+          let trustedHit = false;
+          if (hasValidRect) {
+            try {
+              const hit = document.elementFromPoint(localCenterX, localCenterY);
+              trustedHit = !!hit && (hit === el || el.contains(hit) || hit.contains(el));
+            } catch {
+              trustedHit = false;
+            }
+          }
+          const centerX = offsets.x + localCenterX;
+          const centerY = offsets.y + localCenterY;
+          const shouldNativeClick =
+            offsets.reliable === true &&
+            hasValidRect &&
+            trustedHit &&
+            Number.isFinite(centerX) &&
+            Number.isFinite(centerY);
+          const nativeReason =
+            shouldNativeClick
+              ? "trusted-hit"
+              : offsets.reliable !== true
+                ? "frame-offset-unreliable"
+                : hasValidRect !== true
+                  ? "invalid-target-rect"
+                  : "hit-untrusted";
+          return {
+            ok: true,
+            shouldNativeClick,
+            nativeReason,
+            x: centerX,
+            y: centerY,
+            url: location.href,
+            title: document.title
+          };
         }
         if (kind === "type" || kind === "fill") {
           const target = isTypableElement(el) ? el : findTypableNear(el);
@@ -1970,9 +2094,12 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         try {
           const x = Number(value.x);
           const y = Number(value.y);
+          if (!Number.isFinite(x) || !Number.isFinite(y)) {
+            throw new Error("native click coordinates are not finite");
+          }
           await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
           await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
-          return { ok: true, clicked: true, via: "cdp-native", url: value.url, title: value.title };
+          return { ok: true, clicked: true, via: "cdp-native", url: value.url, title: value.title, objectId };
         } catch {
           // fallback to JS click via callFunctionOn
           await sendCdpCommand(tabId, "Runtime.callFunctionOn", {
@@ -1980,10 +2107,26 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
             functionDeclaration: "function() { this.click?.(); }",
             awaitPromise: true
           });
-          return { ok: true, clicked: true, via: "cdp-js-fallback", url: value.url, title: value.title };
+          return { ok: true, clicked: true, via: "cdp-js-fallback", url: value.url, title: value.title, objectId };
         }
       }
-      return value;
+      if (kind === "click" && value.shouldNativeClick === false) {
+        await sendCdpCommand(tabId, "Runtime.callFunctionOn", {
+          objectId,
+          functionDeclaration: "function() { this.click?.(); }",
+          awaitPromise: true
+        });
+        return {
+          ok: true,
+          clicked: true,
+          via: "cdp-js-fallback",
+          nativeReason: value.nativeReason,
+          url: value.url,
+          title: value.title,
+          objectId
+        };
+      }
+      return { ...value, objectId };
     } finally {
       if (objectId) {
         await sendCdpCommand(tabId, "Runtime.releaseObject", { objectId }).catch(() => {
@@ -2052,6 +2195,11 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
 
     if (backendNodeId && (kind === "click" || kind === "type" || kind === "fill" || kind === "select" || kind === "hover" || kind === "read")) {
       try {
+        // For type/fill, we need to focus first to make Input commands work reliably
+        if (kind === "type" || kind === "fill") {
+          await sendCdpCommand(tabId, "DOM.focus", { backendNodeId });
+        }
+
         const backendResult = await executeActionByBackendNode(tabId, {
           backendNodeId,
           kind,
@@ -2059,6 +2207,21 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           waitForMs: selector ? 0 : waitForMs,
           brainUid: brainUid || undefined
         });
+
+        if (kind === "type" || kind === "fill") {
+          // Native Input Injection via CDP
+          // This mimics hardware-level typing which React/Lexical/Draft.js cannot ignore
+          await sendCdpCommand(tabId, "Input.insertText", { text: value });
+          
+          // Dispatch a generic 'input' event via JS as a final nudge for state sync
+          await sendCdpCommand(tabId, "Runtime.callFunctionOn", {
+            objectId: backendResult.objectId, // We'll need to return this from executeActionByBackendNode
+            functionDeclaration: "function() { this.dispatchEvent(new Event('input', { bubbles: true })); }",
+            awaitPromise: true
+          }).catch(() => {});
+          
+          return { ok: true, typed: value.length, via: "cdp-native-input", url: backendResult.url, title: backendResult.title };
+        }
         return {
           tabId,
           kind,

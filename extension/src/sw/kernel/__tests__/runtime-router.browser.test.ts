@@ -1101,6 +1101,7 @@ describe("runtime-router.browser", () => {
     expect(result.ok).toBe(true);
     expect(result.modeUsed).toBe("bridge");
     expect(result.capabilityUsed).toBe("fs.virtual.read");
+    expect(result.providerId).toBe("plugin.virtual-fs.router.read");
     expect(result.data).toEqual({
       provider: "virtual-fs-router",
       path: "mem://docs.txt"
@@ -1373,6 +1374,186 @@ describe("runtime-router.browser", () => {
     expect(payload.provider).toBe("plugin-script-fs");
     expect(payload.mode).toBe("script");
     expect(((payload.receivedFrame || {}) as Record<string, unknown>).tool).toBe("read");
+  });
+
+  it("tool_call 的 browser_read_file 默认 runtime 受 browserRuntimeStrategy 控制", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.fs.read.runtime-strategy-probe",
+        name: "fs-read-runtime-strategy-probe",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["fs.read"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "fs.read": {
+            id: "plugin.fs.read.runtime-strategy-probe.provider",
+            mode: "script",
+            priority: 80,
+            canHandle: (input) => String((input.args?.frame as Record<string, unknown> | undefined)?.tool || "") === "read",
+            invoke: async (input) => {
+              const frame = (input.args?.frame || {}) as Record<string, unknown>;
+              const frameArgs = (frame.args || {}) as Record<string, unknown>;
+              return {
+                provider: "runtime-strategy-probe",
+                runtime: String(frameArgs.runtime || ""),
+                path: String(frameArgs.path || "")
+              };
+            }
+          }
+        }
+      }
+    });
+
+    let runRequestCount = 0;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const body = (JSON.parse(String(init?.body || "{}")) || {}) as Record<string, unknown>;
+      const isRunRequest = Array.isArray(body.tools) && body.stream === true;
+      if (isRunRequest) {
+        runRequestCount += 1;
+      }
+      const hasToolMessage = Array.isArray(body.messages)
+        && (body.messages as Array<Record<string, unknown>>).some((item) => String(item.role || "") === "tool");
+      if (isRunRequest && !hasToolMessage) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: `call_browser_read_${runRequestCount}`,
+                      type: "function",
+                      function: {
+                        name: "browser_read_file",
+                        arguments: JSON.stringify({
+                          path: "mem://runtime-strategy.txt"
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      if (isRunRequest) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "done"
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "runtime strategy title"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const readToolPayload = async (sessionId: string): Promise<Record<string, unknown>> => {
+      const deadline = Date.now() + 1200;
+      while (Date.now() < deadline) {
+        const viewed = await invokeRuntime({
+          type: "brain.session.view",
+          sessionId
+        });
+        expect(viewed.ok).toBe(true);
+        const messages = readConversationMessages(viewed);
+        const toolMessage = [...messages]
+          .reverse()
+          .find((entry) => String(entry.role || "") === "tool" && String(entry.toolName || "") === "browser_read_file");
+        if (toolMessage) {
+          return JSON.parse(String(toolMessage.content || "{}")) as Record<string, unknown>;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      throw new Error(`missing browser_read_file tool message: ${sessionId}`);
+    };
+
+    const savedHostFirst = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
+        autoTitleInterval: 0,
+        browserRuntimeStrategy: "host-first"
+      }
+    });
+    expect(savedHostFirst.ok).toBe(true);
+
+    const startedHostFirst = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "读取 mem://runtime-strategy.txt"
+    });
+    expect(startedHostFirst.ok).toBe(true);
+    const hostFirstSessionId = String(((startedHostFirst.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(hostFirstSessionId).not.toBe("");
+    await waitForLoopDone(hostFirstSessionId);
+    const hostFirstPayload = await readToolPayload(hostFirstSessionId);
+    expect(String(hostFirstPayload.provider || "")).toBe("runtime-strategy-probe");
+    expect(String(hostFirstPayload.runtime || "")).toBe("browser");
+
+    const savedBrowserFirst = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
+        autoTitleInterval: 0,
+        browserRuntimeStrategy: "browser-first"
+      }
+    });
+    expect(savedBrowserFirst.ok).toBe(true);
+
+    const startedBrowserFirst = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "读取 mem://runtime-strategy.txt 再来一次"
+    });
+    expect(startedBrowserFirst.ok).toBe(true);
+    const browserFirstSessionId = String(((startedBrowserFirst.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(browserFirstSessionId).not.toBe("");
+    await waitForLoopDone(browserFirstSessionId);
+    const browserFirstPayload = await readToolPayload(browserFirstSessionId);
+    expect(String(browserFirstPayload.provider || "")).toBe("runtime-strategy-probe");
+    expect(String(browserFirstPayload.runtime || "")).toBe("sandbox");
+
+    expect(runRequestCount).toBeGreaterThanOrEqual(4);
   });
 
   it("tool_call 的 click 优先走 capability provider 并保留 verify 语义", async () => {
@@ -2080,6 +2261,309 @@ describe("runtime-router.browser", () => {
     expect(String(toolPayload.errorCode || "")).toBe("E_REF_REQUIRED");
   });
 
+  it("tool_call fill_element_by_uid 在 value 为空时应拒绝（E_ARGS）", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    let providerInvoked = 0;
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.browser.action.fill-empty-value",
+        name: "browser-action-fill-empty-value",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["browser.action"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "browser.action": {
+            id: "plugin.browser.action.fill-empty-value.provider",
+            mode: "script",
+            priority: 70,
+            invoke: async () => {
+              providerInvoked += 1;
+              return {
+                data: {
+                  provider: "plugin-browser-action-fill-empty-value"
+                },
+                verified: true,
+                verifyReason: "verified"
+              };
+            }
+          }
+        }
+      }
+    });
+
+    let llmCall = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
+      if (llmCall === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_action_fill_empty_value_1",
+                      type: "function",
+                      function: {
+                        name: "fill_element_by_uid",
+                        arguments: JSON.stringify({
+                          tabId: 1,
+                          uid: "e-input",
+                          value: "   "
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "done"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
+        autoTitleInterval: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "触发 fill_element_by_uid empty value"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    expect(providerInvoked).toBe(0);
+
+    const viewed = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(viewed.ok).toBe(true);
+    const messages = readConversationMessages(viewed);
+    const toolPayload = messages
+      .filter((entry) => String(entry.role || "") === "tool" && String(entry.toolCallId || "") === "call_action_fill_empty_value_1")
+      .map((entry) => JSON.parse(String(entry.content || "{}")) as Record<string, unknown>)[0];
+    expect(toolPayload).toBeDefined();
+    expect(String(toolPayload.errorCode || "")).toBe("E_ARGS");
+  });
+
+  it("tool_call 本地参数校验应覆盖 oneOf/allOf（不依赖 provider schema）", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    let providerInvoked = 0;
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.custom.schema-guard.fs-read",
+        name: "custom-schema-guard-fs-read",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["fs.read"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "fs.read": {
+            id: "plugin.custom.schema-guard.fs-read.provider",
+            mode: "script",
+            priority: 90,
+            invoke: async () => {
+              providerInvoked += 1;
+              return { text: "ok" };
+            }
+          }
+        }
+      }
+    });
+
+    orchestrator.registerToolContract(
+      {
+        name: "schema_guard_tool",
+        description: "schema guard test tool",
+        parameters: {
+          type: "object",
+          properties: {
+            path: { type: "string" },
+            mode: { type: "string" },
+            a: { type: "string" },
+            b: { type: "string" }
+          },
+          required: ["path"],
+          oneOf: [{ required: ["a"] }, { required: ["b"] }],
+          allOf: [{ required: ["mode"] }]
+        },
+        execution: {
+          capability: "fs.read",
+          mode: "script",
+          action: "invoke",
+          verifyPolicy: "off"
+        }
+      },
+      { replace: true }
+    );
+
+    let llmCall = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
+      if (llmCall === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_schema_oneof_1",
+                      type: "function",
+                      function: {
+                        name: "schema_guard_tool",
+                        arguments: JSON.stringify({
+                          path: "/tmp/demo.txt",
+                          mode: "read",
+                          a: "x",
+                          b: "y"
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+      if (llmCall === 2) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_schema_allof_1",
+                      type: "function",
+                      function: {
+                        name: "schema_guard_tool",
+                        arguments: JSON.stringify({
+                          path: "/tmp/demo.txt",
+                          a: "x"
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "done"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
+        autoTitleInterval: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "触发 oneOf/allOf 本地参数校验"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    expect(providerInvoked).toBe(0);
+
+    const viewed = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(viewed.ok).toBe(true);
+    const messages = readConversationMessages(viewed);
+    const toolPayloads = messages
+      .filter((entry) => String(entry.role || "") === "tool")
+      .map((entry) => JSON.parse(String(entry.content || "{}")) as Record<string, unknown>);
+    const oneOfPayload = toolPayloads.find((entry) => String(((entry.stepRef || {}) as Record<string, unknown>).toolCallId || "") === "call_schema_oneof_1");
+    const allOfPayload = toolPayloads.find((entry) => String(((entry.stepRef || {}) as Record<string, unknown>).toolCallId || "") === "call_schema_allof_1");
+    expect(String(oneOfPayload?.errorCode || "")).toBe("E_ARGS");
+    expect(String(allOfPayload?.errorCode || "")).toBe("E_ARGS");
+    expect(String(((oneOfPayload?.details || {}) as Record<string, unknown>).combinator || "")).toBe("oneOf");
+    expect(String(((allOfPayload?.details || {}) as Record<string, unknown>).combinator || "")).toBe("allOf");
+  });
+
   it("tool_call browser_verify 无 expect 时应拒绝并返回 E_ARGS", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -2730,7 +3214,7 @@ describe("runtime-router.browser", () => {
     expect(String(toolMessage?.content || "")).toContain('"modeEscalated":true');
   });
 
-  it("strict verify 不可判定时应以 max_steps 收口（不做 no_progress 早停）", async () => {
+  it("strict verify 不可判定时应触发 no_progress 并以 progress_uncertain 收口", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
 
@@ -2819,10 +3303,16 @@ describe("runtime-router.browser", () => {
     const stream = await waitForLoopDone(sessionId);
     const done = stream.find((item) => String(item.type || "") === "loop_done") as Record<string, unknown> | undefined;
     const donePayload = (done?.payload || {}) as Record<string, unknown>;
-    expect(String(donePayload.status || "")).toBe("max_steps");
+    expect(String(donePayload.status || "")).toBe("progress_uncertain");
+    const noProgressEvents = stream.filter((item) => String(item.type || "") === "loop_no_progress");
+    expect(noProgressEvents.length).toBeGreaterThan(0);
+    const reasons = noProgressEvents.map((item) =>
+      String(((item as Record<string, unknown>).payload as Record<string, unknown> | undefined)?.reason || "")
+    );
+    expect(reasons.some((reason) => ["browser_proof_guard", "repeat_signature"].includes(reason))).toBe(true);
   });
 
-  it("重复同签名 tool_calls 时不再触发 loop_no_progress，改为 max_steps 收口", async () => {
+  it("重复同签名 tool_calls 应触发 loop_no_progress(repeat_signature) 并提前收口", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
     orchestrator.registerPlugin({
@@ -2902,13 +3392,18 @@ describe("runtime-router.browser", () => {
     const stream = await waitForLoopDone(sessionId, 5000);
     const done = stream.find((item) => String(item.type || "") === "loop_done") as Record<string, unknown> | undefined;
     const donePayload = (done?.payload || {}) as Record<string, unknown>;
-    expect(String(donePayload.status || "")).toBe("max_steps");
+    expect(String(donePayload.status || "")).toBe("progress_uncertain");
 
-    const noProgress = stream.find((item) => String(item.type || "") === "loop_no_progress");
-    expect(noProgress).toBeUndefined();
+    const noProgressEvents = stream.filter((item) => String(item.type || "") === "loop_no_progress");
+    expect(noProgressEvents.length).toBeGreaterThan(0);
+    const repeatEvent = noProgressEvents.find((item) => {
+      const payload = ((item as Record<string, unknown>).payload || {}) as Record<string, unknown>;
+      return String(payload.reason || "") === "repeat_signature";
+    });
+    expect(repeatEvent).toBeDefined();
   });
 
-  it("PI 对齐后不再发 loop_no_progress 事件，重复调用由 max_steps 收口", async () => {
+  it("tool_calls 出现 ping_pong 时应触发 loop_no_progress(ping_pong) 并终止", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
     orchestrator.registerPlugin({
@@ -2937,6 +3432,7 @@ describe("runtime-router.browser", () => {
     let llmCall = 0;
     vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
       llmCall += 1;
+      const targetPath = llmCall % 2 === 0 ? "/tmp/no-progress-budget-b.txt" : "/tmp/no-progress-budget-a.txt";
       return new Response(
         JSON.stringify({
           choices: [
@@ -2950,7 +3446,7 @@ describe("runtime-router.browser", () => {
                     function: {
                       name: "host_read_file",
                       arguments: JSON.stringify({
-                        path: "/tmp/no-progress-budget.txt"
+                        path: targetPath
                       })
                     }
                   }
@@ -2988,10 +3484,15 @@ describe("runtime-router.browser", () => {
     const stream = await waitForLoopDone(sessionId, 5000);
     const done = stream.find((item) => String(item.type || "") === "loop_done") as Record<string, unknown> | undefined;
     const donePayload = (done?.payload || {}) as Record<string, unknown>;
-    expect(String(donePayload.status || "")).toBe("max_steps");
+    expect(String(donePayload.status || "")).toBe("progress_uncertain");
 
     const noProgressEvents = stream.filter((item) => String(item.type || "") === "loop_no_progress");
-    expect(noProgressEvents.length).toBe(0);
+    expect(noProgressEvents.length).toBeGreaterThan(0);
+    const pingPongEvent = noProgressEvents.find((item) => {
+      const payload = ((item as Record<string, unknown>).payload || {}) as Record<string, unknown>;
+      return String(payload.reason || "") === "ping_pong";
+    });
+    expect(pingPongEvent).toBeDefined();
   });
 
   it("同一会话二轮请求会保留历史 tool role 并补齐 assistant/tool_call 配对", async () => {
@@ -3279,7 +3780,11 @@ describe("runtime-router.browser", () => {
     expect(String(stepDelta[0].type || "")).toBe("step_execute");
     expect(String(stepDelta[1].type || "")).toBe("step_execute_result");
     expect(String((stepDelta[0].payload as Record<string, unknown> | undefined)?.capability || "")).toBe("fs.virtual.read");
+    expect(String((stepDelta[0].payload as Record<string, unknown> | undefined)?.providerId || "")).toBe("plugin.event-order.read");
     expect(String((stepDelta[1].payload as Record<string, unknown> | undefined)?.capabilityUsed || "")).toBe("fs.virtual.read");
+    expect(String((stepDelta[1].payload as Record<string, unknown> | undefined)?.providerId || "")).toBe("plugin.event-order.read");
+    expect(String((stepDelta[1].payload as Record<string, unknown> | undefined)?.modeUsed || "")).toBe("bridge");
+    expect(String((stepDelta[1].payload as Record<string, unknown> | undefined)?.fallbackFrom || "")).toBe("");
   });
 
   it("brain.step.stream 支持按 maxEvents/maxBytes 裁剪并返回元信息", async () => {
@@ -3446,17 +3951,59 @@ describe("runtime-router.browser", () => {
     expect(String(skippedPayload.reason || "")).toBe("missing_llm_config");
   });
 
-  it("浏览器任务未显式给 tabId 时不再强制 browser proof 守卫", async () => {
+  it("浏览器任务缺乏有效 proof 时应触发 browser proof guard 并收口", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
 
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.browser.action.guard-missing-proof",
+        name: "browser-action-guard-missing-proof",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["browser.action"]
+        }
+      },
+      providers: {
+        capabilities: {
+          "browser.action": {
+            id: "plugin.browser.action.guard-missing-proof.provider",
+            mode: "script",
+            priority: 80,
+            invoke: async () => ({
+              data: {
+                provider: "guard-missing-proof"
+              },
+              verified: false,
+              verifyReason: "verify_skipped"
+            })
+          }
+        }
+      }
+    });
+
+    let llmCall = 0;
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
       return new Response(
         JSON.stringify({
           choices: [
             {
               message: {
-                content: "已完成"
+                content: "",
+                tool_calls: [
+                  {
+                    id: `call_guard_${llmCall}`,
+                    type: "function",
+                    function: {
+                      name: "click",
+                      arguments: JSON.stringify({
+                        tabId: 1,
+                        ref: "e0"
+                      })
+                    }
+                  }
+                ]
               }
             }
           ]
@@ -3481,7 +4028,7 @@ describe("runtime-router.browser", () => {
 
     const started = await invokeRuntime({
       type: "brain.run.start",
-      prompt: "在书签页面搜索 cat 并把结果链接发我"
+      prompt: "点击页面按钮并确认已完成"
     });
     expect(started.ok).toBe(true);
     const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
@@ -3491,11 +4038,15 @@ describe("runtime-router.browser", () => {
     expect(fetchSpy).toHaveBeenCalled();
     const done = stream.find((item) => String(item.type || "") === "loop_done") as Record<string, unknown> | undefined;
     const donePayload = (done?.payload || {}) as Record<string, unknown>;
-    expect(String(donePayload.status || "")).toBe("done");
+    expect(String(donePayload.status || "")).toBe("progress_uncertain");
     const guardCount = stream.filter((item) => String(item.type || "") === "loop_guard_browser_progress_missing").length;
-    const noProgressCount = stream.filter((item) => String(item.type || "") === "loop_no_progress").length;
-    expect(guardCount).toBe(0);
-    expect(noProgressCount).toBe(0);
+    expect(guardCount).toBeGreaterThan(0);
+    const noProgressEvents = stream.filter((item) => String(item.type || "") === "loop_no_progress");
+    const guardNoProgress = noProgressEvents.find((item) => {
+      const payload = ((item as Record<string, unknown>).payload || {}) as Record<string, unknown>;
+      return String(payload.reason || "") === "browser_proof_guard";
+    });
+    expect(guardNoProgress).toBeDefined();
   });
 
   it("LLM 抛出字符串错误时应稳定收口，避免 details 写入字符串导致二次异常", async () => {
@@ -3919,6 +4470,7 @@ describe("runtime-router.browser", () => {
     const clickTool = capturedTools.find(
       (item) => String(((item.function as Record<string, unknown> | undefined)?.name) || "") === "click"
     );
+    const clickDesc = String(((clickTool?.function as Record<string, unknown> | undefined)?.description) || "");
     const clickParams = (((clickTool?.function as Record<string, unknown> | undefined)?.parameters || {}) as Record<
       string,
       unknown
@@ -3929,6 +4481,8 @@ describe("runtime-router.browser", () => {
     expect(clickParams.allOf).toBeUndefined();
     expect(clickParams.enum).toBeUndefined();
     expect(clickParams.not).toBeUndefined();
+    expect(clickDesc).toContain("Schema constraint hints:");
+    expect(clickDesc).toContain("anyOf:");
   });
 
   it("brain.run.start 会注入 available_skills（过滤 disable-model-invocation）", async () => {
@@ -4451,6 +5005,122 @@ describe("runtime-router.browser", () => {
     expect(remainingLlmProviders.some((item) => String(item.id || "") === "route.proxy")).toBe(false);
   });
 
+  it("supports brain.plugin.register_extension with PI-style default export module", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    const { sessionId } = await orchestrator.createSession({ title: "plugin-route-extension-module" });
+    orchestrator.registerToolProvider(
+      "script",
+      {
+        id: "plugin.route.extension.script",
+        invoke: async () => ({ source: "script" })
+      },
+      { replace: true }
+    );
+
+    const moduleUrl = new URL("./fixtures/plugin-route-extension.fixture.ts", import.meta.url).href;
+    const registered = await invokeRuntime({
+      type: "brain.plugin.register_extension",
+      manifest: {
+        id: "plugin.route.extension.module",
+        name: "plugin-route-extension-module",
+        version: "1.0.0",
+        permissions: {
+          hooks: ["tool.after_result"]
+        }
+      },
+      moduleUrl
+    });
+    expect(registered.ok).toBe(true);
+    const registeredData = (registered.data || {}) as Record<string, unknown>;
+    expect(String(registeredData.pluginId || "")).toBe("plugin.route.extension.module");
+    expect(String(registeredData.moduleUrl || "")).toBe(moduleUrl);
+
+    const patched = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      mode: "script",
+      action: "click",
+      verifyPolicy: "off"
+    });
+    expect(patched.ok).toBe(true);
+    const patchedResult = (patched.data || {}) as Record<string, unknown>;
+    expect((patchedResult.data || {}) as Record<string, unknown>).toEqual({ source: "extension-module" });
+  });
+
+  it("supports brain.plugin.install from mem:// package file", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    const { sessionId } = await orchestrator.createSession({ title: "plugin-install-from-mem-package" });
+    orchestrator.registerToolProvider(
+      "script",
+      {
+        id: "plugin.install.mem.script",
+        invoke: async () => ({ source: "script" })
+      },
+      { replace: true }
+    );
+
+    const moduleUrl = new URL("./fixtures/plugin-route-extension.fixture.ts", import.meta.url).href;
+    const packagePath = "mem://plugins/route-extension/plugin.json";
+    const packageContent = JSON.stringify(
+      {
+        manifest: {
+          id: "plugin.route.extension.mem.package",
+          name: "plugin-route-extension-mem-package",
+          version: "1.0.0",
+          permissions: {
+            hooks: ["tool.after_result"]
+          }
+        },
+        moduleUrl
+      },
+      null,
+      2
+    );
+
+    const wrote = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.write",
+      action: "invoke",
+      args: {
+        frame: {
+          tool: "write",
+          args: {
+            path: packagePath,
+            content: packageContent,
+            mode: "overwrite",
+            runtime: "sandbox"
+          }
+        }
+      },
+      verifyPolicy: "off"
+    });
+    expect(wrote.ok).toBe(true);
+
+    const installed = await invokeRuntime({
+      type: "brain.plugin.install",
+      location: packagePath,
+      sessionId
+    });
+    expect(installed.ok).toBe(true);
+    const installedData = (installed.data || {}) as Record<string, unknown>;
+    expect(String(installedData.pluginId || "")).toBe("plugin.route.extension.mem.package");
+    expect(String(installedData.sourceLocation || "")).toBe(packagePath);
+
+    const patched = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      mode: "script",
+      action: "click",
+      verifyPolicy: "off"
+    });
+    expect(patched.ok).toBe(true);
+    const patchedResult = (patched.data || {}) as Record<string, unknown>;
+    expect((patchedResult.data || {}) as Record<string, unknown>).toEqual({ source: "extension-module" });
+  });
+
   it("brain.plugin.disable should restore replaced openai_compatible provider", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -4788,7 +5458,7 @@ description missing`
       }
     });
     expect(installLocalLocation.ok).toBe(false);
-    expect(String(installLocalLocation.error || "")).toContain("仅支持 mem:// 或 vfs://");
+    expect(String(installLocalLocation.error || "")).toContain("仅支持 mem://");
 
     const enableMissingSkillId = await invokeRuntime({
       type: "brain.skill.enable"
@@ -4822,7 +5492,7 @@ description missing`
       roots: [{ root: "/repo/.agents/skills", source: "project" }]
     });
     expect(discoverLocalRoot.ok).toBe(false);
-    expect(String(discoverLocalRoot.error || "")).toContain("仅支持 mem:// 或 vfs://");
+    expect(String(discoverLocalRoot.error || "")).toContain("仅支持 mem://");
 
     const uninstallMissingSkill = await invokeRuntime({
       type: "brain.skill.uninstall",
@@ -4841,6 +5511,7 @@ description missing`
       payload: {
         bridgeUrl: "ws://127.0.0.1:17777/ws",
         bridgeToken: "token-demo",
+        browserRuntimeStrategy: "browser-first",
         ...buildWorkerLlmConfig({ model: "gpt-test" }),
         bridgeInvokeTimeoutMs: 180000,
         llmTimeoutMs: 160000,
@@ -4896,6 +5567,7 @@ description missing`
     expect(debugCfg.ok).toBe(true);
     const debugCfgData = (debugCfg.data || {}) as Record<string, unknown>;
     expect(debugCfgData.bridgeUrl).toBe("ws://127.0.0.1:17777/ws");
+    expect(String(debugCfgData.browserRuntimeStrategy || "")).toBe("browser-first");
     expect(typeof debugCfgData.hasLlmApiKey).toBe("boolean");
     expect(debugCfgData.bridgeInvokeTimeoutMs).toBe(180000);
     expect(debugCfgData.llmTimeoutMs).toBe(160000);
