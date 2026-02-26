@@ -1,7 +1,16 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { useRuntimeStore, type PluginMetadata } from "../stores/runtime";
-import { ArrowLeft, Loader2, RefreshCcw, Power, Trash2, Plus } from "lucide-vue-next";
+import { ArrowLeft, Loader2, RefreshCcw, Power, Trash2, Plus, WandSparkles } from "lucide-vue-next";
+
+interface PluginPreset {
+  id: string;
+  name: string;
+  description: string;
+  replace: boolean;
+  enable: boolean;
+  plugin: Record<string, unknown>;
+}
 
 const emit = defineEmits(["close"]);
 const store = useRuntimeStore();
@@ -16,23 +25,110 @@ const llmProviders = ref<Array<Record<string, unknown>>>([]);
 
 const replaceOnRegister = ref(true);
 const enableOnRegister = ref(true);
-const pluginJson = ref(`{
-  "manifest": {
-    "id": "plugin.proxy.demo",
-    "name": "proxy-demo",
-    "version": "1.0.0",
-    "permissions": {
-      "llmProviders": ["proxy.demo"]
+const selectedPresetId = ref("");
+const pluginJson = ref("");
+
+const presets: PluginPreset[] = [
+  {
+    id: "preset-llm-proxy-basic",
+    name: "LLM Proxy（新增 provider）",
+    description: "新增一个独立 provider，不覆盖系统默认 openai_compatible。",
+    replace: true,
+    enable: true,
+    plugin: {
+      manifest: {
+        id: "plugin.preset.llm.proxy.basic",
+        name: "preset-llm-proxy-basic",
+        version: "1.0.0",
+        permissions: {
+          llmProviders: ["proxy.route.basic"]
+        }
+      },
+      llmProviders: [
+        {
+          id: "proxy.route.basic",
+          transport: "openai_compatible",
+          baseUrl: "https://proxy.example.com/v1"
+        }
+      ]
     }
   },
-  "llmProviders": [
-    {
-      "id": "proxy.demo",
-      "transport": "openai_compatible",
-      "baseUrl": "https://proxy.example.com/v1"
+  {
+    id: "preset-llm-replace-openai",
+    name: "LLM Proxy（覆盖默认 provider）",
+    description: "把 openai_compatible 路由切到代理地址。禁用/卸载插件后可回滚。",
+    replace: true,
+    enable: true,
+    plugin: {
+      manifest: {
+        id: "plugin.preset.llm.replace.openai",
+        name: "preset-llm-replace-openai",
+        version: "1.0.0",
+        permissions: {
+          llmProviders: ["openai_compatible"],
+          replaceLlmProviders: true
+        }
+      },
+      llmProviders: [
+        {
+          id: "openai_compatible",
+          transport: "openai_compatible",
+          baseUrl: "https://proxy.example.com/v1"
+        }
+      ]
     }
-  ]
-}`);
+  },
+  {
+    id: "preset-browser-action-strict",
+    name: "browser.action 严格校验",
+    description: "把 browser.action 的 verify 策略提升为 always，减少“执行成功但无进展”。",
+    replace: true,
+    enable: true,
+    plugin: {
+      manifest: {
+        id: "plugin.preset.browser.action.strict",
+        name: "preset-browser-action-strict",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["browser.action"]
+        }
+      },
+      policies: {
+        capabilities: {
+          "browser.action": {
+            defaultVerifyPolicy: "always",
+            leasePolicy: "required"
+          }
+        }
+      }
+    }
+  },
+  {
+    id: "preset-browser-verify-relaxed",
+    name: "browser.action 宽松校验",
+    description: "把 browser.action 的 verify 策略改为 on_critical，适合探索式任务。",
+    replace: true,
+    enable: true,
+    plugin: {
+      manifest: {
+        id: "plugin.preset.browser.action.relaxed",
+        name: "preset-browser-verify-relaxed",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["browser.action"]
+        }
+      },
+      policies: {
+        capabilities: {
+          "browser.action": {
+            defaultVerifyPolicy: "on_critical",
+            leasePolicy: "required"
+          }
+        }
+      }
+    }
+  }
+];
 
 function setPageError(error: unknown) {
   pageError.value = error instanceof Error ? error.message : String(error || "未知错误");
@@ -47,6 +143,10 @@ function providerSummary(row: Record<string, unknown>): string {
   const id = String(row.id || "").trim() || "unknown";
   const transport = String(row.transport || "custom").trim();
   return `${id} (${transport})`;
+}
+
+function deepCloneRecord(input: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(input)) as Record<string, unknown>;
 }
 
 function parsePluginJsonDraft(): Record<string, unknown> {
@@ -64,6 +164,30 @@ function parsePluginJsonDraft(): Record<string, unknown> {
     throw new Error("插件 JSON 必须是 object");
   }
   return parsed as Record<string, unknown>;
+}
+
+function applyPreset(preset: PluginPreset) {
+  selectedPresetId.value = preset.id;
+  replaceOnRegister.value = preset.replace;
+  enableOnRegister.value = preset.enable;
+  pluginJson.value = JSON.stringify(preset.plugin, null, 2);
+}
+
+async function installPreset(preset: PluginPreset) {
+  registering.value = true;
+  pageError.value = "";
+  try {
+    await store.registerPlugin(deepCloneRecord(preset.plugin), {
+      replace: preset.replace,
+      enable: preset.enable
+    });
+    applyPreset(preset);
+    await refreshPlugins();
+  } catch (error) {
+    setPageError(error);
+  } finally {
+    registering.value = false;
+  }
 }
 
 async function refreshPlugins() {
@@ -135,6 +259,7 @@ async function handleUnregister(plugin: PluginMetadata) {
 
 onMounted(async () => {
   dialogRef.value?.focus();
+  applyPreset(presets[0]);
   await refreshPlugins();
 });
 </script>
@@ -170,9 +295,47 @@ onMounted(async () => {
 
     <div class="flex-1 overflow-y-auto p-4 space-y-6">
       <section class="space-y-3">
-        <h3 class="text-[11px] font-bold uppercase tracking-[0.1em] text-ui-text-muted">快速注册（JSON）</h3>
+        <h3 class="text-[11px] font-bold uppercase tracking-[0.1em] text-ui-text-muted">内置插件模板（先放几项）</h3>
+        <ul class="space-y-2">
+          <li
+            v-for="preset in presets"
+            :key="preset.id"
+            class="rounded-md border px-3 py-2.5"
+            :class="selectedPresetId === preset.id ? 'border-ui-accent bg-ui-accent/5' : 'border-ui-border bg-ui-surface/20'"
+          >
+            <div class="flex items-start gap-2">
+              <div class="min-w-0 flex-1">
+                <p class="text-[13px] font-semibold text-ui-text">{{ preset.name }}</p>
+                <p class="text-[11px] text-ui-text-muted mt-0.5">{{ preset.description }}</p>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <button
+                  class="px-2 py-1 rounded-sm bg-ui-bg border border-ui-border text-[11px] hover:bg-ui-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+                  @click="applyPreset(preset)"
+                >
+                  加载
+                </button>
+                <button
+                  class="px-2 py-1 rounded-sm bg-ui-bg border border-ui-border text-[11px] hover:bg-ui-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50"
+                  :disabled="registering"
+                  @click="installPreset(preset)"
+                >
+                  <WandSparkles :size="12" class="inline-block mr-1" />
+                  一键安装
+                </button>
+              </div>
+            </div>
+          </li>
+        </ul>
+      </section>
+
+      <section class="space-y-3">
+        <h3 class="text-[11px] font-bold uppercase tracking-[0.1em] text-ui-text-muted">高级模式（JSON）</h3>
         <p class="text-[11px] text-ui-text-muted">
-          这里走 `brain.plugin.register`。JSON 方式适合声明式配置（比如 llmProviders）。
+          这里走 `brain.plugin.register`。用于声明式插件（LLM Provider / Policy / ToolContract）。
+        </p>
+        <p class="text-[11px] text-ui-text-muted">
+          注意：函数型 `hooks/provider.invoke` 不能通过 JSON 传输，后续会补“脚本化插件”模式。
         </p>
         <textarea
           v-model="pluginJson"
