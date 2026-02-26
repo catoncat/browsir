@@ -38,6 +38,9 @@ import {
   type ToolContractView,
   type ToolDefinition
 } from "./tool-contract-registry";
+import { createOpenAiCompatibleLlmProvider } from "./llm-openai-compatible-provider";
+import { DEFAULT_LLM_PROVIDER_ID, type LlmProviderAdapter } from "./llm-provider";
+import { LlmProviderRegistry, type RegisterLlmProviderOptions } from "./llm-provider-registry";
 
 export type { ExecuteCapability, ExecuteMode, ExecuteStepInput, ExecuteStepResult } from "./types";
 export type { CapabilityExecutionPolicy, RegisterCapabilityPolicyOptions } from "./capability-policy";
@@ -140,6 +143,7 @@ export class BrainOrchestrator {
   private readonly toolProviders = new ToolProviderRegistry();
   private readonly toolContracts = new ToolContractRegistry();
   private readonly capabilityPolicies = new CapabilityPolicyRegistry();
+  private readonly llmProviders = new LlmProviderRegistry();
   private readonly skills: SkillRegistry;
   private readonly skillResolver: SkillContentResolver;
   private readonly plugins = new PluginRuntime({
@@ -161,7 +165,10 @@ export class BrainOrchestrator {
     registerToolContract: (contract, options) => this.registerToolContract(contract, options),
     unregisterToolContract: (name) => this.unregisterToolContract(name),
     resolveToolContract: (name) => this.resolveToolContract(name),
-    listToolContracts: () => this.listToolContracts()
+    listToolContracts: () => this.listToolContracts(),
+    registerLlmProvider: (provider, options) => this.registerLlmProvider(provider, options),
+    unregisterLlmProvider: (id) => this.unregisterLlmProvider(id),
+    getLlmProvider: (id) => this.getLlmProvider(id)
   });
   private readonly runStateBySession = new Map<string, RunState>();
   private readonly streamBySession = new Map<string, StepTraceRecord[]>();
@@ -207,6 +214,9 @@ export class BrainOrchestrator {
     this.skillResolver = new SkillContentResolver(this.skills, {
       readText: options.skillContentReader
     });
+    this.llmProviders.register(createOpenAiCompatibleLlmProvider(DEFAULT_LLM_PROVIDER_ID), {
+      replace: true
+    });
 
     this.events.subscribe((event) => {
       this.schedulePersistEvent(event);
@@ -243,6 +253,26 @@ export class BrainOrchestrator {
 
   listLlmToolDefinitions(): ToolDefinition[] {
     return this.toolContracts.listLlmToolDefinitions();
+  }
+
+  registerLlmProvider(provider: LlmProviderAdapter, options: RegisterLlmProviderOptions = {}): void {
+    this.llmProviders.register(provider, options);
+  }
+
+  unregisterLlmProvider(id: string): boolean {
+    return this.llmProviders.unregister(id);
+  }
+
+  getLlmProvider(id: string): LlmProviderAdapter | undefined {
+    return this.llmProviders.get(id);
+  }
+
+  listLlmProviders(): Array<{ id: string }> {
+    return this.llmProviders.list();
+  }
+
+  getLlmProviderRegistry(): LlmProviderRegistry {
+    return this.llmProviders;
   }
 
   getToolProvider(mode: ExecuteMode): StepToolProvider | undefined {

@@ -16,11 +16,9 @@ import {
 } from "./llm-message-model.browser";
 import { decideProfileEscalation, type LlmProfileEscalationPolicy } from "./llm-profile-policy";
 import {
-  DEFAULT_LLM_PROVIDER_ID,
   type LlmResolvedRoute
 } from "./llm-provider";
 import { LlmProviderRegistry } from "./llm-provider-registry";
-import { createOpenAiCompatibleLlmProvider } from "./llm-openai-compatible-provider";
 import { resolveLlmRoute } from "./llm-profile-resolver";
 import { writeSessionMeta } from "./session-store.browser";
 import { type BridgeConfig, type RuntimeInfraHandler } from "./runtime-infra.browser";
@@ -2394,8 +2392,7 @@ async function refreshSessionTitleAuto(
 }
 
 export function createRuntimeLoopController(orchestrator: BrainOrchestrator, infra: RuntimeInfraHandler): RuntimeLoopController {
-  const llmProviders = new LlmProviderRegistry();
-  llmProviders.register(createOpenAiCompatibleLlmProvider(DEFAULT_LLM_PROVIDER_ID), { replace: true });
+  const llmProviders = orchestrator.getLlmProviderRegistry();
 
   orchestrator.onHook(
     "compaction.summary",
@@ -2910,6 +2907,34 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       capability: normalizedCapability,
       action: normalizedAction
     });
+
+    // mode provider 已注册时，统一走 orchestrator 执行链，确保 plugin hooks/provider override 生效。
+    const modeProvider = orchestrator.getToolProvider(executionMode);
+    if (modeProvider) {
+      const result = await orchestrator.executeStep({
+        sessionId,
+        mode: executionMode,
+        capability: normalizedCapability,
+        action: normalizedAction,
+        args: payload,
+        verifyPolicy: effectiveVerifyPolicy
+      });
+      orchestrator.events.emit("step_execute_result", sessionId, {
+        ok: result.ok,
+        modeUsed: result.modeUsed,
+        capabilityUsed: result.capabilityUsed || normalizedCapability || "",
+        fallbackFrom: result.fallbackFrom,
+        verified: result.verified,
+        verifyReason: result.verifyReason,
+        error: result.error,
+        errorCode: result.errorCode || "",
+        retryable: result.retryable === true
+      });
+      return {
+        ...result,
+        capabilityUsed: result.capabilityUsed || normalizedCapability
+      };
+    }
 
     const runMode = async (targetMode: ExecuteMode): Promise<unknown> => {
       if (targetMode === "bridge") {

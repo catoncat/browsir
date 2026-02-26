@@ -4,6 +4,8 @@ import type { ExecuteCapability, ExecuteMode } from "./types";
 import type { CapabilityExecutionPolicy, RegisterCapabilityPolicyOptions } from "./capability-policy";
 import type { RegisterProviderOptions, StepToolProvider } from "./tool-provider-registry";
 import type { ToolContract, ToolContractView } from "./tool-contract-registry";
+import type { LlmProviderAdapter } from "./llm-provider";
+import type { RegisterLlmProviderOptions } from "./llm-provider-registry";
 
 export interface AgentPluginPermissions {
   hooks?: string[];
@@ -12,6 +14,8 @@ export interface AgentPluginPermissions {
   replaceProviders?: boolean;
   tools?: string[];
   replaceToolContracts?: boolean;
+  llmProviders?: string[];
+  replaceLlmProviders?: boolean;
 }
 
 export interface AgentPluginManifest {
@@ -29,10 +33,12 @@ type PluginHookEntry<K extends keyof OrchestratorHookMap & string> =
       options?: HookHandlerOptions;
     };
 
+type PluginHookEntries<K extends keyof OrchestratorHookMap & string> = PluginHookEntry<K> | PluginHookEntry<K>[];
+
 export interface AgentPluginDefinition {
   manifest: AgentPluginManifest;
   hooks?: Partial<{
-    [K in keyof OrchestratorHookMap & string]: PluginHookEntry<K>;
+    [K in keyof OrchestratorHookMap & string]: PluginHookEntries<K>;
   }>;
   providers?: {
     modes?: Partial<Record<ExecuteMode, StepToolProvider>>;
@@ -42,6 +48,7 @@ export interface AgentPluginDefinition {
     capabilities?: Record<ExecuteCapability, CapabilityExecutionPolicy>;
   };
   tools?: ToolContract[];
+  llmProviders?: LlmProviderAdapter[];
 }
 
 export interface PluginRuntimeView {
@@ -57,6 +64,7 @@ export interface PluginRuntimeView {
   capabilities: ExecuteCapability[];
   policyCapabilities: ExecuteCapability[];
   tools: string[];
+  llmProviders: string[];
 }
 
 interface RuntimeHost {
@@ -88,6 +96,9 @@ interface RuntimeHost {
   unregisterToolContract(name: string): boolean;
   resolveToolContract(name: string): ToolContract | null;
   listToolContracts(): ToolContractView[];
+  registerLlmProvider(provider: LlmProviderAdapter, options?: RegisterLlmProviderOptions): void;
+  unregisterLlmProvider(id: string): boolean;
+  getLlmProvider(id: string): LlmProviderAdapter | undefined;
 }
 
 interface ReplacedModeProvider {
@@ -111,6 +122,11 @@ interface ReplacedToolContract {
   contract: ToolContract;
 }
 
+interface ReplacedLlmProvider {
+  id: string;
+  provider: LlmProviderAdapter;
+}
+
 interface PluginState {
   definition: AgentPluginDefinition;
   enabled: boolean;
@@ -119,10 +135,12 @@ interface PluginState {
   ownedCapabilityProviders: Array<{ capability: ExecuteCapability; providerId: string }>;
   ownedCapabilityPolicies: Array<{ capability: ExecuteCapability; policyId: string }>;
   ownedToolContracts: string[];
+  ownedLlmProviders: string[];
   replacedModeProviders: ReplacedModeProvider[];
   replacedCapabilityProviders: ReplacedCapabilityProvider[];
   replacedCapabilityPolicies: ReplacedCapabilityPolicy[];
   replacedToolContracts: ReplacedToolContract[];
+  replacedLlmProviders: ReplacedLlmProvider[];
   errorCount: number;
   lastError?: string;
 }
@@ -143,6 +161,11 @@ function toHookEntry<K extends keyof OrchestratorHookMap & string>(entry: Plugin
     handler: entry.handler,
     options: entry.options ?? {}
   };
+}
+
+function normalizeHookEntries<K extends keyof OrchestratorHookMap & string>(entries: PluginHookEntries<K>): PluginHookEntry<K>[] {
+  const list = Array.isArray(entries) ? entries : [entries];
+  return list.filter(Boolean);
 }
 
 export class PluginRuntime {
@@ -172,10 +195,12 @@ export class PluginRuntime {
       ownedCapabilityProviders: [],
       ownedCapabilityPolicies: [],
       ownedToolContracts: [],
+      ownedLlmProviders: [],
       replacedModeProviders: [],
       replacedCapabilityProviders: [],
       replacedCapabilityPolicies: [],
       replacedToolContracts: [],
+      replacedLlmProviders: [],
       errorCount: 0
     };
     this.plugins.set(id, state);
@@ -203,6 +228,7 @@ export class PluginRuntime {
     const permissions = manifest.permissions ?? {};
     const allowReplace = permissions.replaceProviders === true;
     const allowReplaceTools = permissions.replaceToolContracts === true;
+    const allowReplaceLlmProviders = permissions.replaceLlmProviders === true;
     const timeoutMs = Math.max(50, Math.min(10_000, Number(manifest.timeoutMs || 1500)));
 
     try {
@@ -211,30 +237,33 @@ export class PluginRuntime {
         if (!isAllowed(permissions.hooks, hook)) {
           throw new Error(`plugin ${id} 未授权 hook: ${hook}`);
         }
-        const entry = toHookEntry(raw as PluginHookEntry<keyof OrchestratorHookMap & string>);
-        const unregister = this.host.onHook(
-          hook as keyof OrchestratorHookMap & string,
-          async (payload) => {
-            const timer = new Promise<{ action: "continue" }>((resolve) =>
-              setTimeout(() => resolve({ action: "continue" }), timeoutMs)
-            );
-            try {
-              const result = await Promise.race([Promise.resolve(entry.handler(payload)), timer]);
-              if (!result) return { action: "continue" };
-              return result;
-            } catch (error) {
-              state.lastError = error instanceof Error ? error.message : String(error);
-              state.errorCount += 1;
-              return { action: "continue" };
+        const entries = normalizeHookEntries(raw as PluginHookEntries<keyof OrchestratorHookMap & string>);
+        for (const [idx, item] of entries.entries()) {
+          const entry = toHookEntry(item);
+          const unregister = this.host.onHook(
+            hook as keyof OrchestratorHookMap & string,
+            async (payload) => {
+              const timer = new Promise<{ action: "continue" }>((resolve) =>
+                setTimeout(() => resolve({ action: "continue" }), timeoutMs)
+              );
+              try {
+                const result = await Promise.race([Promise.resolve(entry.handler(payload)), timer]);
+                if (!result) return { action: "continue" };
+                return result;
+              } catch (error) {
+                state.lastError = error instanceof Error ? error.message : String(error);
+                state.errorCount += 1;
+                return { action: "continue" };
+              }
+            },
+            {
+              ...entry.options,
+              // Hook id 总是挂插件命名空间，避免跨插件冲突卸载。
+              id: `${id}:${hook}:${String(entry.options.id || `handler-${idx + 1}`).trim() || `handler-${idx + 1}`}`
             }
-          },
-          {
-            ...entry.options,
-            // Hook id 总是挂插件命名空间，避免跨插件冲突卸载。
-            id: `${id}:${hook}:${String(entry.options.id || "handler").trim() || "handler"}`
-          }
-        );
-        state.unregisterHooks.push(unregister);
+          );
+          state.unregisterHooks.push(unregister);
+        }
       }
 
       for (const [mode, provider] of Object.entries(state.definition.providers?.modes || {}) as Array<
@@ -349,6 +378,35 @@ export class PluginRuntime {
         state.ownedToolContracts.push(toolName);
       }
 
+      for (const llmProvider of Array.isArray(state.definition.llmProviders) ? state.definition.llmProviders : []) {
+        const providerId = String(llmProvider?.id || "").trim();
+        if (!providerId) {
+          throw new Error(`plugin ${id} llm provider id 不能为空`);
+        }
+        if (!isAllowed(permissions.llmProviders, providerId)) {
+          throw new Error(`plugin ${id} 未授权 llm provider: ${providerId}`);
+        }
+        if (allowReplaceLlmProviders) {
+          const previous = this.host.getLlmProvider(providerId);
+          if (previous) {
+            state.replacedLlmProviders.push({
+              id: providerId,
+              provider: previous
+            });
+          }
+        }
+        this.host.registerLlmProvider(
+          {
+            ...llmProvider,
+            id: providerId
+          },
+          {
+            replace: allowReplaceLlmProviders
+          }
+        );
+        state.ownedLlmProviders.push(providerId);
+      }
+
       state.enabled = true;
       state.lastError = undefined;
     } catch (error) {
@@ -409,10 +467,19 @@ export class PluginRuntime {
       if (!replaced) continue;
       this.host.registerToolContract(replaced.contract, { replace: true });
     }
+    for (const providerId of state.ownedLlmProviders.splice(0)) {
+      const removed = this.host.unregisterLlmProvider(providerId);
+      if (!removed) continue;
+      const replaced = state.replacedLlmProviders.find((entry) => entry.id === providerId);
+      if (!replaced) continue;
+      if (this.host.getLlmProvider(providerId)) continue;
+      this.host.registerLlmProvider(replaced.provider, { replace: false });
+    }
     state.replacedModeProviders = [];
     state.replacedCapabilityProviders = [];
     state.replacedCapabilityPolicies = [];
     state.replacedToolContracts = [];
+    state.replacedLlmProviders = [];
 
     state.enabled = false;
   }
@@ -434,6 +501,9 @@ export class PluginRuntime {
         policyCapabilities: Object.keys(state.definition.policies?.capabilities || {}),
         tools: (Array.isArray(state.definition.tools) ? state.definition.tools : [])
           .map((item) => String(item?.name || "").trim())
+          .filter(Boolean),
+        llmProviders: (Array.isArray(state.definition.llmProviders) ? state.definition.llmProviders : [])
+          .map((item) => String(item?.id || "").trim())
           .filter(Boolean)
       };
     });

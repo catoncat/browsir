@@ -3,6 +3,8 @@ import { BrainOrchestrator } from "./orchestrator.browser";
 import { createRuntimeInfraHandler, type RuntimeInfraHandler, type RuntimeInfraResult } from "./runtime-infra.browser";
 import { createRuntimeLoopController, type RuntimeLoopController } from "./runtime-loop.browser";
 import { isVirtualUri } from "./virtual-fs.browser";
+import type { AgentPluginDefinition, AgentPluginManifest, AgentPluginPermissions } from "./plugin-runtime";
+import type { LlmProviderAdapter, LlmProviderSendInput } from "./llm-provider";
 import {
   removeSessionIndexEntry,
   removeSessionMeta,
@@ -66,6 +68,215 @@ function requireSessionId(message: unknown): string {
 
 function toRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function toStringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const text = String(item || "").trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+  }
+  return out.length > 0 ? out : [];
+}
+
+function parseJsonObjectText(value: string, field: string): Record<string, unknown> {
+  const text = String(value || "").trim();
+  if (!text) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`${field} 不是合法 JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${field} 必须是 JSON object`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function normalizeHeadersRecord(input: unknown, field: string): Record<string, string> {
+  if (input === undefined || input === null) return {};
+  let source: Record<string, unknown> = {};
+  if (typeof input === "string") {
+    source = parseJsonObjectText(input, field);
+  } else {
+    source = toRecord(input);
+  }
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source)) {
+    const headerName = String(key || "").trim();
+    if (!headerName) continue;
+    out[headerName] = String(value ?? "").trim();
+  }
+  return out;
+}
+
+interface DeclarativeLlmProviderSpec {
+  id: string;
+  transport: "openai_compatible";
+  baseUrl: string;
+  endpointPath: string;
+  headers: Record<string, string>;
+  authMode: "route_api_key" | "static_bearer" | "none";
+  staticApiKey: string;
+}
+
+function normalizeDeclarativeLlmProviderSpec(input: unknown): DeclarativeLlmProviderSpec {
+  const row = toRecord(input);
+  const id = String(row.id || "").trim();
+  if (!id) throw new Error("llm provider id 不能为空");
+
+  const transportRaw = String(row.transport || "openai_compatible").trim().toLowerCase();
+  if (transportRaw !== "openai_compatible") {
+    throw new Error(`llm provider ${id} transport 非法: ${transportRaw}`);
+  }
+
+  const baseUrl = String(row.baseUrl || "").trim().replace(/\/+$/, "");
+  if (!baseUrl) throw new Error(`llm provider ${id} 需要 baseUrl`);
+  if (!/^https?:\/\//i.test(baseUrl)) throw new Error(`llm provider ${id} baseUrl 必须是 http/https URL`);
+
+  const endpointRaw = String(row.endpointPath || row.path || "/chat/completions").trim();
+  const endpointPath = endpointRaw.startsWith("/") ? endpointRaw : `/${endpointRaw}`;
+  const authModeRaw = String(row.authMode || "route_api_key").trim().toLowerCase();
+  const authMode =
+    authModeRaw === "none" || authModeRaw === "static_bearer" || authModeRaw === "route_api_key"
+      ? authModeRaw
+      : null;
+  if (!authMode) throw new Error(`llm provider ${id} authMode 非法: ${authModeRaw}`);
+
+  const staticApiKey = String(row.apiKey || row.staticApiKey || "").trim();
+  if (authMode === "static_bearer" && !staticApiKey) {
+    throw new Error(`llm provider ${id} authMode=static_bearer 时需要 apiKey`);
+  }
+
+  return {
+    id,
+    transport: "openai_compatible",
+    baseUrl,
+    endpointPath,
+    headers: normalizeHeadersRecord(row.headers, `llm provider ${id} headers`),
+    authMode,
+    staticApiKey
+  };
+}
+
+function createDeclarativeOpenAiCompatibleProvider(spec: DeclarativeLlmProviderSpec): LlmProviderAdapter {
+  return {
+    id: spec.id,
+    resolveRequestUrl() {
+      return `${spec.baseUrl}${spec.endpointPath}`;
+    },
+    async send(input: LlmProviderSendInput): Promise<Response> {
+      const requestUrl = String(input.requestUrl || "").trim() || this.resolveRequestUrl(input.route);
+      const authHeader = (() => {
+        if (spec.authMode === "none") return "";
+        if (spec.authMode === "static_bearer") return `Bearer ${spec.staticApiKey}`;
+        return `Bearer ${String(input.route.llmKey || "")}`;
+      })();
+      const headers: Record<string, string> = {
+        "content-type": "application/json",
+        ...spec.headers
+      };
+      if (authHeader) headers.authorization = authHeader;
+      return await fetch(requestUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(input.payload),
+        signal: input.signal
+      });
+    }
+  };
+}
+
+function normalizePluginPermissions(input: unknown): AgentPluginPermissions {
+  const row = toRecord(input);
+  const hooks = toStringList(row.hooks);
+  const modesRaw = toStringList(row.modes);
+  const capabilities = toStringList(row.capabilities);
+  const tools = toStringList(row.tools);
+  const llmProviders = toStringList(row.llmProviders);
+  const modes =
+    Array.isArray(modesRaw) && modesRaw.length > 0
+      ? (modesRaw.filter((item) => item === "script" || item === "cdp" || item === "bridge") as Array<
+          "script" | "cdp" | "bridge"
+        >)
+      : undefined;
+  return {
+    ...(hooks ? { hooks } : {}),
+    ...(modes ? { modes } : {}),
+    ...(capabilities ? { capabilities } : {}),
+    ...(tools ? { tools } : {}),
+    ...(llmProviders ? { llmProviders } : {}),
+    ...(row.replaceProviders === true ? { replaceProviders: true } : {}),
+    ...(row.replaceToolContracts === true ? { replaceToolContracts: true } : {}),
+    ...(row.replaceLlmProviders === true ? { replaceLlmProviders: true } : {})
+  };
+}
+
+function normalizePluginManifest(input: unknown): AgentPluginManifest {
+  const row = toRecord(input);
+  const id = String(row.id || "").trim();
+  if (!id) throw new Error("plugin.manifest.id 不能为空");
+  const name = String(row.name || "").trim() || id;
+  const version = String(row.version || "").trim() || "0.0.0";
+  const timeoutRaw = Number(row.timeoutMs);
+  const timeoutMs = Number.isFinite(timeoutRaw) ? Math.max(50, Math.min(10_000, Math.floor(timeoutRaw))) : undefined;
+  const permissions = normalizePluginPermissions(row.permissions);
+  return {
+    id,
+    name,
+    version,
+    ...(timeoutMs ? { timeoutMs } : {}),
+    ...(Object.keys(permissions).length > 0 ? { permissions } : {})
+  };
+}
+
+function normalizePluginLlmProviders(input: unknown): LlmProviderAdapter[] | undefined {
+  if (!Array.isArray(input)) return undefined;
+  const out: LlmProviderAdapter[] = [];
+  for (const item of input) {
+    const row = toRecord(item);
+    const send = row.send;
+    const resolveRequestUrl = row.resolveRequestUrl;
+    const id = String(row.id || "").trim();
+    if (id && typeof send === "function" && typeof resolveRequestUrl === "function") {
+      out.push({
+        id,
+        send: send as LlmProviderAdapter["send"],
+        resolveRequestUrl: resolveRequestUrl as LlmProviderAdapter["resolveRequestUrl"]
+      });
+      continue;
+    }
+    const spec = normalizeDeclarativeLlmProviderSpec(item);
+    out.push(createDeclarativeOpenAiCompatibleProvider(spec));
+  }
+  return out;
+}
+
+function normalizePluginDefinition(input: unknown): AgentPluginDefinition {
+  const row = toRecord(input);
+  const manifest = normalizePluginManifest(row.manifest);
+  const hooks = row.hooks as AgentPluginDefinition["hooks"] | undefined;
+  const providers = row.providers as AgentPluginDefinition["providers"] | undefined;
+  const policies = row.policies as AgentPluginDefinition["policies"] | undefined;
+  const tools = Array.isArray(row.tools) ? (row.tools as AgentPluginDefinition["tools"]) : undefined;
+  const llmProviders = normalizePluginLlmProviders(row.llmProviders);
+  return {
+    manifest,
+    ...(hooks ? { hooks } : {}),
+    ...(providers ? { providers } : {}),
+    ...(policies ? { policies } : {}),
+    ...(tools ? { tools } : {}),
+    ...(llmProviders ? { llmProviders } : {})
+  };
+}
+
+function readPluginId(payload: Record<string, unknown>): string {
+  return String(payload.pluginId || payload.id || "").trim();
 }
 
 function normalizeIntInRange(raw: unknown, fallback: number, min: number, max: number): number {
@@ -1825,6 +2036,81 @@ async function handleBrainSkill(
   return fail(`unsupported brain.skill action: ${action}`);
 }
 
+async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unknown): Promise<RuntimeResult> {
+  const payload = toRecord(message);
+  const action = String(payload.type || "");
+
+  if (action === "brain.plugin.list") {
+    return ok({
+      plugins: orchestrator.listPlugins(),
+      modeProviders: orchestrator.listToolProviders(),
+      toolContracts: orchestrator.listToolContracts(),
+      llmProviders: orchestrator.listLlmProviders(),
+      capabilityProviders: orchestrator.listCapabilityProviders(),
+      capabilityPolicies: orchestrator.listCapabilityPolicies()
+    });
+  }
+
+  if (action === "brain.plugin.register") {
+    const pluginRaw = toRecord(payload.plugin);
+    if (Object.keys(pluginRaw).length === 0) {
+      return fail("brain.plugin.register 需要 plugin");
+    }
+    const definition = normalizePluginDefinition(pluginRaw);
+    const replace = payload.replace === true;
+    const enable = payload.enable !== false;
+    orchestrator.registerPlugin(definition, { replace, enable });
+    const pluginId = definition.manifest.id;
+    const current = orchestrator.listPlugins().find((item) => item.id === pluginId) || null;
+    return ok({
+      pluginId,
+      enabled: current?.enabled === true,
+      plugin: current,
+      llmProviders: orchestrator.listLlmProviders()
+    });
+  }
+
+  if (action === "brain.plugin.enable") {
+    const pluginId = readPluginId(payload);
+    if (!pluginId) return fail("brain.plugin.enable 需要 pluginId");
+    orchestrator.enablePlugin(pluginId);
+    const current = orchestrator.listPlugins().find((item) => item.id === pluginId) || null;
+    return ok({
+      pluginId,
+      enabled: true,
+      plugin: current,
+      llmProviders: orchestrator.listLlmProviders()
+    });
+  }
+
+  if (action === "brain.plugin.disable") {
+    const pluginId = readPluginId(payload);
+    if (!pluginId) return fail("brain.plugin.disable 需要 pluginId");
+    orchestrator.disablePlugin(pluginId);
+    const current = orchestrator.listPlugins().find((item) => item.id === pluginId) || null;
+    return ok({
+      pluginId,
+      enabled: false,
+      plugin: current,
+      llmProviders: orchestrator.listLlmProviders()
+    });
+  }
+
+  if (action === "brain.plugin.unregister") {
+    const pluginId = readPluginId(payload);
+    if (!pluginId) return fail("brain.plugin.unregister 需要 pluginId");
+    const removed = orchestrator.unregisterPlugin(pluginId);
+    if (!removed) return fail(`plugin 不存在: ${pluginId}`);
+    return ok({
+      pluginId,
+      removed: true,
+      llmProviders: orchestrator.listLlmProviders()
+    });
+  }
+
+  return fail(`unsupported brain.plugin action: ${action}`);
+}
+
 async function handleBrainDebug(
   orchestrator: BrainOrchestrator,
   runtimeLoop: RuntimeLoopController,
@@ -1898,6 +2184,7 @@ async function handleBrainDebug(
       plugins: orchestrator.listPlugins(),
       modeProviders: orchestrator.listToolProviders(),
       toolContracts: orchestrator.listToolContracts(),
+      llmProviders: orchestrator.listLlmProviders(),
       capabilityProviders: orchestrator.listCapabilityProviders(),
       capabilityPolicies: orchestrator.listCapabilityPolicies()
     });
@@ -1956,6 +2243,10 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
 
         if (type.startsWith("brain.skill.")) {
           return await applyAfter(await handleBrainSkill(orchestrator, runtimeLoop, routeMessage));
+        }
+
+        if (type.startsWith("brain.plugin.")) {
+          return await applyAfter(await handleBrainPlugin(orchestrator, routeMessage));
         }
 
         if (type.startsWith("brain.debug.")) {

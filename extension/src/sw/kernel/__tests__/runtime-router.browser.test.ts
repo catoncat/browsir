@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { compact, prepareCompaction } from "../compaction.browser";
 import { BrainOrchestrator } from "../orchestrator.browser";
 import { registerRuntimeRouter } from "../runtime-router";
+import type { LlmResolvedRoute } from "../llm-provider";
 
 type RuntimeListener = (message: unknown, sender: unknown, sendResponse: (value: unknown) => void) => boolean | void;
 
@@ -88,6 +89,24 @@ function buildWorkerLlmConfig(options?: {
       }
     }
   );
+}
+
+function createDummyRoute(overrides: Partial<LlmResolvedRoute> = {}): LlmResolvedRoute {
+  return {
+    profile: "default",
+    provider: "openai_compatible",
+    llmBase: "https://example.ai/v1",
+    llmKey: "sk-demo",
+    llmModel: "gpt-test",
+    llmTimeoutMs: 120000,
+    llmRetryMaxAttempts: 2,
+    llmMaxRetryDelayMs: 60000,
+    role: "worker",
+    escalationPolicy: "upgrade_only",
+    orderedProfiles: ["default"],
+    fromLegacy: false,
+    ...overrides
+  };
 }
 
 function resetRuntimeOnMessageMock(): void {
@@ -4319,6 +4338,160 @@ describe("runtime-router.browser", () => {
     expect(toolContracts.some((item) => String(item.name || "") === "host_bash")).toBe(true);
     expect(capabilities.some((item) => String(item.capability || "") === "fs.virtual.read")).toBe(true);
     expect(policies.some((item) => String(item.capability || "") === "browser.action")).toBe(true);
+  });
+
+  it("supports brain.plugin lifecycle routes with hook + llm provider", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    const { sessionId } = await orchestrator.createSession({ title: "plugin-route-lifecycle" });
+    orchestrator.registerToolProvider(
+      "script",
+      {
+        id: "plugin.route.lifecycle.script",
+        invoke: async () => ({ source: "script" })
+      },
+      { replace: true }
+    );
+
+    const registered = await invokeRuntime({
+      type: "brain.plugin.register",
+      plugin: {
+        manifest: {
+          id: "plugin.route.lifecycle",
+          name: "plugin-route-lifecycle",
+          version: "1.0.0",
+          permissions: {
+            hooks: ["tool.after_result"],
+            llmProviders: ["route.proxy"]
+          }
+        },
+        hooks: {
+          "tool.after_result": () => ({
+            action: "patch",
+            patch: {
+              result: { source: "plugin" }
+            }
+          })
+        },
+        llmProviders: [
+          {
+            id: "route.proxy",
+            transport: "openai_compatible",
+            baseUrl: "https://proxy.example.com/v1"
+          }
+        ]
+      }
+    });
+    expect(registered.ok).toBe(true);
+    const registeredData = (registered.data || {}) as Record<string, unknown>;
+    expect(String(registeredData.pluginId || "")).toBe("plugin.route.lifecycle");
+    const registeredLlmProviders = Array.isArray(registeredData.llmProviders)
+      ? (registeredData.llmProviders as Array<Record<string, unknown>>)
+      : [];
+    expect(registeredLlmProviders.some((item) => String(item.id || "") === "route.proxy")).toBe(true);
+
+    const listOut = await invokeRuntime({ type: "brain.plugin.list" });
+    expect(listOut.ok).toBe(true);
+    const listData = (listOut.data || {}) as Record<string, unknown>;
+    const plugins = Array.isArray(listData.plugins) ? (listData.plugins as Array<Record<string, unknown>>) : [];
+    expect(plugins.some((item) => String(item.id || "") === "plugin.route.lifecycle")).toBe(true);
+
+    const patched = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      mode: "script",
+      action: "click",
+      verifyPolicy: "off"
+    });
+    expect(patched.ok).toBe(true);
+    const patchedResult = (patched.data || {}) as Record<string, unknown>;
+    expect((patchedResult.data || {}) as Record<string, unknown>).toEqual({ source: "plugin" });
+
+    const disabled = await invokeRuntime({
+      type: "brain.plugin.disable",
+      pluginId: "plugin.route.lifecycle"
+    });
+    expect(disabled.ok).toBe(true);
+    const disabledStep = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      mode: "script",
+      action: "click",
+      verifyPolicy: "off"
+    });
+    expect(disabledStep.ok).toBe(true);
+    const disabledStepResult = (disabledStep.data || {}) as Record<string, unknown>;
+    expect((disabledStepResult.data || {}) as Record<string, unknown>).toEqual({ source: "script" });
+
+    const enabled = await invokeRuntime({
+      type: "brain.plugin.enable",
+      pluginId: "plugin.route.lifecycle"
+    });
+    expect(enabled.ok).toBe(true);
+    const enabledStep = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      mode: "script",
+      action: "click",
+      verifyPolicy: "off"
+    });
+    expect(enabledStep.ok).toBe(true);
+    const enabledStepResult = (enabledStep.data || {}) as Record<string, unknown>;
+    expect((enabledStepResult.data || {}) as Record<string, unknown>).toEqual({ source: "plugin" });
+
+    const removed = await invokeRuntime({
+      type: "brain.plugin.unregister",
+      pluginId: "plugin.route.lifecycle"
+    });
+    expect(removed.ok).toBe(true);
+    const removedData = (removed.data || {}) as Record<string, unknown>;
+    const remainingLlmProviders = Array.isArray(removedData.llmProviders)
+      ? (removedData.llmProviders as Array<Record<string, unknown>>)
+      : [];
+    expect(remainingLlmProviders.some((item) => String(item.id || "") === "route.proxy")).toBe(false);
+  });
+
+  it("brain.plugin.disable should restore replaced openai_compatible provider", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    const baseProvider = orchestrator.getLlmProvider("openai_compatible");
+    expect(baseProvider).toBeDefined();
+
+    const registered = await invokeRuntime({
+      type: "brain.plugin.register",
+      plugin: {
+        manifest: {
+          id: "plugin.route.provider.restore",
+          name: "plugin-route-provider-restore",
+          version: "1.0.0",
+          permissions: {
+            llmProviders: ["openai_compatible"],
+            replaceLlmProviders: true
+          }
+        },
+        llmProviders: [
+          {
+            id: "openai_compatible",
+            transport: "openai_compatible",
+            baseUrl: "https://proxy.example.com/v1"
+          }
+        ]
+      }
+    });
+    expect(registered.ok).toBe(true);
+    const overridden = orchestrator.getLlmProvider("openai_compatible");
+    expect(overridden).toBeDefined();
+    expect(overridden).not.toBe(baseProvider);
+    const routedUrl = overridden?.resolveRequestUrl(createDummyRoute()) || "";
+    expect(routedUrl).toBe("https://proxy.example.com/v1/chat/completions");
+
+    const disabled = await invokeRuntime({
+      type: "brain.plugin.disable",
+      pluginId: "plugin.route.provider.restore"
+    });
+    expect(disabled.ok).toBe(true);
+    const restored = orchestrator.getLlmProvider("openai_compatible");
+    expect(restored).toBe(baseProvider);
   });
 
   it("supports brain.skill lifecycle routes", async () => {
