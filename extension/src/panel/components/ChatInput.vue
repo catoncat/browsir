@@ -25,6 +25,8 @@ interface SkillOption {
   disableModelInvocation: boolean;
 }
 
+type SkillCommandMode = "select" | "manage";
+
 const props = defineProps<{
   disabled?: boolean;
   isRunning?: boolean;
@@ -64,6 +66,8 @@ const listScrollContainer = ref<HTMLElement | null>(null);
 const skillListScrollContainer = ref<HTMLElement | null>(null);
 const availableSkills = ref<SkillOption[]>([]);
 const selectedSkills = ref<SkillOption[]>([]);
+const skillCommandMode = ref<SkillCommandMode>("select");
+const skillActionPendingIds = ref<Set<string>>(new Set());
 const skillLoading = ref(false);
 const skillError = ref("");
 const skillCacheUpdatedAt = ref(0);
@@ -75,6 +79,7 @@ onClickOutside(mentionContainer, () => {
 });
 onClickOutside(skillContainer, () => {
   showSkillList.value = false;
+  skillCommandMode.value = "select";
 });
 
 async function refreshTabs() {
@@ -98,7 +103,9 @@ const filteredTabs = computed(() => {
 const filteredSkills = computed(() => {
   const q = skillFilter.value.toLowerCase().trim();
   const selectedIdSet = new Set(selectedSkills.value.map((item) => item.id));
-  const list = availableSkills.value.filter((skill) => skill.enabled && !selectedIdSet.has(skill.id));
+  const list = availableSkills.value.filter((skill) =>
+    skillCommandMode.value === "manage" ? true : skill.enabled && !selectedIdSet.has(skill.id)
+  );
   if (!q) return list;
   return list.filter((skill) => {
     return (
@@ -108,6 +115,7 @@ const filteredSkills = computed(() => {
     );
   });
 });
+const isSkillsManageMode = computed(() => skillCommandMode.value === "manage");
 const isCompacting = computed(() => Boolean(props.isCompacting) && Boolean(props.isRunning));
 const isStartingRun = computed(() => Boolean(props.isStartingRun) && !props.isRunning);
 const canSubmit = computed(() =>
@@ -147,8 +155,10 @@ watch(text, (newVal) => {
   emit("update:modelValue", newVal);
   const slashContext = extractSlashContext(newVal);
   if (slashContext) {
-    if (!showSkillList.value) {
-      void refreshSkills();
+    const modeChanged = skillCommandMode.value !== slashContext.mode;
+    skillCommandMode.value = slashContext.mode;
+    if (!showSkillList.value || modeChanged) {
+      void refreshSkills({ force: true });
     }
     const nextSkillFilter = slashContext.query;
     if (nextSkillFilter !== skillFilter.value) {
@@ -158,6 +168,7 @@ watch(text, (newVal) => {
     showSkillList.value = true;
     showMentionList.value = false;
   } else {
+    skillCommandMode.value = "select";
     showSkillList.value = false;
     skillFilter.value = "";
   }
@@ -234,6 +245,69 @@ function normalizeSkill(input: SkillMetadata): SkillOption | null {
   };
 }
 
+function sortSkillOptions(input: SkillOption[]): SkillOption[] {
+  return [...input].sort((a, b) => {
+    if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+function setSkillActionPending(skillId: string, pending: boolean): void {
+  const id = String(skillId || "").trim();
+  if (!id) return;
+  const next = new Set(skillActionPendingIds.value);
+  if (pending) next.add(id);
+  else next.delete(id);
+  skillActionPendingIds.value = next;
+}
+
+function isSkillActionPending(skillId: string): boolean {
+  const id = String(skillId || "").trim();
+  if (!id) return false;
+  return skillActionPendingIds.value.has(id);
+}
+
+function upsertSkillOption(next: SkillOption): void {
+  const id = String(next.id || "").trim();
+  if (!id) return;
+  const merged = [...availableSkills.value];
+  const index = merged.findIndex((item) => item.id === id);
+  if (index >= 0) merged[index] = next;
+  else merged.push(next);
+  availableSkills.value = sortSkillOptions(merged);
+  skillCacheUpdatedAt.value = Date.now();
+}
+
+async function setSkillEnabled(skill: SkillOption, enabled: boolean): Promise<SkillOption | null> {
+  const id = String(skill?.id || "").trim();
+  if (!id) return null;
+  if (isSkillActionPending(id)) return null;
+  setSkillActionPending(id, true);
+  try {
+    const updatedMeta = enabled ? await runtimeStore.enableSkill(id) : await runtimeStore.disableSkill(id);
+    const normalized = normalizeSkill(updatedMeta);
+    if (!normalized) {
+      await refreshSkills({ force: true });
+      return null;
+    }
+    upsertSkillOption(normalized);
+    if (!normalized.enabled) {
+      removeSkillSelection(normalized.id);
+    }
+    skillError.value = "";
+    return normalized;
+  } catch (error) {
+    skillError.value = error instanceof Error ? error.message : String(error);
+    return null;
+  } finally {
+    setSkillActionPending(id, false);
+  }
+}
+
+async function toggleSkillEnabled(skill: SkillOption): Promise<void> {
+  await setSkillEnabled(skill, !skill.enabled);
+}
+
 async function refreshSkills(options: { force?: boolean } = {}): Promise<void> {
   const now = Date.now();
   if (
@@ -248,13 +322,11 @@ async function refreshSkills(options: { force?: boolean } = {}): Promise<void> {
   skillError.value = "";
   try {
     const listed = await runtimeStore.listSkills();
-    const normalized = listed
+    const normalized = sortSkillOptions(
+      listed
       .map((item) => normalizeSkill(item))
       .filter((item): item is SkillOption => Boolean(item))
-      .sort((a, b) => {
-        if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
-        return a.name.localeCompare(b.name);
-      });
+    );
     availableSkills.value = normalized;
     skillCacheUpdatedAt.value = now;
   } catch (error) {
@@ -268,6 +340,7 @@ interface SlashContext {
   start: number;
   end: number;
   query: string;
+  mode: SkillCommandMode;
 }
 
 function extractSlashContext(value: string): SlashContext | null {
@@ -280,12 +353,32 @@ function extractSlashContext(value: string): SlashContext | null {
   const leadingWhitespaceOffset = whole.startsWith(" ") ? 1 : 0;
   const start = head.length - whole.length + leadingWhitespaceOffset;
   const rawQuery = String(match[1] || "");
-  const query = rawQuery.startsWith("skill:") ? rawQuery.slice("skill:".length) : rawQuery;
+  const lower = rawQuery.toLowerCase();
+  let mode: SkillCommandMode = "select";
+  let query = rawQuery.startsWith("skill:") ? rawQuery.slice("skill:".length) : rawQuery;
+  if (lower === "skills" || lower.startsWith("skills:")) {
+    mode = "manage";
+    query = rawQuery.includes(":") ? rawQuery.slice(rawQuery.indexOf(":") + 1) : "";
+  }
   return {
     start,
     end: cursor,
-    query
+    query,
+    mode
   };
+}
+
+function replaceSlashContextAndFocus(context: SlashContext): void {
+  const before = text.value.slice(0, context.start);
+  const after = text.value.slice(context.end);
+  const merged = before.endsWith(" ") && after.startsWith(" ") ? `${before}${after.slice(1)}` : `${before}${after}`;
+  text.value = merged;
+  nextTick(() => {
+    const cursor = before.length;
+    const target = textarea.value;
+    target?.focus();
+    target?.setSelectionRange(cursor, cursor);
+  });
 }
 
 function confirmSkillSelection(skill = filteredSkills.value[skillFocusedIndex.value]) {
@@ -296,22 +389,41 @@ function confirmSkillSelection(skill = filteredSkills.value[skillFocusedIndex.va
     return;
   }
   addSkillSelection(skill);
-  const before = text.value.slice(0, context.start);
-  const after = text.value.slice(context.end);
-  const merged = before.endsWith(" ") && after.startsWith(" ") ? `${before}${after.slice(1)}` : `${before}${after}`;
-  text.value = merged;
+  replaceSlashContextAndFocus(context);
   showSkillList.value = false;
   skillFilter.value = "";
-  nextTick(() => {
-    const cursor = before.length;
-    const target = textarea.value;
-    target?.focus();
-    target?.setSelectionRange(cursor, cursor);
-  });
+  skillCommandMode.value = "select";
+}
+
+async function useSkillFromManage(skill = filteredSkills.value[skillFocusedIndex.value]): Promise<void> {
+  if (!skill) return;
+  let resolved = skill;
+  if (!resolved.enabled) {
+    const enabled = await setSkillEnabled(resolved, true);
+    if (!enabled) return;
+    resolved = enabled;
+  }
+  addSkillSelection(resolved);
+  const context = extractSlashContext(text.value);
+  if (context) {
+    replaceSlashContextAndFocus(context);
+  }
+  showSkillList.value = false;
+  skillFilter.value = "";
+  skillCommandMode.value = "select";
+}
+
+function handleSkillRowClick(skill: SkillOption): void {
+  if (isSkillsManageMode.value) {
+    void useSkillFromManage(skill);
+    return;
+  }
+  confirmSkillSelection(skill);
 }
 
 function handleKeydown(e: KeyboardEvent) {
   if (showSkillList.value) {
+    const manageMode = isSkillsManageMode.value;
     const total = filteredSkills.value.length;
     if (total === 0) {
       if (e.key === "Escape") showSkillList.value = false;
@@ -336,11 +448,27 @@ function handleKeydown(e: KeyboardEvent) {
       e.preventDefault();
       skillFocusedIndex.value = (skillFocusedIndex.value - 1 + total) % total;
       scrollToFocusedSkill();
-    } else if (e.key === "Enter" || e.key === "Tab") {
+    } else if (e.key === "Enter") {
       e.preventDefault();
-      confirmSkillSelection();
+      if (manageMode) {
+        if (e.altKey) {
+          void toggleSkillEnabled(filteredSkills.value[skillFocusedIndex.value]);
+        } else {
+          void useSkillFromManage(filteredSkills.value[skillFocusedIndex.value]);
+        }
+      } else {
+        confirmSkillSelection();
+      }
+    } else if (e.key === "Tab") {
+      e.preventDefault();
+      if (manageMode) {
+        void useSkillFromManage(filteredSkills.value[skillFocusedIndex.value]);
+      } else {
+        confirmSkillSelection();
+      }
     } else if (e.key === "Escape") {
       showSkillList.value = false;
+      skillCommandMode.value = "select";
     }
     if (showSkillList.value) {
       return;
@@ -421,6 +549,7 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
   showMentionList.value = false;
   showSkillList.value = false;
   skillFilter.value = "";
+  skillCommandMode.value = "select";
 }
 </script>
 
@@ -434,21 +563,6 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
       role="listbox"
       aria-label="选择 skill"
     >
-      <div class="px-3 py-1.5 bg-ui-surface border-b border-ui-border flex items-center justify-between">
-        <div class="flex items-center gap-2 text-[10px] font-bold text-ui-text-muted uppercase tracking-widest">
-          <Wrench :size="10" aria-hidden="true" />
-          Skills
-        </div>
-        <button
-          type="button"
-          class="text-[10px] text-ui-text-muted hover:text-ui-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent rounded px-1"
-          aria-label="刷新 skills 列表"
-          @click="void refreshSkills({ force: true })"
-        >
-          刷新
-        </button>
-      </div>
-
       <div v-if="skillLoading" class="px-3 py-3 text-[12px] text-ui-text-muted inline-flex items-center gap-2">
         <Loader2 :size="13" class="animate-spin" aria-hidden="true" />
         正在加载 skills...
@@ -457,7 +571,7 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
         {{ skillError }}
       </div>
       <div v-else-if="filteredSkills.length === 0" class="px-3 py-3 text-[12px] text-ui-text-muted">
-        没有可用的已启用 skills。先去“Skills 管理”页启用或创建。
+        {{ isSkillsManageMode ? "没有匹配的 skills，可先创建或 discover。" : "没有可用的已启用 skills。可输入 /skills 快速启用。" }}
       </div>
       <div v-else ref="skillListScrollContainer" class="max-h-56 overflow-y-auto custom-scrollbar">
         <button
@@ -469,7 +583,7 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
           class="w-full flex items-start gap-2 px-3 py-2 transition-colors text-left border-b border-ui-border/30 last:border-0 outline-none"
           :class="skillFocusedIndex === index ? 'bg-ui-surface' : ''"
           @mouseenter="skillFocusedIndex = index"
-          @click="confirmSkillSelection(skill)"
+          @click="handleSkillRowClick(skill)"
         >
           <div class="mt-0.5 shrink-0 text-ui-accent">
             <Wrench :size="14" aria-hidden="true" />
@@ -477,6 +591,12 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
           <div class="min-w-0 flex-1">
             <div class="flex items-center gap-2 min-w-0">
               <span class="text-[12px] font-medium text-ui-text truncate">{{ skill.name }}</span>
+              <span
+                v-if="isSkillsManageMode && !skill.enabled"
+                class="text-[9px] font-semibold uppercase tracking-wide rounded px-1 py-0.5 border text-ui-text-muted bg-ui-bg border-ui-border"
+              >
+                off
+              </span>
               <span
                 v-if="skill.disableModelInvocation"
                 class="text-[9px] font-semibold uppercase tracking-wide text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5"
@@ -486,6 +606,18 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
             </div>
             <div class="text-[10px] text-ui-text-muted font-mono truncate">/skill:{{ skill.id }}</div>
             <div v-if="skill.description" class="text-[10px] text-ui-text-muted truncate">{{ skill.description }}</div>
+          </div>
+          <div v-if="isSkillsManageMode" class="shrink-0 flex items-center gap-1">
+            <button
+              type="button"
+              class="rounded-md border border-ui-border px-1.5 py-1 text-[10px] text-ui-text-muted hover:bg-ui-bg hover:text-ui-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent disabled:opacity-50"
+              :disabled="isSkillActionPending(skill.id)"
+              :aria-label="skill.enabled ? `禁用技能 ${skill.name}` : `启用技能 ${skill.name}`"
+              @click.stop="void toggleSkillEnabled(skill)"
+            >
+              <Loader2 v-if="isSkillActionPending(skill.id)" :size="11" class="inline-block animate-spin" aria-hidden="true" />
+              <span v-else>{{ skill.enabled ? "ON" : "OFF" }}</span>
+            </button>
           </div>
         </button>
       </div>
@@ -702,7 +834,7 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
           ref="textarea"
           v-model="text"
           class="w-full p-4 pb-2 bg-transparent border-none resize-none text-[15px] leading-relaxed placeholder:text-ui-text-muted/60 font-sans text-ui-text focus:outline-none min-h-[60px]"
-          placeholder="输入 / 选择 skill，输入 @ 引用标签页"
+          placeholder="输入 / 选择 skill，输入 /skills 快速开关，输入 @ 引用标签页"
           :disabled="disabled"
           aria-label="消息输入框"
           @keydown="handleKeydown"
