@@ -25,6 +25,7 @@ import { type BridgeConfig, type RuntimeInfraHandler } from "./runtime-infra.bro
 import { type CapabilityExecutionPolicy, type StepVerifyPolicy } from "./capability-policy";
 import type { SkillMetadata } from "./skill-registry";
 import { normalizeBrowserRuntimeStrategy, resolveBrowserRuntimeHint } from "./browser-runtime-strategy";
+import { normalizeSkillCreateRequest } from "./skill-create";
 import {
   frameMatchesVirtualCapability,
   invokeVirtualFrame,
@@ -172,6 +173,7 @@ const CANONICAL_BROWSER_TOOL_NAMES = [
   "get_intervention_info",
   "request_intervention",
   "cancel_intervention",
+  "create_skill",
   "load_skill",
   "execute_skill_script",
   "read_skill_reference",
@@ -548,6 +550,7 @@ function isSideEffectingToolName(toolName: string): boolean {
     "download_chat_images",
     "request_intervention",
     "cancel_intervention",
+    "create_skill",
     "execute_skill_script"
   ].includes(normalized);
 }
@@ -1271,6 +1274,10 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
     const id = pick("id");
     return id ? `取消干预 · ${clipText(id, 160)}` : "取消干预";
   }
+  if (normalized === "create_skill") {
+    const name = pick("name") || pick("id");
+    return name ? `创建技能 · ${clipText(name, 160)}` : "创建技能";
+  }
   if (normalized === "load_skill") {
     const name = pick("name");
     return name ? `加载技能 · ${clipText(name, 160)}` : "加载技能";
@@ -1714,6 +1721,7 @@ const EXTENSION_AGENT_PROMPT_TOOL_ORDER = [
   "get_intervention_info",
   "request_intervention",
   "cancel_intervention",
+  "create_skill",
   "load_skill",
   "execute_skill_script",
   "read_skill_reference",
@@ -1763,6 +1771,7 @@ const EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS: Record<string, string> = {
   get_intervention_info: "Read intervention schema/details by type.",
   request_intervention: "Request a human intervention task.",
   cancel_intervention: "Cancel a pending intervention request.",
+  create_skill: "Create or update a skill package in mem://skills and register it atomically.",
   load_skill: "Load skill main content (SKILL.md).",
   execute_skill_script: "Execute script under a skill package.",
   read_skill_reference: "Read skill reference doc under references/.",
@@ -1776,6 +1785,7 @@ const EXTENSION_AGENT_PROMPT_BASE_GUIDELINES = [
   "Use tools instead of guessing. Ground decisions in tool outputs.",
   "For host file tasks, call host_read_file before host_edit_file/host_write_file.",
   "For virtual file tasks, call browser_read_file before browser_edit_file/browser_write_file.",
+  "When creating/updating skills, prefer create_skill; avoid using browser_bash to scaffold skill files.",
   "Prefer *_edit_file for surgical changes; use *_write_file for new files or full rewrites.",
   "For browser tasks, enforce: semantic search -> action -> browser_verify.",
   "Use user-visible query words in search_elements (placeholder/label/text), avoid implementation-only query text.",
@@ -3037,8 +3047,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const builtinPluginId = "runtime.builtin.plugin.notice.send-success-global-message";
     const pluginSource = "plugin.send-success-global-message";
     const successMessage = "发送成功";
-    const dedupeSeen = new Map<string, number>();
-    const dedupeMax = 200;
+    let noticeSeq = 0;
 
     const hasPlugin = (): boolean =>
       orchestrator.listPlugins().some((item) => String(item.id || "").trim() === builtinPluginId);
@@ -3091,17 +3100,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
             const data = toRecord(routeResult.data);
             const sessionId = String(data.sessionId || routeMessage.sessionId || "").trim();
-            const dedupeKey = `${sessionId}::${prompt}::${skillIds.join(",")}`;
-            if (dedupeKey && dedupeSeen.has(dedupeKey)) {
-              return { action: "continue" };
-            }
-            if (dedupeKey) {
-              dedupeSeen.set(dedupeKey, Date.now());
-              if (dedupeSeen.size > dedupeMax) {
-                const first = dedupeSeen.keys().next();
-                if (!first.done) dedupeSeen.delete(first.value);
-              }
-            }
+            noticeSeq += 1;
+            const dedupeKey = `${pluginSource}:${sessionId || "global"}:${Date.now()}:${noticeSeq}`;
 
             fireRuntimeMessage({
               type: "bbloop.global.message",
@@ -3110,6 +3110,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 message: successMessage,
                 source: pluginSource,
                 sessionId,
+                dedupeKey,
                 ts: nowIso()
               }
             });
@@ -3123,7 +3124,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                   payload: {
                     kind: "success",
                     message: successMessage,
-                    source: pluginSource
+                    source: pluginSource,
+                    dedupeKey
                   }
                 }
               });
@@ -3963,6 +3965,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         enabledOnly: boolean;
       }
     | {
+        kind: "local.create_skill";
+        sessionId: string;
+        input: JsonRecord;
+      }
+    | {
         kind: "local.get_skill_info";
         skillName: string;
       }
@@ -4426,6 +4433,34 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       throw new Error(result.error || `文件读取失败: ${location}`);
     }
     return extractSkillReadContent(result.data);
+  }
+
+  async function writeTextByLocation(sessionId: string, location: string, content: string): Promise<void> {
+    const runtimeHint = isVirtualUri(location) ? "browser" : "local";
+    const result = await executeStep({
+      sessionId,
+      capability: CAPABILITIES.fsWrite,
+      action: "invoke",
+      args: {
+        path: location,
+        runtime: runtimeHint,
+        content,
+        mode: "overwrite",
+        frame: {
+          tool: "write",
+          args: {
+            path: location,
+            runtime: runtimeHint,
+            content,
+            mode: "overwrite"
+          }
+        }
+      },
+      verifyPolicy: "off"
+    });
+    if (!result.ok) {
+      throw new Error(result.error || `文件写入失败: ${location}`);
+    }
   }
 
   function normalizeDownloadFilename(input: string, fallback: string): string {
@@ -5313,6 +5348,30 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             enabledOnly: args.enabledOnly === true
           }
         };
+      case "create_skill": {
+        const skillName = String(args.name || args.id || "").trim();
+        const description = String(args.description || "").trim();
+        if (!skillName || !description) {
+          return {
+            ok: false,
+            error: attachFailureProtocol("create_skill", {
+              error: "create_skill 需要 name/id 和 description",
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide name(id optional) + description and retry create_skill."
+            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+          };
+        }
+        return {
+          ok: true,
+          plan: {
+            kind: "local.create_skill",
+            sessionId,
+            input: args
+          }
+        };
+      }
       case "get_skill_info": {
         const skillName = String(args.skillName || args.name || "").trim();
         if (!skillName) {
@@ -5769,6 +5828,24 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           success: true,
           count: filtered.length,
           skills: filtered
+        });
+      }
+      case "local.create_skill": {
+        const normalized = normalizeSkillCreateRequest(plan.input);
+        for (const file of normalized.writes) {
+          await writeTextByLocation(plan.sessionId, file.path, file.content);
+        }
+        const skill = await orchestrator.installSkill(normalized.skill, { replace: normalized.replace });
+        return buildToolResponseEnvelope("create_skill", {
+          success: true,
+          sessionId: plan.sessionId,
+          skillId: skill.id,
+          skill,
+          root: normalized.root,
+          skillDir: normalized.skillDir,
+          location: skill.location,
+          fileCount: normalized.writes.length,
+          files: normalized.writes.map((item) => item.path)
         });
       }
       case "local.get_skill_info": {

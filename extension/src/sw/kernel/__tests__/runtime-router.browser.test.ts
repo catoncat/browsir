@@ -5155,6 +5155,29 @@ describe("runtime-router.browser", () => {
     ).toBe(true);
   });
 
+  it("builtin send-success plugin should emit bbloop.global.message on brain.run.start", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const sendSpy = vi.spyOn(chrome.runtime, "sendMessage").mockResolvedValue({ ok: true } as never);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "test notice"
+    });
+    expect(started.ok).toBe(true);
+
+    const calls = sendSpy.mock.calls
+      .map((item) => item[0])
+      .filter((item) => item && typeof item === "object" && String((item as Record<string, unknown>).type || "") === "bbloop.global.message");
+
+    expect(calls.length).toBeGreaterThan(0);
+    const payload = (calls[calls.length - 1] as Record<string, unknown>)?.payload as Record<string, unknown>;
+    expect(String(payload.message || "")).toBe("发送成功");
+    expect(String(payload.source || "")).toBe("plugin.send-success-global-message");
+    expect(String(payload.dedupeKey || "")).toContain("plugin.send-success-global-message");
+  });
+
   it("builtin fs.read sandbox plugin should fail when disabled and recover when re-enabled", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -5737,6 +5760,58 @@ describe("runtime-router.browser", () => {
     expect(listedSkillsAfterUninstall.some((item) => String(item.id || "") === "skill.pi.align")).toBe(false);
   });
 
+  it("brain.skill.create should write package and install atomically", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "seed create skill context",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const created = await invokeRuntime({
+      type: "brain.skill.create",
+      sessionId,
+      skill: {
+        name: "Tree Skill",
+        description: "draw a tree with sandbox and append to any response",
+        content: "# Tree Skill\n\nAlways draw a tree before response.",
+        scripts: {
+          "draw_tree.sh": "printf '/\\\\\\n/  \\\\\\n/____\\\\\\n  ||\\n  ||\\n'"
+        },
+        references: {
+          "README.md": "reference docs"
+        }
+      }
+    });
+    expect(created.ok).toBe(true);
+    const createdData = (created.data || {}) as Record<string, unknown>;
+    expect(String(createdData.skillId || "")).toBe("tree-skill");
+    expect(Number(createdData.fileCount || 0)).toBe(3);
+
+    const listed = await invokeRuntime({
+      type: "brain.skill.list"
+    });
+    expect(listed.ok).toBe(true);
+    const listedSkills = Array.isArray((listed.data as Record<string, unknown>)?.skills)
+      ? (((listed.data as Record<string, unknown>).skills as unknown[]) as Array<Record<string, unknown>>)
+      : [];
+    expect(listedSkills.some((item) => String(item.id || "") === "tree-skill")).toBe(true);
+
+    const resolved = await invokeRuntime({
+      type: "brain.skill.resolve",
+      sessionId,
+      skillId: "tree-skill"
+    });
+    expect(resolved.ok).toBe(true);
+    const resolvedData = (resolved.data || {}) as Record<string, unknown>;
+    expect(String(resolvedData.content || "")).toContain("Always draw a tree before response.");
+  });
+
   it("brain.skill.resolve should read content through fs.read capability", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -6002,6 +6077,26 @@ description missing`
     });
     expect(discoverLocalRoot.ok).toBe(false);
     expect(String(discoverLocalRoot.error || "")).toContain("仅支持 mem://");
+
+    const createMissingSessionId = await invokeRuntime({
+      type: "brain.skill.create",
+      skill: {
+        name: "demo",
+        description: "demo"
+      }
+    });
+    expect(createMissingSessionId.ok).toBe(false);
+    expect(String(createMissingSessionId.error || "")).toContain("brain.skill.create 需要 sessionId");
+
+    const createMissingDescription = await invokeRuntime({
+      type: "brain.skill.create",
+      sessionId: "session-demo",
+      skill: {
+        name: "demo"
+      }
+    });
+    expect(createMissingDescription.ok).toBe(false);
+    expect(String(createMissingDescription.error || "")).toContain("brain.skill.create 需要 description");
 
     const uninstallMissingSkill = await invokeRuntime({
       type: "brain.skill.uninstall",

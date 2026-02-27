@@ -1,7 +1,7 @@
 const GLOBAL_MESSAGE_EVENT_TYPE = "bbloop.global.message";
 const FALLBACK_EVENT_TYPE = "plugin.global_message";
 const SUCCESS_MESSAGE = "发送成功";
-const MAX_DEDUP_SIZE = 200;
+let noticeSeq = 0;
 
 function toRecord(value) {
   return value && typeof value === "object" ? value : {};
@@ -29,16 +29,6 @@ function fireRuntimeMessage(payload) {
   }
 }
 
-function buildDedupKey(routeMessage, routeResult) {
-  const req = toRecord(routeMessage);
-  const res = toRecord(routeResult);
-  const data = toRecord(res.data);
-  const sessionId = String(data.sessionId || req.sessionId || "").trim();
-  const prompt = String(req.prompt || "").trim();
-  const skillIds = toStringList(req.skillIds).join(",");
-  return `${sessionId}::${prompt}::${skillIds}`;
-}
-
 function shouldNotifyForRunStart(routeMessage, routeResult) {
   const req = toRecord(routeMessage);
   const res = toRecord(routeResult);
@@ -51,8 +41,6 @@ function shouldNotifyForRunStart(routeMessage, routeResult) {
 }
 
 export default function registerSendSuccessPlugin(pi) {
-  const seen = new Map();
-
   pi.on("runtime.route.after", (event) => {
     const routeType = String(event?.type || "").trim();
     if (routeType !== "brain.run.start") {
@@ -65,20 +53,10 @@ export default function registerSendSuccessPlugin(pi) {
       return { action: "continue" };
     }
 
-    const dedupKey = buildDedupKey(routeMessage, routeResult);
-    if (dedupKey && seen.has(dedupKey)) {
-      return { action: "continue" };
-    }
-    if (dedupKey) {
-      seen.set(dedupKey, Date.now());
-      if (seen.size > MAX_DEDUP_SIZE) {
-        const first = seen.keys().next();
-        if (!first.done) seen.delete(first.value);
-      }
-    }
-
     const data = toRecord(routeResult.data);
     const sessionId = String(data.sessionId || routeMessage.sessionId || "").trim();
+    noticeSeq += 1;
+    const dedupeKey = `plugin.send-success-global-message:${sessionId || "global"}:${Date.now()}:${noticeSeq}`;
 
     fireRuntimeMessage({
       type: GLOBAL_MESSAGE_EVENT_TYPE,
@@ -87,6 +65,7 @@ export default function registerSendSuccessPlugin(pi) {
         message: SUCCESS_MESSAGE,
         source: "plugin.send-success-global-message",
         sessionId,
+        dedupeKey,
         ts: new Date().toISOString()
       }
     });
@@ -100,7 +79,8 @@ export default function registerSendSuccessPlugin(pi) {
           payload: {
             kind: "success",
             message: SUCCESS_MESSAGE,
-            source: "plugin.send-success-global-message"
+            source: "plugin.send-success-global-message",
+            dedupeKey
           }
         }
       });
