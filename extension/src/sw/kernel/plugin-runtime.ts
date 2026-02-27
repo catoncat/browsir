@@ -145,11 +145,6 @@ interface PluginState {
   lastError?: string;
 }
 
-function isAllowed(list: string[] | undefined, value: string): boolean {
-  if (!Array.isArray(list) || list.length === 0) return false;
-  return list.includes("*") || list.includes(value);
-}
-
 function toHookEntry<K extends keyof OrchestratorHookMap & string>(entry: PluginHookEntry<K>): {
   handler: HookHandler<OrchestratorHookMap[K]>;
   options: HookHandlerOptions;
@@ -226,17 +221,16 @@ export class PluginRuntime {
 
     const manifest = state.definition.manifest;
     const permissions = manifest.permissions ?? {};
-    const allowReplace = permissions.replaceProviders === true;
-    const allowReplaceTools = permissions.replaceToolContracts === true;
-    const allowReplaceLlmProviders = permissions.replaceLlmProviders === true;
+    const allowReplaceModeProviders = permissions.replaceProviders !== false;
+    const allowReplaceCapabilityProviders = permissions.replaceProviders === true;
+    const allowReplaceCapabilityPolicies = permissions.replaceProviders !== false;
+    const allowReplaceTools = permissions.replaceToolContracts !== false;
+    const allowReplaceLlmProviders = permissions.replaceLlmProviders !== false;
     const timeoutMs = Math.max(50, Math.min(10_000, Number(manifest.timeoutMs || 1500)));
 
     try {
       for (const [hook, raw] of Object.entries(state.definition.hooks || {})) {
         if (!raw) continue;
-        if (!isAllowed(permissions.hooks, hook)) {
-          throw new Error(`plugin ${id} 未授权 hook: ${hook}`);
-        }
         const entries = normalizeHookEntries(raw as PluginHookEntries<keyof OrchestratorHookMap & string>);
         for (const [idx, item] of entries.entries()) {
           const entry = toHookEntry(item);
@@ -270,11 +264,8 @@ export class PluginRuntime {
         [ExecuteMode, StepToolProvider | undefined]
       >) {
         if (!provider) continue;
-        if (!isAllowed(permissions.modes, mode)) {
-          throw new Error(`plugin ${id} 未授权 mode provider: ${mode}`);
-        }
         const nextProviderId = provider.id || `${id}:mode:${mode}`;
-        if (allowReplace) {
+        if (allowReplaceModeProviders) {
           const previous = this.host.getToolProvider(mode);
           if (previous) {
             state.replacedModeProviders.push({ mode, provider: previous });
@@ -287,7 +278,7 @@ export class PluginRuntime {
             id: nextProviderId
           },
           {
-            replace: allowReplace
+            replace: allowReplaceModeProviders
           }
         );
         state.ownedModeProviders.push({ mode, providerId: nextProviderId });
@@ -295,11 +286,8 @@ export class PluginRuntime {
 
       for (const [capability, provider] of Object.entries(state.definition.providers?.capabilities || {})) {
         if (!provider) continue;
-        if (!isAllowed(permissions.capabilities, capability)) {
-          throw new Error(`plugin ${id} 未授权 capability provider: ${capability}`);
-        }
         const nextProviderId = provider.id || `${id}:capability:${capability}`;
-        if (allowReplace) {
+        if (allowReplaceCapabilityProviders) {
           const previous = this.host.getCapabilityProviders(capability);
           if (previous.length > 0) {
             state.replacedCapabilityProviders.push({ capability, providers: previous });
@@ -312,7 +300,7 @@ export class PluginRuntime {
             id: nextProviderId
           },
           {
-            replace: allowReplace
+            replace: allowReplaceCapabilityProviders
           }
         );
         state.ownedCapabilityProviders.push({
@@ -323,10 +311,7 @@ export class PluginRuntime {
 
       for (const [capability, policy] of Object.entries(state.definition.policies?.capabilities || {})) {
         if (!policy) continue;
-        if (!isAllowed(permissions.capabilities, capability)) {
-          throw new Error(`plugin ${id} 未授权 capability policy: ${capability}`);
-        }
-        if (allowReplace) {
+        if (allowReplaceCapabilityPolicies) {
           const previous = this.host.getCapabilityPolicy(capability);
           if (previous?.source === "override") {
             state.replacedCapabilityPolicies.push({
@@ -337,7 +322,7 @@ export class PluginRuntime {
           }
         }
         const policyId = this.host.registerCapabilityPolicy(capability, policy, {
-          replace: allowReplace,
+          replace: allowReplaceCapabilityPolicies,
           id: `${id}:policy:${capability}`
         });
         state.ownedCapabilityPolicies.push({
@@ -350,9 +335,6 @@ export class PluginRuntime {
         const toolName = String(toolContract?.name || "").trim();
         if (!toolName) {
           throw new Error(`plugin ${id} tool contract name 不能为空`);
-        }
-        if (!isAllowed(permissions.tools, toolName)) {
-          throw new Error(`plugin ${id} 未授权 tool contract: ${toolName}`);
         }
         if (allowReplaceTools) {
           const previousView = this.host.listToolContracts().find((item) => String(item.name || "") === toolName);
@@ -382,9 +364,6 @@ export class PluginRuntime {
         const providerId = String(llmProvider?.id || "").trim();
         if (!providerId) {
           throw new Error(`plugin ${id} llm provider id 不能为空`);
-        }
-        if (!isAllowed(permissions.llmProviders, providerId)) {
-          throw new Error(`plugin ${id} 未授权 llm provider: ${providerId}`);
         }
         if (allowReplaceLlmProviders) {
           const previous = this.host.getLlmProvider(providerId);

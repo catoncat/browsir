@@ -43,6 +43,7 @@ const DEFAULT_SKILL_DISCOVER_MAX_FILES = 256;
 const MAX_SKILL_DISCOVER_MAX_FILES = 4096;
 const MAX_PLUGIN_PACKAGE_READ_BYTES = 512 * 1024;
 const BUILTIN_PLUGIN_ID_PREFIX = "runtime.builtin.plugin.";
+const UI_EXTENSION_STORAGE_KEY = "brain.plugin.ui_extensions";
 const DEFAULT_SKILL_DISCOVER_ROOTS: Array<{ root: string; source: string }> = [
   { root: "mem://skills", source: "browser" }
 ];
@@ -300,6 +301,131 @@ function normalizePluginDefinition(input: unknown): AgentPluginDefinition {
     ...(policies ? { policies } : {}),
     ...(tools ? { tools } : {}),
     ...(llmProviders ? { llmProviders } : {})
+  };
+}
+
+interface UiExtensionDescriptor {
+  pluginId: string;
+  moduleUrl: string;
+  exportName: string;
+  enabled: boolean;
+  updatedAt: string;
+}
+
+function normalizeUiExtensionDescriptor(input: unknown): UiExtensionDescriptor | null {
+  const row = toRecord(input);
+  const pluginId = String(row.pluginId || "").trim();
+  const moduleUrl = String(row.moduleUrl || "").trim();
+  if (!pluginId || !moduleUrl) return null;
+  const exportName = String(row.exportName || "default").trim() || "default";
+  const enabled = row.enabled !== false;
+  const updatedAt = String(row.updatedAt || "").trim() || nowIso();
+  return {
+    pluginId,
+    moduleUrl,
+    exportName,
+    enabled,
+    updatedAt
+  };
+}
+
+async function readUiExtensionDescriptors(): Promise<UiExtensionDescriptor[]> {
+  const payload = await chrome.storage.local.get(UI_EXTENSION_STORAGE_KEY);
+  const list = Array.isArray(toRecord(payload)[UI_EXTENSION_STORAGE_KEY])
+    ? (toRecord(payload)[UI_EXTENSION_STORAGE_KEY] as unknown[])
+    : [];
+  const out: UiExtensionDescriptor[] = [];
+  const seen = new Set<string>();
+  for (const item of list) {
+    const normalized = normalizeUiExtensionDescriptor(item);
+    if (!normalized) continue;
+    if (seen.has(normalized.pluginId)) continue;
+    seen.add(normalized.pluginId);
+    out.push(normalized);
+  }
+  return out;
+}
+
+async function writeUiExtensionDescriptors(list: UiExtensionDescriptor[]): Promise<void> {
+  await chrome.storage.local.set({
+    [UI_EXTENSION_STORAGE_KEY]: list
+  });
+}
+
+async function upsertUiExtensionDescriptor(next: UiExtensionDescriptor): Promise<void> {
+  const list = await readUiExtensionDescriptors();
+  const index = list.findIndex((item) => item.pluginId === next.pluginId);
+  if (index >= 0) {
+    list[index] = next;
+  } else {
+    list.push(next);
+  }
+  await writeUiExtensionDescriptors(list);
+}
+
+async function updateUiExtensionDescriptorEnabled(pluginId: string, enabled: boolean): Promise<UiExtensionDescriptor | null> {
+  const list = await readUiExtensionDescriptors();
+  const index = list.findIndex((item) => item.pluginId === pluginId);
+  if (index < 0) return null;
+  const next = {
+    ...list[index],
+    enabled,
+    updatedAt: nowIso()
+  };
+  list[index] = next;
+  await writeUiExtensionDescriptors(list);
+  return next;
+}
+
+async function removeUiExtensionDescriptor(pluginId: string): Promise<UiExtensionDescriptor | null> {
+  const list = await readUiExtensionDescriptors();
+  const index = list.findIndex((item) => item.pluginId === pluginId);
+  if (index < 0) return null;
+  const [removed] = list.splice(index, 1);
+  await writeUiExtensionDescriptors(list);
+  return removed || null;
+}
+
+function notifyUiExtensionLifecycle(
+  type:
+    | "brain.plugin.ui_extension.registered"
+    | "brain.plugin.ui_extension.enabled"
+    | "brain.plugin.ui_extension.disabled"
+    | "brain.plugin.ui_extension.unregistered",
+  descriptor: UiExtensionDescriptor
+): void {
+  try {
+    const maybePromise = chrome.runtime.sendMessage({
+      type,
+      payload: descriptor
+    });
+    if (maybePromise && typeof (maybePromise as Promise<unknown>).catch === "function") {
+      void (maybePromise as Promise<unknown>).catch(() => undefined);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function resolveUiExtensionDescriptorFromSource(
+  pluginId: string,
+  source: Record<string, unknown>,
+  enabled: boolean
+): UiExtensionDescriptor | null {
+  const moduleInput = source.uiModuleUrl ?? source.uiModulePath ?? source.uiModule;
+  const hasModule =
+    String(source.uiModuleUrl || "").trim().length > 0
+    || String(source.uiModulePath || "").trim().length > 0
+    || String(source.uiModule || "").trim().length > 0;
+  if (!hasModule) return null;
+  const moduleUrl = resolvePluginModuleUrl(moduleInput);
+  const exportName = String(source.uiExportName || "default").trim() || "default";
+  return {
+    pluginId,
+    moduleUrl,
+    exportName,
+    enabled,
+    updatedAt: nowIso()
   };
 }
 
@@ -2156,13 +2282,21 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
   const action = String(payload.type || "");
 
   if (action === "brain.plugin.list") {
+    const uiExtensions = await readUiExtensionDescriptors();
     return ok({
       plugins: orchestrator.listPlugins(),
       modeProviders: orchestrator.listToolProviders(),
       toolContracts: orchestrator.listToolContracts(),
       llmProviders: orchestrator.listLlmProviders(),
       capabilityProviders: orchestrator.listCapabilityProviders(),
-      capabilityPolicies: orchestrator.listCapabilityPolicies()
+      capabilityPolicies: orchestrator.listCapabilityPolicies(),
+      uiExtensions
+    });
+  }
+
+  if (action === "brain.plugin.ui_extension.list") {
+    return ok({
+      uiExtensions: await readUiExtensionDescriptors()
     });
   }
 
@@ -2188,13 +2322,19 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
     registerExtension(orchestrator, manifest, setup, options);
     const pluginId = manifest.id;
     const current = orchestrator.listPlugins().find((item) => item.id === pluginId) || null;
+    const uiDescriptor = resolveUiExtensionDescriptorFromSource(pluginId, source, current?.enabled === true);
+    if (uiDescriptor) {
+      await upsertUiExtensionDescriptor(uiDescriptor);
+      notifyUiExtensionLifecycle("brain.plugin.ui_extension.registered", uiDescriptor);
+    }
     return ok({
       pluginId,
       enabled: current?.enabled === true,
       plugin: current,
       moduleUrl,
       exportName,
-      llmProviders: orchestrator.listLlmProviders()
+      llmProviders: orchestrator.listLlmProviders(),
+      ...(uiDescriptor ? { uiExtension: uiDescriptor } : {})
     });
   }
 
@@ -2208,11 +2348,21 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
     orchestrator.registerPlugin(definition, options);
     const pluginId = definition.manifest.id;
     const current = orchestrator.listPlugins().find((item) => item.id === pluginId) || null;
+    const uiSource = {
+      ...pluginRaw,
+      ...payload
+    } as Record<string, unknown>;
+    const uiDescriptor = resolveUiExtensionDescriptorFromSource(pluginId, uiSource, current?.enabled === true);
+    if (uiDescriptor) {
+      await upsertUiExtensionDescriptor(uiDescriptor);
+      notifyUiExtensionLifecycle("brain.plugin.ui_extension.registered", uiDescriptor);
+    }
     return ok({
       pluginId,
       enabled: current?.enabled === true,
       plugin: current,
-      llmProviders: orchestrator.listLlmProviders()
+      llmProviders: orchestrator.listLlmProviders(),
+      ...(uiDescriptor ? { uiExtension: uiDescriptor } : {})
     });
   }
 
@@ -2278,11 +2428,16 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
     if (!pluginId) return fail("brain.plugin.enable 需要 pluginId");
     orchestrator.enablePlugin(pluginId);
     const current = orchestrator.listPlugins().find((item) => item.id === pluginId) || null;
+    const uiExtension = await updateUiExtensionDescriptorEnabled(pluginId, true);
+    if (uiExtension) {
+      notifyUiExtensionLifecycle("brain.plugin.ui_extension.enabled", uiExtension);
+    }
     return ok({
       pluginId,
       enabled: true,
       plugin: current,
-      llmProviders: orchestrator.listLlmProviders()
+      llmProviders: orchestrator.listLlmProviders(),
+      ...(uiExtension ? { uiExtension } : {})
     });
   }
 
@@ -2291,11 +2446,16 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
     if (!pluginId) return fail("brain.plugin.disable 需要 pluginId");
     orchestrator.disablePlugin(pluginId);
     const current = orchestrator.listPlugins().find((item) => item.id === pluginId) || null;
+    const uiExtension = await updateUiExtensionDescriptorEnabled(pluginId, false);
+    if (uiExtension) {
+      notifyUiExtensionLifecycle("brain.plugin.ui_extension.disabled", uiExtension);
+    }
     return ok({
       pluginId,
       enabled: false,
       plugin: current,
-      llmProviders: orchestrator.listLlmProviders()
+      llmProviders: orchestrator.listLlmProviders(),
+      ...(uiExtension ? { uiExtension } : {})
     });
   }
 
@@ -2307,10 +2467,15 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
     }
     const removed = orchestrator.unregisterPlugin(pluginId);
     if (!removed) return fail(`plugin 不存在: ${pluginId}`);
+    const removedUiExtension = await removeUiExtensionDescriptor(pluginId);
+    if (removedUiExtension) {
+      notifyUiExtensionLifecycle("brain.plugin.ui_extension.unregistered", removedUiExtension);
+    }
     return ok({
       pluginId,
       removed: true,
-      llmProviders: orchestrator.listLlmProviders()
+      llmProviders: orchestrator.listLlmProviders(),
+      ...(removedUiExtension ? { uiExtension: removedUiExtension } : {})
     });
   }
 

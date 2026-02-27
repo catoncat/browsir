@@ -1,5 +1,9 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
+import {
+  normalizeBrowserRuntimeStrategy,
+  type BrowserRuntimeStrategy
+} from "../../sw/kernel/browser-runtime-strategy";
 
 interface RuntimeResponse<T = any> {
   ok: boolean;
@@ -89,6 +93,7 @@ export interface PanelLlmProfileChains {
 interface PanelConfig {
   bridgeUrl: string;
   bridgeToken: string;
+  browserRuntimeStrategy: BrowserRuntimeStrategy;
   llmApiBase: string;
   llmApiKey: string;
   llmModel: string;
@@ -210,6 +215,14 @@ export interface PluginMetadata {
   llmProviders: string[];
 }
 
+export interface PluginUiExtensionMetadata {
+  pluginId: string;
+  moduleUrl: string;
+  exportName: string;
+  enabled: boolean;
+  updatedAt: string;
+}
+
 export interface PluginListResult {
   plugins: PluginMetadata[];
   modeProviders: Array<Record<string, unknown>>;
@@ -217,6 +230,7 @@ export interface PluginListResult {
   llmProviders: Array<Record<string, unknown>>;
   capabilityProviders: Array<Record<string, unknown>>;
   capabilityPolicies: Array<Record<string, unknown>>;
+  uiExtensions: PluginUiExtensionMetadata[];
 }
 
 export interface PluginRegisterResult {
@@ -224,12 +238,21 @@ export interface PluginRegisterResult {
   enabled: boolean;
   plugin: PluginMetadata | null;
   llmProviders: Array<Record<string, unknown>>;
+  moduleUrl?: string;
+  exportName?: string;
 }
 
 export interface PluginUnregisterResult {
   pluginId: string;
   removed: boolean;
   llmProviders: Array<Record<string, unknown>>;
+}
+
+export interface PluginInstallInput {
+  location?: string;
+  path?: string;
+  package?: Record<string, unknown>;
+  sessionId?: string;
 }
 
 async function sendMessage<T = any>(type: string, payload: Record<string, unknown> = {}): Promise<T> {
@@ -285,15 +308,35 @@ function normalizePluginMetadata(input: unknown): PluginMetadata {
   };
 }
 
+function normalizePluginUiExtensionMetadata(input: unknown): PluginUiExtensionMetadata | null {
+  const row = toRecord(input);
+  const pluginId = String(row.pluginId || "").trim();
+  const moduleUrl = String(row.moduleUrl || "").trim();
+  if (!pluginId || !moduleUrl) return null;
+  return {
+    pluginId,
+    moduleUrl,
+    exportName: String(row.exportName || "default").trim() || "default",
+    enabled: row.enabled !== false,
+    updatedAt: String(row.updatedAt || "").trim() || new Date().toISOString()
+  };
+}
+
 function normalizePluginListResult(input: unknown): PluginListResult {
   const row = toRecord(input);
+  const uiExtensions = Array.isArray(row.uiExtensions)
+    ? row.uiExtensions
+      .map((item) => normalizePluginUiExtensionMetadata(item))
+      .filter((item): item is PluginUiExtensionMetadata => Boolean(item))
+    : [];
   return {
     plugins: Array.isArray(row.plugins) ? row.plugins.map((item) => normalizePluginMetadata(item)) : [],
     modeProviders: Array.isArray(row.modeProviders) ? row.modeProviders.map((item) => toRecord(item)) : [],
     toolContracts: Array.isArray(row.toolContracts) ? row.toolContracts.map((item) => toRecord(item)) : [],
     llmProviders: Array.isArray(row.llmProviders) ? row.llmProviders.map((item) => toRecord(item)) : [],
     capabilityProviders: Array.isArray(row.capabilityProviders) ? row.capabilityProviders.map((item) => toRecord(item)) : [],
-    capabilityPolicies: Array.isArray(row.capabilityPolicies) ? row.capabilityPolicies.map((item) => toRecord(item)) : []
+    capabilityPolicies: Array.isArray(row.capabilityPolicies) ? row.capabilityPolicies.map((item) => toRecord(item)) : [],
+    uiExtensions
   };
 }
 
@@ -304,7 +347,9 @@ function normalizePluginRegisterResult(input: unknown): PluginRegisterResult {
     pluginId: String(row.pluginId || "").trim(),
     enabled: row.enabled === true,
     plugin: Object.keys(pluginRaw).length > 0 ? normalizePluginMetadata(pluginRaw) : null,
-    llmProviders: Array.isArray(row.llmProviders) ? row.llmProviders.map((item) => toRecord(item)) : []
+    llmProviders: Array.isArray(row.llmProviders) ? row.llmProviders.map((item) => toRecord(item)) : [],
+    moduleUrl: String(row.moduleUrl || "").trim() || undefined,
+    exportName: String(row.exportName || "").trim() || undefined
   };
 }
 
@@ -459,6 +504,7 @@ function normalizeConfig(raw: Record<string, unknown> | null | undefined): Panel
   return {
     bridgeUrl,
     bridgeToken,
+    browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(raw?.browserRuntimeStrategy, "host-first"),
     llmApiBase,
     llmApiKey,
     llmModel,
@@ -630,7 +676,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
           tool: "read",
           args: {
             path: String(path || "").trim(),
-            runtime: "browser",
+            runtime: "sandbox",
             ...(options.offset == null ? {} : { offset: options.offset }),
             ...(options.limit == null ? {} : { limit: options.limit })
           }
@@ -660,7 +706,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
           tool: "write",
           args: {
             path: String(path || "").trim(),
-            runtime: "browser",
+            runtime: "sandbox",
             content: String(content || ""),
             mode
           }
@@ -741,6 +787,33 @@ export const useRuntimeStore = defineStore("runtime", () => {
     return normalizePluginRegisterResult(out);
   }
 
+  async function registerPluginExtension(
+    input: {
+      manifest: Record<string, unknown>;
+      moduleUrl?: string;
+      modulePath?: string;
+      module?: string;
+      exportName?: string;
+      plugin?: Record<string, unknown>;
+    },
+    options: { replace?: boolean; enable?: boolean } = {}
+  ): Promise<PluginRegisterResult> {
+    const payload: Record<string, unknown> = {
+      manifest: {
+        ...toRecord(input.manifest)
+      }
+    };
+    if (typeof input.moduleUrl === "string" && input.moduleUrl.trim()) payload.moduleUrl = input.moduleUrl.trim();
+    if (typeof input.modulePath === "string" && input.modulePath.trim()) payload.modulePath = input.modulePath.trim();
+    if (typeof input.module === "string" && input.module.trim()) payload.module = input.module.trim();
+    if (typeof input.exportName === "string" && input.exportName.trim()) payload.exportName = input.exportName.trim();
+    if (input.plugin && typeof input.plugin === "object") payload.plugin = toRecord(input.plugin);
+    if (options.replace === true) payload.replace = true;
+    if (options.enable === false) payload.enable = false;
+    const out = await sendMessage<Record<string, unknown>>("brain.plugin.register_extension", payload);
+    return normalizePluginRegisterResult(out);
+  }
+
   async function enablePlugin(pluginId: string): Promise<PluginRegisterResult> {
     const out = await sendMessage<Record<string, unknown>>("brain.plugin.enable", {
       pluginId: String(pluginId || "").trim()
@@ -760,6 +833,22 @@ export const useRuntimeStore = defineStore("runtime", () => {
       pluginId: String(pluginId || "").trim()
     });
     return normalizePluginUnregisterResult(out);
+  }
+
+  async function installPlugin(
+    input: PluginInstallInput,
+    options: { replace?: boolean; enable?: boolean } = {}
+  ): Promise<PluginRegisterResult> {
+    const payload: Record<string, unknown> = {};
+    const location = String(input.location || input.path || "").trim();
+    if (location) payload.location = location;
+    if (input.package && typeof input.package === "object") payload.package = toRecord(input.package);
+    const sessionId = String(input.sessionId || "").trim();
+    if (sessionId) payload.sessionId = sessionId;
+    if (options.replace === true) payload.replace = true;
+    if (options.enable === false) payload.enable = false;
+    const out = await sendMessage<Record<string, unknown>>("brain.plugin.install", payload);
+    return normalizePluginRegisterResult(out);
   }
 
   function findAssistantMessageIndex(entryId: string) {
@@ -1035,16 +1124,19 @@ export const useRuntimeStore = defineStore("runtime", () => {
         : (llmProfiles[0]?.id || "default");
       const llmProfileChains = normalizeLlmProfileChains(config.value.llmProfileChains, profileIds);
       const llmEscalationPolicy = normalizeEscalationPolicy(config.value.llmEscalationPolicy);
+      const browserRuntimeStrategy = normalizeBrowserRuntimeStrategy(config.value.browserRuntimeStrategy, "host-first");
 
       config.value.llmProfiles = llmProfiles;
       config.value.llmDefaultProfile = llmDefaultProfile;
       config.value.llmProfileChains = llmProfileChains;
       config.value.llmEscalationPolicy = llmEscalationPolicy;
+      config.value.browserRuntimeStrategy = browserRuntimeStrategy;
 
       await sendMessage("config.save", {
         payload: {
           bridgeUrl: config.value.bridgeUrl.trim(),
           bridgeToken: config.value.bridgeToken,
+          browserRuntimeStrategy,
           llmApiBase,
           llmApiKey,
           llmModel,
@@ -1101,6 +1193,8 @@ export const useRuntimeStore = defineStore("runtime", () => {
     runSkill,
     listPlugins,
     registerPlugin,
+    registerPluginExtension,
+    installPlugin,
     enablePlugin,
     disablePlugin,
     unregisterPlugin,

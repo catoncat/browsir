@@ -2801,9 +2801,10 @@ describe("runtime-router.browser", () => {
         canHandle: (input) => {
           const frame = (input.args?.frame || {}) as Record<string, unknown>;
           const frameArgs = (frame.args || {}) as Record<string, unknown>;
+          const runtime = String(frameArgs.runtime || "").trim().toLowerCase();
           return String(frame.tool || "") === "bash"
             && String(frameArgs.cmdId || "") === "bash.exec"
-            && String(frameArgs.runtime || "").trim().toLowerCase() === "browser";
+            && (runtime === "browser" || runtime === "sandbox");
         },
         invoke: async () => {
           providerInvoked += 1;
@@ -5418,6 +5419,105 @@ describe("runtime-router.browser", () => {
     expect(patched.ok).toBe(true);
     const patchedResult = (patched.data || {}) as Record<string, unknown>;
     expect((patchedResult.data || {}) as Record<string, unknown>).toEqual({ source: "extension-module" });
+  });
+
+  it("supports brain.plugin ui_extension lifecycle routes", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const notifySpy = vi.spyOn(chrome.runtime, "sendMessage").mockResolvedValue({ ok: true } as never);
+    const moduleUrl = new URL("./fixtures/plugin-route-extension.fixture.ts", import.meta.url).href;
+    const uiModuleUrl = new URL("./fixtures/plugin-route-extension.fixture.ts", import.meta.url).href;
+    const pluginId = "plugin.route.extension.ui.lifecycle";
+
+    const registered = await invokeRuntime({
+      type: "brain.plugin.register_extension",
+      manifest: {
+        id: pluginId,
+        name: "plugin-route-extension-ui-lifecycle",
+        version: "1.0.0",
+        permissions: {
+          hooks: ["tool.after_result"]
+        }
+      },
+      moduleUrl,
+      uiModuleUrl,
+      uiExportName: "default"
+    });
+    expect(registered.ok).toBe(true);
+
+    const listed = await invokeRuntime({
+      type: "brain.plugin.ui_extension.list"
+    });
+    expect(listed.ok).toBe(true);
+    const listedExtensions = Array.isArray((listed.data as Record<string, unknown>)?.uiExtensions)
+      ? (((listed.data as Record<string, unknown>).uiExtensions as unknown[]) as Array<Record<string, unknown>>)
+      : [];
+    const listedExtension = listedExtensions.find((item) => String(item.pluginId || "") === pluginId);
+    expect(listedExtension).toBeDefined();
+    expect(Boolean(listedExtension?.enabled)).toBe(true);
+    expect(String(listedExtension?.moduleUrl || "")).toBe(uiModuleUrl);
+
+    const disabled = await invokeRuntime({
+      type: "brain.plugin.disable",
+      pluginId
+    });
+    expect(disabled.ok).toBe(true);
+    const listedAfterDisable = await invokeRuntime({
+      type: "brain.plugin.ui_extension.list"
+    });
+    expect(listedAfterDisable.ok).toBe(true);
+    const disabledExtensions = Array.isArray((listedAfterDisable.data as Record<string, unknown>)?.uiExtensions)
+      ? (((listedAfterDisable.data as Record<string, unknown>).uiExtensions as unknown[]) as Array<Record<string, unknown>>)
+      : [];
+    const disabledExtension = disabledExtensions.find((item) => String(item.pluginId || "") === pluginId);
+    expect(disabledExtension).toBeDefined();
+    expect(Boolean(disabledExtension?.enabled)).toBe(false);
+
+    const enabled = await invokeRuntime({
+      type: "brain.plugin.enable",
+      pluginId
+    });
+    expect(enabled.ok).toBe(true);
+
+    const unregistered = await invokeRuntime({
+      type: "brain.plugin.unregister",
+      pluginId
+    });
+    expect(unregistered.ok).toBe(true);
+    const listedAfterUnregister = await invokeRuntime({
+      type: "brain.plugin.ui_extension.list"
+    });
+    expect(listedAfterUnregister.ok).toBe(true);
+    const unregisteredExtensions = Array.isArray((listedAfterUnregister.data as Record<string, unknown>)?.uiExtensions)
+      ? (((listedAfterUnregister.data as Record<string, unknown>).uiExtensions as unknown[]) as Array<Record<string, unknown>>)
+      : [];
+    expect(unregisteredExtensions.some((item) => String(item.pluginId || "") === pluginId)).toBe(false);
+
+    expect(notifySpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "brain.plugin.ui_extension.registered",
+        payload: expect.objectContaining({ pluginId })
+      })
+    );
+    expect(notifySpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "brain.plugin.ui_extension.disabled",
+        payload: expect.objectContaining({ pluginId })
+      })
+    );
+    expect(notifySpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "brain.plugin.ui_extension.enabled",
+        payload: expect.objectContaining({ pluginId })
+      })
+    );
+    expect(notifySpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "brain.plugin.ui_extension.unregistered",
+        payload: expect.objectContaining({ pluginId })
+      })
+    );
   });
 
   it("supports brain.plugin.install from mem:// package file", async () => {

@@ -10,5 +10,7 @@
     }
   },
   "modulePath": "plugins/send-success-global-message/index.js",
-  "exportName": "default"
+  "exportName": "default",
+  "uiModulePath": "plugins/send-success-global-message/ui.js",
+  "uiExportName": "default"
 }

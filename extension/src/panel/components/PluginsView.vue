@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
-import { useRuntimeStore, type PluginMetadata } from "../stores/runtime";
+import { useRuntimeStore, type PluginMetadata, type PluginUiExtensionMetadata } from "../stores/runtime";
 import { ArrowLeft, Loader2, RefreshCcw, Power, Trash2, Plus, WandSparkles } from "lucide-vue-next";
 
 interface PluginPreset {
@@ -22,6 +22,7 @@ const actionPluginId = ref("");
 const pageError = ref("");
 const plugins = ref<PluginMetadata[]>([]);
 const llmProviders = ref<Array<Record<string, unknown>>>([]);
+const uiExtensions = ref<PluginUiExtensionMetadata[]>([]);
 
 const replaceOnRegister = ref(true);
 const enableOnRegister = ref(true);
@@ -151,6 +152,18 @@ function isBuiltinPlugin(plugin: PluginMetadata): boolean {
   return String(plugin.id || "").trim().startsWith(BUILTIN_PLUGIN_ID_PREFIX);
 }
 
+function findUiExtension(pluginId: string): PluginUiExtensionMetadata | null {
+  const id = String(pluginId || "").trim();
+  if (!id) return null;
+  return uiExtensions.value.find((item) => String(item.pluginId || "").trim() === id) || null;
+}
+
+function formatUiExtensionSummary(pluginId: string): string {
+  const ext = findUiExtension(pluginId);
+  if (!ext) return "无";
+  return `${ext.enabled ? "enabled" : "disabled"} · ${ext.exportName || "default"} · ${ext.moduleUrl}`;
+}
+
 function deepCloneRecord(input: Record<string, unknown>): Record<string, unknown> {
   return JSON.parse(JSON.stringify(input)) as Record<string, unknown>;
 }
@@ -211,6 +224,7 @@ async function refreshPlugins() {
     const out = await store.listPlugins();
     plugins.value = out.plugins;
     llmProviders.value = out.llmProviders;
+    uiExtensions.value = out.uiExtensions;
   } catch (error) {
     setPageError(error);
   } finally {
@@ -477,6 +491,7 @@ onMounted(async () => {
               <p>modes: {{ formatList(plugin.modes) }}</p>
               <p>capabilities: {{ formatList(plugin.capabilities) }}</p>
               <p>llmProviders: {{ formatList(plugin.llmProviders) }}</p>
+              <p class="sm:col-span-2">uiExtension: {{ formatUiExtensionSummary(plugin.id) }}</p>
             </div>
             <p v-if="plugin.lastError" class="text-[11px] text-rose-600">lastError: {{ plugin.lastError }}</p>
             <div class="flex items-center gap-2">

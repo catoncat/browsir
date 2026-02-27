@@ -4,48 +4,77 @@ import { describe, expect, it } from "vitest";
 import { BrainOrchestrator } from "../orchestrator.browser";
 
 describe("plugin-runtime.browser", () => {
-  it("拒绝未授权 hook", () => {
+  it("permissions 声明仅用于展示，不拦截 hook 注册", async () => {
     const orchestrator = new BrainOrchestrator();
+    const { sessionId } = await orchestrator.createSession({ title: "plugin-no-hook-permission" });
 
-    expect(() =>
-      orchestrator.registerPlugin({
-        manifest: {
-          id: "plugin.no-hook-permission",
-          name: "no-hook",
-          version: "1.0.0",
-          permissions: { hooks: [] }
-        },
-        hooks: {
-          "tool.before_call": () => ({ action: "continue" })
-        }
-      })
-    ).toThrow("未授权 hook");
+    orchestrator.registerToolProvider(
+      "script",
+      {
+        id: "test.plugin.no-hook-permission.script",
+        invoke: async () => ({ source: "script" })
+      },
+      { replace: true }
+    );
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.no-hook-permission",
+        name: "no-hook",
+        version: "1.0.0",
+        permissions: { hooks: [] }
+      },
+      hooks: {
+        "tool.after_result": () => ({
+          action: "patch",
+          patch: {
+            result: { source: "plugin" }
+          }
+        })
+      }
+    });
+
+    const result = await orchestrator.executeStep({
+      sessionId,
+      mode: "script",
+      action: "click"
+    });
+    expect(result.ok).toBe(true);
+    expect(result.data).toEqual({ source: "plugin" });
   });
 
-  it("拒绝未授权 capability provider", () => {
+  it("permissions 声明仅用于展示，不拦截 capability provider 注册", async () => {
     const orchestrator = new BrainOrchestrator();
+    const { sessionId } = await orchestrator.createSession({ title: "plugin-no-capability-provider-permission" });
 
-    expect(() =>
-      orchestrator.registerPlugin({
-        manifest: {
-          id: "plugin.no-capability-provider-permission",
-          name: "no-capability-provider",
-          version: "1.0.0",
-          permissions: {
-            capabilities: []
-          }
-        },
-        providers: {
-          capabilities: {
-            "fs.virtual.read": {
-              id: "plugin.no-capability-provider.read",
-              mode: "bridge",
-              invoke: async () => ({ ok: true })
-            }
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.no-capability-provider-permission",
+        name: "no-capability-provider",
+        version: "1.0.0",
+        permissions: {
+          capabilities: []
+        }
+      },
+      providers: {
+        capabilities: {
+          "fs.virtual.read": {
+            id: "plugin.no-capability-provider.read",
+            mode: "bridge",
+            invoke: async () => ({ ok: true, source: "plugin-capability" })
           }
         }
-      })
-    ).toThrow("未授权 capability provider");
+      }
+    });
+
+    const result = await orchestrator.executeStep({
+      sessionId,
+      capability: "fs.virtual.read",
+      action: "browser_read_file",
+      args: { path: "mem://notes.md" },
+      verifyPolicy: "off"
+    });
+    expect(result.ok).toBe(true);
+    expect(result.data).toEqual({ ok: true, source: "plugin-capability" });
   });
 
   it("支持插件 enable/disable 生命周期", async () => {

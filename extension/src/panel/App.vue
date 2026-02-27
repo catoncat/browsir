@@ -5,6 +5,14 @@ import { computed, onMounted, onUnmounted, ref, nextTick, watch } from "vue";
 import { useRuntimeStore } from "./stores/runtime";
 import { useMessageActions, type PanelMessageLike, type PendingRegenerateState } from "./utils/message-actions";
 import { collectDiagnostics } from "./utils/diagnostics";
+import {
+  createPanelUiPluginRuntime,
+  type UiChatInputPayload,
+  type UiExtensionDescriptor,
+  type UiMessageRenderPayload,
+  type UiToolRenderPayload,
+  type UiNoticePayload
+} from "./utils/ui-plugin-runtime";
 
 import SessionList from "./components/SessionList.vue";
 import ChatMessage from "./components/ChatMessage.vue";
@@ -188,6 +196,12 @@ interface RuntimeEventDigest {
   sessionId: string;
 }
 
+interface RuntimeResponse<T = unknown> {
+  ok: boolean;
+  data?: T;
+  error?: string;
+}
+
 async function regenerateFromAssistantWithScene(
   entryId: string,
   options: { mode?: "fork" | "retry"; setActive?: boolean } = {}
@@ -245,12 +259,17 @@ const llmStreamingSessionId = ref("");
 const llmStreamingActive = ref(false);
 const recentRuntimeEvents = ref<RuntimeEventDigest[]>([]);
 const queuedPromotingIds = ref<Set<string>>(new Set());
+const panelUiRuntime = createPanelUiPluginRuntime({ defaultTimeoutMs: 150 });
+const uiRenderEpoch = ref(0);
+const stableMessages = ref<DisplayMessage[]>([]);
 let forkSessionHighlightTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingStepLogFlushTimer: ReturnType<typeof setTimeout> | null = null;
 let toolPendingCardLeaveTimer: ReturnType<typeof setTimeout> | null = null;
 let initialToolSyncTimer: ReturnType<typeof setTimeout> | null = null;
 let llmStreamFlushRaf: number | null = null;
+let panelNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 let llmStreamingDeltaBuffer = "";
+let stableMessagesBuildToken = 0;
 const pendingStepLogBuffer = new Map<number, string[]>();
 
 const USER_FORK_MIN_VISIBLE_MS = 620;
@@ -1453,7 +1472,7 @@ const toolHistoryToggleLabel = computed(() =>
   showToolHistory.value ? "隐藏工具轨迹" : "显示工具轨迹"
 );
 
-const stableMessages = computed<DisplayMessage[]>(() => {
+const baseConversationMessages = computed<DisplayMessage[]>(() => {
   return (messages.value || [])
     .filter((item) => {
       const role = String(item?.role || "");
@@ -1469,6 +1488,14 @@ const stableMessages = computed<DisplayMessage[]>(() => {
       toolCallId: String(item?.toolCallId || "")
     }));
 });
+
+watch(
+  [baseConversationMessages, uiRenderEpoch],
+  () => {
+    void rebuildStableMessages();
+  },
+  { immediate: true }
+);
 
 const hasVisibleConversation = computed(() =>
   stableMessages.value.length > 0
@@ -1524,7 +1551,7 @@ watch(isRunActive, (running, wasRunning) => {
   activeRunHint.value = null;
 });
 
-watch(activeSessionId, () => {
+watch(activeSessionId, (nextSessionId, previousSessionId) => {
   queuedPromotingIds.value = new Set();
   stopInitialToolSync();
   resetToolPendingCardHandoff();
@@ -1553,6 +1580,13 @@ watch(activeSessionId, () => {
     );
     startInitialToolSync();
   }
+  const nextId = String(nextSessionId || "").trim();
+  const prevId = String(previousSessionId || "").trim();
+  void panelUiRuntime.runHook("ui.session.changed", {
+    sessionId: nextId,
+    previousSessionId: prevId,
+    reason: "active_session_changed"
+  });
 });
 
 watch(
@@ -1692,6 +1726,241 @@ function setErrorMessage(err: unknown, fallback: string) {
   error.value = message || fallback;
 }
 
+function clearPanelNoticeTimer() {
+  if (!panelNoticeTimer) return;
+  clearTimeout(panelNoticeTimer);
+  panelNoticeTimer = null;
+}
+
+function normalizeUiNoticePayload(input: unknown): UiNoticePayload | null {
+  const row = toRecord(input);
+  const message = String(row.message || "").trim();
+  if (!message) return null;
+  const rawType = String(row.type || "").trim().toLowerCase();
+  const type = rawType === "error" ? "error" : "success";
+  const durationRaw = Number(row.durationMs);
+  const durationMs = Number.isFinite(durationRaw) ? Math.max(800, Math.min(15_000, Math.floor(durationRaw))) : undefined;
+  return {
+    type,
+    message,
+    source: String(row.source || "").trim() || undefined,
+    sessionId: String(row.sessionId || "").trim() || undefined,
+    durationMs,
+    dedupeKey: String(row.dedupeKey || "").trim() || undefined,
+    ts: String(row.ts || "").trim() || undefined
+  };
+}
+
+async function showActionNoticeWithPlugins(input: unknown) {
+  const normalized = normalizeUiNoticePayload(input);
+  if (!normalized) return;
+  const hook = await panelUiRuntime.runHook("ui.notice.before_show", normalized);
+  if (hook.blocked) return;
+  const next = normalizeUiNoticePayload(hook.value);
+  if (!next) return;
+  actionNotice.value = {
+    type: next.type === "error" ? "error" : "success",
+    message: next.message
+  };
+  clearPanelNoticeTimer();
+  const duration = Number(next.durationMs) || 2200;
+  panelNoticeTimer = setTimeout(() => {
+    actionNotice.value = null;
+    panelNoticeTimer = null;
+  }, duration);
+}
+
+function normalizeUiExtensionDescriptor(input: unknown): UiExtensionDescriptor | null {
+  const row = toRecord(input);
+  const pluginId = String(row.pluginId || "").trim();
+  const moduleUrl = String(row.moduleUrl || "").trim();
+  if (!pluginId || !moduleUrl) return null;
+  return {
+    pluginId,
+    moduleUrl,
+    exportName: String(row.exportName || "default").trim() || "default",
+    enabled: row.enabled !== false,
+    updatedAt: String(row.updatedAt || "").trim() || new Date().toISOString()
+  };
+}
+
+async function hydratePanelUiPlugins() {
+  const response = (await chrome.runtime.sendMessage({
+    type: "brain.plugin.ui_extension.list"
+  })) as RuntimeResponse<{ uiExtensions?: unknown[] }>;
+  if (!response?.ok) {
+    throw new Error(String(response?.error || "brain.plugin.ui_extension.list failed"));
+  }
+  const list = Array.isArray(response.data?.uiExtensions) ? response.data?.uiExtensions : [];
+  await panelUiRuntime.hydrate(list);
+  bumpUiRenderEpoch();
+}
+
+async function applyUiExtensionLifecycleMessage(type: string, payload: unknown): Promise<boolean> {
+  const descriptor = normalizeUiExtensionDescriptor(payload);
+  if (!descriptor) return false;
+  if (type === "brain.plugin.ui_extension.registered") {
+    await panelUiRuntime.registerDescriptor(descriptor);
+    bumpUiRenderEpoch();
+    return true;
+  }
+  if (type === "brain.plugin.ui_extension.enabled") {
+    await panelUiRuntime.registerDescriptor({
+      ...descriptor,
+      enabled: true
+    });
+    await panelUiRuntime.enable(descriptor.pluginId);
+    bumpUiRenderEpoch();
+    return true;
+  }
+  if (type === "brain.plugin.ui_extension.disabled") {
+    await panelUiRuntime.registerDescriptor({
+      ...descriptor,
+      enabled: false
+    });
+    panelUiRuntime.disable(descriptor.pluginId);
+    bumpUiRenderEpoch();
+    return true;
+  }
+  if (type === "brain.plugin.ui_extension.unregistered") {
+    panelUiRuntime.unregister(descriptor.pluginId);
+    bumpUiRenderEpoch();
+    return true;
+  }
+  return false;
+}
+
+function normalizeSendMode(raw: unknown): "normal" | "steer" | "followUp" {
+  const text = String(raw || "").trim();
+  if (text === "steer" || text === "followUp") return text;
+  return "normal";
+}
+
+function normalizeUiChatInputPayload(input: unknown): UiChatInputPayload {
+  const row = toRecord(input);
+  const tabIds = Array.isArray(row.tabIds)
+    ? row.tabIds
+      .map((item) => Number(item))
+      .filter((value) => Number.isFinite(value))
+      .map((value) => Math.floor(value))
+    : [];
+  const skillIds = Array.isArray(row.skillIds)
+    ? row.skillIds.map((item) => String(item || "").trim()).filter((item) => item.length > 0)
+    : [];
+  return {
+    text: String(row.text || ""),
+    tabIds,
+    skillIds,
+    mode: normalizeSendMode(row.mode),
+    sessionId: String(row.sessionId || "").trim() || undefined
+  };
+}
+
+function toUiMessageRenderPayload(input: DisplayMessage): UiMessageRenderPayload {
+  return {
+    role: String(input.role || "").trim(),
+    content: String(input.content || ""),
+    entryId: String(input.entryId || "").trim(),
+    toolName: String(input.toolName || "").trim() || undefined,
+    toolCallId: String(input.toolCallId || "").trim() || undefined
+  };
+}
+
+function normalizeUiMessageRenderPayload(
+  input: unknown,
+  fallback: DisplayMessage
+): DisplayMessage | null {
+  const row = toRecord(input);
+  const entryId = String(row.entryId ?? fallback.entryId ?? "").trim();
+  if (!entryId) return null;
+  const role = String(row.role ?? fallback.role ?? "").trim() || String(fallback.role || "").trim();
+  return {
+    role,
+    content: String(row.content ?? fallback.content ?? ""),
+    entryId,
+    toolName: String(row.toolName ?? fallback.toolName ?? "").trim() || "",
+    toolCallId: String(row.toolCallId ?? fallback.toolCallId ?? "").trim() || ""
+  };
+}
+
+function toUiToolRenderPayload(input: DisplayMessage): UiToolRenderPayload {
+  return {
+    toolName: String(input.toolName || "").trim(),
+    toolCallId: String(input.toolCallId || "").trim(),
+    content: String(input.content || "")
+  };
+}
+
+function normalizeUiToolRenderPayload(
+  input: unknown,
+  fallback: DisplayMessage
+): {
+  toolName: string;
+  toolCallId: string;
+  content: string;
+} {
+  const row = toRecord(input);
+  return {
+    toolName: String(row.toolName ?? fallback.toolName ?? "").trim() || "",
+    toolCallId: String(row.toolCallId ?? fallback.toolCallId ?? "").trim() || "",
+    content: String(row.content ?? fallback.content ?? "")
+  };
+}
+
+function bumpUiRenderEpoch() {
+  uiRenderEpoch.value += 1;
+}
+
+async function applyUiRenderHooksToMessage(input: DisplayMessage): Promise<DisplayMessage | null> {
+  const base = normalizeUiMessageRenderPayload(input, input);
+  if (!base) return null;
+
+  const messageHook = await panelUiRuntime.runHook("ui.message.before_render", toUiMessageRenderPayload(base));
+  if (messageHook.blocked) return null;
+  let current = normalizeUiMessageRenderPayload(messageHook.value, base);
+  if (!current) return null;
+
+  if (current.role !== "tool") {
+    return current;
+  }
+
+  const toolCallHook = await panelUiRuntime.runHook(
+    "ui.tool.call.before_render",
+    toUiToolRenderPayload(current)
+  );
+  if (toolCallHook.blocked) return null;
+  const toolCallPatched = normalizeUiToolRenderPayload(toolCallHook.value, current);
+  current = {
+    ...current,
+    ...toolCallPatched
+  };
+
+  const toolResultHook = await panelUiRuntime.runHook(
+    "ui.tool.result.before_render",
+    toUiToolRenderPayload(current)
+  );
+  if (toolResultHook.blocked) return null;
+  const toolResultPatched = normalizeUiToolRenderPayload(toolResultHook.value, current);
+  current = {
+    ...current,
+    ...toolResultPatched
+  };
+  return current;
+}
+
+async function rebuildStableMessages() {
+  const token = ++stableMessagesBuildToken;
+  const source = baseConversationMessages.value;
+  const next: DisplayMessage[] = [];
+  for (const item of source) {
+    const rendered = await applyUiRenderHooksToMessage(item);
+    if (!rendered) continue;
+    next.push(rendered);
+  }
+  if (token !== stableMessagesBuildToken) return;
+  stableMessages.value = next;
+}
+
 function canEditUserMessage(message: PanelMessageLike) {
   if (message?.role !== "user") return false;
   return String(message?.content || "").trim().length > 0;
@@ -1795,21 +2064,40 @@ async function refreshBridgeConnectionStatus() {
   }
 }
 
-const onRuntimeMessage = (message: unknown) => {
-  const payload = message as {
+async function handleRuntimeMessage(message: unknown) {
+  const runtimeHook = await panelUiRuntime.runHook("ui.runtime.event", {
+    type: String(toRecord(message).type || "").trim(),
+    message
+  });
+  if (runtimeHook.blocked) return;
+
+  const payload = toRecord(runtimeHook.value.message) as {
     type?: string;
     status?: string;
-    event?: { sessionId?: string };
+    event?: { sessionId?: string; type?: string; payload?: unknown };
     payload?: { sessionId?: string; event?: string; data?: Record<string, unknown> };
   };
 
-  if (payload?.type === "bridge.status") {
+  const type = String(payload?.type || "").trim();
+  if (!type) return;
+
+  if (type.startsWith("brain.plugin.ui_extension.")) {
+    await applyUiExtensionLifecycleMessage(type, payload.payload);
+    return;
+  }
+
+  if (type === "bbloop.global.message") {
+    await showActionNoticeWithPlugins(payload.payload);
+    return;
+  }
+
+  if (type === "bridge.status") {
     const status = String(payload.status || "").trim();
     bridgeConnectionStatus.value = status === "connected" ? "connected" : "disconnected";
     return;
   }
 
-  if (payload?.type === "bridge.event") {
+  if (type === "bridge.event") {
     bridgeConnectionStatus.value = "connected";
     if (payload.payload) {
       pushRecentRuntimeEvent("bridge", payload.payload);
@@ -1818,9 +2106,13 @@ const onRuntimeMessage = (message: unknown) => {
     return;
   }
 
-  if (payload?.type !== "brain.event") return;
+  if (type !== "brain.event") return;
   if (payload.event) {
     pushRecentRuntimeEvent("brain", payload.event);
+  }
+  const brainEventType = String(payload?.event?.type || "").trim();
+  if (brainEventType === "plugin.global_message") {
+    await showActionNoticeWithPlugins(payload?.event?.payload);
   }
   const eventSessionId = String(payload?.event?.sessionId || "").trim();
   if (!eventSessionId) return;
@@ -1835,12 +2127,19 @@ const onRuntimeMessage = (message: unknown) => {
   }
 
   void runSafely(() => store.refreshSessions(), "刷新会话列表失败");
+}
+
+const onRuntimeMessage = (message: unknown) => {
+  void handleRuntimeMessage(message).catch((error) => {
+    console.error("runtime message handling failed", error);
+  });
 };
 
 onMounted(() => {
   chrome.runtime.onMessage.addListener(onRuntimeMessage);
   void runSafely(async () => {
     await store.bootstrap();
+    await hydratePanelUiPlugins();
     await refreshBridgeConnectionStatus();
     if (activeSessionId.value && isRunActive.value) {
       await syncActiveToolRun(activeSessionId.value);
@@ -1935,17 +2234,40 @@ async function handleSend(payload: { text: string; tabIds: number[]; skillIds: s
     await createSessionTask;
   }
   if (startRunPending.value && !isRunActive.value) return;
-  const text = String(payload.text || "");
-  if (!text.trim() && (!payload.skillIds || payload.skillIds.length === 0)) return;
-  const isNew = !activeSessionId.value;
+  const currentSessionId = String(activeSessionId.value || "").trim();
+  const beforeSend = await panelUiRuntime.runHook(
+    "ui.chat_input.before_send",
+    normalizeUiChatInputPayload({
+      ...payload,
+      sessionId: currentSessionId || undefined
+    })
+  );
+  if (beforeSend.blocked) {
+    await showActionNoticeWithPlugins({
+      type: "error",
+      message: String(beforeSend.reason || "").trim() || "发送已被插件阻止",
+      source: "ui.plugin"
+    });
+    return;
+  }
+
+  const sendInput = normalizeUiChatInputPayload(beforeSend.value);
+  const text = String(sendInput.text || "");
+  if (!text.trim() && sendInput.skillIds.length === 0) return;
+  const isNew = !currentSessionId;
 
   try {
     startRunPending.value = true;
     await store.sendPrompt(text, {
       newSession: isNew,
-      tabIds: Array.isArray(payload.tabIds) ? payload.tabIds : [],
-      skillIds: Array.isArray(payload.skillIds) ? payload.skillIds : [],
-      streamingBehavior: payload.mode === "normal" ? undefined : payload.mode
+      tabIds: sendInput.tabIds,
+      skillIds: sendInput.skillIds,
+      streamingBehavior: sendInput.mode === "normal" ? undefined : sendInput.mode
+    });
+    const sessionIdAfterSend = String(activeSessionId.value || "").trim() || sendInput.sessionId;
+    void panelUiRuntime.runHook("ui.chat_input.after_send", {
+      ...sendInput,
+      sessionId: sessionIdAfterSend || undefined
     });
     prompt.value = "";
   } catch (err) {
@@ -1981,8 +2303,11 @@ async function handleCopyMarkdown() {
   const md = generateMarkdown();
   try {
     await navigator.clipboard.writeText(md);
-    actionNotice.value = { type: 'success', message: '已复制到剪贴板' };
-    setTimeout(() => { actionNotice.value = null; }, 2000);
+    await showActionNoticeWithPlugins({
+      type: "success",
+      message: "已复制到剪贴板",
+      source: "panel.copy_markdown"
+    });
   } catch (err) {
     setErrorMessage(err, '复制失败');
   }
@@ -2004,10 +2329,11 @@ async function handleCopyDiagnostics() {
       timelineLimit: 28
     });
     await navigator.clipboard.writeText(text);
-    actionNotice.value = { type: "success", message: "诊断信息已复制" };
-    setTimeout(() => {
-      actionNotice.value = null;
-    }, 2200);
+    await showActionNoticeWithPlugins({
+      type: "success",
+      message: "诊断信息已复制",
+      source: "panel.copy_diagnostics"
+    });
   } catch (err) {
     setErrorMessage(err, "复制诊断信息失败");
   }
@@ -2038,8 +2364,10 @@ function handleExport(mode: 'download' | 'open') {
 }
 
 onUnmounted(() => {
+  stableMessagesBuildToken += 1;
   stopInitialToolSync();
   clearToolPendingCardLeaveTimer();
+  clearPanelNoticeTimer();
   if (forkSessionHighlightTimer) {
     clearTimeout(forkSessionHighlightTimer);
     forkSessionHighlightTimer = null;
