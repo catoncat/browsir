@@ -5045,7 +5045,7 @@ describe("runtime-router.browser", () => {
     expect(policies.some((item) => String(item.capability || "") === "browser.action")).toBe(true);
   });
 
-  it("bootstraps builtin capability plugins on runtime startup", async () => {
+  it("bootstraps builtin plugins on runtime startup", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
 
@@ -5072,6 +5072,9 @@ describe("runtime-router.browser", () => {
       true
     );
     expect(plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.capability.browser.verify.cdp")).toBe(true);
+    expect(
+      plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.notice.send-success-global-message")
+    ).toBe(true);
 
     expect(
       capabilityProviders.some(

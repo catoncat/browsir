@@ -3033,6 +3033,109 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
   };
 
+  const ensureBuiltinRoutePlugins = (): void => {
+    const builtinPluginId = "runtime.builtin.plugin.notice.send-success-global-message";
+    const pluginSource = "plugin.send-success-global-message";
+    const successMessage = "发送成功";
+    const dedupeSeen = new Map<string, number>();
+    const dedupeMax = 200;
+
+    const hasPlugin = (): boolean =>
+      orchestrator.listPlugins().some((item) => String(item.id || "").trim() === builtinPluginId);
+
+    const toStringList = (input: unknown): string[] => {
+      if (!Array.isArray(input)) return [];
+      const out: string[] = [];
+      for (const item of input) {
+        const text = String(item || "").trim();
+        if (!text) continue;
+        out.push(text);
+      }
+      return out;
+    };
+
+    const fireRuntimeMessage = (payload: Record<string, unknown>): void => {
+      try {
+        const maybePromise = chrome.runtime.sendMessage(payload);
+        if (maybePromise && typeof (maybePromise as Promise<unknown>).catch === "function") {
+          void (maybePromise as Promise<unknown>).catch(() => undefined);
+        }
+      } catch {
+        // ignore
+      }
+    };
+
+    if (hasPlugin()) return;
+    orchestrator.registerPlugin(
+      {
+        manifest: {
+          id: builtinPluginId,
+          name: "builtin-send-success-global-message",
+          version: "1.0.0",
+          permissions: {
+            hooks: ["runtime.route.after"]
+          }
+        },
+        hooks: {
+          "runtime.route.after": (event) => {
+            const routeType = String(event?.type || "").trim();
+            if (routeType !== "brain.run.start") return { action: "continue" };
+
+            const routeResult = toRecord(event?.result);
+            if (routeResult.ok !== true) return { action: "continue" };
+
+            const routeMessage = toRecord(event?.message);
+            const prompt = String(routeMessage.prompt || "").trim();
+            const skillIds = toStringList(routeMessage.skillIds);
+            if (!prompt && skillIds.length === 0) return { action: "continue" };
+
+            const data = toRecord(routeResult.data);
+            const sessionId = String(data.sessionId || routeMessage.sessionId || "").trim();
+            const dedupeKey = `${sessionId}::${prompt}::${skillIds.join(",")}`;
+            if (dedupeKey && dedupeSeen.has(dedupeKey)) {
+              return { action: "continue" };
+            }
+            if (dedupeKey) {
+              dedupeSeen.set(dedupeKey, Date.now());
+              if (dedupeSeen.size > dedupeMax) {
+                const first = dedupeSeen.keys().next();
+                if (!first.done) dedupeSeen.delete(first.value);
+              }
+            }
+
+            fireRuntimeMessage({
+              type: "bbloop.global.message",
+              payload: {
+                kind: "success",
+                message: successMessage,
+                source: pluginSource,
+                sessionId,
+                ts: nowIso()
+              }
+            });
+
+            if (sessionId) {
+              fireRuntimeMessage({
+                type: "brain.event",
+                event: {
+                  sessionId,
+                  type: "plugin.global_message",
+                  payload: {
+                    kind: "success",
+                    message: successMessage,
+                    source: pluginSource
+                  }
+                }
+              });
+            }
+            return { action: "continue" };
+          }
+        }
+      },
+      { enable: true }
+    );
+  };
+
   const ensureBuiltinCapabilityPlugins = (): void => {
     type CapabilityStepInput = {
       sessionId: string;
@@ -3246,6 +3349,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
   };
 
+  ensureBuiltinRoutePlugins();
   ensureBuiltinCapabilityPlugins();
   ensureBuiltinBridgeCapabilityProviders();
   ensureBuiltinSandboxCapabilityProviders();
@@ -4523,7 +4627,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const forcedRuntime =
           context.executionTool === "host_bash"
             ? "local"
-            : await resolveBrowserRuntime(args.runtime);
+            : "sandbox";
         const timeoutMs =
           args.timeoutMs == null
             ? undefined
