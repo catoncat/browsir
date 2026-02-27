@@ -6,6 +6,7 @@ import { invokeVirtualFrame, isVirtualUri } from "./virtual-fs.browser";
 import { registerExtension, type ExtensionFactory } from "./extension-api";
 import type { AgentPluginDefinition, AgentPluginManifest, AgentPluginPermissions } from "./plugin-runtime";
 import type { LlmProviderAdapter, LlmProviderSendInput } from "./llm-provider";
+import { normalizeSkillCreateRequest } from "./skill-create";
 import {
   removeSessionIndexEntry,
   removeSessionMeta,
@@ -127,6 +128,24 @@ async function readVirtualJsonObject(path: string, field: string, sessionId = "d
   return parseJsonObjectText(content, field);
 }
 
+async function writeVirtualTextFile(path: string, content: string, sessionId = "default"): Promise<Record<string, unknown>> {
+  const resolvedPath = String(path || "").trim();
+  if (!resolvedPath) throw new Error("write path 不能为空");
+  if (!isVirtualUri(resolvedPath)) {
+    throw new Error("write path 仅支持 mem://");
+  }
+  return await invokeVirtualFrame({
+    tool: "write",
+    args: {
+      path: resolvedPath,
+      content: String(content || ""),
+      mode: "overwrite",
+      runtime: "sandbox"
+    },
+    sessionId: String(sessionId || "").trim() || "default"
+  });
+}
+
 function normalizeHeadersRecord(input: unknown, field: string): Record<string, string> {
   if (input === undefined || input === null) return {};
   let source: Record<string, unknown> = {};
@@ -228,6 +247,8 @@ function normalizePluginPermissions(input: unknown): AgentPluginPermissions {
   const capabilities = toStringList(row.capabilities);
   const tools = toStringList(row.tools);
   const llmProviders = toStringList(row.llmProviders);
+  const runtimeMessages = toStringList(row.runtimeMessages);
+  const brainEvents = toStringList(row.brainEvents);
   const modes =
     Array.isArray(modesRaw) && modesRaw.length > 0
       ? (modesRaw.filter((item) => item === "script" || item === "cdp" || item === "bridge") as Array<
@@ -240,6 +261,8 @@ function normalizePluginPermissions(input: unknown): AgentPluginPermissions {
     ...(capabilities ? { capabilities } : {}),
     ...(tools ? { tools } : {}),
     ...(llmProviders ? { llmProviders } : {}),
+    ...(runtimeMessages ? { runtimeMessages } : {}),
+    ...(brainEvents ? { brainEvents } : {}),
     ...(row.replaceProviders === true ? { replaceProviders: true } : {}),
     ...(row.replaceToolContracts === true ? { replaceToolContracts: true } : {}),
     ...(row.replaceLlmProviders === true ? { replaceLlmProviders: true } : {})
@@ -308,6 +331,7 @@ interface UiExtensionDescriptor {
   pluginId: string;
   moduleUrl: string;
   exportName: string;
+  moduleSource?: string;
   enabled: boolean;
   updatedAt: string;
 }
@@ -316,14 +340,17 @@ function normalizeUiExtensionDescriptor(input: unknown): UiExtensionDescriptor |
   const row = toRecord(input);
   const pluginId = String(row.pluginId || "").trim();
   const moduleUrl = String(row.moduleUrl || "").trim();
-  if (!pluginId || !moduleUrl) return null;
+  const moduleSource = String(row.moduleSource || "");
+  if (!pluginId) return null;
+  if (!moduleUrl && !moduleSource.trim()) return null;
   const exportName = String(row.exportName || "default").trim() || "default";
   const enabled = row.enabled !== false;
   const updatedAt = String(row.updatedAt || "").trim() || nowIso();
   return {
     pluginId,
-    moduleUrl,
+    moduleUrl: moduleUrl || `inline://${pluginId}/ui.js`,
     exportName,
+    ...(moduleSource.trim() ? { moduleSource } : {}),
     enabled,
     updatedAt
   };
@@ -412,18 +439,27 @@ function resolveUiExtensionDescriptorFromSource(
   source: Record<string, unknown>,
   enabled: boolean
 ): UiExtensionDescriptor | null {
+  const moduleSource = String(source.uiModuleSource || "");
   const moduleInput = source.uiModuleUrl ?? source.uiModulePath ?? source.uiModule;
   const hasModule =
-    String(source.uiModuleUrl || "").trim().length > 0
+    moduleSource.trim().length > 0
+    || String(source.uiModuleContent || "").trim().length > 0
+    || String(source.uiCode || "").trim().length > 0
+    || String(source.uiScript || "").trim().length > 0
+    || String(source.uiSource || "").trim().length > 0
+    || String(source.uiModuleUrl || "").trim().length > 0
     || String(source.uiModulePath || "").trim().length > 0
     || String(source.uiModule || "").trim().length > 0;
   if (!hasModule) return null;
-  const moduleUrl = resolvePluginModuleUrl(moduleInput);
+  const moduleUrl = moduleInput
+    ? resolvePluginModuleUrl(moduleInput)
+    : `inline://${pluginId}/ui.js`;
   const exportName = String(source.uiExportName || "default").trim() || "default";
   return {
     pluginId,
     moduleUrl,
     exportName,
+    ...(moduleSource.trim().length > 0 ? { moduleSource } : {}),
     enabled,
     updatedAt: nowIso()
   };
@@ -432,6 +468,7 @@ function resolveUiExtensionDescriptorFromSource(
 function hasPluginExtensionEntry(source: Record<string, unknown>): boolean {
   return (
     typeof source.setup === "function"
+    || String(source.moduleSource || "").trim().length > 0
     || String(source.moduleUrl || "").trim().length > 0
     || String(source.modulePath || "").trim().length > 0
     || String(source.module || "").trim().length > 0
@@ -480,6 +517,36 @@ async function loadExtensionFactoryFromModule(moduleUrl: string, exportName = "d
   const setup = target === "default" ? moduleNs.default : moduleNs[target];
   if (typeof setup !== "function") {
     throw new Error(`plugin extension ${moduleUrl} 缺少可执行导出: ${target}`);
+  }
+  return setup as ExtensionFactory;
+}
+
+function loadModuleNamespaceFromSource(source: string, moduleLabel: string): Record<string, unknown> {
+  const code = String(source || "");
+  if (!code.trim()) {
+    throw new Error(`${moduleLabel} 不能为空`);
+  }
+  const transformed = code.replace(/(^|\n)\s*export\s+default\s+/m, "$1module.exports = ");
+  const module = { exports: {} as unknown };
+  const exports = module.exports;
+  const factory = new Function("module", "exports", `${transformed}\n;return module.exports;`);
+  const out = factory(module, exports);
+  const normalized = out === undefined ? module.exports : out;
+  if (typeof normalized === "function") {
+    return { default: normalized };
+  }
+  if (normalized && typeof normalized === "object") {
+    return normalized as Record<string, unknown>;
+  }
+  throw new Error(`${moduleLabel} 未导出可执行函数`);
+}
+
+function loadExtensionFactoryFromSource(source: string, exportName = "default", moduleLabel = "plugin extension"): ExtensionFactory {
+  const moduleNs = loadModuleNamespaceFromSource(source, moduleLabel);
+  const target = String(exportName || "default").trim() || "default";
+  const setup = target === "default" ? moduleNs.default : moduleNs[target];
+  if (typeof setup !== "function") {
+    throw new Error(`${moduleLabel} 缺少可执行导出: ${target}`);
   }
   return setup as ExtensionFactory;
 }
@@ -1990,6 +2057,28 @@ async function handleBrainSkill(
   const payload = toRecord(message);
   const action = String(payload.type || "");
 
+  if (action === "brain.skill.create") {
+    const sessionId = String(payload.sessionId || "").trim();
+    if (!sessionId) return fail("brain.skill.create 需要 sessionId");
+    const nested = toRecord(payload.skill);
+    const source = Object.keys(nested).length > 0 ? { ...payload, ...nested } : payload;
+    const normalized = normalizeSkillCreateRequest(source);
+    for (const file of normalized.writes) {
+      await writeVirtualTextFile(file.path, file.content, sessionId);
+    }
+    const skill = await orchestrator.installSkill(normalized.skill, { replace: normalized.replace });
+    return ok({
+      sessionId,
+      skillId: skill.id,
+      skill,
+      root: normalized.root,
+      skillDir: normalized.skillDir,
+      location: skill.location,
+      fileCount: normalized.writes.length,
+      files: normalized.writes.map((item) => item.path)
+    });
+  }
+
   if (action === "brain.skill.list") {
     return ok({
       skills: await orchestrator.listSkills()
@@ -2305,6 +2394,7 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
     const source = Object.keys(pluginRaw).length > 0 ? pluginRaw : payload;
     const manifest = normalizePluginManifest(source.manifest);
     const setupRaw = source.setup;
+    const moduleSource = String(source.moduleSource || "");
     const moduleInput = source.moduleUrl ?? source.modulePath ?? source.module;
     const exportName = String(source.exportName || "default").trim() || "default";
 
@@ -2312,6 +2402,9 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
     let moduleUrl = "";
     if (typeof setupRaw === "function") {
       setup = setupRaw as ExtensionFactory;
+    } else if (moduleSource.trim().length > 0) {
+      setup = loadExtensionFactoryFromSource(moduleSource, exportName, `plugin extension ${manifest.id}`);
+      moduleUrl = `inline://${manifest.id}/index.js`;
     } else {
       moduleUrl = resolvePluginModuleUrl(moduleInput);
       setup = await loadExtensionFactoryFromModule(moduleUrl, exportName);

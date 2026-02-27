@@ -2,6 +2,7 @@ export interface UiExtensionDescriptor {
   pluginId: string;
   moduleUrl: string;
   exportName: string;
+  moduleSource?: string;
   enabled: boolean;
   updatedAt: string;
 }
@@ -116,11 +117,14 @@ function normalizeDescriptor(input: unknown): UiExtensionDescriptor | null {
   const row = toRecord(input);
   const pluginId = String(row.pluginId || "").trim();
   const moduleUrl = String(row.moduleUrl || "").trim();
-  if (!pluginId || !moduleUrl) return null;
+  const moduleSource = String(row.moduleSource || "");
+  if (!pluginId) return null;
+  if (!moduleUrl && !moduleSource.trim()) return null;
   return {
     pluginId,
-    moduleUrl,
+    moduleUrl: moduleUrl || `inline://${pluginId}/ui.js`,
     exportName: String(row.exportName || "default").trim() || "default",
+    ...(moduleSource.trim() ? { moduleSource } : {}),
     enabled: row.enabled !== false,
     updatedAt: String(row.updatedAt || "").trim() || new Date().toISOString()
   };
@@ -145,6 +149,36 @@ async function loadPluginFactory(moduleUrl: string, exportName: string): Promise
   const setup = target === "default" ? moduleNs.default : moduleNs[target];
   if (typeof setup !== "function") {
     throw new Error(`ui plugin ${moduleUrl} 缺少可执行导出: ${target}`);
+  }
+  return setup as PanelUiPluginFactory;
+}
+
+function loadModuleNamespaceFromSource(source: string, moduleLabel: string): Record<string, unknown> {
+  const code = String(source || "");
+  if (!code.trim()) {
+    throw new Error(`${moduleLabel} 不能为空`);
+  }
+  const transformed = code.replace(/(^|\n)\s*export\s+default\s+/m, "$1module.exports = ");
+  const module = { exports: {} as unknown };
+  const exports = module.exports;
+  const factory = new Function("module", "exports", `${transformed}\n;return module.exports;`);
+  const out = factory(module, exports);
+  const normalized = out === undefined ? module.exports : out;
+  if (typeof normalized === "function") {
+    return { default: normalized };
+  }
+  if (normalized && typeof normalized === "object") {
+    return normalized as Record<string, unknown>;
+  }
+  throw new Error(`${moduleLabel} 未导出可执行函数`);
+}
+
+function loadPluginFactoryFromSource(source: string, exportName: string, moduleLabel: string): PanelUiPluginFactory {
+  const moduleNs = loadModuleNamespaceFromSource(source, moduleLabel);
+  const target = String(exportName || "default").trim() || "default";
+  const setup = target === "default" ? moduleNs.default : moduleNs[target];
+  if (typeof setup !== "function") {
+    throw new Error(`${moduleLabel} 缺少可执行导出: ${target}`);
   }
   return setup as PanelUiPluginFactory;
 }
@@ -217,7 +251,13 @@ export class PanelUiPluginRuntime {
     };
 
     try {
-      const setup = await loadPluginFactory(state.descriptor.moduleUrl, state.descriptor.exportName);
+      const setup = state.descriptor.moduleSource
+        ? loadPluginFactoryFromSource(
+          state.descriptor.moduleSource,
+          state.descriptor.exportName,
+          `ui plugin ${state.descriptor.pluginId}`
+        )
+        : await loadPluginFactory(state.descriptor.moduleUrl, state.descriptor.exportName);
       await Promise.resolve(setup(api));
       state.handlers = collectedHandlers;
       state.enabled = true;

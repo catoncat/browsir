@@ -1800,12 +1800,7 @@ function showMissionMascot(input: unknown) {
   };
 
   clearMissionMascotTimer();
-  const fallbackDuration = next.phase === "error" ? 3600 : next.phase === "done" ? 2600 : 2200;
-  const duration = Number(next.durationMs) || fallbackDuration;
-  missionMascotTimer = setTimeout(() => {
-    missionMascot.value.visible = false;
-    missionMascotTimer = null;
-  }, duration);
+  missionMascotTimer = null;
 }
 
 function normalizeUiNoticePayload(input: unknown): UiNoticePayload | null {
@@ -1850,11 +1845,14 @@ function normalizeUiExtensionDescriptor(input: unknown): UiExtensionDescriptor |
   const row = toRecord(input);
   const pluginId = String(row.pluginId || "").trim();
   const moduleUrl = String(row.moduleUrl || "").trim();
-  if (!pluginId || !moduleUrl) return null;
+  const moduleSource = String(row.moduleSource || "");
+  if (!pluginId) return null;
+  if (!moduleUrl && !moduleSource.trim()) return null;
   return {
     pluginId,
-    moduleUrl,
+    moduleUrl: moduleUrl || `inline://${pluginId}/ui.js`,
     exportName: String(row.exportName || "default").trim() || "default",
+    ...(moduleSource.trim() ? { moduleSource } : {}),
     enabled: row.enabled !== false,
     updatedAt: String(row.updatedAt || "").trim() || new Date().toISOString()
   };
@@ -2336,9 +2334,12 @@ async function handleSend(payload: { text: string; tabIds: number[]; skillIds: s
   const text = String(sendInput.text || "");
   if (!text.trim() && sendInput.skillIds.length === 0) return;
   const isNew = !currentSessionId;
+  const shouldExpectRunStart = !isRunActive.value;
 
   try {
-    startRunPending.value = true;
+    if (shouldExpectRunStart) {
+      startRunPending.value = true;
+    }
     await store.sendPrompt(text, {
       newSession: isNew,
       tabIds: sendInput.tabIds,
@@ -2355,7 +2356,7 @@ async function handleSend(payload: { text: string; tabIds: number[]; skillIds: s
     startRunPending.value = false;
     setErrorMessage(err, "发送失败");
   } finally {
-    if (!isRunActive.value) {
+    if (shouldExpectRunStart || !isRunActive.value) {
       startRunPending.value = false;
     }
   }

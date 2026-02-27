@@ -213,12 +213,15 @@ export interface PluginMetadata {
   policyCapabilities: string[];
   tools: string[];
   llmProviders: string[];
+  runtimeMessages: string[];
+  brainEvents: string[];
 }
 
 export interface PluginUiExtensionMetadata {
   pluginId: string;
   moduleUrl: string;
   exportName: string;
+  moduleSource?: string;
   enabled: boolean;
   updatedAt: string;
 }
@@ -304,7 +307,9 @@ function normalizePluginMetadata(input: unknown): PluginMetadata {
     capabilities: toStringArray(row.capabilities),
     policyCapabilities: toStringArray(row.policyCapabilities),
     tools: toStringArray(row.tools),
-    llmProviders: toStringArray(row.llmProviders)
+    llmProviders: toStringArray(row.llmProviders),
+    runtimeMessages: toStringArray(row.runtimeMessages),
+    brainEvents: toStringArray(row.brainEvents)
   };
 }
 
@@ -312,11 +317,14 @@ function normalizePluginUiExtensionMetadata(input: unknown): PluginUiExtensionMe
   const row = toRecord(input);
   const pluginId = String(row.pluginId || "").trim();
   const moduleUrl = String(row.moduleUrl || "").trim();
-  if (!pluginId || !moduleUrl) return null;
+  const moduleSource = String(row.moduleSource || "");
+  if (!pluginId) return null;
+  if (!moduleUrl && !moduleSource.trim()) return null;
   return {
     pluginId,
-    moduleUrl,
+    moduleUrl: moduleUrl || `inline://${pluginId}/ui.js`,
     exportName: String(row.exportName || "default").trim() || "default",
+    ...(moduleSource.trim() ? { moduleSource } : {}),
     enabled: row.enabled !== false,
     updatedAt: String(row.updatedAt || "").trim() || new Date().toISOString()
   };

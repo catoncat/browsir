@@ -5073,11 +5073,22 @@ describe("runtime-router.browser", () => {
     );
     expect(plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.capability.browser.verify.cdp")).toBe(true);
     expect(
-      plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.notice.send-success-global-message")
+      plugins.some((item) => String(item.id || "") === "plugin.example.notice.send-success-global-message")
     ).toBe(true);
     expect(
-      plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.ui.mission-hud.dog")
+      plugins.some((item) => String(item.id || "") === "plugin.example.ui.mission-hud.dog")
     ).toBe(true);
+
+    const sendSuccessPlugin = plugins.find(
+      (item) => String(item.id || "") === "plugin.example.notice.send-success-global-message"
+    );
+    expect(Array.isArray(sendSuccessPlugin?.runtimeMessages)).toBe(true);
+    expect(((sendSuccessPlugin?.runtimeMessages as unknown[]) || []).includes("bbloop.global.message")).toBe(true);
+    expect(((sendSuccessPlugin?.brainEvents as unknown[]) || []).includes("plugin.global_message")).toBe(true);
+
+    const mascotPlugin = plugins.find((item) => String(item.id || "") === "plugin.example.ui.mission-hud.dog");
+    expect(Array.isArray(mascotPlugin?.runtimeMessages)).toBe(true);
+    expect(((mascotPlugin?.runtimeMessages as unknown[]) || []).includes("bbloop.ui.mascot")).toBe(true);
 
     expect(
       capabilityProviders.some(
@@ -5471,6 +5482,80 @@ describe("runtime-router.browser", () => {
     expect(patched.ok).toBe(true);
     const patchedResult = (patched.data || {}) as Record<string, unknown>;
     expect((patchedResult.data || {}) as Record<string, unknown>).toEqual({ source: "extension-module" });
+  });
+
+  it("supports brain.plugin.register_extension with moduleSource + uiModuleSource", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    const { sessionId } = await orchestrator.createSession({ title: "plugin-route-extension-module-source" });
+    orchestrator.registerToolProvider(
+      "script",
+      {
+        id: "plugin.route.extension.source.script",
+        invoke: async () => ({ source: "script" })
+      },
+      { replace: true }
+    );
+
+    const pluginId = "plugin.route.extension.module.source";
+    const moduleSource = `export default function registerPlugin(pi) {
+  pi.on("tool.after_result", (event) => {
+    const previous = (event.result || {});
+    return {
+      action: "patch",
+      patch: {
+        result: {
+          ...previous,
+          source: "extension-module-source"
+        }
+      }
+    };
+  });
+}`;
+    const uiModuleSource = `export default function registerUiPlugin(ui) {
+  ui.on("ui.runtime.event", () => ({ action: "continue" }));
+}`;
+
+    const registered = await invokeRuntime({
+      type: "brain.plugin.register_extension",
+      manifest: {
+        id: pluginId,
+        name: "plugin-route-extension-module-source",
+        version: "1.0.0",
+        permissions: {
+          hooks: ["tool.after_result"]
+        }
+      },
+      moduleSource,
+      uiModuleSource
+    });
+    expect(registered.ok).toBe(true);
+    const registeredData = (registered.data || {}) as Record<string, unknown>;
+    expect(String(registeredData.pluginId || "")).toBe(pluginId);
+    expect(String(registeredData.moduleUrl || "")).toBe(`inline://${pluginId}/index.js`);
+
+    const patched = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      mode: "script",
+      action: "click",
+      verifyPolicy: "off"
+    });
+    expect(patched.ok).toBe(true);
+    const patchedResult = (patched.data || {}) as Record<string, unknown>;
+    expect((patchedResult.data || {}) as Record<string, unknown>).toEqual({ source: "extension-module-source" });
+
+    const listed = await invokeRuntime({
+      type: "brain.plugin.ui_extension.list"
+    });
+    expect(listed.ok).toBe(true);
+    const listedExtensions = Array.isArray((listed.data as Record<string, unknown>)?.uiExtensions)
+      ? (((listed.data as Record<string, unknown>).uiExtensions as unknown[]) as Array<Record<string, unknown>>)
+      : [];
+    const listedExtension = listedExtensions.find((item) => String(item.pluginId || "") === pluginId);
+    expect(listedExtension).toBeDefined();
+    expect(String(listedExtension?.moduleUrl || "")).toBe(`inline://${pluginId}/ui.js`);
+    expect(String(listedExtension?.moduleSource || "")).toBe(uiModuleSource);
   });
 
   it("supports brain.plugin ui_extension lifecycle routes", async () => {
