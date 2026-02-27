@@ -74,6 +74,14 @@ interface ToolCallItem {
   };
 }
 
+interface BashExecOutcome {
+  cmdId: string;
+  argv: string[];
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+}
+
 interface RunStartInput {
   sessionId?: string;
   sessionOptions?: JsonRecord;
@@ -172,58 +180,11 @@ const CANONICAL_BROWSER_TOOL_NAMES = [
   "get_skill_info"
 ] as const;
 
-const BUILTIN_BRIDGE_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [
-  {
-    capability: CAPABILITIES.processExec,
-    providerId: "runtime.builtin.capability.process.exec.bridge"
-  },
-  {
-    capability: CAPABILITIES.fsRead,
-    providerId: "runtime.builtin.capability.fs.read.bridge"
-  },
-  {
-    capability: CAPABILITIES.fsWrite,
-    providerId: "runtime.builtin.capability.fs.write.bridge"
-  },
-  {
-    capability: CAPABILITIES.fsEdit,
-    providerId: "runtime.builtin.capability.fs.edit.bridge"
-  }
-];
+const BUILTIN_BRIDGE_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [];
 
-const BUILTIN_SANDBOX_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [
-  {
-    capability: CAPABILITIES.processExec,
-    providerId: "executor.sandbox"
-  },
-  {
-    capability: CAPABILITIES.fsRead,
-    providerId: "executor.sandbox"
-  },
-  {
-    capability: CAPABILITIES.fsWrite,
-    providerId: "executor.sandbox"
-  },
-  {
-    capability: CAPABILITIES.fsEdit,
-    providerId: "executor.sandbox"
-  }
-];
+const BUILTIN_SANDBOX_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [];
 
-const BUILTIN_BROWSER_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [
-  {
-    capability: CAPABILITIES.browserSnapshot,
-    providerId: "runtime.builtin.capability.browser.snapshot.cdp"
-  },
-  {
-    capability: CAPABILITIES.browserAction,
-    providerId: "runtime.builtin.capability.browser.action.cdp"
-  },
-  {
-    capability: CAPABILITIES.browserVerify,
-    providerId: "runtime.builtin.capability.browser.verify.cdp"
-  }
-];
+const BUILTIN_BROWSER_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [];
 
 const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
   "host_bash",
@@ -236,6 +197,7 @@ const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
   "browser_edit_file",
   ...CANONICAL_BROWSER_TOOL_NAMES
 ]);
+const BASH_RUNTIME_TOOL_NAMES = new Set(["host_bash", "browser_bash"]);
 
 const NO_PROGRESS_CONTINUE_BUDGET: Record<NoProgressReason, number> = {
   repeat_signature: 1,
@@ -2090,6 +2052,113 @@ function buildToolResponseEnvelope(type: string, data: unknown, extra: JsonRecor
   };
 }
 
+function extractBashExecOutcome(data: unknown): BashExecOutcome | null {
+  const root = toRecord(data);
+  const rootData = toRecord(root.data);
+  const rootResponse = toRecord(root.response);
+  const rootResponseData = toRecord(rootResponse.data);
+  const rootResponseInnerData = toRecord(rootResponseData.data);
+  const rootResult = toRecord(root.result);
+  const candidates = [root, rootData, rootResponse, rootResponseData, rootResponseInnerData, rootResult];
+  for (const item of candidates) {
+    const cmdId = String(item.cmdId || "").trim();
+    const hasCmd = cmdId === "bash.exec";
+    const hasFields = item.exitCode !== undefined || typeof item.stdout === "string" || typeof item.stderr === "string";
+    if (!hasCmd && !hasFields) continue;
+    const argv = Array.isArray(item.argv) ? item.argv.map((value) => String(value || "")) : [];
+    const exitCodeRaw = Number(item.exitCode);
+    return {
+      cmdId: hasCmd ? cmdId : "bash.exec",
+      argv,
+      stdout: typeof item.stdout === "string" ? item.stdout : "",
+      stderr: typeof item.stderr === "string" ? item.stderr : "",
+      exitCode: Number.isFinite(exitCodeRaw) ? exitCodeRaw : null
+    };
+  }
+  return null;
+}
+
+function extractBashCommandFromArgv(argv: string[]): string {
+  if (!Array.isArray(argv) || argv.length === 0) return "";
+  const shellEvalIndex = argv.findIndex((value) => value === "-lc");
+  if (shellEvalIndex >= 0 && shellEvalIndex + 1 < argv.length) {
+    return String(argv[shellEvalIndex + 1] || "");
+  }
+  return String(argv[argv.length - 1] || "");
+}
+
+function diagnoseBashExitFailure(input: {
+  toolName: string;
+  exitCode: number;
+  stderr: string;
+}): { tag: string; error: string; retryHint: string } {
+  const normalizedTool = String(input.toolName || "").trim().toLowerCase();
+  const stderrLower = String(input.stderr || "").toLowerCase();
+  if (normalizedTool === "browser_bash" && /(?:\bwindow is not defined\b|\bdocument is not defined\b)/i.test(stderrLower)) {
+    return {
+      tag: "dom_global_unavailable",
+      error: `browser_bash 执行失败：sandbox shell 不是页面 DOM 上下文，window/document 不可用（exitCode=${input.exitCode}）。`,
+      retryHint: "需要页面 DOM 时改用 browser.action/browser_verify/script_action；仅执行命令时请移除 window/document 后重试。"
+    };
+  }
+  if (normalizedTool === "browser_bash" && /expected word but got lparen/i.test(stderrLower)) {
+    return {
+      tag: "unsupported_shell_syntax",
+      error: `browser_bash 执行失败：sandbox shell 不支持 C-style for ((...)) 语法（exitCode=${input.exitCode}）。`,
+      retryHint: "改用 POSIX 写法（for i in ...; do ...; done），或切换 host_bash 使用宿主 bash。"
+    };
+  }
+  const stderrLine = clipText(
+    String(input.stderr || "")
+      .split(/\r?\n/)
+      .find((line) => String(line || "").trim().length > 0) || "",
+    240
+  );
+  return {
+    tag: "non_zero_exit",
+    error: stderrLine
+      ? `${input.toolName} 执行失败：bash.exec exitCode=${input.exitCode}，stderr=${stderrLine}`
+      : `${input.toolName} 执行失败：bash.exec exitCode=${input.exitCode}`,
+    retryHint: "检查命令与运行时兼容性后重试；browser_bash 使用 sandbox shell，语法与宿主 bash 可能不同。"
+  };
+}
+
+function buildBashExitFailureEnvelope(toolName: string, invoke: ExecuteStepResult, outcome: BashExecOutcome): JsonRecord {
+  const exitCode = Number(outcome.exitCode);
+  const diagnosed = diagnoseBashExitFailure({
+    toolName,
+    exitCode: Number.isFinite(exitCode) ? exitCode : 1,
+    stderr: outcome.stderr
+  });
+  return {
+    ...attachFailureProtocol(
+      toolName,
+      {
+        error: diagnosed.error,
+        errorCode: "E_BASH_EXIT_NON_ZERO",
+        errorReason: "failed_execute",
+        retryable: true,
+        retryHint: diagnosed.retryHint,
+        details: {
+          cmdId: outcome.cmdId,
+          exitCode: outcome.exitCode,
+          command: clipText(extractBashCommandFromArgv(outcome.argv), 1_200),
+          stdout: clipText(outcome.stdout, 1_200),
+          stderr: clipText(outcome.stderr, 1_200),
+          diagnosis: diagnosed.tag
+        }
+      },
+      {
+        phase: "execute",
+        resumeStrategy: "replan"
+      }
+    ),
+    modeUsed: invoke.modeUsed,
+    providerId: invoke.providerId || undefined,
+    fallbackFrom: invoke.fallbackFrom || undefined
+  };
+}
+
 function buildStepFailureEnvelope(
   toolName: string,
   out: ExecuteStepResult,
@@ -2964,6 +3033,220 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
   };
 
+  const ensureBuiltinCapabilityPlugins = (): void => {
+    type CapabilityStepInput = {
+      sessionId: string;
+      action?: string;
+      capability?: ExecuteCapability;
+      verifyPolicy?: StepVerifyPolicy;
+      args?: JsonRecord;
+    };
+
+    interface BuiltinCapabilityPluginInput {
+      pluginId: string;
+      pluginName: string;
+      capability: ExecuteCapability;
+      providerId: string;
+      mode: ExecuteMode;
+      priority: number;
+      canHandle?: (stepInput: CapabilityStepInput) => boolean;
+      invoke: (stepInput: CapabilityStepInput) => Promise<unknown>;
+    }
+
+    const hasPlugin = (pluginId: string): boolean =>
+      orchestrator.listPlugins().some((item) => String(item.id || "").trim() === pluginId);
+
+    const registerBuiltinCapabilityPlugin = (spec: BuiltinCapabilityPluginInput): void => {
+      if (hasPlugin(spec.pluginId)) return;
+      orchestrator.registerPlugin(
+        {
+          manifest: {
+            id: spec.pluginId,
+            name: spec.pluginName,
+            version: "1.0.0",
+            permissions: {
+              capabilities: [spec.capability]
+            }
+          },
+          providers: {
+            capabilities: {
+              [spec.capability]: {
+                id: spec.providerId,
+                mode: spec.mode,
+                priority: spec.priority,
+                ...(spec.canHandle ? { canHandle: spec.canHandle } : {}),
+                invoke: spec.invoke
+              }
+            }
+          }
+        },
+        { enable: true }
+      );
+    };
+
+    const createFrameCanHandle = (capability: ExecuteCapability, runtime: "bridge" | "sandbox") => {
+      return (stepInput: CapabilityStepInput): boolean => {
+        const frame = toRecord(toRecord(stepInput.args).frame);
+        if (!String(frame.tool || "").trim()) return false;
+        if (runtime === "bridge") {
+          if (shouldRouteFrameToBrowserVfs(frame)) return false;
+        } else if (!shouldRouteFrameToBrowserVfs(frame)) {
+          return false;
+        }
+        return frameMatchesVirtualCapability(frame, capability);
+      };
+    };
+
+    const fileCapabilitySpecs: Array<{
+      capability: ExecuteCapability;
+      bridge: { pluginId: string; pluginName: string; providerId: string };
+      sandbox: { pluginId: string; pluginName: string; providerId: string };
+    }> = [
+      {
+        capability: CAPABILITIES.processExec,
+        bridge: {
+          pluginId: "runtime.builtin.plugin.capability.process.exec.bridge",
+          pluginName: "builtin-process-exec-bridge",
+          providerId: "runtime.builtin.capability.process.exec.bridge"
+        },
+        sandbox: {
+          pluginId: "runtime.builtin.plugin.capability.process.exec.sandbox",
+          pluginName: "builtin-process-exec-sandbox",
+          providerId: "runtime.builtin.plugin.capability.process.exec.sandbox.provider"
+        }
+      },
+      {
+        capability: CAPABILITIES.fsRead,
+        bridge: {
+          pluginId: "runtime.builtin.plugin.capability.fs.read.bridge",
+          pluginName: "builtin-fs-read-bridge",
+          providerId: "runtime.builtin.capability.fs.read.bridge"
+        },
+        sandbox: {
+          pluginId: "runtime.builtin.plugin.capability.fs.read.sandbox",
+          pluginName: "builtin-fs-read-sandbox",
+          providerId: "runtime.builtin.plugin.capability.fs.read.sandbox.provider"
+        }
+      },
+      {
+        capability: CAPABILITIES.fsWrite,
+        bridge: {
+          pluginId: "runtime.builtin.plugin.capability.fs.write.bridge",
+          pluginName: "builtin-fs-write-bridge",
+          providerId: "runtime.builtin.capability.fs.write.bridge"
+        },
+        sandbox: {
+          pluginId: "runtime.builtin.plugin.capability.fs.write.sandbox",
+          pluginName: "builtin-fs-write-sandbox",
+          providerId: "runtime.builtin.plugin.capability.fs.write.sandbox.provider"
+        }
+      },
+      {
+        capability: CAPABILITIES.fsEdit,
+        bridge: {
+          pluginId: "runtime.builtin.plugin.capability.fs.edit.bridge",
+          pluginName: "builtin-fs-edit-bridge",
+          providerId: "runtime.builtin.capability.fs.edit.bridge"
+        },
+        sandbox: {
+          pluginId: "runtime.builtin.plugin.capability.fs.edit.sandbox",
+          pluginName: "builtin-fs-edit-sandbox",
+          providerId: "runtime.builtin.plugin.capability.fs.edit.sandbox.provider"
+        }
+      }
+    ];
+
+    for (const spec of fileCapabilitySpecs) {
+      registerBuiltinCapabilityPlugin({
+        pluginId: spec.bridge.pluginId,
+        pluginName: spec.bridge.pluginName,
+        capability: spec.capability,
+        providerId: spec.bridge.providerId,
+        mode: "bridge",
+        priority: -100,
+        canHandle: createFrameCanHandle(spec.capability, "bridge"),
+        invoke: async (stepInput) =>
+          bridgeCapabilityInvoker({
+            sessionId: stepInput.sessionId,
+            capability: spec.capability,
+            args: toRecord(stepInput.args)
+          })
+      });
+      registerBuiltinCapabilityPlugin({
+        pluginId: spec.sandbox.pluginId,
+        pluginName: spec.sandbox.pluginName,
+        capability: spec.capability,
+        providerId: spec.sandbox.providerId,
+        mode: "script",
+        priority: -80,
+        canHandle: createFrameCanHandle(spec.capability, "sandbox"),
+        invoke: async (stepInput) =>
+          virtualFsCapabilityInvoker({
+            sessionId: stepInput.sessionId,
+            capability: spec.capability,
+            args: toRecord(stepInput.args)
+          })
+      });
+    }
+
+    const createBrowserCapabilityInput = (stepInput: CapabilityStepInput) => ({
+      sessionId: stepInput.sessionId,
+      action: String(stepInput.action || "").trim(),
+      args: toRecord(stepInput.args),
+      verifyPolicy: stepInput.verifyPolicy,
+      capability: stepInput.capability
+    });
+
+    const browserCapabilitySpecs: Array<{
+      pluginId: string;
+      pluginName: string;
+      capability: ExecuteCapability;
+      providerId: string;
+      invoke: (input: {
+        sessionId: string;
+        action: string;
+        args: JsonRecord;
+        verifyPolicy?: StepVerifyPolicy;
+        capability?: ExecuteCapability;
+      }) => Promise<unknown>;
+    }> = [
+      {
+        pluginId: "runtime.builtin.plugin.capability.browser.snapshot.cdp",
+        pluginName: "builtin-browser-snapshot-cdp",
+        capability: CAPABILITIES.browserSnapshot,
+        providerId: "runtime.builtin.capability.browser.snapshot.cdp",
+        invoke: invokeBrowserSnapshotCapability
+      },
+      {
+        pluginId: "runtime.builtin.plugin.capability.browser.action.cdp",
+        pluginName: "builtin-browser-action-cdp",
+        capability: CAPABILITIES.browserAction,
+        providerId: "runtime.builtin.plugin.capability.browser.action.cdp.provider",
+        invoke: invokeBrowserActionCapability
+      },
+      {
+        pluginId: "runtime.builtin.plugin.capability.browser.verify.cdp",
+        pluginName: "builtin-browser-verify-cdp",
+        capability: CAPABILITIES.browserVerify,
+        providerId: "runtime.builtin.capability.browser.verify.cdp",
+        invoke: invokeBrowserVerifyCapability
+      }
+    ];
+
+    for (const spec of browserCapabilitySpecs) {
+      registerBuiltinCapabilityPlugin({
+        pluginId: spec.pluginId,
+        pluginName: spec.pluginName,
+        capability: spec.capability,
+        providerId: spec.providerId,
+        mode: "cdp",
+        priority: -100,
+        invoke: async (stepInput) => spec.invoke(createBrowserCapabilityInput(stepInput))
+      });
+    }
+  };
+
+  ensureBuiltinCapabilityPlugins();
   ensureBuiltinBridgeCapabilityProviders();
   ensureBuiltinSandboxCapabilityProviders();
   ensureBuiltinBrowserCapabilityProviders();
@@ -3432,6 +3715,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     capability: ExecuteCapability | undefined,
     autoRetryMax = TOOL_AUTO_RETRY_MAX
   ): Promise<JsonRecord> {
+    const normalizedToolName = String(toolName || "").trim().toLowerCase();
     const invokeId = String(frame.id || `invoke-${crypto.randomUUID()}`);
     const frameWithInvokeId: JsonRecord = {
       ...frame,
@@ -3450,6 +3734,12 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         }
       });
       if (invoke.ok) {
+        if (BASH_RUNTIME_TOOL_NAMES.has(normalizedToolName)) {
+          const outcome = extractBashExecOutcome(invoke.data);
+          if (outcome && outcome.exitCode !== null && outcome.exitCode !== 0) {
+            return buildBashExitFailureEnvelope(toolName, invoke, outcome);
+          }
+        }
         return buildToolResponseEnvelope("invoke", invoke.data, {
           capabilityUsed: invoke.capabilityUsed || capability,
           modeUsed: invoke.modeUsed,

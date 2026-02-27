@@ -2787,6 +2787,156 @@ describe("runtime-router.browser", () => {
     expect(String(toolPayload.error || "")).toContain("active_element_not_typable");
   });
 
+  it("tool_call browser_bash exitCode!=0 时应标记 failed_execute 并给出 sandbox 诊断", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    let providerInvoked = 0;
+
+    orchestrator.registerCapabilityProvider(
+      "process.exec",
+      {
+        id: "test.browser.bash.nonzero.process.exec",
+        mode: "script",
+        priority: 120,
+        canHandle: (input) => {
+          const frame = (input.args?.frame || {}) as Record<string, unknown>;
+          const frameArgs = (frame.args || {}) as Record<string, unknown>;
+          return String(frame.tool || "") === "bash"
+            && String(frameArgs.cmdId || "") === "bash.exec"
+            && String(frameArgs.runtime || "").trim().toLowerCase() === "browser";
+        },
+        invoke: async () => {
+          providerInvoked += 1;
+          return {
+            type: "invoke",
+            response: {
+              ok: true,
+              data: {
+                cmdId: "bash.exec",
+                argv: ["bash", "-lc", "node -e \"console.log(window)\""],
+                exitCode: 2,
+                stdout: "",
+                stderr: "window is not defined\n"
+              }
+            }
+          };
+        }
+      },
+      { replace: true }
+    );
+
+    const capturedBodies: Array<Record<string, unknown>> = [];
+    let llmCall = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      llmCall += 1;
+      capturedBodies.push(JSON.parse(String(init?.body || "{}")) as Record<string, unknown>);
+      if (llmCall === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_browser_bash_fail_1",
+                      type: "function",
+                      function: {
+                        name: "browser_bash",
+                        arguments: JSON.stringify({
+                          command: "node -e \"console.log(window)\""
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "done"
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
+        autoTitleInterval: 0
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "触发 browser_bash 非零退出码诊断"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId);
+    expect(providerInvoked).toBe(1);
+
+    const toolStep = stream.find((item) => {
+      if (String(item.type || "") !== "step_finished") return false;
+      const payload = ((item as Record<string, unknown>).payload || {}) as Record<string, unknown>;
+      return String(payload.action || "") === "browser_bash";
+    }) as Record<string, unknown> | undefined;
+    expect(toolStep).toBeDefined();
+    const toolStepPayload = ((toolStep?.payload || {}) as Record<string, unknown>) || {};
+    expect(toolStepPayload.ok).toBe(false);
+    expect(String(toolStepPayload.providerId || "")).toBe("test.browser.bash.nonzero.process.exec");
+
+    const secondBody = capturedBodies[1] || {};
+    const secondMessages = Array.isArray(secondBody.messages) ? (secondBody.messages as Array<Record<string, unknown>>) : [];
+    const toolMessageToLlm = secondMessages.find(
+      (entry) => String(entry.role || "") === "tool" && String(entry.tool_call_id || "") === "call_browser_bash_fail_1"
+    );
+    expect(toolMessageToLlm).toBeDefined();
+    const toolPayloadToLlm = JSON.parse(String(toolMessageToLlm?.content || "{}")) as Record<string, unknown>;
+    expect(String(toolPayloadToLlm.errorReason || "")).toBe("failed_execute");
+    expect(String(toolPayloadToLlm.error || "")).toContain("window/document");
+    expect(Number(((toolPayloadToLlm.details || {}) as Record<string, unknown>).exitCode || -1)).toBe(2);
+
+    const viewed = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(viewed.ok).toBe(true);
+    const messages = readConversationMessages(viewed);
+    const persistedToolMessage = messages.find(
+      (entry) => String(entry.role || "") === "tool" && String(entry.toolCallId || "") === "call_browser_bash_fail_1"
+    );
+    expect(persistedToolMessage).toBeDefined();
+    const persistedPayload = JSON.parse(String(persistedToolMessage?.content || "{}")) as Record<string, unknown>;
+    expect(String(persistedPayload.errorReason || "")).toBe("failed_execute");
+    expect(String(((persistedPayload.details || {}) as Record<string, unknown>).diagnosis || "")).toBe("dom_global_unavailable");
+  });
+
   it("tool_call computer(type) 应使用 React 受控输入兼容表达式", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -4894,6 +5044,205 @@ describe("runtime-router.browser", () => {
     expect(policies.some((item) => String(item.capability || "") === "browser.action")).toBe(true);
   });
 
+  it("bootstraps builtin capability plugins on runtime startup", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const out = await invokeRuntime({
+      type: "brain.plugin.list"
+    });
+    expect(out.ok).toBe(true);
+    const data = (out.data || {}) as Record<string, unknown>;
+    const plugins = Array.isArray(data.plugins) ? (data.plugins as Array<Record<string, unknown>>) : [];
+    const capabilityProviders = Array.isArray(data.capabilityProviders)
+      ? (data.capabilityProviders as Array<Record<string, unknown>>)
+      : [];
+
+    expect(plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.capability.process.exec.bridge")).toBe(true);
+    expect(plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.capability.process.exec.sandbox")).toBe(true);
+    expect(plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.capability.fs.read.bridge")).toBe(true);
+    expect(plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.capability.fs.read.sandbox")).toBe(true);
+    expect(plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.capability.fs.write.bridge")).toBe(true);
+    expect(plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.capability.fs.write.sandbox")).toBe(true);
+    expect(plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.capability.fs.edit.bridge")).toBe(true);
+    expect(plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.capability.fs.edit.sandbox")).toBe(true);
+    expect(plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.capability.browser.snapshot.cdp")).toBe(true);
+    expect(plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.capability.browser.action.cdp")).toBe(
+      true
+    );
+    expect(plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.capability.browser.verify.cdp")).toBe(true);
+
+    expect(
+      capabilityProviders.some(
+        (item) =>
+          String(item.capability || "") === "process.exec"
+          && String(item.id || "") === "runtime.builtin.capability.process.exec.bridge"
+      )
+    ).toBe(true);
+    expect(
+      capabilityProviders.some(
+        (item) =>
+          String(item.capability || "") === "process.exec"
+          && String(item.id || "") === "runtime.builtin.plugin.capability.process.exec.sandbox.provider"
+      )
+    ).toBe(true);
+    expect(
+      capabilityProviders.some(
+        (item) =>
+          String(item.capability || "") === "fs.read"
+          && String(item.id || "") === "runtime.builtin.capability.fs.read.bridge"
+      )
+    ).toBe(true);
+    expect(
+      capabilityProviders.some(
+        (item) =>
+          String(item.capability || "") === "fs.read"
+          && String(item.id || "") === "runtime.builtin.plugin.capability.fs.read.sandbox.provider"
+      )
+    ).toBe(true);
+    expect(
+      capabilityProviders.some(
+        (item) =>
+          String(item.capability || "") === "fs.write"
+          && String(item.id || "") === "runtime.builtin.capability.fs.write.bridge"
+      )
+    ).toBe(true);
+    expect(
+      capabilityProviders.some(
+        (item) =>
+          String(item.capability || "") === "fs.write"
+          && String(item.id || "") === "runtime.builtin.plugin.capability.fs.write.sandbox.provider"
+      )
+    ).toBe(true);
+    expect(
+      capabilityProviders.some(
+        (item) =>
+          String(item.capability || "") === "fs.edit"
+          && String(item.id || "") === "runtime.builtin.capability.fs.edit.bridge"
+      )
+    ).toBe(true);
+    expect(
+      capabilityProviders.some(
+        (item) =>
+          String(item.capability || "") === "fs.edit"
+          && String(item.id || "") === "runtime.builtin.plugin.capability.fs.edit.sandbox.provider"
+      )
+    ).toBe(true);
+    expect(
+      capabilityProviders.some(
+        (item) =>
+          String(item.capability || "") === "browser.snapshot"
+          && String(item.id || "") === "runtime.builtin.capability.browser.snapshot.cdp"
+      )
+    ).toBe(true);
+    expect(
+      capabilityProviders.some(
+        (item) =>
+          String(item.capability || "") === "browser.action"
+          && String(item.id || "") === "runtime.builtin.plugin.capability.browser.action.cdp.provider"
+      )
+    ).toBe(true);
+    expect(
+      capabilityProviders.some(
+        (item) =>
+          String(item.capability || "") === "browser.verify"
+          && String(item.id || "") === "runtime.builtin.capability.browser.verify.cdp"
+      )
+    ).toBe(true);
+  });
+
+  it("builtin fs.read sandbox plugin should fail when disabled and recover when re-enabled", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "builtin capability plugin toggle",
+      autoRun: false
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const wrote = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.write",
+      action: "invoke",
+      args: {
+        frame: {
+          tool: "write",
+          args: {
+            path: "mem://plugins/toggle/readme.txt",
+            content: "plugin-toggle-content",
+            mode: "overwrite",
+            runtime: "browser"
+          }
+        }
+      },
+      verifyPolicy: "off"
+    });
+    expect(wrote.ok).toBe(true);
+    const wroteResult = (wrote.data || {}) as Record<string, unknown>;
+    expect(Boolean(wroteResult.ok)).toBe(true);
+
+    const disabled = await invokeRuntime({
+      type: "brain.plugin.disable",
+      pluginId: "runtime.builtin.plugin.capability.fs.read.sandbox"
+    });
+    expect(disabled.ok).toBe(true);
+
+    const readWhenDisabled = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.read",
+      action: "invoke",
+      args: {
+        frame: {
+          tool: "read",
+          args: {
+            path: "mem://plugins/toggle/readme.txt"
+          }
+        }
+      },
+      verifyPolicy: "off"
+    });
+    expect(readWhenDisabled.ok).toBe(true);
+    const disabledResult = (readWhenDisabled.data || {}) as Record<string, unknown>;
+    expect(Boolean(disabledResult.ok)).toBe(false);
+    expect(String(disabledResult.error || "")).toContain("未找到 capability provider: fs.read");
+
+    const enabled = await invokeRuntime({
+      type: "brain.plugin.enable",
+      pluginId: "runtime.builtin.plugin.capability.fs.read.sandbox"
+    });
+    expect(enabled.ok).toBe(true);
+
+    const readAfterEnabled = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.read",
+      action: "invoke",
+      args: {
+        frame: {
+          tool: "read",
+          args: {
+            path: "mem://plugins/toggle/readme.txt"
+          }
+        }
+      },
+      verifyPolicy: "off"
+    });
+    expect(readAfterEnabled.ok).toBe(true);
+    const enabledResult = (readAfterEnabled.data || {}) as Record<string, unknown>;
+    expect(Boolean(enabledResult.ok)).toBe(true);
+    expect(String(enabledResult.modeUsed || "")).toBe("script");
+    const invokePayload = (enabledResult.data || {}) as Record<string, unknown>;
+    const response = (invokePayload.response || {}) as Record<string, unknown>;
+    const responseData = (response.data || {}) as Record<string, unknown>;
+    expect(String(responseData.content || "")).toContain("plugin-toggle-content");
+  });
+
   it("supports brain.plugin lifecycle routes with hook + llm provider", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -5119,6 +5468,40 @@ describe("runtime-router.browser", () => {
     expect(patched.ok).toBe(true);
     const patchedResult = (patched.data || {}) as Record<string, unknown>;
     expect((patchedResult.data || {}) as Record<string, unknown>).toEqual({ source: "extension-module" });
+  });
+
+  it("brain.plugin.install should reject non-object package payload", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const installed = await invokeRuntime({
+      type: "brain.plugin.install",
+      package: "not-an-object"
+    });
+    expect(installed.ok).toBe(false);
+    expect(String(installed.error || "")).toContain("package 必须是 object");
+  });
+
+  it("brain.plugin.install should validate package manifest.id", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const installed = await invokeRuntime({
+      type: "brain.plugin.install",
+      package: {
+        plugin: {
+          manifest: {
+            name: "missing-id",
+            version: "1.0.0"
+          },
+          hooks: {
+            "tool.after_result": () => ({ action: "continue" })
+          }
+        }
+      }
+    });
+    expect(installed.ok).toBe(false);
+    expect(String(installed.error || "")).toContain("manifest.id");
   });
 
   it("brain.plugin.disable should restore replaced openai_compatible provider", async () => {

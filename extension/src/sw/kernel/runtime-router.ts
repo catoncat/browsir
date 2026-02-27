@@ -2,7 +2,8 @@ import { initSessionIndex, resetSessionStore } from "./storage-reset.browser";
 import { BrainOrchestrator } from "./orchestrator.browser";
 import { createRuntimeInfraHandler, type RuntimeInfraHandler, type RuntimeInfraResult } from "./runtime-infra.browser";
 import { createRuntimeLoopController, type RuntimeLoopController } from "./runtime-loop.browser";
-import { isVirtualUri } from "./virtual-fs.browser";
+import { invokeVirtualFrame, isVirtualUri } from "./virtual-fs.browser";
+import { registerExtension, type ExtensionFactory } from "./extension-api";
 import type { AgentPluginDefinition, AgentPluginManifest, AgentPluginPermissions } from "./plugin-runtime";
 import type { LlmProviderAdapter, LlmProviderSendInput } from "./llm-provider";
 import {
@@ -36,9 +37,11 @@ const MAX_SUBAGENT_PARALLEL_CONCURRENCY = 4;
 const MAX_SUBAGENT_CHAIN_TASKS = 8;
 const DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS = 60_000;
 const MAX_SUBAGENT_WAIT_TIMEOUT_MS = 300_000;
+const SUBAGENT_IDLE_GRACE_MS = 150;
 const CHAIN_PREVIOUS_TOKEN = "{previous}";
 const DEFAULT_SKILL_DISCOVER_MAX_FILES = 256;
 const MAX_SKILL_DISCOVER_MAX_FILES = 4096;
+const MAX_PLUGIN_PACKAGE_READ_BYTES = 512 * 1024;
 const DEFAULT_SKILL_DISCOVER_ROOTS: Array<{ root: string; source: string }> = [
   { root: "mem://skills", source: "browser" }
 ];
@@ -96,6 +99,30 @@ function parseJsonObjectText(value: string, field: string): Record<string, unkno
     throw new Error(`${field} 必须是 JSON object`);
   }
   return parsed as Record<string, unknown>;
+}
+
+async function readVirtualJsonObject(path: string, field: string, sessionId = "default"): Promise<Record<string, unknown>> {
+  const resolvedPath = String(path || "").trim();
+  if (!resolvedPath) throw new Error(`${field} 不能为空`);
+  if (!isVirtualUri(resolvedPath)) {
+    throw new Error(`${field} 仅支持 mem://`);
+  }
+  const result = await invokeVirtualFrame({
+    tool: "read",
+    args: {
+      path: resolvedPath,
+      offset: 0,
+      limit: MAX_PLUGIN_PACKAGE_READ_BYTES,
+      runtime: "sandbox"
+    },
+    sessionId: String(sessionId || "").trim() || "default"
+  });
+  const payload = toRecord(result);
+  if (payload.truncated === true) {
+    throw new Error(`${field} 超过读取上限 ${MAX_PLUGIN_PACKAGE_READ_BYTES} bytes`);
+  }
+  const content = String(payload.content || "");
+  return parseJsonObjectText(content, field);
 }
 
 function normalizeHeadersRecord(input: unknown, field: string): Record<string, string> {
@@ -275,8 +302,77 @@ function normalizePluginDefinition(input: unknown): AgentPluginDefinition {
   };
 }
 
+function hasPluginExtensionEntry(source: Record<string, unknown>): boolean {
+  return (
+    typeof source.setup === "function"
+    || String(source.moduleUrl || "").trim().length > 0
+    || String(source.modulePath || "").trim().length > 0
+    || String(source.module || "").trim().length > 0
+  );
+}
+
+function readPluginInstallSource(input: Record<string, unknown>): Record<string, unknown> {
+  const nested = toRecord(input.plugin);
+  if (Object.keys(nested).length > 0) return nested;
+  if (Object.prototype.hasOwnProperty.call(input, "plugin")) {
+    throw new Error("brain.plugin.install package.plugin 必须是 object");
+  }
+  return input;
+}
+
+function validatePluginInstallSource(source: Record<string, unknown>): void {
+  const manifest = toRecord(source.manifest);
+  const manifestId = String(manifest.id || "").trim();
+  if (!manifestId) {
+    throw new Error("brain.plugin.install package manifest.id 不能为空");
+  }
+}
+
+function resolvePluginModuleUrl(input: unknown): string {
+  const raw = String(input || "").trim();
+  if (!raw) throw new Error("plugin extension moduleUrl 不能为空");
+  if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(raw)) return raw;
+  if (raw.startsWith("//")) throw new Error(`plugin extension moduleUrl 非法: ${raw}`);
+  const normalized = raw.startsWith("/") ? raw.slice(1) : raw;
+  const chromeRuntime = (globalThis as typeof globalThis & {
+    chrome?: {
+      runtime?: {
+        getURL?: (path: string) => string;
+      };
+    };
+  }).chrome?.runtime;
+  if (chromeRuntime?.getURL) {
+    return chromeRuntime.getURL(normalized);
+  }
+  return new URL(raw, import.meta.url).href;
+}
+
+async function loadExtensionFactoryFromModule(moduleUrl: string, exportName = "default"): Promise<ExtensionFactory> {
+  const moduleNs = (await import(/* @vite-ignore */ moduleUrl)) as Record<string, unknown>;
+  const target = String(exportName || "default").trim() || "default";
+  const setup = target === "default" ? moduleNs.default : moduleNs[target];
+  if (typeof setup !== "function") {
+    throw new Error(`plugin extension ${moduleUrl} 缺少可执行导出: ${target}`);
+  }
+  return setup as ExtensionFactory;
+}
+
 function readPluginId(payload: Record<string, unknown>): string {
   return String(payload.pluginId || payload.id || "").trim();
+}
+
+interface RegisterPluginOptions {
+  replace: boolean;
+  enable: boolean;
+}
+
+function resolvePluginRegisterOptions(source: Record<string, unknown>, payload: Record<string, unknown>): RegisterPluginOptions {
+  const replaceRaw = source.replace ?? payload.replace;
+  const enableRaw = source.enable ?? payload.enable;
+  return {
+    replace: replaceRaw === true,
+    enable: enableRaw === false ? false : true
+  };
 }
 
 function normalizeIntInRange(raw: unknown, fallback: number, min: number, max: number): number {
@@ -656,6 +752,7 @@ async function waitForLoopDoneBySession(
   timeoutMs: number
 ): Promise<{ status: string; timeout: boolean }> {
   const deadline = Date.now() + Math.max(1_000, timeoutMs);
+  let idleSince = 0;
   while (Date.now() < deadline) {
     const stream = await orchestrator.getStepStream(sessionId);
     for (let i = stream.length - 1; i >= 0; i -= 1) {
@@ -669,11 +766,24 @@ async function waitForLoopDoneBySession(
     }
     const state = orchestrator.getRunState(sessionId);
     if (!state.running && !state.paused) {
+      if (!state.stopped) {
+        if (!idleSince) {
+          idleSince = Date.now();
+        } else if (Date.now() - idleSince >= SUBAGENT_IDLE_GRACE_MS) {
+          return {
+            status: "done",
+            timeout: false
+          };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        continue;
+      }
       return {
         status: state.stopped ? "stopped" : "unknown",
         timeout: false
       };
     }
+    idleSince = 0;
     await new Promise((resolve) => setTimeout(resolve, 30));
   }
   return {
@@ -1494,7 +1604,7 @@ function normalizeSkillDiscoverRoots(payload: Record<string, unknown>): SkillDis
         const root = sanitizeSkillDiscoverCell(item, "root");
         if (!root) continue;
         if (!isVirtualUri(root)) {
-          throw new Error("brain.skill.discover 仅支持 mem:// 或 vfs:// roots");
+          throw new Error("brain.skill.discover 仅支持 mem:// roots");
         }
         out.push({ root: normalizeSkillPath(root), source: fallbackSource });
         continue;
@@ -1503,7 +1613,7 @@ function normalizeSkillDiscoverRoots(payload: Record<string, unknown>): SkillDis
       const root = sanitizeSkillDiscoverCell(row.root || row.path || "", "root");
       if (!root) continue;
       if (!isVirtualUri(root)) {
-        throw new Error("brain.skill.discover 仅支持 mem:// 或 vfs:// roots");
+        throw new Error("brain.skill.discover 仅支持 mem:// roots");
       }
       const source = sanitizeSkillDiscoverCell(row.source || fallbackSource, "source") || fallbackSource;
       out.push({ root: normalizeSkillPath(root), source });
@@ -1760,7 +1870,7 @@ async function handleBrainSkill(
     const location = normalizeSkillPath(skillPayload.location);
     if (!location) return fail("brain.skill.install 需要 location");
     if (!isVirtualUri(location)) {
-      return fail("brain.skill.install location 仅支持 mem:// 或 vfs://");
+      return fail("brain.skill.install location 仅支持 mem://");
     }
 
     const skill = await orchestrator.installSkill(
@@ -1844,7 +1954,7 @@ async function handleBrainSkill(
             args: {
               cmdId: "bash.exec",
               args: [command],
-              runtime: "browser",
+              runtime: "sandbox",
               timeoutMs
             }
           }
@@ -1901,7 +2011,7 @@ async function handleBrainSkill(
               tool: "read",
               args: {
                 path: hit.path,
-                ...(isVirtualUri(hit.path) ? { runtime: "browser" } : {})
+                ...(isVirtualUri(hit.path) ? { runtime: "sandbox" } : {})
               }
             }
           },
@@ -2051,15 +2161,46 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
     });
   }
 
+  if (action === "brain.plugin.register_extension") {
+    const pluginRaw = toRecord(payload.plugin);
+    const source = Object.keys(pluginRaw).length > 0 ? pluginRaw : payload;
+    const manifest = normalizePluginManifest(source.manifest);
+    const setupRaw = source.setup;
+    const moduleInput = source.moduleUrl ?? source.modulePath ?? source.module;
+    const exportName = String(source.exportName || "default").trim() || "default";
+
+    let setup: ExtensionFactory;
+    let moduleUrl = "";
+    if (typeof setupRaw === "function") {
+      setup = setupRaw as ExtensionFactory;
+    } else {
+      moduleUrl = resolvePluginModuleUrl(moduleInput);
+      setup = await loadExtensionFactoryFromModule(moduleUrl, exportName);
+    }
+
+    const options = resolvePluginRegisterOptions(source, payload);
+
+    registerExtension(orchestrator, manifest, setup, options);
+    const pluginId = manifest.id;
+    const current = orchestrator.listPlugins().find((item) => item.id === pluginId) || null;
+    return ok({
+      pluginId,
+      enabled: current?.enabled === true,
+      plugin: current,
+      moduleUrl,
+      exportName,
+      llmProviders: orchestrator.listLlmProviders()
+    });
+  }
+
   if (action === "brain.plugin.register") {
     const pluginRaw = toRecord(payload.plugin);
     if (Object.keys(pluginRaw).length === 0) {
       return fail("brain.plugin.register 需要 plugin");
     }
     const definition = normalizePluginDefinition(pluginRaw);
-    const replace = payload.replace === true;
-    const enable = payload.enable !== false;
-    orchestrator.registerPlugin(definition, { replace, enable });
+    const options = resolvePluginRegisterOptions(pluginRaw, payload);
+    orchestrator.registerPlugin(definition, options);
     const pluginId = definition.manifest.id;
     const current = orchestrator.listPlugins().find((item) => item.id === pluginId) || null;
     return ok({
@@ -2067,6 +2208,63 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
       enabled: current?.enabled === true,
       plugin: current,
       llmProviders: orchestrator.listLlmProviders()
+    });
+  }
+
+  if (action === "brain.plugin.install") {
+    const location = String(payload.location || payload.path || "").trim();
+    const hasInlinePackage = Object.prototype.hasOwnProperty.call(payload, "package");
+    const packageFromPayload = toRecord(payload.package);
+    if (hasInlinePackage && Object.keys(packageFromPayload).length === 0) {
+      return fail("brain.plugin.install 的 package 必须是 object");
+    }
+    const sessionId = String(payload.sessionId || "").trim() || "default";
+    const packageSource =
+      Object.keys(packageFromPayload).length > 0
+        ? packageFromPayload
+        : location
+          ? await readVirtualJsonObject(location, "brain.plugin.install location", sessionId)
+          : {};
+    if (Object.keys(packageSource).length === 0) {
+      return fail("brain.plugin.install 需要 package 或 location(mem://...)");
+    }
+    let pluginSource: Record<string, unknown>;
+    try {
+      pluginSource = readPluginInstallSource(packageSource);
+      validatePluginInstallSource(pluginSource);
+    } catch (error) {
+      return fail(error);
+    }
+    const installPayload = {
+      ...payload,
+      ...pluginSource
+    } as Record<string, unknown>;
+    const hasExtensionEntry = hasPluginExtensionEntry(installPayload);
+    if (hasExtensionEntry) {
+      const result = await handleBrainPlugin(orchestrator, {
+        ...installPayload,
+        type: "brain.plugin.register_extension",
+        ...(payload.replace === undefined ? {} : { replace: payload.replace }),
+        ...(payload.enable === undefined ? {} : { enable: payload.enable })
+      });
+      if (!result.ok) return result;
+      return ok({
+        ...(toRecord(result.data) as Record<string, unknown>),
+        sourceLocation: location || undefined
+      });
+    }
+
+    const result = await handleBrainPlugin(orchestrator, {
+      ...installPayload,
+      type: "brain.plugin.register",
+      plugin: pluginSource,
+      ...(payload.replace === undefined ? {} : { replace: payload.replace }),
+      ...(payload.enable === undefined ? {} : { enable: payload.enable })
+    });
+    if (!result.ok) return result;
+    return ok({
+      ...(toRecord(result.data) as Record<string, unknown>),
+      sourceLocation: location || undefined
     });
   }
 
@@ -2168,6 +2366,7 @@ async function handleBrainDebug(
     const systemPromptPreview = await runtimeLoop.getSystemPromptPreview();
     return ok({
       bridgeUrl: String(cfg.bridgeUrl || ""),
+      browserRuntimeStrategy: String(cfg.browserRuntimeStrategy || "host-first"),
       llmDefaultProfile: String(cfg.llmDefaultProfile || "default"),
       llmProfilesCount: profiles.length,
       bridgeInvokeTimeoutMs: Number(cfg.bridgeInvokeTimeoutMs || 0),
