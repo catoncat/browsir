@@ -42,6 +42,7 @@ const CHAIN_PREVIOUS_TOKEN = "{previous}";
 const DEFAULT_SKILL_DISCOVER_MAX_FILES = 256;
 const MAX_SKILL_DISCOVER_MAX_FILES = 4096;
 const MAX_PLUGIN_PACKAGE_READ_BYTES = 512 * 1024;
+const BUILTIN_PLUGIN_ID_PREFIX = "runtime.builtin.plugin.";
 const DEFAULT_SKILL_DISCOVER_ROOTS: Array<{ root: string; source: string }> = [
   { root: "mem://skills", source: "browser" }
 ];
@@ -359,6 +360,10 @@ async function loadExtensionFactoryFromModule(moduleUrl: string, exportName = "d
 
 function readPluginId(payload: Record<string, unknown>): string {
   return String(payload.pluginId || payload.id || "").trim();
+}
+
+function isBuiltinPluginId(pluginId: string): boolean {
+  return String(pluginId || "").trim().startsWith(BUILTIN_PLUGIN_ID_PREFIX);
 }
 
 interface RegisterPluginOptions {
@@ -2297,6 +2302,9 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
   if (action === "brain.plugin.unregister") {
     const pluginId = readPluginId(payload);
     if (!pluginId) return fail("brain.plugin.unregister 需要 pluginId");
+    if (isBuiltinPluginId(pluginId)) {
+      return fail(`内置插件不允许卸载: ${pluginId}`);
+    }
     const removed = orchestrator.unregisterPlugin(pluginId);
     if (!removed) return fail(`plugin 不存在: ${pluginId}`);
     return ok({

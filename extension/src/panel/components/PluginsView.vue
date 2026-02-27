@@ -27,6 +27,8 @@ const replaceOnRegister = ref(true);
 const enableOnRegister = ref(true);
 const selectedPresetId = ref("");
 const pluginJson = ref("");
+const packageLocation = ref("mem://plugins/demo/plugin.json");
+const BUILTIN_PLUGIN_ID_PREFIX = "runtime.builtin.plugin.";
 
 const presets: PluginPreset[] = [
   {
@@ -145,8 +147,20 @@ function providerSummary(row: Record<string, unknown>): string {
   return `${id} (${transport})`;
 }
 
+function isBuiltinPlugin(plugin: PluginMetadata): boolean {
+  return String(plugin.id || "").trim().startsWith(BUILTIN_PLUGIN_ID_PREFIX);
+}
+
 function deepCloneRecord(input: Record<string, unknown>): Record<string, unknown> {
   return JSON.parse(JSON.stringify(input)) as Record<string, unknown>;
+}
+
+function toRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function readTextField(row: Record<string, unknown>, key: string): string {
+  return String(row[key] || "").trim();
 }
 
 function parsePluginJsonDraft(): Record<string, unknown> {
@@ -209,10 +223,57 @@ async function handleRegister() {
   pageError.value = "";
   try {
     const plugin = parsePluginJsonDraft();
-    await store.registerPlugin(plugin, {
-      replace: replaceOnRegister.value,
-      enable: enableOnRegister.value
-    });
+    const manifest = toRecord(plugin.manifest);
+    const moduleUrl = readTextField(plugin, "moduleUrl");
+    const modulePath = readTextField(plugin, "modulePath");
+    const moduleName = readTextField(plugin, "module");
+    const exportName = readTextField(plugin, "exportName");
+    if (Object.keys(manifest).length > 0 && (moduleUrl || modulePath || moduleName)) {
+      await store.registerPluginExtension(
+        {
+          manifest,
+          ...(moduleUrl ? { moduleUrl } : {}),
+          ...(modulePath ? { modulePath } : {}),
+          ...(moduleName ? { module: moduleName } : {}),
+          ...(exportName ? { exportName } : {})
+        },
+        {
+          replace: replaceOnRegister.value,
+          enable: enableOnRegister.value
+        }
+      );
+    } else {
+      await store.registerPlugin(plugin, {
+        replace: replaceOnRegister.value,
+        enable: enableOnRegister.value
+      });
+    }
+    await refreshPlugins();
+  } catch (error) {
+    setPageError(error);
+  } finally {
+    registering.value = false;
+  }
+}
+
+async function handleInstallFromPackageLocation() {
+  registering.value = true;
+  pageError.value = "";
+  try {
+    const location = String(packageLocation.value || "").trim();
+    if (!location) {
+      throw new Error("插件包路径不能为空");
+    }
+    await store.installPlugin(
+      {
+        location,
+        sessionId: String(store.activeSessionId || "").trim() || undefined
+      },
+      {
+        replace: replaceOnRegister.value,
+        enable: enableOnRegister.value
+      }
+    );
     await refreshPlugins();
   } catch (error) {
     setPageError(error);
@@ -243,6 +304,10 @@ async function handleToggle(plugin: PluginMetadata) {
 async function handleUnregister(plugin: PluginMetadata) {
   const pluginId = String(plugin.id || "").trim();
   if (!pluginId) return;
+  if (isBuiltinPlugin(plugin)) {
+    pageError.value = `内置插件不允许卸载: ${pluginId}`;
+    return;
+  }
   const confirmed = globalThis.confirm(`确认卸载插件 ${plugin.name || plugin.id} ?`);
   if (!confirmed) return;
   actionPluginId.value = pluginId;
@@ -335,7 +400,7 @@ onMounted(async () => {
           这里走 `brain.plugin.register`。用于声明式插件（LLM Provider / Policy / ToolContract）。
         </p>
         <p class="text-[11px] text-ui-text-muted">
-          注意：函数型 `hooks/provider.invoke` 不能通过 JSON 传输，后续会补“脚本化插件”模式。
+          若 JSON 内包含 `manifest + moduleUrl/modulePath/module`，会自动切到 `brain.plugin.register_extension`。
         </p>
         <textarea
           v-model="pluginJson"
@@ -360,6 +425,30 @@ onMounted(async () => {
             <Loader2 v-if="registering" :size="14" class="inline-block animate-spin mr-1" />
             <Plus v-else :size="14" class="inline-block mr-1" />
             注册插件
+          </button>
+        </div>
+      </section>
+
+      <section class="space-y-3">
+        <h3 class="text-[11px] font-bold uppercase tracking-[0.1em] text-ui-text-muted">插件包安装（mem://）</h3>
+        <p class="text-[11px] text-ui-text-muted">
+          走 `brain.plugin.install`，从浏览器虚拟文件系统读取插件包 JSON。
+        </p>
+        <div class="flex items-center gap-2">
+          <input
+            v-model="packageLocation"
+            type="text"
+            class="flex-1 bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[12px] font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+            aria-label="插件包路径"
+            placeholder="mem://plugins/demo/plugin.json"
+          />
+          <button
+            class="px-3 py-2 rounded-sm bg-ui-surface border border-ui-border text-[12px] font-semibold hover:bg-ui-border/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50"
+            :disabled="registering"
+            @click="handleInstallFromPackageLocation"
+          >
+            <Loader2 v-if="registering" :size="14" class="inline-block animate-spin mr-1" />
+            从包安装
           </button>
         </div>
       </section>
@@ -401,11 +490,11 @@ onMounted(async () => {
               </button>
               <button
                 class="px-2.5 py-1.5 rounded-sm bg-ui-bg border border-ui-border text-[12px] hover:bg-ui-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50"
-                :disabled="actionPluginId === plugin.id"
+                :disabled="actionPluginId === plugin.id || isBuiltinPlugin(plugin)"
                 @click="handleUnregister(plugin)"
               >
                 <Trash2 :size="13" class="inline-block mr-1" />
-                卸载
+                {{ isBuiltinPlugin(plugin) ? "内置不可卸载" : "卸载" }}
               </button>
             </div>
           </li>

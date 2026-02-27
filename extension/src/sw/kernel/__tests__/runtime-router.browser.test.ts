@@ -5243,6 +5243,29 @@ describe("runtime-router.browser", () => {
     expect(String(responseData.content || "")).toContain("plugin-toggle-content");
   });
 
+  it("brain.plugin.unregister should reject builtin plugins", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const removed = await invokeRuntime({
+      type: "brain.plugin.unregister",
+      pluginId: "runtime.builtin.plugin.capability.fs.read.bridge"
+    });
+    expect(removed.ok).toBe(false);
+    expect(String(removed.error || "")).toContain("内置插件不允许卸载");
+
+    const listed = await invokeRuntime({
+      type: "brain.plugin.list"
+    });
+    expect(listed.ok).toBe(true);
+    const plugins = Array.isArray((listed.data as Record<string, unknown>)?.plugins)
+      ? (((listed.data as Record<string, unknown>).plugins as unknown[]) as Array<Record<string, unknown>>)
+      : [];
+    expect(
+      plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.capability.fs.read.bridge")
+    ).toBe(true);
+  });
+
   it("supports brain.plugin lifecycle routes with hook + llm provider", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
