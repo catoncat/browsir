@@ -5075,6 +5075,9 @@ describe("runtime-router.browser", () => {
     expect(
       plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.notice.send-success-global-message")
     ).toBe(true);
+    expect(
+      plugins.some((item) => String(item.id || "") === "runtime.builtin.plugin.ui.mission-hud.dog")
+    ).toBe(true);
 
     expect(
       capabilityProviders.some(
@@ -5176,6 +5179,29 @@ describe("runtime-router.browser", () => {
     expect(String(payload.message || "")).toBe("发送成功");
     expect(String(payload.source || "")).toBe("plugin.send-success-global-message");
     expect(String(payload.dedupeKey || "")).toContain("plugin.send-success-global-message");
+  });
+
+  it("builtin mission-hud plugin should emit mascot event on brain.run.start", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const sendSpy = vi.spyOn(chrome.runtime, "sendMessage").mockResolvedValue({ ok: true } as never);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "test mascot"
+    });
+    expect(started.ok).toBe(true);
+
+    const calls = sendSpy.mock.calls
+      .map((item) => item[0])
+      .filter((item) => item && typeof item === "object" && String((item as Record<string, unknown>).type || "") === "bbloop.ui.mascot");
+
+    expect(calls.length).toBeGreaterThan(0);
+    const payload = (calls[calls.length - 1] as Record<string, unknown>)?.payload as Record<string, unknown>;
+    expect(String(payload.phase || "")).toBe("thinking");
+    expect(String(payload.source || "")).toBe("plugin.ui.mission-hud");
+    expect(String(payload.message || "").trim().length).toBeGreaterThan(0);
   });
 
   it("builtin fs.read sandbox plugin should fail when disabled and recover when re-enabled", async () => {

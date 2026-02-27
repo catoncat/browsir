@@ -23,6 +23,7 @@ import ProviderSettingsView from "./components/ProviderSettingsView.vue";
 import DebugView from "./components/DebugView.vue";
 import SkillsView from "./components/SkillsView.vue";
 import PluginsView from "./components/PluginsView.vue";
+import MissionMascot from "./components/MissionMascot.vue";
 import { Loader2, Plus, Settings, Bug, Activity, History, MoreVertical, FileText, Download, ExternalLink, Copy, GitBranch, RefreshCcw, Wrench, Server, Plug } from "lucide-vue-next";
 import { onClickOutside } from "@vueuse/core";
 
@@ -202,6 +203,14 @@ interface RuntimeResponse<T = unknown> {
   error?: string;
 }
 
+type MissionMascotPhase = "thinking" | "tool" | "verify" | "done" | "error";
+
+interface MissionMascotState {
+  visible: boolean;
+  phase: MissionMascotPhase;
+  message: string;
+}
+
 async function regenerateFromAssistantWithScene(
   entryId: string,
   options: { mode?: "fork" | "retry"; setActive?: boolean } = {}
@@ -258,6 +267,11 @@ const llmStreamingText = ref("");
 const llmStreamingSessionId = ref("");
 const llmStreamingActive = ref(false);
 const recentRuntimeEvents = ref<RuntimeEventDigest[]>([]);
+const missionMascot = ref<MissionMascotState>({
+  visible: false,
+  phase: "thinking",
+  message: ""
+});
 const queuedPromotingIds = ref<Set<string>>(new Set());
 const panelUiRuntime = createPanelUiPluginRuntime({ defaultTimeoutMs: 150 });
 const uiRenderEpoch = ref(0);
@@ -268,6 +282,7 @@ let toolPendingCardLeaveTimer: ReturnType<typeof setTimeout> | null = null;
 let initialToolSyncTimer: ReturnType<typeof setTimeout> | null = null;
 let llmStreamFlushRaf: number | null = null;
 let panelNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+let missionMascotTimer: ReturnType<typeof setTimeout> | null = null;
 let llmStreamingDeltaBuffer = "";
 let stableMessagesBuildToken = 0;
 const pendingStepLogBuffer = new Map<number, string[]>();
@@ -1553,6 +1568,8 @@ watch(isRunActive, (running, wasRunning) => {
 
 watch(activeSessionId, (nextSessionId, previousSessionId) => {
   queuedPromotingIds.value = new Set();
+  missionMascot.value.visible = false;
+  clearMissionMascotTimer();
   stopInitialToolSync();
   resetToolPendingCardHandoff();
   runPhase.value = isRunActive.value ? "llm" : "idle";
@@ -1730,6 +1747,65 @@ function clearPanelNoticeTimer() {
   if (!panelNoticeTimer) return;
   clearTimeout(panelNoticeTimer);
   panelNoticeTimer = null;
+}
+
+function clearMissionMascotTimer() {
+  if (!missionMascotTimer) return;
+  clearTimeout(missionMascotTimer);
+  missionMascotTimer = null;
+}
+
+function normalizeMissionMascotPhase(raw: unknown): MissionMascotPhase {
+  const text = String(raw || "").trim().toLowerCase();
+  if (text === "tool") return "tool";
+  if (text === "verify") return "verify";
+  if (text === "done") return "done";
+  if (text === "error") return "error";
+  return "thinking";
+}
+
+function normalizeMissionMascotPayload(input: unknown): {
+  phase: MissionMascotPhase;
+  message: string;
+  sessionId?: string;
+  durationMs?: number;
+} | null {
+  const row = toRecord(input);
+  const message = String(row.message || row.text || "").trim();
+  if (!message) return null;
+  const durationRaw = Number(row.durationMs);
+  const durationMs = Number.isFinite(durationRaw)
+    ? Math.max(600, Math.min(15000, Math.floor(durationRaw)))
+    : undefined;
+  return {
+    phase: normalizeMissionMascotPhase(row.phase),
+    message,
+    sessionId: String(row.sessionId || "").trim() || undefined,
+    durationMs
+  };
+}
+
+function showMissionMascot(input: unknown) {
+  const next = normalizeMissionMascotPayload(input);
+  if (!next) return;
+  const currentSessionId = String(activeSessionId.value || "").trim();
+  if (next.sessionId && currentSessionId && next.sessionId !== currentSessionId) {
+    return;
+  }
+
+  missionMascot.value = {
+    visible: true,
+    phase: next.phase,
+    message: next.message
+  };
+
+  clearMissionMascotTimer();
+  const fallbackDuration = next.phase === "error" ? 3600 : next.phase === "done" ? 2600 : 2200;
+  const duration = Number(next.durationMs) || fallbackDuration;
+  missionMascotTimer = setTimeout(() => {
+    missionMascot.value.visible = false;
+    missionMascotTimer = null;
+  }, duration);
 }
 
 function normalizeUiNoticePayload(input: unknown): UiNoticePayload | null {
@@ -2091,6 +2167,11 @@ async function handleRuntimeMessage(message: unknown) {
     return;
   }
 
+  if (type === "bbloop.ui.mascot") {
+    showMissionMascot(payload.payload);
+    return;
+  }
+
   if (type === "bridge.status") {
     const status = String(payload.status || "").trim();
     bridgeConnectionStatus.value = status === "connected" ? "connected" : "disconnected";
@@ -2368,6 +2449,7 @@ onUnmounted(() => {
   stopInitialToolSync();
   clearToolPendingCardLeaveTimer();
   clearPanelNoticeTimer();
+  clearMissionMascotTimer();
   if (forkSessionHighlightTimer) {
     clearTimeout(forkSessionHighlightTimer);
     forkSessionHighlightTimer = null;
@@ -2578,6 +2660,12 @@ onUnmounted(() => {
       >
         {{ error }}
       </div>
+
+      <MissionMascot
+        :visible="missionMascot.visible"
+        :phase="missionMascot.phase"
+        :message="missionMascot.message"
+      />
 
       <div
         ref="scrollContainer"
