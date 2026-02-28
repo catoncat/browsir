@@ -479,10 +479,46 @@ function handleCreateProject(): void {
   errorMessage.value = "";
 }
 
+function findProjectByPluginId(pluginId: string): StudioProject | null {
+  const id = String(pluginId || "").trim();
+  if (!id) return null;
+  return projects.value.find((item) => String(item.pluginId || "").trim() === id) || null;
+}
+
+function fallbackIndexJs(pluginId: string): string {
+  return `// 当前插件没有可恢复的 index.js 源码快照
+// pluginId: ${pluginId}
+// 你可以在这里编写后点击“热更新”覆盖当前插件
+module.exports = function registerPlugin(_pi) {
+  return;
+};`;
+}
+
+function fallbackUiJs(pluginId: string): string {
+  return `// 当前插件没有可恢复的 ui.js 源码快照
+// pluginId: ${pluginId}
+module.exports = function registerUiPlugin(_ui) {
+  return;
+};`;
+}
+
 function handleLoadFromInstalled(plugin: PluginMetadata): void {
-  selectedPluginId.value = plugin.id;
+  const pluginId = String(plugin.id || "").trim();
+  selectedPluginId.value = pluginId;
+  const linkedProject = findProjectByPluginId(pluginId);
+  if (linkedProject) {
+    selectedProjectId.value = linkedProject.id;
+    applyEditorFiles(linkedProject.files);
+    writeSelectedProjectToStorage(linkedProject.id);
+    statusMessage.value = `已载入 ${plugin.id} 的完整项目代码`;
+    errorMessage.value = "";
+    return;
+  }
+  selectedProjectId.value = "";
   pluginJsonCode.value = buildPluginJsonFromInstalledPlugin(plugin);
-  statusMessage.value = `已载入 ${plugin.id} 的 manifest`;
+  indexJsCode.value = fallbackIndexJs(pluginId);
+  uiJsCode.value = fallbackUiJs(pluginId);
+  statusMessage.value = `已载入 ${plugin.id}（仅 manifest 有快照）`;
   errorMessage.value = "";
 }
 
