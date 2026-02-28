@@ -5803,6 +5803,59 @@ describe("runtime-router.browser", () => {
     expect(String(installed.error || "")).toContain("manifest.id");
   });
 
+  it("brain.plugin.validate should validate inline indexJs package", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const validated = await invokeRuntime({
+      type: "brain.plugin.validate",
+      sessionId: "plugin-studio",
+      package: {
+        manifest: {
+          id: "plugin.route.validate.inline.index",
+          name: "plugin-route-validate-inline-index",
+          version: "1.0.0",
+          permissions: {
+            hooks: ["tool.after_result"]
+          }
+        },
+        indexJs: `module.exports = function registerPlugin(pi) {
+  pi.on("tool.after_result", () => ({ action: "continue" }));
+};`
+      }
+    });
+    expect(validated.ok).toBe(true);
+    const data = (validated.data || {}) as Record<string, unknown>;
+    expect(data.valid).toBe(true);
+    const checks = Array.isArray(data.checks) ? (data.checks as Record<string, unknown>[]) : [];
+    expect(
+      checks.some((item) => String(item.name || "") === "index.module" && item.ok === true)
+    ).toBe(true);
+  });
+
+  it("brain.plugin.validate should fail when no index/ui module declared", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const validated = await invokeRuntime({
+      type: "brain.plugin.validate",
+      package: {
+        manifest: {
+          id: "plugin.route.validate.empty-entry",
+          name: "plugin-route-validate-empty-entry",
+          version: "1.0.0"
+        }
+      }
+    });
+    expect(validated.ok).toBe(true);
+    const data = (validated.data || {}) as Record<string, unknown>;
+    expect(data.valid).toBe(false);
+    const checks = Array.isArray(data.checks) ? (data.checks as Record<string, unknown>[]) : [];
+    expect(
+      checks.some((item) => String(item.name || "") === "entry.module" && item.ok === false)
+    ).toBe(true);
+  });
+
   it("brain.plugin.install should execute inline indexJs from mem sandbox module", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);

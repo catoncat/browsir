@@ -16,6 +16,8 @@ export interface AgentPluginPermissions {
   replaceToolContracts?: boolean;
   llmProviders?: string[];
   replaceLlmProviders?: boolean;
+  runtimeMessages?: string[];
+  brainEvents?: string[];
 }
 
 export interface AgentPluginManifest {
@@ -65,6 +67,13 @@ export interface PluginRuntimeView {
   policyCapabilities: ExecuteCapability[];
   tools: string[];
   llmProviders: string[];
+  runtimeMessages: string[];
+  brainEvents: string[];
+  usageTotalCalls: number;
+  usageTotalErrors: number;
+  usageTotalTimeouts: number;
+  usageLastUsedAt?: string;
+  usageHookCalls: Record<string, number>;
 }
 
 interface RuntimeHost {
@@ -143,6 +152,11 @@ interface PluginState {
   replacedLlmProviders: ReplacedLlmProvider[];
   errorCount: number;
   lastError?: string;
+  usageTotalCalls: number;
+  usageTotalErrors: number;
+  usageTotalTimeouts: number;
+  usageLastUsedAt?: string;
+  usageHookCalls: Record<string, number>;
 }
 
 function toHookEntry<K extends keyof OrchestratorHookMap & string>(entry: PluginHookEntry<K>): {
@@ -161,6 +175,19 @@ function toHookEntry<K extends keyof OrchestratorHookMap & string>(entry: Plugin
 function normalizeHookEntries<K extends keyof OrchestratorHookMap & string>(entries: PluginHookEntries<K>): PluginHookEntry<K>[] {
   const list = Array.isArray(entries) ? entries : [entries];
   return list.filter(Boolean);
+}
+
+function toUniqueStringList(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of input) {
+    const text = String(item || "").trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+  }
+  return out;
 }
 
 export class PluginRuntime {
@@ -196,7 +223,11 @@ export class PluginRuntime {
       replacedCapabilityPolicies: [],
       replacedToolContracts: [],
       replacedLlmProviders: [],
-      errorCount: 0
+      errorCount: 0,
+      usageTotalCalls: 0,
+      usageTotalErrors: 0,
+      usageTotalTimeouts: 0,
+      usageHookCalls: {}
     };
     this.plugins.set(id, state);
     if (options.enable !== false) {
@@ -237,14 +268,29 @@ export class PluginRuntime {
           const unregister = this.host.onHook(
             hook as keyof OrchestratorHookMap & string,
             async (payload) => {
-              const timer = new Promise<{ action: "continue" }>((resolve) =>
-                setTimeout(() => resolve({ action: "continue" }), timeoutMs)
+              const hookName = String(hook || "").trim();
+              state.usageTotalCalls += 1;
+              state.usageLastUsedAt = new Date().toISOString();
+              if (hookName) {
+                state.usageHookCalls[hookName] = (state.usageHookCalls[hookName] || 0) + 1;
+              }
+              const timeoutResult = { __bblTimeout: true as const };
+              const timer = new Promise<typeof timeoutResult>((resolve) =>
+                setTimeout(() => resolve(timeoutResult), timeoutMs)
               );
               try {
                 const result = await Promise.race([Promise.resolve(entry.handler(payload)), timer]);
+                if (result && typeof result === "object" && (result as { __bblTimeout?: boolean }).__bblTimeout === true) {
+                  state.usageTotalTimeouts += 1;
+                  state.usageTotalErrors += 1;
+                  state.lastError = `plugin hook timeout: ${hookName || "unknown"}`;
+                  state.errorCount += 1;
+                  return { action: "continue" };
+                }
                 if (!result) return { action: "continue" };
                 return result;
               } catch (error) {
+                state.usageTotalErrors += 1;
                 state.lastError = error instanceof Error ? error.message : String(error);
                 state.errorCount += 1;
                 return { action: "continue" };
@@ -466,6 +512,7 @@ export class PluginRuntime {
   list(): PluginRuntimeView[] {
     return Array.from(this.plugins.values()).map((state) => {
       const manifest = state.definition.manifest;
+      const permissions = manifest.permissions || {};
       return {
         id: manifest.id,
         name: manifest.name,
@@ -483,7 +530,14 @@ export class PluginRuntime {
           .filter(Boolean),
         llmProviders: (Array.isArray(state.definition.llmProviders) ? state.definition.llmProviders : [])
           .map((item) => String(item?.id || "").trim())
-          .filter(Boolean)
+          .filter(Boolean),
+        runtimeMessages: toUniqueStringList(permissions.runtimeMessages),
+        brainEvents: toUniqueStringList(permissions.brainEvents),
+        usageTotalCalls: state.usageTotalCalls,
+        usageTotalErrors: state.usageTotalErrors,
+        usageTotalTimeouts: state.usageTotalTimeouts,
+        usageLastUsedAt: state.usageLastUsedAt,
+        usageHookCalls: { ...state.usageHookCalls }
       };
     });
   }

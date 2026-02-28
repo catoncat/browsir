@@ -566,6 +566,45 @@ function buildInstallPackage(): Record<string, unknown> {
   };
 }
 
+function summarizeValidationForStatus(report: {
+  warnings: string[];
+  checks: Array<{ name: string; ok: boolean }>;
+}): string {
+  const failed = report.checks.filter((item) => item.ok !== true).length;
+  const warningCount = Array.isArray(report.warnings) ? report.warnings.length : 0;
+  if (failed > 0) return `校验失败 ${failed} 项`;
+  if (warningCount > 0) return `校验通过（${warningCount} 条提示）`;
+  return "校验通过";
+}
+
+function summarizeValidationError(report: {
+  checks: Array<{ name: string; ok: boolean; error?: string }>;
+}): string {
+  const failed = report.checks.filter((item) => item.ok !== true);
+  if (failed.length === 0) return "插件校验失败";
+  return failed
+    .slice(0, 4)
+    .map((item) => `${item.name}: ${String(item.error || "失败")}`)
+    .join(" | ");
+}
+
+async function validatePayloadBeforeInstall(payload: Record<string, unknown>): Promise<void> {
+  const report = await store.validatePluginPackage({
+    package: payload,
+    sessionId: PLUGIN_STUDIO_SESSION_ID
+  });
+  const checkSummary = summarizeValidationForStatus(report);
+  pushLog(triggerLogs.value, {
+    type: "validation",
+    title: report.valid ? "校验通过" : "校验失败",
+    text: `${checkSummary} · pluginId=${report.pluginId || "<unknown>"}`
+  });
+  if (!report.valid) {
+    throw new Error(summarizeValidationError(report));
+  }
+  statusMessage.value = checkSummary;
+}
+
 function tryBuildInstallPackageForPlugin(pluginId: string): {
   payload: Record<string, unknown>;
   matched: boolean;
@@ -697,6 +736,7 @@ async function handleInstall(replace: boolean): Promise<void> {
   statusMessage.value = "";
   try {
     const payload = buildInstallPackage();
+    await validatePayloadBeforeInstall(payload);
     const result = await store.installPlugin(
       {
         package: payload,
@@ -747,6 +787,7 @@ async function handleTogglePlugin(enable: boolean): Promise<void> {
       // “重启插件”语义：优先按编辑区代码 replace 热更新，再启用。
       const fromEditor = tryBuildInstallPackageForPlugin(pluginId);
       if (fromEditor.matched) {
+        await validatePayloadBeforeInstall(fromEditor.payload);
         await store.installPlugin(
           {
             package: fromEditor.payload,
@@ -858,8 +899,11 @@ function handleLoadFromInstalled(plugin: PluginMetadata): void {
 function handleExportPackage(): void {
   errorMessage.value = "";
   statusMessage.value = "";
-  try {
+  busy.value = true;
+  void (async () => {
+    try {
     const payload = buildInstallPackage();
+    await validatePayloadBeforeInstall(payload);
     const pluginId = extractManifestId(toRecord(payload));
     const fileName = `${pluginId || "plugin"}.package.json`;
     const text = JSON.stringify(payload, null, 2);
@@ -873,9 +917,12 @@ function handleExportPackage(): void {
     anchor.remove();
     URL.revokeObjectURL(url);
     statusMessage.value = "导出成功";
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error || "导出失败");
-  }
+    } catch (error) {
+      errorMessage.value = error instanceof Error ? error.message : String(error || "导出失败");
+    } finally {
+      busy.value = false;
+    }
+  })();
 }
 
 function clearLogs(): void {

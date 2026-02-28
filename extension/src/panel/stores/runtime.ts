@@ -215,6 +215,11 @@ export interface PluginMetadata {
   llmProviders: string[];
   runtimeMessages: string[];
   brainEvents: string[];
+  usageTotalCalls: number;
+  usageTotalErrors: number;
+  usageTotalTimeouts: number;
+  usageLastUsedAt?: string;
+  usageHookCalls: Record<string, number>;
 }
 
 export interface PluginUiExtensionMetadata {
@@ -258,6 +263,21 @@ export interface PluginInstallInput {
   sessionId?: string;
 }
 
+export interface PluginValidateCheck {
+  name: string;
+  ok: boolean;
+  error?: string;
+  details?: Record<string, unknown>;
+}
+
+export interface PluginValidateResult {
+  pluginId: string;
+  valid: boolean;
+  warnings: string[];
+  checks: PluginValidateCheck[];
+  sourceLocation?: string;
+}
+
 async function sendMessage<T = any>(type: string, payload: Record<string, unknown> = {}): Promise<T> {
   const response = (await chrome.runtime.sendMessage({ type, ...payload })) as RuntimeResponse<T>;
   if (!response?.ok) {
@@ -292,6 +312,19 @@ function toStringArray(input: unknown): string[] {
   return out;
 }
 
+function toNumberRecord(input: unknown): Record<string, number> {
+  const row = toRecord(input);
+  const out: Record<string, number> = {};
+  for (const [key, value] of Object.entries(row)) {
+    const name = String(key || "").trim();
+    if (!name) continue;
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0) continue;
+    out[name] = Math.floor(n);
+  }
+  return out;
+}
+
 function normalizePluginMetadata(input: unknown): PluginMetadata {
   const row = toRecord(input);
   return {
@@ -309,7 +342,12 @@ function normalizePluginMetadata(input: unknown): PluginMetadata {
     tools: toStringArray(row.tools),
     llmProviders: toStringArray(row.llmProviders),
     runtimeMessages: toStringArray(row.runtimeMessages),
-    brainEvents: toStringArray(row.brainEvents)
+    brainEvents: toStringArray(row.brainEvents),
+    usageTotalCalls: toIntInRange(row.usageTotalCalls, 0, 0, Number.MAX_SAFE_INTEGER),
+    usageTotalErrors: toIntInRange(row.usageTotalErrors, 0, 0, Number.MAX_SAFE_INTEGER),
+    usageTotalTimeouts: toIntInRange(row.usageTotalTimeouts, 0, 0, Number.MAX_SAFE_INTEGER),
+    usageLastUsedAt: String(row.usageLastUsedAt || "").trim() || undefined,
+    usageHookCalls: toNumberRecord(row.usageHookCalls)
   };
 }
 
@@ -356,6 +394,28 @@ function normalizePluginRegisterResult(input: unknown): PluginRegisterResult {
     llmProviders: Array.isArray(row.llmProviders) ? row.llmProviders.map((item) => toRecord(item)) : [],
     moduleUrl: String(row.moduleUrl || "").trim() || undefined,
     exportName: String(row.exportName || "").trim() || undefined
+  };
+}
+
+function normalizePluginValidateResult(input: unknown): PluginValidateResult {
+  const row = toRecord(input);
+  const checks = Array.isArray(row.checks)
+    ? row.checks.map((item) => {
+      const check = toRecord(item);
+      return {
+        name: String(check.name || "").trim(),
+        ok: check.ok === true,
+        error: String(check.error || "").trim() || undefined,
+        details: Object.keys(toRecord(check.details)).length > 0 ? toRecord(check.details) : undefined
+      } as PluginValidateCheck;
+    }).filter((item) => item.name)
+    : [];
+  return {
+    pluginId: String(row.pluginId || "").trim(),
+    valid: row.valid === true,
+    warnings: toStringArray(row.warnings),
+    checks,
+    sourceLocation: String(row.sourceLocation || "").trim() || undefined
   };
 }
 
@@ -857,6 +917,17 @@ export const useRuntimeStore = defineStore("runtime", () => {
     return normalizePluginRegisterResult(out);
   }
 
+  async function validatePluginPackage(input: PluginInstallInput): Promise<PluginValidateResult> {
+    const payload: Record<string, unknown> = {};
+    const location = String(input.location || input.path || "").trim();
+    if (location) payload.location = location;
+    if (input.package && typeof input.package === "object") payload.package = toRecord(input.package);
+    const sessionId = String(input.sessionId || "").trim();
+    if (sessionId) payload.sessionId = sessionId;
+    const out = await sendMessage<Record<string, unknown>>("brain.plugin.validate", payload);
+    return normalizePluginValidateResult(out);
+  }
+
   function findAssistantMessageIndex(entryId: string) {
     return messages.value.findIndex((msg) => msg.entryId === entryId && msg.role === "assistant");
   }
@@ -1201,6 +1272,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
     registerPlugin,
     registerPluginExtension,
     installPlugin,
+    validatePluginPackage,
     enablePlugin,
     disablePlugin,
     unregisterPlugin,

@@ -813,6 +813,30 @@ function hasPluginExtensionEntry(source: Record<string, unknown>): boolean {
   );
 }
 
+interface PluginValidationCheck {
+  name: string;
+  ok: boolean;
+  error?: string;
+  details?: Record<string, unknown>;
+}
+
+function buildPluginValidationCheck(
+  name: string,
+  ok: boolean,
+  options: { error?: unknown; details?: Record<string, unknown> } = {}
+): PluginValidationCheck {
+  return {
+    name,
+    ok,
+    ...(ok
+      ? {}
+      : {
+          error: String(options.error || "").trim() || "校验失败"
+        }),
+    ...(options.details && Object.keys(options.details).length > 0 ? { details: options.details } : {})
+  };
+}
+
 function readPluginInstallSource(input: Record<string, unknown>): Record<string, unknown> {
   const nested = toRecord(input.plugin);
   if (Object.keys(nested).length > 0) return nested;
@@ -2851,6 +2875,126 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
       llmProviders: orchestrator.listLlmProviders(),
       ...(uiDescriptor ? { uiExtension: uiDescriptor } : {})
     });
+  }
+
+  if (action === "brain.plugin.validate") {
+    const location = String(payload.location || payload.path || "").trim();
+    const hasInlinePackage = Object.prototype.hasOwnProperty.call(payload, "package");
+    const packageFromPayload = toRecord(payload.package);
+    if (hasInlinePackage && Object.keys(packageFromPayload).length === 0) {
+      return fail("brain.plugin.validate 的 package 必须是 object");
+    }
+    const sessionId = String(payload.sessionId || "").trim() || "default";
+    const packageSource =
+      Object.keys(packageFromPayload).length > 0
+        ? packageFromPayload
+        : location
+          ? await readVirtualJsonObject(location, "brain.plugin.validate location", sessionId)
+          : {};
+    if (Object.keys(packageSource).length === 0) {
+      return fail("brain.plugin.validate 需要 package 或 location(mem://...)");
+    }
+
+    try {
+      let pluginSource = readPluginInstallSource(packageSource);
+      validatePluginInstallSource(pluginSource);
+      pluginSource = await materializeInlinePluginSources(pluginSource, sessionId);
+      const manifest = normalizePluginManifest(pluginSource.manifest);
+      const pluginId = manifest.id;
+      const checks: PluginValidationCheck[] = [];
+      const warnings: string[] = [];
+
+      const hasExtensionEntry = hasPluginExtensionEntry(pluginSource);
+      const moduleInput = String(pluginSource.modulePath || pluginSource.moduleUrl || pluginSource.module || "").trim();
+      const exportName = String(pluginSource.exportName || "default").trim() || "default";
+      if (hasExtensionEntry && moduleInput) {
+        try {
+          const moduleUrl = resolvePluginModuleUrl(moduleInput);
+          if (isVirtualUri(moduleUrl)) {
+            const describe = await invokePluginSandboxRunner({
+              sessionId: String(pluginSource.moduleSessionId || sessionId || "").trim() || sessionId,
+              modulePath: moduleUrl,
+              exportName,
+              op: "describe"
+            });
+            checks.push(
+              buildPluginValidationCheck("index.module", true, {
+                details: {
+                  moduleUrl,
+                  exportName,
+                  hooks: toStringList(describe.hooks) || []
+                }
+              })
+            );
+          } else {
+            await loadExtensionFactoryFromModule(moduleUrl, exportName);
+            checks.push(
+              buildPluginValidationCheck("index.module", true, {
+                details: {
+                  moduleUrl,
+                  exportName
+                }
+              })
+            );
+          }
+        } catch (error) {
+          checks.push(buildPluginValidationCheck("index.module", false, { error }));
+        }
+      } else {
+        warnings.push("未声明 index.js 扩展入口（modulePath/moduleUrl/module）");
+      }
+
+      const uiDescriptor = resolveUiExtensionDescriptorFromSource(pluginId, pluginSource, true);
+      if (uiDescriptor) {
+        try {
+          if (isVirtualUri(uiDescriptor.moduleUrl)) {
+            const describe = await invokePluginSandboxRunner({
+              sessionId: String(uiDescriptor.sessionId || sessionId || "").trim() || sessionId,
+              modulePath: uiDescriptor.moduleUrl,
+              exportName: uiDescriptor.exportName,
+              op: "describe"
+            });
+            checks.push(
+              buildPluginValidationCheck("ui.module", true, {
+                details: {
+                  moduleUrl: uiDescriptor.moduleUrl,
+                  exportName: uiDescriptor.exportName,
+                  hooks: toStringList(describe.hooks) || []
+                }
+              })
+            );
+          } else {
+            await loadExtensionFactoryFromModule(uiDescriptor.moduleUrl, uiDescriptor.exportName);
+            checks.push(
+              buildPluginValidationCheck("ui.module", true, {
+                details: {
+                  moduleUrl: uiDescriptor.moduleUrl,
+                  exportName: uiDescriptor.exportName
+                }
+              })
+            );
+          }
+        } catch (error) {
+          checks.push(buildPluginValidationCheck("ui.module", false, { error }));
+        }
+      } else {
+        warnings.push("未声明 ui.js 扩展入口（uiModulePath/uiModuleUrl/uiModule）");
+      }
+
+      if (!hasExtensionEntry && !uiDescriptor) {
+        checks.push(buildPluginValidationCheck("entry.module", false, { error: "至少需要 index.js 或 ui.js 入口之一" }));
+      }
+
+      return ok({
+        pluginId,
+        valid: checks.every((item) => item.ok),
+        checks,
+        warnings,
+        sourceLocation: location || undefined
+      });
+    } catch (error) {
+      return fail(error);
+    }
   }
 
   if (action === "brain.plugin.install") {

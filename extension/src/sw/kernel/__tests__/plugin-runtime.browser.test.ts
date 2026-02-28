@@ -217,6 +217,47 @@ describe("plugin-runtime.browser", () => {
     expect(rolledBack.leasePolicy).toBe("auto");
   });
 
+  it("应统计插件 hook 的运行次数", async () => {
+    const orchestrator = new BrainOrchestrator();
+    orchestrator.registerToolProvider(
+      "script",
+      {
+        id: "test.plugin.usage.script",
+        invoke: async () => ({ source: "script" })
+      },
+      { replace: true }
+    );
+    const { sessionId } = await orchestrator.createSession({ title: "plugin-usage-counter" });
+
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.usage.counter",
+        name: "usage-counter",
+        version: "1.0.0",
+        permissions: { hooks: ["tool.after_result"] }
+      },
+      hooks: {
+        "tool.after_result": () => ({ action: "continue" })
+      }
+    });
+
+    await orchestrator.executeStep({
+      sessionId,
+      mode: "script",
+      action: "click"
+    });
+    await orchestrator.executeStep({
+      sessionId,
+      mode: "script",
+      action: "click"
+    });
+
+    const plugin = orchestrator.listPlugins().find((item) => item.id === "plugin.usage.counter");
+    expect(plugin).toBeTruthy();
+    expect(Number(plugin?.usageTotalCalls || 0)).toBeGreaterThanOrEqual(2);
+    expect(Number((plugin?.usageHookCalls || {})["tool.after_result"] || 0)).toBeGreaterThanOrEqual(2);
+  });
+
   it("replaceProviders=true 时 disable 会恢复被替换 provider 与 policy", async () => {
     const orchestrator = new BrainOrchestrator();
     const { sessionId } = await orchestrator.createSession({ title: "plugin-restore-replaced" });

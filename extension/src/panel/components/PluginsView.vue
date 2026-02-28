@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { useRuntimeStore, type PluginMetadata, type PluginUiExtensionMetadata } from "../stores/runtime";
-import { ArrowLeft, Loader2, RefreshCcw, Power, Trash2, Plus, WandSparkles } from "lucide-vue-next";
+import { ArrowLeft, Loader2, RefreshCcw, Power, Trash2, Plus, WandSparkles, ExternalLink } from "lucide-vue-next";
 
 interface PluginPreset {
   id: string;
@@ -30,6 +30,7 @@ const selectedPresetId = ref("");
 const pluginJson = ref("");
 const packageLocation = ref("mem://plugins/demo/plugin.json");
 const BUILTIN_PLUGIN_ID_PREFIX = "runtime.builtin.plugin.";
+const isStandaloneStudioPage = ref(false);
 
 const presets: PluginPreset[] = [
   {
@@ -142,6 +143,11 @@ function formatList(values: string[]): string {
   return values.join(", ");
 }
 
+interface PluginUsageRow {
+  label: string;
+  value: string;
+}
+
 function providerSummary(row: Record<string, unknown>): string {
   const id = String(row.id || "").trim() || "unknown";
   const transport = String(row.transport || "custom").trim();
@@ -162,6 +168,73 @@ function formatUiExtensionSummary(pluginId: string): string {
   const ext = findUiExtension(pluginId);
   if (!ext) return "无";
   return `${ext.enabled ? "enabled" : "disabled"} · ${ext.exportName || "default"} · ${ext.moduleUrl}`;
+}
+
+function buildPluginUsageRows(plugin: PluginMetadata): PluginUsageRow[] {
+  const rows: PluginUsageRow[] = [];
+  const push = (label: string, values: string[]) => {
+    if (!values.length) return;
+    rows.push({ label, value: values.join(", ") });
+  };
+  push("hooks", plugin.hooks);
+  push("modes", plugin.modes);
+  push("capabilities", plugin.capabilities);
+  push("policyCapabilities", plugin.policyCapabilities);
+  push("tools", plugin.tools);
+  push("llmProviders", plugin.llmProviders);
+  push("runtimeMessages", plugin.runtimeMessages);
+  push("brainEvents", plugin.brainEvents);
+  const uiSummary = formatUiExtensionSummary(plugin.id);
+  if (uiSummary !== "无") {
+    rows.push({
+      label: "uiExtension",
+      value: uiSummary
+    });
+  }
+  if (plugin.usageTotalCalls > 0 || plugin.usageTotalErrors > 0 || plugin.usageTotalTimeouts > 0) {
+    rows.push({
+      label: "usage.calls",
+      value: String(plugin.usageTotalCalls)
+    });
+    rows.push({
+      label: "usage.errors",
+      value: String(plugin.usageTotalErrors)
+    });
+    rows.push({
+      label: "usage.timeouts",
+      value: String(plugin.usageTotalTimeouts)
+    });
+    if (plugin.usageLastUsedAt) {
+      rows.push({
+        label: "usage.lastUsedAt",
+        value: plugin.usageLastUsedAt
+      });
+    }
+    const topHookCalls = Object.entries(plugin.usageHookCalls || {})
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([hook, count]) => `${hook}:${count}`);
+    if (topHookCalls.length > 0) {
+      rows.push({
+        label: "usage.hooks",
+        value: topHookCalls.join(", ")
+      });
+    }
+  }
+  return rows;
+}
+
+function pluginUsageKind(plugin: PluginMetadata): string {
+  const traits: string[] = [];
+  if (plugin.hooks.length > 0) traits.push("Hook");
+  if (plugin.modes.length > 0 || plugin.capabilities.length > 0 || plugin.policyCapabilities.length > 0) traits.push("执行链");
+  if (plugin.tools.length > 0) traits.push("Tool Contract");
+  if (plugin.llmProviders.length > 0) traits.push("LLM Provider");
+  if (plugin.runtimeMessages.length > 0 || plugin.brainEvents.length > 0) traits.push("UI/事件输出");
+  if (formatUiExtensionSummary(plugin.id) !== "无") traits.push("UI Extension");
+  if (plugin.usageTotalCalls > 0) traits.push("已执行");
+  if (!traits.length) return "未声明";
+  return traits.join(" + ");
 }
 
 function deepCloneRecord(input: Record<string, unknown>): Record<string, unknown> {
@@ -336,7 +409,19 @@ async function handleUnregister(plugin: PluginMetadata) {
   }
 }
 
+async function handleOpenStandaloneStudio() {
+  pageError.value = "";
+  try {
+    const url = chrome.runtime.getURL("plugin-studio.html");
+    await chrome.tabs.create({ url });
+  } catch (error) {
+    setPageError(error);
+  }
+}
+
 onMounted(async () => {
+  const path = String(globalThis.location?.pathname || "").trim().toLowerCase();
+  isStandaloneStudioPage.value = path.endsWith("/plugin-studio.html");
   dialogRef.value?.focus();
   applyPreset(presets[0]);
   await refreshPlugins();
@@ -363,7 +448,16 @@ onMounted(async () => {
       </button>
       <h2 class="ml-2 font-bold text-[14px] text-ui-text tracking-tight">插件管理</h2>
       <button
-        class="ml-auto p-2 hover:bg-ui-surface rounded-sm transition-colors text-ui-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50"
+        v-if="!isStandaloneStudioPage"
+        class="ml-auto p-2 hover:bg-ui-surface rounded-sm transition-colors text-ui-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+        aria-label="在独立页面打开插件管理"
+        title="在独立页面打开"
+        @click="handleOpenStandaloneStudio"
+      >
+        <ExternalLink :size="16" />
+      </button>
+      <button
+        class="p-2 hover:bg-ui-surface rounded-sm transition-colors text-ui-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50"
         :disabled="loading"
         aria-label="刷新插件列表"
         @click="refreshPlugins"
@@ -374,7 +468,7 @@ onMounted(async () => {
 
     <div class="flex-1 overflow-y-auto p-4 space-y-6">
       <section class="space-y-3">
-        <h3 class="text-[11px] font-bold uppercase tracking-[0.1em] text-ui-text-muted">内置插件模板（先放几项）</h3>
+        <h3 class="text-[11px] font-bold uppercase tracking-[0.1em] text-ui-text-muted">示例插件模板（初始化可用）</h3>
         <ul class="space-y-2">
           <li
             v-for="preset in presets"
@@ -486,12 +580,17 @@ onMounted(async () => {
                 {{ plugin.enabled ? "enabled" : "disabled" }}
               </span>
             </div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-ui-text-muted">
-              <p>hooks: {{ formatList(plugin.hooks) }}</p>
-              <p>modes: {{ formatList(plugin.modes) }}</p>
-              <p>capabilities: {{ formatList(plugin.capabilities) }}</p>
-              <p>llmProviders: {{ formatList(plugin.llmProviders) }}</p>
-              <p class="sm:col-span-2">uiExtension: {{ formatUiExtensionSummary(plugin.id) }}</p>
+            <div class="rounded border border-ui-border/70 bg-ui-bg px-2.5 py-2 text-[11px] text-ui-text-muted space-y-1.5">
+              <p><span class="font-semibold text-ui-text">类型:</span> {{ pluginUsageKind(plugin) }}</p>
+              <template v-if="buildPluginUsageRows(plugin).length > 0">
+                <p
+                  v-for="row in buildPluginUsageRows(plugin)"
+                  :key="`${plugin.id}-${row.label}`"
+                >
+                  <span class="font-semibold text-ui-text">{{ row.label }}:</span> {{ row.value }}
+                </p>
+              </template>
+              <p v-else>未声明可观测使用项</p>
             </div>
             <p v-if="plugin.lastError" class="text-[11px] text-rose-600">lastError: {{ plugin.lastError }}</p>
             <div class="flex items-center gap-2">
