@@ -5632,6 +5632,70 @@ describe("runtime-router.browser", () => {
     );
   });
 
+  it("supports brain.plugin.ui_hook.run for mem ui module installed from inline uiJs", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    const pluginId = "plugin.route.ui.inline.mem";
+
+    const installed = await invokeRuntime({
+      type: "brain.plugin.install",
+      sessionId: "plugin-studio",
+      package: {
+        manifest: {
+          id: pluginId,
+          name: "plugin-route-ui-inline-mem",
+          version: "1.0.0"
+        },
+        uiJs: `module.exports = function registerUiPlugin(ui) {
+  ui.on("ui.notice.before_show", (event) => {
+    return {
+      action: "patch",
+      patch: {
+        message: String(event && event.message || "") + "!"
+      }
+    };
+  });
+};`
+      }
+    });
+    expect(installed.ok).toBe(true);
+
+    const hookRun = await invokeRuntime({
+      type: "brain.plugin.ui_hook.run",
+      pluginId,
+      hook: "ui.notice.before_show",
+      payload: {
+        type: "success",
+        message: "发送成功"
+      }
+    });
+    expect(hookRun.ok).toBe(true);
+    const hookData = (hookRun.data || {}) as Record<string, unknown>;
+    const hookResult = (hookData.hookResult || {}) as Record<string, unknown>;
+    expect(String(hookResult.action || "")).toBe("patch");
+    const patch = (hookResult.patch || {}) as Record<string, unknown>;
+    expect(String(patch.message || "")).toBe("发送成功!");
+
+    const disabled = await invokeRuntime({
+      type: "brain.plugin.disable",
+      pluginId
+    });
+    expect(disabled.ok).toBe(true);
+
+    const hookRunAfterDisable = await invokeRuntime({
+      type: "brain.plugin.ui_hook.run",
+      pluginId,
+      hook: "ui.notice.before_show",
+      payload: {
+        type: "success",
+        message: "发送成功"
+      }
+    });
+    expect(hookRunAfterDisable.ok).toBe(true);
+    const disabledData = (hookRunAfterDisable.data || {}) as Record<string, unknown>;
+    expect(String(disabledData.skipped || "")).toBe("disabled");
+  });
+
   it("supports brain.plugin.install from mem:// package file", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);

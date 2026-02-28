@@ -4,6 +4,7 @@ export interface UiExtensionDescriptor {
   exportName: string;
   enabled: boolean;
   updatedAt: string;
+  sessionId?: string;
 }
 
 export interface UiNoticePayload {
@@ -102,6 +103,12 @@ interface UiPluginState {
   lastError?: string;
 }
 
+interface RuntimeResponse<T = unknown> {
+  ok: boolean;
+  data?: T;
+  error?: string;
+}
+
 interface RunHookResult<T> {
   blocked: boolean;
   reason?: string;
@@ -122,7 +129,8 @@ function normalizeDescriptor(input: unknown): UiExtensionDescriptor | null {
     moduleUrl,
     exportName: String(row.exportName || "default").trim() || "default",
     enabled: row.enabled !== false,
-    updatedAt: String(row.updatedAt || "").trim() || new Date().toISOString()
+    updatedAt: String(row.updatedAt || "").trim() || new Date().toISOString(),
+    sessionId: String(row.sessionId || "").trim() || undefined
   };
 }
 
@@ -147,6 +155,45 @@ async function loadPluginFactory(moduleUrl: string, exportName: string): Promise
     throw new Error(`ui plugin ${moduleUrl} 缺少可执行导出: ${target}`);
   }
   return setup as PanelUiPluginFactory;
+}
+
+function isVirtualModuleUrl(moduleUrl: string): boolean {
+  return /^mem:\/\//i.test(String(moduleUrl || "").trim());
+}
+
+async function invokeRemoteUiHook<K extends UiHookName>(
+  descriptor: UiExtensionDescriptor,
+  hook: K,
+  payload: UiHookPayloadMap[K]
+): Promise<UiHookResult<UiHookPayloadMap[K]> | null> {
+  const response = (await chrome.runtime.sendMessage({
+    type: "brain.plugin.ui_hook.run",
+    pluginId: descriptor.pluginId,
+    hook,
+    payload,
+    ...(descriptor.sessionId ? { sessionId: descriptor.sessionId } : {}),
+    ...(descriptor.exportName ? { exportName: descriptor.exportName } : {})
+  })) as RuntimeResponse<{ hookResult?: unknown }>;
+  if (!response?.ok) {
+    throw new Error(String(response?.error || "brain.plugin.ui_hook.run failed"));
+  }
+  const hookResult = toRecord(toRecord(response.data).hookResult);
+  const action = String(hookResult.action || "").trim();
+  if (action === "patch") {
+    return {
+      action: "patch",
+      patch: toRecord(hookResult.patch) as Partial<UiHookPayloadMap[K]>
+    };
+  }
+  if (action === "block") {
+    return {
+      action: "block",
+      reason: String(hookResult.reason || "").trim() || undefined
+    };
+  }
+  return {
+    action: "continue"
+  };
 }
 
 export class PanelUiPluginRuntime {
@@ -200,6 +247,12 @@ export class PanelUiPluginRuntime {
     const state = this.states.get(id);
     if (!state) return;
     if (state.enabled) return;
+    if (isVirtualModuleUrl(state.descriptor.moduleUrl)) {
+      state.enabled = true;
+      state.handlers = [];
+      state.lastError = undefined;
+      return;
+    }
 
     const collectedHandlers: UiHandlerEntry[] = [];
     const api: PanelUiPluginApi = {
@@ -245,36 +298,41 @@ export class PanelUiPluginRuntime {
   }
 
   async runHook<K extends UiHookName>(hook: K, payload: UiHookPayloadMap[K]): Promise<RunHookResult<UiHookPayloadMap[K]>> {
-    const handlers = this.listHandlers(hook);
-    if (handlers.length === 0) {
-      return {
-        blocked: false,
-        value: payload
-      };
-    }
-
     let current = clonePayload(payload);
+    const handlers = this.listHandlers(hook);
     for (const item of handlers) {
       const state = this.states.get(item.pluginId);
       if (!state || !state.enabled) continue;
       try {
-        const result = await this.runWithTimeout(item.handler(current), item.timeoutMs);
-        if (!result || typeof result !== "object") continue;
-        const action = String((result as { action?: string }).action || "").trim();
-        if (action === "block") {
-          return {
-            blocked: true,
-            reason: String((result as { reason?: string }).reason || "").trim() || undefined,
-            value: current
-          };
+        const next = await this.applyHookResult(
+          state,
+          await this.runWithTimeout(item.handler(current), item.timeoutMs),
+          current
+        );
+        if (next.blocked) {
+          return next;
         }
-        if (action === "patch") {
-          const patch = toRecord((result as { patch?: unknown }).patch);
-          current = {
-            ...(toRecord(current) as UiHookPayloadMap[K]),
-            ...(patch as Partial<UiHookPayloadMap[K]>)
-          };
+        current = next.value;
+      } catch (error) {
+        state.errorCount += 1;
+        state.lastError = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    const remoteDescriptors = this.listRemoteDescriptors();
+    for (const descriptor of remoteDescriptors) {
+      const state = this.states.get(descriptor.pluginId);
+      if (!state || !state.enabled) continue;
+      try {
+        const result = await this.runWithTimeout(
+          invokeRemoteUiHook(descriptor, hook, current),
+          this.defaultTimeoutMs
+        );
+        const next = await this.applyHookResult(state, result, current);
+        if (next.blocked) {
+          return next;
         }
+        current = next.value;
       } catch (error) {
         state.errorCount += 1;
         state.lastError = error instanceof Error ? error.message : String(error);
@@ -300,7 +358,8 @@ export class PanelUiPluginRuntime {
     }
     const moduleChanged =
       current.descriptor.moduleUrl !== descriptor.moduleUrl
-      || current.descriptor.exportName !== descriptor.exportName;
+      || current.descriptor.exportName !== descriptor.exportName
+      || current.descriptor.sessionId !== descriptor.sessionId;
     current.descriptor = descriptor;
     if (moduleChanged) {
       current.enabled = false;
@@ -326,6 +385,53 @@ export class PanelUiPluginRuntime {
       return a.order - b.order;
     });
     return out;
+  }
+
+  private listRemoteDescriptors(): UiExtensionDescriptor[] {
+    const out: UiExtensionDescriptor[] = [];
+    for (const state of this.states.values()) {
+      if (!state.enabled) continue;
+      if (!isVirtualModuleUrl(state.descriptor.moduleUrl)) continue;
+      out.push(state.descriptor);
+    }
+    out.sort((a, b) => a.pluginId.localeCompare(b.pluginId));
+    return out;
+  }
+
+  private async applyHookResult<K extends UiHookName>(
+    state: UiPluginState,
+    result: unknown,
+    current: UiHookPayloadMap[K]
+  ): Promise<RunHookResult<UiHookPayloadMap[K]>> {
+    if (!result || typeof result !== "object") {
+      return {
+        blocked: false,
+        value: current
+      };
+    }
+    const action = String((result as { action?: string }).action || "").trim();
+    if (action === "block") {
+      return {
+        blocked: true,
+        reason: String((result as { reason?: string }).reason || "").trim() || undefined,
+        value: current
+      };
+    }
+    if (action === "patch") {
+      const patch = toRecord((result as { patch?: unknown }).patch);
+      return {
+        blocked: false,
+        value: {
+          ...(toRecord(current) as UiHookPayloadMap[K]),
+          ...(patch as Partial<UiHookPayloadMap[K]>)
+        }
+      };
+    }
+    state.lastError = undefined;
+    return {
+      blocked: false,
+      value: current
+    };
   }
 
   private async runWithTimeout<T>(value: T | Promise<T>, timeoutMs: number): Promise<T> {

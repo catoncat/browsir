@@ -541,16 +541,28 @@ function buildInstallPackage(): Record<string, unknown> {
     throw new Error("plugin.json 缺少 manifest.id");
   }
   const segment = toSafePluginPathSegment(manifestId);
+  const indexJs = String(indexJsCode.value || "");
+  const uiJs = String(uiJsCode.value || "");
+  const hasIndexJs = indexJs.trim().length > 0;
+  const hasUiJs = uiJs.trim().length > 0;
   const modulePath = `mem://plugins/${segment}/index.js`;
   const uiModulePath = `mem://plugins/${segment}/ui.js`;
   return {
     ...pluginJson,
-    modulePath,
-    moduleSessionId: PLUGIN_STUDIO_SESSION_ID,
-    uiModulePath,
-    uiModuleSessionId: PLUGIN_STUDIO_SESSION_ID,
-    indexJs: String(indexJsCode.value || ""),
-    uiJs: String(uiJsCode.value || "")
+    ...(hasIndexJs
+      ? {
+          modulePath,
+          moduleSessionId: PLUGIN_STUDIO_SESSION_ID,
+          indexJs
+        }
+      : {}),
+    ...(hasUiJs
+      ? {
+          uiModulePath,
+          uiModuleSessionId: PLUGIN_STUDIO_SESSION_ID,
+          uiJs
+        }
+      : {})
   };
 }
 

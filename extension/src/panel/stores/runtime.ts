@@ -223,6 +223,7 @@ export interface PluginUiExtensionMetadata {
   exportName: string;
   enabled: boolean;
   updatedAt: string;
+  sessionId?: string;
 }
 
 export interface PluginListResult {
@@ -322,7 +323,8 @@ function normalizePluginUiExtensionMetadata(input: unknown): PluginUiExtensionMe
     moduleUrl,
     exportName: String(row.exportName || "default").trim() || "default",
     enabled: row.enabled !== false,
-    updatedAt: String(row.updatedAt || "").trim() || new Date().toISOString()
+    updatedAt: String(row.updatedAt || "").trim() || new Date().toISOString(),
+    sessionId: String(row.sessionId || "").trim() || undefined
   };
 }
 

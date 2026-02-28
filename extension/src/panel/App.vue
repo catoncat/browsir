@@ -1851,7 +1851,8 @@ function normalizeUiExtensionDescriptor(input: unknown): UiExtensionDescriptor |
     moduleUrl,
     exportName: String(row.exportName || "default").trim() || "default",
     enabled: row.enabled !== false,
-    updatedAt: String(row.updatedAt || "").trim() || new Date().toISOString()
+    updatedAt: String(row.updatedAt || "").trim() || new Date().toISOString(),
+    sessionId: String(row.sessionId || "").trim() || undefined
   };
 }
 

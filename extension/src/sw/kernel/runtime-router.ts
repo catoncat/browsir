@@ -467,18 +467,16 @@ async function materializeInlinePluginSources(
   if (!indexJs && !uiJs) return source;
 
   const paths = buildPluginVirtualSourcePaths(pluginId);
-  const modulePath =
-    String(source.modulePath || source.moduleUrl || source.module || "").trim()
-    || paths.indexPath;
-
   const next: Record<string, unknown> = {
-    ...source,
-    modulePath,
-    moduleSessionId: sessionId
+    ...source
   };
+  const existingModulePath = String(source.modulePath || source.moduleUrl || source.module || "").trim();
 
   if (indexJs) {
+    const modulePath = existingModulePath || paths.indexPath;
     await writeVirtualTextFile(modulePath, indexJs, sessionId);
+    next.modulePath = modulePath;
+    next.moduleSessionId = sessionId;
   }
 
   if (uiJs) {
@@ -681,6 +679,7 @@ interface UiExtensionDescriptor {
   exportName: string;
   enabled: boolean;
   updatedAt: string;
+  sessionId?: string;
 }
 
 function normalizeUiExtensionDescriptor(input: unknown): UiExtensionDescriptor | null {
@@ -696,7 +695,8 @@ function normalizeUiExtensionDescriptor(input: unknown): UiExtensionDescriptor |
     moduleUrl,
     exportName,
     enabled,
-    updatedAt
+    updatedAt,
+    sessionId: String(row.sessionId || "").trim() || undefined
   };
 }
 
@@ -790,17 +790,17 @@ function resolveUiExtensionDescriptorFromSource(
     || String(source.uiModule || "").trim().length > 0;
   if (!hasModule) return null;
   const moduleUrl = resolvePluginModuleUrl(moduleInput);
-  if (isVirtualUri(moduleUrl)) {
-    // mem:// ui module 需要走 sandbox bridge，当前 UI runtime 还未接入该执行路径。
-    return null;
-  }
   const exportName = String(source.uiExportName || "default").trim() || "default";
+  const sessionId = String(
+    source.uiModuleSessionId || source.moduleSessionId || source.sessionId || PLUGIN_SANDBOX_DEFAULT_SESSION_ID
+  ).trim();
   return {
     pluginId,
     moduleUrl,
     exportName,
     enabled,
-    updatedAt: nowIso()
+    updatedAt: nowIso(),
+    ...(isVirtualUri(moduleUrl) ? { sessionId: sessionId || PLUGIN_SANDBOX_DEFAULT_SESSION_ID } : {})
   };
 }
 
@@ -2694,6 +2694,77 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
   if (action === "brain.plugin.ui_extension.list") {
     return ok({
       uiExtensions: await readUiExtensionDescriptors()
+    });
+  }
+
+  if (action === "brain.plugin.ui_hook.run") {
+    const pluginId = String(payload.pluginId || payload.id || "").trim();
+    if (!pluginId) return fail("brain.plugin.ui_hook.run 需要 pluginId");
+    const hook = String(payload.hook || "").trim();
+    if (!hook) return fail("brain.plugin.ui_hook.run 需要 hook");
+
+    const descriptor = (await readUiExtensionDescriptors()).find((item) => item.pluginId === pluginId) || null;
+    if (!descriptor) {
+      return fail(`ui extension 不存在: ${pluginId}`);
+    }
+    if (descriptor.enabled !== true) {
+      return ok({
+        pluginId,
+        hook,
+        hookResult: {
+          action: "continue"
+        },
+        skipped: "disabled"
+      });
+    }
+    if (!isVirtualUri(descriptor.moduleUrl)) {
+      return fail(`ui hook sandbox 仅支持 mem:// module: ${descriptor.moduleUrl}`);
+    }
+
+    const sessionId =
+      String(payload.sessionId || descriptor.sessionId || "").trim()
+      || PLUGIN_SANDBOX_DEFAULT_SESSION_ID;
+    const exportName = String(payload.exportName || descriptor.exportName || "default").trim() || "default";
+    const executed = await invokePluginSandboxRunner({
+      sessionId,
+      modulePath: descriptor.moduleUrl,
+      exportName,
+      op: "runHook",
+      hook,
+      payload: payload.payload
+    });
+    const runtimeMessages = Array.isArray(executed.runtimeMessages) ? executed.runtimeMessages : [];
+    for (const message of runtimeMessages) {
+      emitPluginRuntimeMessage(message);
+    }
+    const hookResult = toRecord(executed.hookResult);
+    const actionName = String(hookResult.action || "").trim();
+    if (actionName === "patch") {
+      return ok({
+        pluginId,
+        hook,
+        hookResult: {
+          action: "patch",
+          patch: toRecord(hookResult.patch)
+        }
+      });
+    }
+    if (actionName === "block") {
+      return ok({
+        pluginId,
+        hook,
+        hookResult: {
+          action: "block",
+          reason: String(hookResult.reason || "").trim() || undefined
+        }
+      });
+    }
+    return ok({
+      pluginId,
+      hook,
+      hookResult: {
+        action: "continue"
+      }
     });
   }
 
