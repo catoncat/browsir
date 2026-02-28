@@ -5484,7 +5484,7 @@ describe("runtime-router.browser", () => {
     expect((patchedResult.data || {}) as Record<string, unknown>).toEqual({ source: "extension-module" });
   });
 
-  it("supports brain.plugin.register_extension with moduleSource + uiModuleSource", async () => {
+  it("brain.plugin.register_extension should reject moduleSource under CSP", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
     const { sessionId } = await orchestrator.createSession({ title: "plugin-route-extension-module-source" });
@@ -5529,33 +5529,8 @@ describe("runtime-router.browser", () => {
       moduleSource,
       uiModuleSource
     });
-    expect(registered.ok).toBe(true);
-    const registeredData = (registered.data || {}) as Record<string, unknown>;
-    expect(String(registeredData.pluginId || "")).toBe(pluginId);
-    expect(String(registeredData.moduleUrl || "")).toBe(`inline://${pluginId}/index.js`);
-
-    const patched = await invokeRuntime({
-      type: "brain.step.execute",
-      sessionId,
-      mode: "script",
-      action: "click",
-      verifyPolicy: "off"
-    });
-    expect(patched.ok).toBe(true);
-    const patchedResult = (patched.data || {}) as Record<string, unknown>;
-    expect((patchedResult.data || {}) as Record<string, unknown>).toEqual({ source: "extension-module-source" });
-
-    const listed = await invokeRuntime({
-      type: "brain.plugin.ui_extension.list"
-    });
-    expect(listed.ok).toBe(true);
-    const listedExtensions = Array.isArray((listed.data as Record<string, unknown>)?.uiExtensions)
-      ? (((listed.data as Record<string, unknown>).uiExtensions as unknown[]) as Array<Record<string, unknown>>)
-      : [];
-    const listedExtension = listedExtensions.find((item) => String(item.pluginId || "") === pluginId);
-    expect(listedExtension).toBeDefined();
-    expect(String(listedExtension?.moduleUrl || "")).toBe(`inline://${pluginId}/ui.js`);
-    expect(String(listedExtension?.moduleSource || "")).toBe(uiModuleSource);
+    expect(registered.ok).toBe(false);
+    expect(String(registered.error || "")).toContain("moduleSource 暂不支持");
   });
 
   it("supports brain.plugin ui_extension lifecycle routes", async () => {

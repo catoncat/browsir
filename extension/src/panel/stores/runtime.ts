@@ -221,7 +221,6 @@ export interface PluginUiExtensionMetadata {
   pluginId: string;
   moduleUrl: string;
   exportName: string;
-  moduleSource?: string;
   enabled: boolean;
   updatedAt: string;
 }
@@ -317,14 +316,11 @@ function normalizePluginUiExtensionMetadata(input: unknown): PluginUiExtensionMe
   const row = toRecord(input);
   const pluginId = String(row.pluginId || "").trim();
   const moduleUrl = String(row.moduleUrl || "").trim();
-  const moduleSource = String(row.moduleSource || "");
-  if (!pluginId) return null;
-  if (!moduleUrl && !moduleSource.trim()) return null;
+  if (!pluginId || !moduleUrl) return null;
   return {
     pluginId,
-    moduleUrl: moduleUrl || `inline://${pluginId}/ui.js`,
+    moduleUrl,
     exportName: String(row.exportName || "default").trim() || "default",
-    ...(moduleSource.trim() ? { moduleSource } : {}),
     enabled: row.enabled !== false,
     updatedAt: String(row.updatedAt || "").trim() || new Date().toISOString()
   };

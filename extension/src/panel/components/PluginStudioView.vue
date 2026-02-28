@@ -493,6 +493,12 @@ function applyEditorFiles(files: StudioFiles): void {
   uiJsCode.value = String(files.uiJs || "");
 }
 
+function getSelectedProject(): StudioProject | null {
+  const id = String(selectedProjectId.value || "").trim();
+  if (!id) return null;
+  return projects.value.find((item) => item.id === id) || null;
+}
+
 function selectProject(project: StudioProject): void {
   selectedProjectId.value = project.id;
   if (project.pluginId) {
@@ -529,9 +535,7 @@ function buildInstallPackage(): Record<string, unknown> {
     throw new Error("plugin.json 缺少 manifest.id");
   }
   return {
-    ...pluginJson,
-    moduleSource: String(indexJsCode.value || ""),
-    uiModuleSource: String(uiJsCode.value || "")
+    ...pluginJson
   };
 }
 
@@ -575,18 +579,29 @@ function tryBuildInstallPackageForPlugin(pluginId: string): {
   }
 }
 
-function buildCurrentProject(category: "example" | "user"): StudioProject {
+function buildCurrentProject(
+  options: {
+    category?: "example" | "user";
+    baseProject?: StudioProject | null;
+  } = {}
+): StudioProject {
+  const baseProject = options.baseProject || null;
+  const category = baseProject?.category || options.category || "user";
   let pluginId = "";
   try {
     pluginId = extractManifestId(parsePluginJson());
   } catch {
     pluginId = "";
   }
+  const resolvedPluginId = pluginId || baseProject?.pluginId || "";
+  const resolvedName = baseProject
+    ? baseProject.name
+    : (resolvedPluginId ? `项目: ${resolvedPluginId}` : "未命名项目");
   return {
-    id: selectedProjectId.value || randomId("project"),
-    name: pluginId ? `项目: ${pluginId}` : "未命名项目",
+    id: baseProject?.id || selectedProjectId.value || randomId("project"),
+    name: resolvedName,
     category,
-    pluginId: pluginId || undefined,
+    pluginId: resolvedPluginId || undefined,
     updatedAt: nowIso(),
     files: {
       pluginJson: String(pluginJsonCode.value || ""),
@@ -605,7 +620,7 @@ function upsertProject(project: StudioProject): void {
     list.push(project);
   }
   projects.value = list.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  writeProjectsToStorage(projects.value.filter((item) => item.category === "user"));
+  writeProjectsToStorage(projects.value);
 }
 
 function syncInstalledSelection(pluginId: string): void {
@@ -669,13 +684,19 @@ async function handleInstall(replace: boolean): Promise<void> {
     if (pluginId) {
       syncInstalledSelection(pluginId);
     }
-    const userProject = buildCurrentProject("user");
+    const baseProject = getSelectedProject();
+    const nextProject = buildCurrentProject({
+      category: baseProject?.category || "user",
+      baseProject
+    });
     if (pluginId) {
-      userProject.pluginId = pluginId;
-      userProject.name = `项目: ${pluginId}`;
+      nextProject.pluginId = pluginId;
+      if (!baseProject || baseProject.category === "user") {
+        nextProject.name = `项目: ${pluginId}`;
+      }
     }
-    selectedProjectId.value = userProject.id;
-    upsertProject(userProject);
+    selectedProjectId.value = nextProject.id;
+    upsertProject(nextProject);
     await refreshPlugins();
     statusMessage.value = replace ? "热更新成功" : "安装成功";
   } catch (error) {
@@ -732,9 +753,13 @@ function handleSaveProject(): void {
   errorMessage.value = "";
   statusMessage.value = "";
   try {
-    const userProject = buildCurrentProject("user");
-    selectedProjectId.value = userProject.id;
-    upsertProject(userProject);
+    const baseProject = getSelectedProject();
+    const nextProject = buildCurrentProject({
+      category: baseProject?.category || "user",
+      baseProject
+    });
+    selectedProjectId.value = nextProject.id;
+    upsertProject(nextProject);
     statusMessage.value = "项目已保存";
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : String(error || "保存失败");
@@ -932,8 +957,15 @@ async function bootstrap(): Promise<void> {
       loadExampleProjects(),
       refreshPlugins()
     ]);
-    const userList = readProjectsFromStorage();
-    const merged = [...exampleList, ...userList].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const savedList = readProjectsFromStorage();
+    const mergedById = new Map<string, StudioProject>();
+    for (const item of exampleList) {
+      mergedById.set(item.id, item);
+    }
+    for (const item of savedList) {
+      mergedById.set(item.id, item);
+    }
+    const merged = Array.from(mergedById.values()).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     projects.value = merged;
 
     const selectedFromStorage = readSelectedProjectFromStorage();
