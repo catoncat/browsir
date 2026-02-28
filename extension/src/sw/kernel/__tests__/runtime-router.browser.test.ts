@@ -5739,6 +5739,63 @@ describe("runtime-router.browser", () => {
     expect(String(installed.error || "")).toContain("manifest.id");
   });
 
+  it("brain.plugin.install should execute inline indexJs from mem sandbox module", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    const { sessionId } = await orchestrator.createSession({ title: "plugin-install-inline-index-js" });
+    orchestrator.registerToolProvider(
+      "script",
+      {
+        id: "plugin.install.inline-index.script",
+        invoke: async () => ({ source: "script" })
+      },
+      { replace: true }
+    );
+
+    const installed = await invokeRuntime({
+      type: "brain.plugin.install",
+      sessionId: "plugin-studio",
+      package: {
+        manifest: {
+          id: "plugin.route.extension.inline.index-js",
+          name: "plugin-route-extension-inline-index-js",
+          version: "1.0.0",
+          permissions: {
+            hooks: ["tool.after_result"]
+          }
+        },
+        indexJs: `module.exports = function registerPlugin(pi) {
+  pi.on("tool.after_result", (event) => {
+    const current = event && event.result && typeof event.result === "object" ? event.result : {};
+    return {
+      action: "patch",
+      patch: {
+        result: {
+          ...current,
+          source: "inline-index-js"
+        }
+      }
+    };
+  });
+};`
+      }
+    });
+    expect(installed.ok).toBe(true);
+    const installedData = (installed.data || {}) as Record<string, unknown>;
+    expect(String(installedData.pluginId || "")).toBe("plugin.route.extension.inline.index-js");
+
+    const patched = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      mode: "script",
+      action: "click",
+      verifyPolicy: "off"
+    });
+    expect(patched.ok).toBe(true);
+    const patchedResult = (patched.data || {}) as Record<string, unknown>;
+    expect((patchedResult.data || {}) as Record<string, unknown>).toEqual({ source: "inline-index-js" });
+  });
+
   it("brain.plugin.disable should restore replaced openai_compatible provider", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);

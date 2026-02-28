@@ -45,9 +45,168 @@ const MAX_SKILL_DISCOVER_MAX_FILES = 4096;
 const MAX_PLUGIN_PACKAGE_READ_BYTES = 512 * 1024;
 const BUILTIN_PLUGIN_ID_PREFIX = "runtime.builtin.plugin.";
 const UI_EXTENSION_STORAGE_KEY = "brain.plugin.ui_extensions";
+const PLUGIN_SANDBOX_DEFAULT_SESSION_ID = "plugin-studio";
+const PLUGIN_SANDBOX_RUNNER_PATH = "mem://__bbl/plugin-host-runner.cjs";
+const PLUGIN_SANDBOX_RESULT_PREFIX = "__BBL_PLUGIN_RESULT__";
 const DEFAULT_SKILL_DISCOVER_ROOTS: Array<{ root: string; source: string }> = [
   { root: "mem://skills", source: "browser" }
 ];
+const PLUGIN_SANDBOX_RUNNER_SOURCE = String.raw`const fs = require("fs");
+const { pathToFileURL } = require("url");
+
+const RESULT_PREFIX = "__BBL_PLUGIN_RESULT__";
+
+function toRecord(value) {
+  return value && typeof value === "object" ? value : {};
+}
+
+function emit(payload) {
+  process.stdout.write(RESULT_PREFIX + JSON.stringify(payload) + "\n");
+}
+
+async function loadFactory(modulePath, exportName) {
+  let moduleNs;
+  try {
+    moduleNs = require(modulePath);
+  } catch (_error) {
+    moduleNs = await import(pathToFileURL(modulePath).href);
+  }
+  const target = String(exportName || "default").trim() || "default";
+  const setup = target === "default" ? ((moduleNs && moduleNs.default) || moduleNs) : moduleNs?.[target];
+  if (typeof setup !== "function") {
+    throw new Error("plugin module missing export: " + target);
+  }
+  return setup;
+}
+
+function installChromeBridge(state) {
+  const baseChrome = globalThis.chrome && typeof globalThis.chrome === "object" ? globalThis.chrome : {};
+  const baseRuntime = baseChrome.runtime && typeof baseChrome.runtime === "object" ? baseChrome.runtime : {};
+  globalThis.chrome = {
+    ...baseChrome,
+    runtime: {
+      ...baseRuntime,
+      sendMessage(message) {
+        state.runtimeMessages.push(message);
+        return Promise.resolve({ ok: true });
+      }
+    }
+  };
+}
+
+function createApi(registry) {
+  return {
+    on(hook, handler, options = {}) {
+      const name = String(hook || "").trim();
+      if (!name || typeof handler !== "function") return;
+      if (!Array.isArray(registry.hooks[name])) registry.hooks[name] = [];
+      registry.hooks[name].push({ handler, options: toRecord(options) });
+    },
+    registerTool() {
+      return;
+    },
+    registerModeProvider() {
+      return;
+    },
+    registerCapabilityProvider() {
+      return;
+    },
+    registerCapabilityPolicy() {
+      return;
+    },
+    registerProvider() {
+      return;
+    }
+  };
+}
+
+async function runHook(handlers, payload) {
+  let hasPatch = false;
+  const mergedPatch = {};
+  let current = payload;
+  for (const item of handlers) {
+    const result = await Promise.resolve(item.handler(current));
+    const row = toRecord(result);
+    const action = String(row.action || "").trim();
+    if (action === "block") {
+      return {
+        action: "block",
+        reason: String(row.reason || "").trim() || undefined
+      };
+    }
+    if (action === "patch") {
+      const patch = toRecord(row.patch);
+      Object.assign(mergedPatch, patch);
+      hasPatch = true;
+      if (current && typeof current === "object" && !Array.isArray(current)) {
+        current = {
+          ...current,
+          ...patch
+        };
+      }
+    }
+  }
+  if (hasPatch) {
+    return {
+      action: "patch",
+      patch: mergedPatch
+    };
+  }
+  return {
+    action: "continue"
+  };
+}
+
+(async () => {
+  try {
+    const inputFilePath = String(process.argv[2] || "").trim();
+    const modulePath = String(process.argv[3] || "").trim();
+    if (!inputFilePath || !modulePath) {
+      throw new Error("runner args missing: <input-file> <module-path>");
+    }
+    const rawInput = String(fs.readFileSync(inputFilePath, "utf8") || "{}");
+    const input = JSON.parse(rawInput);
+    const state = {
+      runtimeMessages: []
+    };
+    installChromeBridge(state);
+
+    const registry = {
+      hooks: {}
+    };
+    const setup = await loadFactory(modulePath, String(input.exportName || "default"));
+    await Promise.resolve(setup(createApi(registry)));
+
+    const op = String(input.op || "describe").trim() || "describe";
+    if (op === "describe") {
+      emit({
+        ok: true,
+        hooks: Object.keys(registry.hooks)
+      });
+      return;
+    }
+
+    if (op === "runHook") {
+      const hook = String(input.hook || "").trim();
+      const handlers = Array.isArray(registry.hooks[hook]) ? registry.hooks[hook] : [];
+      const hookResult = await runHook(handlers, input.payload);
+      emit({
+        ok: true,
+        hookResult,
+        runtimeMessages: state.runtimeMessages
+      });
+      return;
+    }
+
+    throw new Error("unsupported op: " + op);
+  } catch (error) {
+    emit({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    process.exitCode = 1;
+  }
+})();`;
 
 function ok<T>(data: T): RuntimeResult<T> {
   return { ok: true, data };
@@ -144,6 +303,195 @@ async function writeVirtualTextFile(path: string, content: string, sessionId = "
     },
     sessionId: String(sessionId || "").trim() || "default"
   });
+}
+
+function toSafeVirtualSegment(input: unknown): string {
+  const text = String(input || "").trim().replace(/[^a-zA-Z0-9._-]/g, "_");
+  return text || "plugin";
+}
+
+function buildPluginVirtualSourcePaths(pluginId: string): {
+  root: string;
+  packagePath: string;
+  indexPath: string;
+  uiPath: string;
+} {
+  const segment = toSafeVirtualSegment(pluginId);
+  const root = `mem://plugins/${segment}`;
+  return {
+    root,
+    packagePath: `${root}/plugin.json`,
+    indexPath: `${root}/index.js`,
+    uiPath: `${root}/ui.js`
+  };
+}
+
+function emitPluginRuntimeMessage(message: unknown): void {
+  try {
+    const maybePromise = chrome.runtime.sendMessage(message as Record<string, unknown>);
+    if (maybePromise && typeof (maybePromise as Promise<unknown>).catch === "function") {
+      void (maybePromise as Promise<unknown>).catch(() => undefined);
+    }
+  } catch {
+    // ignore runtime dispatch failure from plugin sandbox
+  }
+}
+
+function parsePluginSandboxResult(output: unknown): Record<string, unknown> {
+  const row = toRecord(output);
+  const stdout = String(row.stdout || "");
+  const stderr = String(row.stderr || "");
+  const exitCode = Number.isFinite(Number(row.exitCode)) ? Number(row.exitCode) : -1;
+  const lines = stdout.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = String(lines[i] || "").trim();
+    if (!line.startsWith(PLUGIN_SANDBOX_RESULT_PREFIX)) continue;
+    const jsonText = line.slice(PLUGIN_SANDBOX_RESULT_PREFIX.length);
+    return parseJsonObjectText(jsonText, "plugin sandbox result");
+  }
+  const stderrPreview = stderr.replace(/\s+/g, " ").trim().slice(0, 260);
+  const stdoutPreview = stdout.replace(/\s+/g, " ").trim().slice(0, 260);
+  throw new Error(
+    `plugin sandbox 缺少可解析结果 (exit=${exitCode}, stderr=${stderrPreview || "<empty>"}, stdout=${stdoutPreview || "<empty>"})`
+  );
+}
+
+async function invokePluginSandboxRunner(input: {
+  sessionId: string;
+  modulePath: string;
+  exportName: string;
+  op: "describe" | "runHook";
+  hook?: string;
+  payload?: unknown;
+}): Promise<Record<string, unknown>> {
+  const sessionId = String(input.sessionId || "").trim() || PLUGIN_SANDBOX_DEFAULT_SESSION_ID;
+  await writeVirtualTextFile(PLUGIN_SANDBOX_RUNNER_PATH, PLUGIN_SANDBOX_RUNNER_SOURCE, sessionId);
+
+  const inputFile = `mem://__bbl/plugin-input-${toSafeVirtualSegment(randomId("runner"))}.json`;
+  const payload: Record<string, unknown> = {
+    op: input.op,
+    exportName: input.exportName
+  };
+  if (input.op === "runHook") {
+    payload.hook = String(input.hook || "").trim();
+    payload.payload = input.payload;
+  }
+  await writeVirtualTextFile(inputFile, JSON.stringify(payload), sessionId);
+
+  const command = `node ${PLUGIN_SANDBOX_RUNNER_PATH} ${inputFile} ${input.modulePath}`;
+  const raw = await invokeVirtualFrame({
+    tool: "bash",
+    args: {
+      cmdId: "bash.exec",
+      args: [command],
+      cwd: "mem://",
+      runtime: "sandbox"
+    },
+    sessionId
+  });
+  const row = toRecord(raw);
+  const parsed = parsePluginSandboxResult(row);
+  if (parsed.ok !== true) {
+    throw new Error(String(parsed.error || "plugin sandbox 执行失败"));
+  }
+  return parsed;
+}
+
+async function loadExtensionFactoryFromVirtualModule(input: {
+  manifest: AgentPluginManifest;
+  modulePath: string;
+  exportName: string;
+  sessionId: string;
+}): Promise<ExtensionFactory> {
+  const describe = await invokePluginSandboxRunner({
+    sessionId: input.sessionId,
+    modulePath: input.modulePath,
+    exportName: input.exportName,
+    op: "describe"
+  });
+  const discoveredHooks = toStringList(describe.hooks) || [];
+  const declaredHooks = toStringList(toRecord(input.manifest.permissions).hooks) || [];
+  const hookSet = new Set<string>([...discoveredHooks, ...declaredHooks]);
+  const hooks = [...hookSet].filter(Boolean);
+
+  return (api) => {
+    for (const hookName of hooks) {
+      api.on(hookName as never, async (eventPayload: unknown) => {
+        const executed = await invokePluginSandboxRunner({
+          sessionId: input.sessionId,
+          modulePath: input.modulePath,
+          exportName: input.exportName,
+          op: "runHook",
+          hook: hookName,
+          payload: eventPayload
+        });
+
+        const runtimeMessages = Array.isArray(executed.runtimeMessages) ? executed.runtimeMessages : [];
+        for (const message of runtimeMessages) {
+          emitPluginRuntimeMessage(message);
+        }
+
+        const hookResult = toRecord(executed.hookResult);
+        const action = String(hookResult.action || "").trim();
+        if (action === "patch") {
+          return {
+            action: "patch",
+            patch: toRecord(hookResult.patch)
+          };
+        }
+        if (action === "block") {
+          const reason = String(hookResult.reason || "").trim();
+          return {
+            action: "block",
+            ...(reason ? { reason } : {})
+          };
+        }
+        return {
+          action: "continue"
+        };
+      });
+    }
+  };
+}
+
+async function materializeInlinePluginSources(
+  source: Record<string, unknown>,
+  sessionId: string
+): Promise<Record<string, unknown>> {
+  const manifest = toRecord(source.manifest);
+  const pluginId = String(manifest.id || "").trim();
+  if (!pluginId) return source;
+
+  const indexJs = String(source.indexJs || "").trim();
+  const uiJs = String(source.uiJs || "").trim();
+  if (!indexJs && !uiJs) return source;
+
+  const paths = buildPluginVirtualSourcePaths(pluginId);
+  const modulePath =
+    String(source.modulePath || source.moduleUrl || source.module || "").trim()
+    || paths.indexPath;
+
+  const next: Record<string, unknown> = {
+    ...source,
+    modulePath,
+    moduleSessionId: sessionId
+  };
+
+  if (indexJs) {
+    await writeVirtualTextFile(modulePath, indexJs, sessionId);
+  }
+
+  if (uiJs) {
+    const uiModulePath =
+      String(source.uiModulePath || source.uiModuleUrl || source.uiModule || "").trim()
+      || paths.uiPath;
+    await writeVirtualTextFile(uiModulePath, uiJs, sessionId);
+    next.uiModulePath = uiModulePath;
+    next.uiModuleSessionId = sessionId;
+  }
+
+  await writeVirtualTextFile(paths.packagePath, JSON.stringify(next, null, 2), sessionId);
+  return next;
 }
 
 function normalizeHeadersRecord(input: unknown, field: string): Record<string, string> {
@@ -442,6 +790,10 @@ function resolveUiExtensionDescriptorFromSource(
     || String(source.uiModule || "").trim().length > 0;
   if (!hasModule) return null;
   const moduleUrl = resolvePluginModuleUrl(moduleInput);
+  if (isVirtualUri(moduleUrl)) {
+    // mem:// ui module 需要走 sandbox bridge，当前 UI runtime 还未接入该执行路径。
+    return null;
+  }
   const exportName = String(source.uiExportName || "default").trim() || "default";
   return {
     pluginId,
@@ -2352,6 +2704,9 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
     const setupRaw = source.setup;
     const moduleInput = source.moduleUrl ?? source.modulePath ?? source.module;
     const exportName = String(source.exportName || "default").trim() || "default";
+    const moduleSessionId =
+      String(source.moduleSessionId || source.sessionId || "").trim()
+      || PLUGIN_SANDBOX_DEFAULT_SESSION_ID;
     const moduleSource = String(source.moduleSource || "").trim();
     if (moduleSource) {
       return fail("moduleSource 暂不支持（CSP 禁止 unsafe-eval），请使用 moduleUrl/modulePath");
@@ -2362,8 +2717,20 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
     if (typeof setupRaw === "function") {
       setup = setupRaw as ExtensionFactory;
     } else {
+      const rawModulePath = String(moduleInput || "").trim();
       moduleUrl = resolvePluginModuleUrl(moduleInput);
-      setup = await loadExtensionFactoryFromModule(moduleUrl, exportName);
+      if (isVirtualUri(rawModulePath) || isVirtualUri(moduleUrl)) {
+        const virtualModulePath = isVirtualUri(rawModulePath) ? rawModulePath : moduleUrl;
+        setup = await loadExtensionFactoryFromVirtualModule({
+          manifest,
+          modulePath: virtualModulePath,
+          exportName,
+          sessionId: moduleSessionId
+        });
+        moduleUrl = virtualModulePath;
+      } else {
+        setup = await loadExtensionFactoryFromModule(moduleUrl, exportName);
+      }
     }
 
     const options = resolvePluginRegisterOptions(source, payload);
@@ -2436,6 +2803,7 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
     try {
       pluginSource = readPluginInstallSource(packageSource);
       validatePluginInstallSource(pluginSource);
+      pluginSource = await materializeInlinePluginSources(pluginSource, sessionId);
     } catch (error) {
       return fail(error);
     }

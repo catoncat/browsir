@@ -47,6 +47,7 @@ const SELECTED_STORAGE_KEY = "bbl.plugin_studio.selected.v1";
 const MAX_LOG_ITEMS = 240;
 const BUILTIN_PLUGIN_ID_PREFIX = "runtime.builtin.plugin.";
 const EXAMPLE_PLUGIN_ID_PREFIX = "plugin.example.";
+const PLUGIN_STUDIO_SESSION_ID = "plugin-studio";
 
 const loading = ref(false);
 const busy = ref(false);
@@ -528,14 +529,28 @@ function extractManifestId(pluginJson: Record<string, unknown>): string {
   return String(manifest.id || "").trim();
 }
 
+function toSafePluginPathSegment(input: string): string {
+  const text = String(input || "").trim().replace(/[^a-zA-Z0-9._-]/g, "_");
+  return text || "plugin";
+}
+
 function buildInstallPackage(): Record<string, unknown> {
   const pluginJson = parsePluginJson();
   const manifestId = extractManifestId(pluginJson);
   if (!manifestId) {
     throw new Error("plugin.json 缺少 manifest.id");
   }
+  const segment = toSafePluginPathSegment(manifestId);
+  const modulePath = `mem://plugins/${segment}/index.js`;
+  const uiModulePath = `mem://plugins/${segment}/ui.js`;
   return {
-    ...pluginJson
+    ...pluginJson,
+    modulePath,
+    moduleSessionId: PLUGIN_STUDIO_SESSION_ID,
+    uiModulePath,
+    uiModuleSessionId: PLUGIN_STUDIO_SESSION_ID,
+    indexJs: String(indexJsCode.value || ""),
+    uiJs: String(uiJsCode.value || "")
   };
 }
 
@@ -673,7 +688,7 @@ async function handleInstall(replace: boolean): Promise<void> {
     const result = await store.installPlugin(
       {
         package: payload,
-        sessionId: String(store.activeSessionId || "").trim() || undefined
+        sessionId: PLUGIN_STUDIO_SESSION_ID
       },
       {
         replace,
@@ -723,7 +738,7 @@ async function handleTogglePlugin(enable: boolean): Promise<void> {
         await store.installPlugin(
           {
             package: fromEditor.payload,
-            sessionId: String(store.activeSessionId || "").trim() || undefined
+            sessionId: PLUGIN_STUDIO_SESSION_ID
           },
           {
             replace: true,
