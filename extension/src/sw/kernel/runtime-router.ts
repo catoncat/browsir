@@ -287,6 +287,29 @@ async function readVirtualJsonObject(path: string, field: string, sessionId = "d
   return parseJsonObjectText(content, field);
 }
 
+async function readVirtualTextFile(path: string, field: string, sessionId = "default"): Promise<string> {
+  const resolvedPath = String(path || "").trim();
+  if (!resolvedPath) throw new Error(`${field} 不能为空`);
+  if (!isVirtualUri(resolvedPath)) {
+    throw new Error(`${field} 仅支持 mem://`);
+  }
+  const result = await invokeVirtualFrame({
+    tool: "read",
+    args: {
+      path: resolvedPath,
+      offset: 0,
+      limit: MAX_PLUGIN_PACKAGE_READ_BYTES,
+      runtime: "sandbox"
+    },
+    sessionId: String(sessionId || "").trim() || "default"
+  });
+  const payload = toRecord(result);
+  if (payload.truncated === true) {
+    throw new Error(`${field} 超过读取上限 ${MAX_PLUGIN_PACKAGE_READ_BYTES} bytes`);
+  }
+  return String(payload.content || "");
+}
+
 async function writeVirtualTextFile(path: string, content: string, sessionId = "default"): Promise<Record<string, unknown>> {
   const resolvedPath = String(path || "").trim();
   if (!resolvedPath) throw new Error("write path 不能为空");
@@ -382,7 +405,248 @@ function parsePluginSandboxResult(output: unknown): Record<string, unknown> {
   );
 }
 
-async function invokePluginSandboxRunner(input: {
+function isPluginSandboxCspEvalError(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error);
+  const lowered = text.toLowerCase();
+  return lowered.includes("unsafe-eval") || lowered.includes("evaluating a string as javascript violates");
+}
+
+function encodeBase64Utf8(text: string): string {
+  const bytes = new TextEncoder().encode(String(text || ""));
+  let binary = "";
+  const CHUNK_SIZE = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+    const chunk = bytes.subarray(i, i + CHUNK_SIZE);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function quoteForShellSingle(value: string): string {
+  return `'${String(value || "").replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function buildHostPluginSandboxCommand(input: {
+  moduleSource: string;
+  exportName: string;
+  op: "describe" | "runHook";
+  hook?: string;
+  payload?: unknown;
+}): string {
+  const sourceBase64 = encodeBase64Utf8(input.moduleSource);
+  const runnerInputBase64 = encodeBase64Utf8(
+    JSON.stringify({
+      op: input.op,
+      exportName: input.exportName,
+      ...(input.op === "runHook"
+        ? {
+            hook: String(input.hook || "").trim(),
+            payload: input.payload
+          }
+        : {})
+    })
+  );
+  return `BBL_PLUGIN_SOURCE_BASE64=${quoteForShellSingle(sourceBase64)} BBL_PLUGIN_INPUT_BASE64=${quoteForShellSingle(runnerInputBase64)} node <<'NODE'
+const RESULT_PREFIX = "__BBL_PLUGIN_RESULT__";
+
+function toRecord(value) {
+  return value && typeof value === "object" ? value : {};
+}
+
+function emit(payload) {
+  process.stdout.write(RESULT_PREFIX + JSON.stringify(payload) + "\\n");
+}
+
+function installChromeBridge(state) {
+  const baseChrome = globalThis.chrome && typeof globalThis.chrome === "object" ? globalThis.chrome : {};
+  const baseRuntime = baseChrome.runtime && typeof baseChrome.runtime === "object" ? baseChrome.runtime : {};
+  globalThis.chrome = {
+    ...baseChrome,
+    runtime: {
+      ...baseRuntime,
+      sendMessage(message) {
+        state.runtimeMessages.push(message);
+        return Promise.resolve({ ok: true });
+      }
+    }
+  };
+}
+
+function createApi(registry) {
+  return {
+    on(hook, handler, options = {}) {
+      const name = String(hook || "").trim();
+      if (!name || typeof handler !== "function") return;
+      if (!Array.isArray(registry.hooks[name])) registry.hooks[name] = [];
+      registry.hooks[name].push({ handler, options: toRecord(options) });
+    },
+    registerTool() {},
+    registerModeProvider() {},
+    registerCapabilityProvider() {},
+    registerCapabilityPolicy() {},
+    registerProvider() {}
+  };
+}
+
+async function runHook(handlers, payload) {
+  let hasPatch = false;
+  const mergedPatch = {};
+  let current = payload;
+  for (const item of handlers) {
+    const result = await Promise.resolve(item.handler(current));
+    const row = toRecord(result);
+    const action = String(row.action || "").trim();
+    if (action === "block") {
+      return { action: "block", reason: String(row.reason || "").trim() || undefined };
+    }
+    if (action === "patch") {
+      const patch = toRecord(row.patch);
+      Object.assign(mergedPatch, patch);
+      hasPatch = true;
+      if (current && typeof current === "object" && !Array.isArray(current)) {
+        current = { ...current, ...patch };
+      }
+    }
+  }
+  if (hasPatch) {
+    return { action: "patch", patch: mergedPatch };
+  }
+  return { action: "continue" };
+}
+
+async function loadFactoryFromSource(sourceText, exportName) {
+  const sourceBase64 = Buffer.from(String(sourceText || ""), "utf8").toString("base64");
+  const esmUrl = "data:text/javascript;base64," + sourceBase64;
+  try {
+    const moduleNs = await import(esmUrl);
+    const target = String(exportName || "default").trim() || "default";
+    const setup = target === "default" ? (moduleNs?.default ?? moduleNs) : moduleNs?.[target];
+    if (typeof setup !== "function") {
+      throw new Error("plugin module missing export: " + target);
+    }
+    return setup;
+  } catch (esmError) {
+    const cjsWrapped = [
+      "const module = { exports: {} };",
+      "const exports = module.exports;",
+      "const require = (_id) => { throw new Error('require is not supported in plugin sandbox cjs fallback'); };",
+      String(sourceText || ""),
+      "export default module.exports;"
+    ].join("\\n");
+    const cjsBase64 = Buffer.from(cjsWrapped, "utf8").toString("base64");
+    const cjsUrl = "data:text/javascript;base64," + cjsBase64;
+    const moduleNs = await import(cjsUrl);
+    const target = String(exportName || "default").trim() || "default";
+    const setup = target === "default" ? (moduleNs?.default ?? moduleNs) : moduleNs?.[target];
+    if (typeof setup !== "function") {
+      throw esmError;
+    }
+    return setup;
+  }
+}
+
+(async () => {
+  try {
+    const sourceBase64 = String(process.env.BBL_PLUGIN_SOURCE_BASE64 || "").trim();
+    const inputBase64 = String(process.env.BBL_PLUGIN_INPUT_BASE64 || "").trim();
+    if (!sourceBase64 || !inputBase64) {
+      throw new Error("runner env missing: BBL_PLUGIN_SOURCE_BASE64 / BBL_PLUGIN_INPUT_BASE64");
+    }
+    const sourceText = Buffer.from(sourceBase64, "base64").toString("utf8");
+    const input = JSON.parse(Buffer.from(inputBase64, "base64").toString("utf8"));
+    const state = { runtimeMessages: [] };
+    installChromeBridge(state);
+    const registry = { hooks: {} };
+    const setup = await loadFactoryFromSource(sourceText, String(input.exportName || "default"));
+    await Promise.resolve(setup(createApi(registry)));
+    const op = String(input.op || "describe").trim() || "describe";
+    if (op === "describe") {
+      emit({ ok: true, hooks: Object.keys(registry.hooks) });
+      return;
+    }
+    if (op === "runHook") {
+      const hook = String(input.hook || "").trim();
+      const handlers = Array.isArray(registry.hooks[hook]) ? registry.hooks[hook] : [];
+      const hookResult = await runHook(handlers, input.payload);
+      emit({
+        ok: true,
+        hookResult,
+        runtimeMessages: state.runtimeMessages
+      });
+      return;
+    }
+    throw new Error("unsupported op: " + op);
+  } catch (error) {
+    emit({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    process.exitCode = 1;
+  }
+})();
+NODE`;
+}
+
+function extractBridgeInvokeBashResult(result: unknown): Record<string, unknown> {
+  const root = toRecord(result);
+  const candidates = [
+    root,
+    toRecord(root.data),
+    toRecord(toRecord(root.data).data),
+    toRecord(root.result)
+  ];
+  for (const item of candidates) {
+    if ("stdout" in item || "stderr" in item || "exitCode" in item) {
+      return item;
+    }
+  }
+  return root;
+}
+
+async function invokePluginSandboxRunnerViaBridge(input: {
+  sessionId: string;
+  modulePath: string;
+  exportName: string;
+  op: "describe" | "runHook";
+  hook?: string;
+  payload?: unknown;
+  infra: RuntimeInfraHandler;
+}): Promise<Record<string, unknown>> {
+  const sessionId = String(input.sessionId || "").trim() || PLUGIN_SANDBOX_DEFAULT_SESSION_ID;
+  const moduleSource = await readVirtualTextFile(input.modulePath, "plugin sandbox modulePath", sessionId);
+  const command = buildHostPluginSandboxCommand({
+    moduleSource,
+    exportName: input.exportName,
+    op: input.op,
+    hook: input.hook,
+    payload: input.payload
+  });
+  const bridgeResponse = await input.infra.handleMessage({
+    type: "bridge.invoke",
+    payload: {
+      tool: "bash",
+      args: {
+        cmdId: "bash.exec",
+        args: [command],
+        cwd: ".",
+        timeoutMs: 120_000
+      },
+      sessionId
+    }
+  });
+  if (!bridgeResponse || bridgeResponse.ok !== true) {
+    const errorText = bridgeResponse ? String(bridgeResponse.error || "bridge.invoke failed") : "bridge.invoke unavailable";
+    throw new Error(`plugin sandbox bridge 回退失败: ${errorText}`);
+  }
+  const row = extractBridgeInvokeBashResult(bridgeResponse.data);
+  const parsed = parsePluginSandboxResult(row);
+  if (parsed.ok !== true) {
+    throw new Error(String(parsed.error || "plugin sandbox 执行失败"));
+  }
+  return parsed;
+}
+
+async function invokePluginSandboxRunnerInBrowser(input: {
   sessionId: string;
   modulePath: string;
   exportName: string;
@@ -423,17 +687,52 @@ async function invokePluginSandboxRunner(input: {
   return parsed;
 }
 
+async function invokePluginSandboxRunner(input: {
+  sessionId: string;
+  modulePath: string;
+  exportName: string;
+  op: "describe" | "runHook";
+  hook?: string;
+  payload?: unknown;
+  infra?: RuntimeInfraHandler;
+}): Promise<Record<string, unknown>> {
+  try {
+    return await invokePluginSandboxRunnerInBrowser(input);
+  } catch (error) {
+    if (!isPluginSandboxCspEvalError(error)) {
+      throw error;
+    }
+    if (!input.infra || !isVirtualUri(input.modulePath)) {
+      throw error;
+    }
+    try {
+      return await invokePluginSandboxRunnerViaBridge({
+        ...input,
+        infra: input.infra
+      });
+    } catch (bridgeError) {
+      const browserErrorText = error instanceof Error ? error.message : String(error);
+      const bridgeErrorText = bridgeError instanceof Error ? bridgeError.message : String(bridgeError);
+      throw new Error(
+        `plugin sandbox 浏览器执行被 CSP 拦截，bridge 回退也失败；browser=${browserErrorText}; bridge=${bridgeErrorText}`
+      );
+    }
+  }
+}
+
 async function loadExtensionFactoryFromVirtualModule(input: {
   manifest: AgentPluginManifest;
   modulePath: string;
   exportName: string;
   sessionId: string;
+  infra?: RuntimeInfraHandler;
 }): Promise<ExtensionFactory> {
   const describe = await invokePluginSandboxRunner({
     sessionId: input.sessionId,
     modulePath: input.modulePath,
     exportName: input.exportName,
-    op: "describe"
+    op: "describe",
+    infra: input.infra
   });
   const discoveredHooks = toStringList(describe.hooks) || [];
   const declaredHooks = toStringList(toRecord(input.manifest.permissions).hooks) || [];
@@ -451,7 +750,8 @@ async function loadExtensionFactoryFromVirtualModule(input: {
             exportName: input.exportName,
             op: "runHook",
             hook: hookName,
-            payload: eventPayload
+            payload: eventPayload,
+            infra: input.infra
           });
 
           const runtimeMessages = Array.isArray(executed.runtimeMessages) ? executed.runtimeMessages : [];
@@ -2755,7 +3055,11 @@ async function handleBrainSkill(
   return fail(`unsupported brain.skill action: ${action}`);
 }
 
-async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unknown): Promise<RuntimeResult> {
+async function handleBrainPlugin(
+  orchestrator: BrainOrchestrator,
+  infra: RuntimeInfraHandler,
+  message: unknown
+): Promise<RuntimeResult> {
   const payload = toRecord(message);
   const action = String(payload.type || "");
 
@@ -2815,7 +3119,8 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
         exportName,
         op: "runHook",
         hook,
-        payload: payload.payload
+        payload: payload.payload,
+        infra
       });
     } catch (error) {
       emitPluginHookTrace({
@@ -2908,7 +3213,8 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
           manifest,
           modulePath: virtualModulePath,
           exportName,
-          sessionId: moduleSessionId
+          sessionId: moduleSessionId,
+          infra
         });
         moduleUrl = virtualModulePath;
       } else {
@@ -3003,7 +3309,8 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
               sessionId: String(pluginSource.moduleSessionId || sessionId || "").trim() || sessionId,
               modulePath: moduleUrl,
               exportName,
-              op: "describe"
+              op: "describe",
+              infra
             });
             checks.push(
               buildPluginValidationCheck("index.module", true, {
@@ -3040,7 +3347,8 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
               sessionId: String(uiDescriptor.sessionId || sessionId || "").trim() || sessionId,
               modulePath: uiDescriptor.moduleUrl,
               exportName: uiDescriptor.exportName,
-              op: "describe"
+              op: "describe",
+              infra
             });
             checks.push(
               buildPluginValidationCheck("ui.module", true, {
@@ -3116,7 +3424,7 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
     } as Record<string, unknown>;
     const hasExtensionEntry = hasPluginExtensionEntry(installPayload);
     if (hasExtensionEntry) {
-      const result = await handleBrainPlugin(orchestrator, {
+      const result = await handleBrainPlugin(orchestrator, infra, {
         ...installPayload,
         type: "brain.plugin.register_extension",
         ...(payload.replace === undefined ? {} : { replace: payload.replace }),
@@ -3129,7 +3437,7 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
       });
     }
 
-    const result = await handleBrainPlugin(orchestrator, {
+    const result = await handleBrainPlugin(orchestrator, infra, {
       ...installPayload,
       type: "brain.plugin.register",
       plugin: pluginSource,
@@ -3338,7 +3646,7 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
         }
 
         if (type.startsWith("brain.plugin.")) {
-          return await applyAfter(await handleBrainPlugin(orchestrator, routeMessage));
+          return await applyAfter(await handleBrainPlugin(orchestrator, infra, routeMessage));
         }
 
         if (type.startsWith("brain.debug.")) {
