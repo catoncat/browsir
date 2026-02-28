@@ -535,6 +535,46 @@ function buildInstallPackage(): Record<string, unknown> {
   };
 }
 
+function tryBuildInstallPackageForPlugin(pluginId: string): {
+  payload: Record<string, unknown>;
+  matched: boolean;
+  reason?: string;
+} {
+  const targetId = String(pluginId || "").trim();
+  if (!targetId) {
+    return {
+      payload: {},
+      matched: false,
+      reason: "pluginId 为空"
+    };
+  }
+  try {
+    const payload = buildInstallPackage();
+    const manifestId = extractManifestId(toRecord(payload));
+    if (!manifestId) {
+      return {
+        payload: {},
+        matched: false,
+        reason: "plugin.json 缺少 manifest.id"
+      };
+    }
+    if (manifestId !== targetId) {
+      return {
+        payload: {},
+        matched: false,
+        reason: `编辑区 manifest.id=${manifestId} 与目标插件 ${targetId} 不一致`
+      };
+    }
+    return { payload, matched: true };
+  } catch (error) {
+    return {
+      payload: {},
+      matched: false,
+      reason: error instanceof Error ? error.message : String(error || "构建插件包失败")
+    };
+  }
+}
+
 function buildCurrentProject(category: "example" | "user"): StudioProject {
   let pluginId = "";
   try {
@@ -656,8 +696,26 @@ async function handleTogglePlugin(enable: boolean): Promise<void> {
   statusMessage.value = "";
   try {
     if (enable) {
-      await store.enablePlugin(pluginId);
-      statusMessage.value = "插件已启用";
+      // “重启插件”语义：优先按编辑区代码 replace 热更新，再启用。
+      const fromEditor = tryBuildInstallPackageForPlugin(pluginId);
+      if (fromEditor.matched) {
+        await store.installPlugin(
+          {
+            package: fromEditor.payload,
+            sessionId: String(store.activeSessionId || "").trim() || undefined
+          },
+          {
+            replace: true,
+            enable: true
+          }
+        );
+        statusMessage.value = "插件已按当前代码重启";
+      } else {
+        await store.enablePlugin(pluginId);
+        statusMessage.value = fromEditor.reason
+          ? `插件已启用（未重载代码：${fromEditor.reason}）`
+          : "插件已启用";
+      }
     } else {
       await store.disablePlugin(pluginId);
       statusMessage.value = "插件已禁用";
