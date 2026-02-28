@@ -37,6 +37,7 @@ const props = defineProps<{
   isRunning?: boolean;
   isCompacting?: boolean;
   isStartingRun?: boolean;
+  placeholder?: string;
   modelValue: string;
   queueItems?: QueueItem[];
   queuePromotingIds?: string[];
@@ -899,7 +900,7 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
           ref="textarea"
           v-model="text"
           class="composer-textarea w-full p-4 pb-2 bg-transparent border-none resize-none text-[15px] leading-relaxed placeholder:text-ui-text-muted/60 font-sans text-ui-text focus:outline-none min-h-[60px]"
-          placeholder="/技能 @标签"
+          :placeholder="props.placeholder || '/技能 @标签'"
           :disabled="disabled"
           aria-label="消息输入框"
           @keydown="handleKeydown"
@@ -950,42 +951,42 @@ textarea::-webkit-scrollbar {
   display: none;
 }
 .composer-shell {
-  border: 1px solid color-mix(in oklab, var(--border) 92%, transparent);
-  border-radius: 1rem;
-  background: linear-gradient(
-    180deg,
-    color-mix(in oklab, var(--surface) 92%, var(--bg) 8%) 0%,
-    color-mix(in oklab, var(--surface) 96%, var(--bg) 4%) 100%
-  );
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72), 0 10px 24px rgba(15, 23, 42, 0.06);
+  border: 1px solid color-mix(in oklab, var(--border) 88%, transparent);
+  border-radius: 1.45rem;
+  background: color-mix(in oklab, var(--surface) 90%, var(--bg) 10%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.64), 0 1px 3px rgba(15, 23, 42, 0.07);
   transition: border-color 0.18s ease, box-shadow 0.18s ease;
 }
 .composer-shell:focus-within {
-  border-color: color-mix(in oklab, var(--accent) 48%, var(--border) 52%);
+  border-color: color-mix(in oklab, var(--accent) 44%, var(--border) 56%);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.75),
-    0 0 0 3px color-mix(in oklab, var(--accent) 20%, transparent),
-    0 12px 30px rgba(15, 23, 42, 0.1);
+    inset 0 1px 0 rgba(255, 255, 255, 0.68),
+    0 0 0 2px color-mix(in oklab, var(--accent) 18%, transparent),
+    0 2px 8px rgba(15, 23, 42, 0.08);
 }
 .composer-textarea {
-  transition: box-shadow 0.18s ease;
-}
-.composer-textarea:focus-visible {
-  box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--accent) 34%, transparent);
-  border-radius: 0.75rem;
+  transition: color 0.18s ease;
 }
 .composer-action-btn {
-  width: 2.25rem;
-  height: 2.25rem;
+  width: 2.5rem;
+  height: 2.5rem;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 0.75rem;
-  border: 1px solid transparent;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklab, var(--border) 86%, transparent);
+  background: color-mix(in oklab, var(--surface) 92%, var(--bg) 8%);
+  color: color-mix(in oklab, var(--text-muted) 82%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.62), 0 1px 2px rgba(15, 23, 42, 0.08);
   transition: transform 0.14s ease, background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, color 0.18s ease;
 }
 .composer-action-btn:active {
   transform: translateY(1px) scale(0.98);
+}
+.composer-action-btn:focus-visible {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.68),
+    0 0 0 2px color-mix(in oklab, var(--accent) 28%, transparent);
 }
 .composer-send-btn {
   color: #fff;
@@ -993,21 +994,21 @@ textarea::-webkit-scrollbar {
 .composer-send-btn-ready {
   background: linear-gradient(
     180deg,
-    color-mix(in oklab, var(--accent) 82%, #fff 18%) 0%,
-    color-mix(in oklab, var(--accent) 96%, #0f172a 4%) 100%
+    color-mix(in oklab, var(--accent) 90%, #fff 10%) 0%,
+    color-mix(in oklab, var(--accent) 100%, #0f172a 0%) 100%
   );
-  border-color: color-mix(in oklab, var(--accent) 55%, #0f172a 45%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.26), 0 8px 18px color-mix(in oklab, var(--accent) 32%, transparent);
+  border-color: color-mix(in oklab, var(--accent) 72%, #0f172a 28%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 4px 12px color-mix(in oklab, var(--accent) 32%, transparent);
 }
 .composer-send-btn-ready:hover {
   transform: translateY(-1px);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 10px 22px color-mix(in oklab, var(--accent) 42%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24), 0 6px 14px color-mix(in oklab, var(--accent) 38%, transparent);
 }
 .composer-send-btn-disabled {
-  background: color-mix(in oklab, var(--surface) 93%, var(--bg) 7%);
-  color: color-mix(in oklab, var(--text-muted) 70%, transparent);
-  border-color: color-mix(in oklab, var(--border) 94%, transparent);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  background: color-mix(in oklab, var(--surface) 95%, var(--bg) 5%);
+  color: color-mix(in oklab, var(--text-muted) 68%, transparent);
+  border-color: color-mix(in oklab, var(--border) 90%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.58);
 }
 .composer-send-btn:disabled {
   cursor: not-allowed;
@@ -1016,25 +1017,15 @@ textarea::-webkit-scrollbar {
 .composer-send-btn:disabled:hover {
   transform: none;
 }
-.composer-send-btn:focus-visible {
-  box-shadow:
-    0 0 0 3px color-mix(in oklab, var(--accent) 30%, transparent),
-    inset 0 1px 0 rgba(255, 255, 255, 0.32);
-}
 .composer-stop-btn {
   color: #fff;
-  background: linear-gradient(180deg, #ee7d6f 0%, #d95a4e 100%);
-  border-color: color-mix(in oklab, #b03a2f 58%, transparent);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 7px 16px rgba(217, 90, 78, 0.25);
+  background: color-mix(in oklab, var(--text) 86%, var(--surface) 14%);
+  border-color: color-mix(in oklab, var(--text) 55%, var(--border) 45%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 3px 10px rgba(15, 23, 42, 0.18);
 }
 .composer-stop-btn:hover {
   transform: translateY(-1px);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 9px 20px rgba(217, 90, 78, 0.34);
-}
-.composer-stop-btn:focus-visible {
-  box-shadow:
-    0 0 0 3px rgba(217, 90, 78, 0.28),
-    inset 0 1px 0 rgba(255, 255, 255, 0.24);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 4px 12px rgba(15, 23, 42, 0.24);
 }
 .custom-scrollbar::-webkit-scrollbar {
   width: 2px;

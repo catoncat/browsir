@@ -1,0 +1,23 @@
+{
+  "manifest": {
+    "id": "plugin.example.notice.send-success-global-message",
+    "name": "example-send-success-global-message",
+    "version": "1.0.0",
+    "permissions": {
+      "hooks": [
+        "runtime.route.after"
+      ],
+      "runtimeMessages": [
+        "bbloop.global.message",
+        "brain.event"
+      ],
+      "brainEvents": [
+        "plugin.global_message"
+      ]
+    }
+  },
+  "modulePath": "plugins/example-send-success-global-message/index.js",
+  "exportName": "default",
+  "uiModulePath": "plugins/example-send-success-global-message/ui.js",
+  "uiExportName": "default"
+}

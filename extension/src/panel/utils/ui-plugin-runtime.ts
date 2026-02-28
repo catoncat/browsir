@@ -50,13 +50,73 @@ export interface UiToolRenderPayload {
   content: string;
 }
 
+export interface UiSessionListRenderItem {
+  id: string;
+  title: string;
+  updatedAt?: string;
+  parentSessionId?: string;
+  forkedFromSessionId?: string;
+}
+
+export interface UiSessionListRenderPayload {
+  sessions: UiSessionListRenderItem[];
+  activeId: string;
+  isOpen: boolean;
+  loading?: boolean;
+}
+
+export interface UiHeaderRenderPayload {
+  sessionId?: string;
+  title: string;
+  isRunning: boolean;
+  isCompacting: boolean;
+  forkedFromSessionId?: string;
+}
+
+export interface UiMessageListRenderPayload {
+  sessionId?: string;
+  isRunning: boolean;
+  messages: UiMessageRenderPayload[];
+}
+
+export interface UiQueueRenderItem {
+  id: string;
+  behavior: "steer" | "followUp";
+  text: string;
+}
+
+export interface UiQueueRenderPayload {
+  sessionId?: string;
+  items: UiQueueRenderItem[];
+  state: {
+    steer: number;
+    followUp: number;
+    total: number;
+  };
+}
+
+export interface UiChatInputRenderPayload {
+  sessionId?: string;
+  text: string;
+  placeholder: string;
+  disabled: boolean;
+  isRunning: boolean;
+  isCompacting: boolean;
+  isStartingRun: boolean;
+}
+
 export interface UiHookPayloadMap {
   "ui.notice.before_show": UiNoticePayload;
   "ui.runtime.event": UiRuntimeEventPayload;
   "ui.session.changed": UiSessionChangedPayload;
+  "ui.session.list.before_render": UiSessionListRenderPayload;
+  "ui.header.before_render": UiHeaderRenderPayload;
   "ui.chat_input.before_send": UiChatInputPayload;
   "ui.chat_input.after_send": UiChatInputPayload;
+  "ui.chat_input.before_render": UiChatInputRenderPayload;
+  "ui.queue.before_render": UiQueueRenderPayload;
   "ui.message.before_render": UiMessageRenderPayload;
+  "ui.message.list.before_render": UiMessageListRenderPayload;
   "ui.tool.call.before_render": UiToolRenderPayload;
   "ui.tool.result.before_render": UiToolRenderPayload;
 }

@@ -67,6 +67,7 @@ const uiJsCode = ref("");
 const runtimeLogs = ref<RuntimeLogItem[]>([]);
 const brainLogs = ref<RuntimeLogItem[]>([]);
 const triggerLogs = ref<RuntimeLogItem[]>([]);
+const hookTraceLogs = ref<RuntimeLogItem[]>([]);
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -433,10 +434,13 @@ async function loadExampleProjects(): Promise<StudioProject[]> {
     }
   };
   try {
-    const [pluginJson, indexJs, uiJs] = await Promise.all([
-      readExtensionFile("plugins/send-success-global-message/plugin.json"),
-      readExtensionFile("plugins/send-success-global-message/index.js"),
-      readExtensionFile("plugins/send-success-global-message/ui.js")
+    const [sendPluginJson, sendIndexJs, sendUiJs, mascotPluginJson, mascotIndexJs, mascotUiJs] = await Promise.all([
+      readExtensionFile("plugins/example-send-success-global-message/plugin.json"),
+      readExtensionFile("plugins/example-send-success-global-message/index.js"),
+      readExtensionFile("plugins/example-send-success-global-message/ui.js"),
+      readExtensionFile("plugins/example-mission-hud-dog/plugin.json"),
+      readExtensionFile("plugins/example-mission-hud-dog/index.js"),
+      readExtensionFile("plugins/example-mission-hud-dog/ui.js")
     ]);
     return [
       {
@@ -446,13 +450,9 @@ async function loadExampleProjects(): Promise<StudioProject[]> {
         pluginId: "plugin.example.notice.send-success-global-message",
         updatedAt: nowIso(),
         files: {
-          pluginJson: rewriteExampleManifest(
-            pluginJson,
-            "plugin.example.notice.send-success-global-message",
-            "example-send-success-global-message"
-          ),
-          indexJs,
-          uiJs
+          pluginJson: sendPluginJson,
+          indexJs: sendIndexJs,
+          uiJs: sendUiJs
         }
       },
       {
@@ -462,9 +462,9 @@ async function loadExampleProjects(): Promise<StudioProject[]> {
         pluginId: "plugin.example.ui.mission-hud.dog",
         updatedAt: nowIso(),
         files: {
-          pluginJson: missionHudDogPluginJson(),
-          indexJs: missionHudDogIndexJs(),
-          uiJs: missionHudDogUiJs()
+          pluginJson: mascotPluginJson,
+          indexJs: mascotIndexJs,
+          uiJs: mascotUiJs
         }
       },
       fallback
@@ -929,6 +929,7 @@ function clearLogs(): void {
   runtimeLogs.value = [];
   brainLogs.value = [];
   triggerLogs.value = [];
+  hookTraceLogs.value = [];
 }
 
 function isBuiltinPlugin(plugin: PluginMetadata): boolean {
@@ -997,6 +998,34 @@ function handleRuntimeMessage(message: unknown): void {
         text: summarize(event.payload)
       });
     }
+    return;
+  }
+
+  if (type === "bbloop.plugin.trace") {
+    const trace = toRecord(payload.payload);
+    const traceType = String(trace.traceType || "hook").trim();
+    const pluginId = String(trace.pluginId || "").trim() || "<plugin>";
+    const hook = String(trace.hook || "").trim() || "<hook>";
+    const durationMs = Number(trace.durationMs);
+    const durationText = Number.isFinite(durationMs) ? `${Math.max(0, Math.floor(durationMs))}ms` : "n/a";
+    const textParts = [
+      `type=${traceType}`,
+      `plugin=${pluginId}`,
+      `hook=${hook}`,
+      `duration=${durationText}`,
+      String(trace.error || "").trim() ? `error=${String(trace.error || "").trim()}` : "",
+      String(trace.responsePreview || "").trim() ? `resp=${String(trace.responsePreview || "").trim()}` : ""
+    ].filter(Boolean);
+    pushLog(hookTraceLogs.value, {
+      type,
+      title: `${traceType} · ${hook}`,
+      text: textParts.join(" · ")
+    });
+    pushLog(triggerLogs.value, {
+      type,
+      title: `${traceType} · ${pluginId}`,
+      text: textParts.join(" · ")
+    });
     return;
   }
 
@@ -1213,6 +1242,16 @@ onUnmounted(() => {
           <p class="panel-title">触发记录</p>
           <ul class="panel-list logs">
             <li v-for="item in triggerLogs" :key="item.id" class="panel-item log-item">
+              <p class="item-title">{{ item.title }}</p>
+              <p class="item-sub">{{ item.text }}</p>
+            </li>
+          </ul>
+        </section>
+
+        <section class="studio-panel log-panel">
+          <p class="panel-title">Hook 时间线</p>
+          <ul class="panel-list logs">
+            <li v-for="item in hookTraceLogs" :key="item.id" class="panel-item log-item">
               <p class="item-title">{{ item.title }}</p>
               <p class="item-sub">{{ item.text }}</p>
             </li>

@@ -8,8 +8,13 @@ import { collectDiagnostics } from "./utils/diagnostics";
 import {
   createPanelUiPluginRuntime,
   type UiChatInputPayload,
+  type UiChatInputRenderPayload,
   type UiExtensionDescriptor,
+  type UiHeaderRenderPayload,
+  type UiMessageListRenderPayload,
   type UiMessageRenderPayload,
+  type UiQueueRenderPayload,
+  type UiSessionListRenderPayload,
   type UiToolRenderPayload,
   type UiNoticePayload
 } from "./utils/ui-plugin-runtime";
@@ -110,6 +115,19 @@ const activeForkSourceTitle = computed(() => {
   if (resolved) return resolved;
   return "未命名会话";
 });
+
+interface SessionListRenderSessionItem {
+  id: string;
+  title?: string;
+  updatedAt?: string;
+  parentSessionId?: string;
+  forkedFrom?: {
+    sessionId?: string;
+    leafId?: string;
+    sourceEntryId?: string;
+    reason?: string;
+  } | null;
+}
 
 interface DisplayMessage extends PanelMessageLike {
   role: string;
@@ -276,6 +294,38 @@ const queuedPromotingIds = ref<Set<string>>(new Set());
 const panelUiRuntime = createPanelUiPluginRuntime({ defaultTimeoutMs: 150 });
 const uiRenderEpoch = ref(0);
 const stableMessages = ref<DisplayMessage[]>([]);
+const sessionListRenderState = ref<{
+  sessions: SessionListRenderSessionItem[];
+  activeId: string;
+}>({
+  sessions: [],
+  activeId: ""
+});
+const headerRenderState = ref<{
+  title: string;
+}>({
+  title: "新对话"
+});
+const queueRenderState = ref<{
+  items: QueuedPromptViewItem[];
+  state: {
+    steer: number;
+    followUp: number;
+    total: number;
+  };
+}>({
+  items: [],
+  state: {
+    steer: 0,
+    followUp: 0,
+    total: 0
+  }
+});
+const chatInputRenderState = ref<{
+  placeholder: string;
+}>({
+  placeholder: "/技能 @标签"
+});
 let forkSessionHighlightTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingStepLogFlushTimer: ReturnType<typeof setTimeout> | null = null;
 let toolPendingCardLeaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1512,6 +1562,38 @@ watch(
   { immediate: true }
 );
 
+watch(
+  [sessions, activeSessionId, listOpen, loading, uiRenderEpoch],
+  () => {
+    void rebuildSessionListRenderState();
+  },
+  { immediate: true, deep: true }
+);
+
+watch(
+  [activeSessionTitle, activeSessionId, isRunActive, isCompacting, activeForkSourceSessionId, uiRenderEpoch],
+  () => {
+    void rebuildHeaderRenderState();
+  },
+  { immediate: true }
+);
+
+watch(
+  [queuedPromptViewItems, runtimeQueueState, activeSessionId, uiRenderEpoch],
+  () => {
+    void rebuildQueueRenderState();
+  },
+  { immediate: true, deep: true }
+);
+
+watch(
+  [prompt, loading, creatingSession, isStopping, isRunActive, isCompacting, startRunPending, activeSessionId, uiRenderEpoch],
+  () => {
+    void rebuildChatInputRenderState();
+  },
+  { immediate: true }
+);
+
 const hasVisibleConversation = computed(() =>
   stableMessages.value.length > 0
   || shouldShowStreamingDraft.value
@@ -1928,6 +2010,181 @@ function normalizeUiChatInputPayload(input: unknown): UiChatInputPayload {
   };
 }
 
+function toUiSessionListRenderPayload(): UiSessionListRenderPayload {
+  const rows = Array.isArray(sessions.value) ? sessions.value : [];
+  return {
+    sessions: rows.map((session) => ({
+      id: String(session.id || "").trim(),
+      title: String(session.title || "").trim() || "新对话",
+      updatedAt: String(session.updatedAt || "").trim() || undefined,
+      parentSessionId: String(session.parentSessionId || "").trim() || undefined,
+      forkedFromSessionId: String(session.forkedFrom?.sessionId || "").trim() || undefined
+    })).filter((item) => item.id),
+    activeId: String(activeSessionId.value || "").trim(),
+    isOpen: listOpen.value,
+    loading: loading.value
+  };
+}
+
+function normalizeUiSessionListRenderPayload(input: unknown, fallback: UiSessionListRenderPayload): {
+  sessions: SessionListRenderSessionItem[];
+  activeId: string;
+} {
+  const row = toRecord(input);
+  const source = Array.isArray(row.sessions) ? row.sessions : fallback.sessions;
+  const sessionsOut: SessionListRenderSessionItem[] = [];
+  for (const item of source) {
+    const session = toRecord(item);
+    const id = String(session.id || "").trim();
+    if (!id) continue;
+    sessionsOut.push({
+      id,
+      title: String(session.title || "").trim() || "新对话",
+      updatedAt: String(session.updatedAt || "").trim() || undefined,
+      parentSessionId: String(session.parentSessionId || "").trim() || undefined,
+      forkedFrom: String(session.forkedFromSessionId || "").trim()
+        ? {
+            sessionId: String(session.forkedFromSessionId || "").trim()
+          }
+        : null
+    });
+  }
+  return {
+    sessions: sessionsOut,
+    activeId: String((row.activeId ?? fallback.activeId) || "").trim()
+  };
+}
+
+function toUiHeaderRenderPayload(): UiHeaderRenderPayload {
+  return {
+    sessionId: String(activeSessionId.value || "").trim() || undefined,
+    title: String(activeSessionTitle.value || "").trim() || "新对话",
+    isRunning: isRunActive.value,
+    isCompacting: isCompacting.value,
+    forkedFromSessionId: String(activeForkSourceSessionId.value || "").trim() || undefined
+  };
+}
+
+function normalizeUiHeaderRenderPayload(input: unknown, fallback: UiHeaderRenderPayload): {
+  title: string;
+} {
+  const row = toRecord(input);
+  const title = String((row.title ?? fallback.title) || "").trim() || "新对话";
+  return {
+    title
+  };
+}
+
+function toUiQueueRenderPayload(): UiQueueRenderPayload {
+  return {
+    sessionId: String(activeSessionId.value || "").trim() || undefined,
+    items: queuedPromptViewItems.value.map((item) => ({
+      id: String(item.id || "").trim(),
+      behavior: item.behavior === "steer" ? "steer" : "followUp",
+      text: String(item.text || "")
+    })).filter((item) => item.id && item.text.trim().length > 0),
+    state: {
+      steer: Number(runtimeQueueState.value.steer || 0),
+      followUp: Number(runtimeQueueState.value.followUp || 0),
+      total: Number(runtimeQueueState.value.total || 0)
+    }
+  };
+}
+
+function normalizeUiQueueRenderPayload(input: unknown, fallback: UiQueueRenderPayload): {
+  items: QueuedPromptViewItem[];
+  state: {
+    steer: number;
+    followUp: number;
+    total: number;
+  };
+} {
+  const row = toRecord(input);
+  const sourceItems = Array.isArray(row.items) ? row.items : fallback.items;
+  const items: QueuedPromptViewItem[] = [];
+  for (const item of sourceItems) {
+    const queueItem = toRecord(item);
+    const id = String(queueItem.id || "").trim();
+    const text = String(queueItem.text || "");
+    if (!id || !text.trim()) continue;
+    items.push({
+      id,
+      behavior: String(queueItem.behavior || "") === "steer" ? "steer" : "followUp",
+      text,
+      timestamp: nowIso()
+    });
+  }
+  const state = toRecord(row.state);
+  const steer = Number(state.steer);
+  const followUp = Number(state.followUp);
+  const total = Number(state.total);
+  return {
+    items,
+    state: {
+      steer: Number.isFinite(steer) ? Math.max(0, Math.floor(steer)) : fallback.state.steer,
+      followUp: Number.isFinite(followUp) ? Math.max(0, Math.floor(followUp)) : fallback.state.followUp,
+      total: Number.isFinite(total) ? Math.max(0, Math.floor(total)) : fallback.state.total
+    }
+  };
+}
+
+function toUiChatInputRenderPayload(): UiChatInputRenderPayload {
+  return {
+    sessionId: String(activeSessionId.value || "").trim() || undefined,
+    text: String(prompt.value || ""),
+    placeholder: String(chatInputRenderState.value.placeholder || "").trim() || "/技能 @标签",
+    disabled: Boolean(loading.value || creatingSession.value || isStopping.value),
+    isRunning: isRunActive.value,
+    isCompacting: isCompacting.value,
+    isStartingRun: Boolean(startRunPending.value && !isRunActive.value)
+  };
+}
+
+function normalizeUiChatInputRenderPayload(input: unknown, fallback: UiChatInputRenderPayload): {
+  placeholder: string;
+} {
+  const row = toRecord(input);
+  const placeholder = String((row.placeholder ?? fallback.placeholder) || "").trim() || "/技能 @标签";
+  return {
+    placeholder
+  };
+}
+
+function toUiMessageListRenderPayload(items: DisplayMessage[]): UiMessageListRenderPayload {
+  return {
+    sessionId: String(activeSessionId.value || "").trim() || undefined,
+    isRunning: isRunActive.value,
+    messages: items.map((item) => toUiMessageRenderPayload(item))
+  };
+}
+
+function normalizeUiMessageListRenderPayload(input: unknown, fallback: DisplayMessage[]): DisplayMessage[] {
+  const fallbackByEntryId = new Map<string, DisplayMessage>();
+  for (const item of fallback) {
+    const id = String(item.entryId || "").trim();
+    if (id) fallbackByEntryId.set(id, item);
+  }
+
+  const row = toRecord(input);
+  const source = Array.isArray(row.messages) ? row.messages : fallback.map((item) => toUiMessageRenderPayload(item));
+  const out: DisplayMessage[] = [];
+  for (const item of source) {
+    const raw = toRecord(item);
+    const entryId = String(raw.entryId || "").trim();
+    const fallbackItem = fallbackByEntryId.get(entryId) || {
+      role: String(raw.role || "assistant"),
+      content: "",
+      entryId: entryId || `ui-${Math.random().toString(36).slice(2, 8)}`,
+      toolName: "",
+      toolCallId: ""
+    };
+    const normalized = normalizeUiMessageRenderPayload(raw, fallbackItem);
+    if (!normalized) continue;
+    out.push(normalized);
+  }
+  return out;
+}
+
 function toUiMessageRenderPayload(input: DisplayMessage): UiMessageRenderPayload {
   return {
     role: String(input.role || "").trim(),
@@ -2029,8 +2286,67 @@ async function rebuildStableMessages() {
     if (!rendered) continue;
     next.push(rendered);
   }
+  const listHook = await panelUiRuntime.runHook(
+    "ui.message.list.before_render",
+    toUiMessageListRenderPayload(next)
+  );
+  if (listHook.blocked) {
+    if (token !== stableMessagesBuildToken) return;
+    stableMessages.value = [];
+    return;
+  }
+  const listPatched = normalizeUiMessageListRenderPayload(listHook.value, next);
   if (token !== stableMessagesBuildToken) return;
-  stableMessages.value = next;
+  stableMessages.value = listPatched;
+}
+
+async function rebuildSessionListRenderState() {
+  const fallback = toUiSessionListRenderPayload();
+  const hook = await panelUiRuntime.runHook("ui.session.list.before_render", fallback);
+  if (hook.blocked) {
+    sessionListRenderState.value = {
+      sessions: fallback.sessions.map((item) => ({
+        id: item.id,
+        title: item.title,
+        updatedAt: item.updatedAt,
+        parentSessionId: item.parentSessionId,
+        forkedFrom: item.forkedFromSessionId ? { sessionId: item.forkedFromSessionId } : null
+      })),
+      activeId: fallback.activeId
+    };
+    return;
+  }
+  sessionListRenderState.value = normalizeUiSessionListRenderPayload(hook.value, fallback);
+}
+
+async function rebuildHeaderRenderState() {
+  const fallback = toUiHeaderRenderPayload();
+  const hook = await panelUiRuntime.runHook("ui.header.before_render", fallback);
+  if (hook.blocked) {
+    headerRenderState.value = normalizeUiHeaderRenderPayload(fallback, fallback);
+    return;
+  }
+  headerRenderState.value = normalizeUiHeaderRenderPayload(hook.value, fallback);
+}
+
+async function rebuildQueueRenderState() {
+  const fallback = toUiQueueRenderPayload();
+  const hook = await panelUiRuntime.runHook("ui.queue.before_render", fallback);
+  if (hook.blocked) {
+    queueRenderState.value = normalizeUiQueueRenderPayload(fallback, fallback);
+    return;
+  }
+  queueRenderState.value = normalizeUiQueueRenderPayload(hook.value, fallback);
+}
+
+async function rebuildChatInputRenderState() {
+  const fallback = toUiChatInputRenderPayload();
+  const hook = await panelUiRuntime.runHook("ui.chat_input.before_render", fallback);
+  if (hook.blocked) {
+    chatInputRenderState.value = normalizeUiChatInputRenderPayload(fallback, fallback);
+    return;
+  }
+  chatInputRenderState.value = normalizeUiChatInputRenderPayload(hook.value, fallback);
 }
 
 function canEditUserMessage(message: PanelMessageLike) {
@@ -2469,8 +2785,8 @@ onUnmounted(() => {
     <SessionList
       v-if="listOpen"
       :is-open="listOpen"
-      :sessions="sessions"
-      :active-id="activeSessionId"
+      :sessions="sessionListRenderState.sessions"
+      :active-id="sessionListRenderState.activeId"
       :loading="loading"
       @close="listOpen = false"
       @new="handleCreateSession"
@@ -2533,7 +2849,7 @@ onUnmounted(() => {
           </div>
           <div class="flex-1 min-w-0 flex flex-col justify-center ml-1">
             <h1 v-if="!isRegeneratingTitle" class="min-w-0 text-[15px] font-bold text-ui-text truncate tracking-tight">
-              {{ activeSessionTitle }}
+              {{ headerRenderState.title }}
             </h1>
             <div v-else class="flex items-center gap-1.5 text-ui-accent">
               <span class="text-[13px] font-bold tracking-tight animate-pulse">正在重新生成标题</span>
@@ -2755,12 +3071,13 @@ onUnmounted(() => {
       <div class="shrink-0 w-full bg-ui-bg z-20">
         <ChatInput
           v-model="prompt"
+          :placeholder="chatInputRenderState.placeholder"
           :is-running="isRunning"
           :is-compacting="isCompacting"
           :is-starting-run="startRunPending && !isRunActive"
-          :queue-items="queuedPromptViewItems"
+          :queue-items="queueRenderState.items"
           :queue-promoting-ids="Array.from(queuedPromotingIds)"
-          :queue-state="runtimeQueueState"
+          :queue-state="queueRenderState.state"
           :disabled="loading || creatingSession || isStopping"
           @send="handleSend"
           @queue-promote="handlePromoteQueuedPromptToSteer($event.id)"

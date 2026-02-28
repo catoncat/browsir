@@ -337,6 +337,32 @@ function emitPluginRuntimeMessage(message: unknown): void {
   }
 }
 
+function previewJsonText(value: unknown, max = 600): string {
+  let text = "";
+  try {
+    text = JSON.stringify(value);
+  } catch {
+    text = String(value ?? "");
+  }
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (compact.length <= max) return compact;
+  return `${compact.slice(0, Math.max(80, max - 1))}…`;
+}
+
+function emitPluginHookTrace(payload: Record<string, unknown>): void {
+  try {
+    const maybePromise = chrome.runtime.sendMessage({
+      type: "bbloop.plugin.trace",
+      payload
+    });
+    if (maybePromise && typeof (maybePromise as Promise<unknown>).catch === "function") {
+      void (maybePromise as Promise<unknown>).catch(() => undefined);
+    }
+  } catch {
+    // ignore runtime dispatch failure from plugin trace
+  }
+}
+
 function parsePluginSandboxResult(output: unknown): Record<string, unknown> {
   const row = toRecord(output);
   const stdout = String(row.stdout || "");
@@ -417,38 +443,69 @@ async function loadExtensionFactoryFromVirtualModule(input: {
   return (api) => {
     for (const hookName of hooks) {
       api.on(hookName as never, async (eventPayload: unknown) => {
-        const executed = await invokePluginSandboxRunner({
-          sessionId: input.sessionId,
-          modulePath: input.modulePath,
-          exportName: input.exportName,
-          op: "runHook",
-          hook: hookName,
-          payload: eventPayload
-        });
+        const startedAt = Date.now();
+        try {
+          const executed = await invokePluginSandboxRunner({
+            sessionId: input.sessionId,
+            modulePath: input.modulePath,
+            exportName: input.exportName,
+            op: "runHook",
+            hook: hookName,
+            payload: eventPayload
+          });
 
-        const runtimeMessages = Array.isArray(executed.runtimeMessages) ? executed.runtimeMessages : [];
-        for (const message of runtimeMessages) {
-          emitPluginRuntimeMessage(message);
-        }
+          const runtimeMessages = Array.isArray(executed.runtimeMessages) ? executed.runtimeMessages : [];
+          for (const message of runtimeMessages) {
+            emitPluginRuntimeMessage(message);
+          }
 
-        const hookResult = toRecord(executed.hookResult);
-        const action = String(hookResult.action || "").trim();
-        if (action === "patch") {
+          const hookResult = toRecord(executed.hookResult);
+          emitPluginHookTrace({
+            traceType: "sw_hook",
+            pluginId: String(input.manifest.id || "").trim(),
+            hook: hookName,
+            modulePath: input.modulePath,
+            exportName: input.exportName,
+            sessionId: input.sessionId,
+            startedAt: new Date(startedAt).toISOString(),
+            durationMs: Math.max(0, Date.now() - startedAt),
+            requestPreview: previewJsonText(eventPayload),
+            responsePreview: previewJsonText(hookResult),
+            runtimeMessageCount: runtimeMessages.length
+          });
+
+          const action = String(hookResult.action || "").trim();
+          if (action === "patch") {
+            return {
+              action: "patch",
+              patch: toRecord(hookResult.patch)
+            };
+          }
+          if (action === "block") {
+            const reason = String(hookResult.reason || "").trim();
+            return {
+              action: "block",
+              ...(reason ? { reason } : {})
+            };
+          }
           return {
-            action: "patch",
-            patch: toRecord(hookResult.patch)
+            action: "continue"
           };
+        } catch (error) {
+          emitPluginHookTrace({
+            traceType: "sw_hook",
+            pluginId: String(input.manifest.id || "").trim(),
+            hook: hookName,
+            modulePath: input.modulePath,
+            exportName: input.exportName,
+            sessionId: input.sessionId,
+            startedAt: new Date(startedAt).toISOString(),
+            durationMs: Math.max(0, Date.now() - startedAt),
+            requestPreview: previewJsonText(eventPayload),
+            error: error instanceof Error ? error.message : String(error)
+          });
+          throw error;
         }
-        if (action === "block") {
-          const reason = String(hookResult.reason || "").trim();
-          return {
-            action: "block",
-            ...(reason ? { reason } : {})
-          };
-        }
-        return {
-          action: "continue"
-        };
       });
     }
   };
@@ -2749,19 +2806,50 @@ async function handleBrainPlugin(orchestrator: BrainOrchestrator, message: unkno
       String(payload.sessionId || descriptor.sessionId || "").trim()
       || PLUGIN_SANDBOX_DEFAULT_SESSION_ID;
     const exportName = String(payload.exportName || descriptor.exportName || "default").trim() || "default";
-    const executed = await invokePluginSandboxRunner({
-      sessionId,
-      modulePath: descriptor.moduleUrl,
-      exportName,
-      op: "runHook",
-      hook,
-      payload: payload.payload
-    });
+    const startedAt = Date.now();
+    let executed: Record<string, unknown>;
+    try {
+      executed = await invokePluginSandboxRunner({
+        sessionId,
+        modulePath: descriptor.moduleUrl,
+        exportName,
+        op: "runHook",
+        hook,
+        payload: payload.payload
+      });
+    } catch (error) {
+      emitPluginHookTrace({
+        traceType: "ui_hook",
+        pluginId,
+        hook,
+        modulePath: descriptor.moduleUrl,
+        exportName,
+        sessionId,
+        startedAt: new Date(startedAt).toISOString(),
+        durationMs: Math.max(0, Date.now() - startedAt),
+        requestPreview: previewJsonText(payload.payload),
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
     const runtimeMessages = Array.isArray(executed.runtimeMessages) ? executed.runtimeMessages : [];
     for (const message of runtimeMessages) {
       emitPluginRuntimeMessage(message);
     }
     const hookResult = toRecord(executed.hookResult);
+    emitPluginHookTrace({
+      traceType: "ui_hook",
+      pluginId,
+      hook,
+      modulePath: descriptor.moduleUrl,
+      exportName,
+      sessionId,
+      startedAt: new Date(startedAt).toISOString(),
+      durationMs: Math.max(0, Date.now() - startedAt),
+      requestPreview: previewJsonText(payload.payload),
+      responsePreview: previewJsonText(hookResult),
+      runtimeMessageCount: runtimeMessages.length
+    });
     const actionName = String(hookResult.action || "").trim();
     if (actionName === "patch") {
       return ok({

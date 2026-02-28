@@ -32,7 +32,12 @@ import {
   isVirtualUri,
   shouldRouteFrameToBrowserVfs
 } from "./virtual-fs.browser";
+import { registerExtension } from "./extension-api";
 import { nowIso, type SessionEntry, type SessionMeta, type StreamingBehavior } from "./types";
+import exampleSendSuccessPluginPackage from "../../../plugins/example-send-success-global-message/plugin.json";
+import exampleMissionHudDogPluginPackage from "../../../plugins/example-mission-hud-dog/plugin.json";
+import registerExampleSendSuccessPlugin from "../../../plugins/example-send-success-global-message/index.js";
+import registerExampleMissionHudDogPlugin from "../../../plugins/example-mission-hud-dog/index.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -3043,254 +3048,91 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
   };
 
-  const ensureBuiltinRoutePlugins = (): void => {
-    const builtinPluginId = "runtime.builtin.plugin.notice.send-success-global-message";
-    const pluginSource = "plugin.send-success-global-message";
-    const successMessage = "发送成功";
-    const mascotPluginId = "runtime.builtin.plugin.ui.mission-hud.dog";
-    const mascotSource = "plugin.ui.mission-hud";
-    let noticeSeq = 0;
-    let mascotSeq = 0;
+  const ensureDefaultExampleRoutePlugins = (): void => {
+    interface ExamplePluginPackage {
+      manifest?: Record<string, unknown>;
+      modulePath?: string;
+      moduleUrl?: string;
+      module?: string;
+      exportName?: string;
+    }
 
-    const hasPlugin = (pluginId = builtinPluginId): boolean =>
-      orchestrator.listPlugins().some((item) => String(item.id || "").trim() === pluginId);
-
-    const toStringList = (input: unknown): string[] => {
-      if (!Array.isArray(input)) return [];
-      const out: string[] = [];
-      for (const item of input) {
-        const text = String(item || "").trim();
-        if (!text) continue;
-        out.push(text);
-      }
-      return out;
+    const toPackage = (input: unknown): ExamplePluginPackage => {
+      return toRecord(input) as ExamplePluginPackage;
     };
 
-    const fireRuntimeMessage = (payload: Record<string, unknown>): void => {
-      try {
-        const maybePromise = chrome.runtime.sendMessage(payload);
-        if (maybePromise && typeof (maybePromise as Promise<unknown>).catch === "function") {
-          void (maybePromise as Promise<unknown>).catch(() => undefined);
-        }
-      } catch {
-        // ignore
+    const normalizeManifest = (input: unknown): {
+      id: string;
+      name: string;
+      version: string;
+      timeoutMs?: number;
+      permissions?: Record<string, unknown>;
+    } => {
+      const row = toRecord(input);
+      const id = String(row.id || "").trim();
+      if (!id) {
+        throw new Error("example plugin manifest.id 不能为空");
       }
+      const name = String(row.name || "").trim() || id;
+      const version = String(row.version || "").trim() || "1.0.0";
+      const timeoutRaw = Number(row.timeoutMs);
+      const timeoutMs = Number.isFinite(timeoutRaw) ? Math.max(50, Math.min(10_000, Math.floor(timeoutRaw))) : undefined;
+      const permissions = toRecord(row.permissions);
+      return {
+        id,
+        name,
+        version,
+        ...(timeoutMs ? { timeoutMs } : {}),
+        ...(Object.keys(permissions).length > 0 ? { permissions } : {})
+      };
     };
 
-    const emitMascot = (
-      phase: "thinking" | "tool" | "verify" | "done" | "error",
-      message: string,
-      options: {
-        sessionId?: string;
-        durationMs?: number;
-      } = {}
+    const resolveModuleUrl = (rawInput: unknown): string => {
+      const raw = String(rawInput || "").trim();
+      if (!raw) throw new Error("example plugin modulePath 不能为空");
+      if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(raw)) return raw;
+      if (raw.startsWith("//")) throw new Error(`example plugin modulePath 非法: ${raw}`);
+      const normalized = raw.startsWith("/") ? raw.slice(1) : raw;
+      const runtime = (globalThis as typeof globalThis & {
+        chrome?: {
+          runtime?: {
+            getURL?: (path: string) => string;
+          };
+        };
+      }).chrome?.runtime;
+      if (runtime?.getURL) {
+        return runtime.getURL(normalized);
+      }
+      return normalized;
+    };
+
+    const registerPackage = (
+      pkgInput: unknown,
+      setup: (api: Record<string, unknown>) => unknown
     ): void => {
-      mascotSeq += 1;
-      const sessionId = String(options.sessionId || "").trim();
-      fireRuntimeMessage({
-        type: "bbloop.ui.mascot",
-        payload: {
-          phase,
-          message,
-          source: mascotSource,
-          sessionId,
-          durationMs: options.durationMs,
-          dedupeKey: `${mascotSource}:${sessionId || "global"}:${Date.now()}:${mascotSeq}`,
-          ts: nowIso()
-        }
+      const pkg = toPackage(pkgInput);
+      const manifest = normalizeManifest(pkg.manifest);
+      const pluginId = String(manifest.id || "").trim();
+      if (!pluginId) return;
+      const existed = orchestrator.listPlugins().some((item) => String(item.id || "").trim() === pluginId);
+      if (existed) return;
+
+      const moduleInput = String(pkg.moduleUrl || pkg.modulePath || pkg.module || "").trim();
+      const moduleUrl = resolveModuleUrl(moduleInput);
+      const exportName = String(pkg.exportName || "default").trim() || "default";
+      registerExtension(orchestrator, manifest, setup as never, {
+        replace: false,
+        enable: true
+      });
+      orchestrator.events.emit("plugin.example.bootstrap", "global", {
+        pluginId,
+        moduleUrl,
+        exportName
       });
     };
 
-    if (!hasPlugin()) {
-      orchestrator.registerPlugin(
-        {
-          manifest: {
-            id: builtinPluginId,
-            name: "builtin-send-success-global-message",
-            version: "1.0.0",
-            permissions: {
-              hooks: ["runtime.route.after"]
-            }
-          },
-          hooks: {
-            "runtime.route.after": (event) => {
-              const routeType = String(event?.type || "").trim();
-              if (routeType !== "brain.run.start") return { action: "continue" };
-
-              const routeResult = toRecord(event?.result);
-              if (routeResult.ok !== true) return { action: "continue" };
-
-              const routeMessage = toRecord(event?.message);
-              const prompt = String(routeMessage.prompt || "").trim();
-              const skillIds = toStringList(routeMessage.skillIds);
-              if (!prompt && skillIds.length === 0) return { action: "continue" };
-
-              const data = toRecord(routeResult.data);
-              const sessionId = String(data.sessionId || routeMessage.sessionId || "").trim();
-              noticeSeq += 1;
-              const dedupeKey = `${pluginSource}:${sessionId || "global"}:${Date.now()}:${noticeSeq}`;
-
-              fireRuntimeMessage({
-                type: "bbloop.global.message",
-                payload: {
-                  kind: "success",
-                  message: successMessage,
-                  source: pluginSource,
-                  sessionId,
-                  dedupeKey,
-                  ts: nowIso()
-                }
-              });
-
-              if (sessionId) {
-                fireRuntimeMessage({
-                  type: "brain.event",
-                  event: {
-                    sessionId,
-                    type: "plugin.global_message",
-                    payload: {
-                      kind: "success",
-                      message: successMessage,
-                      source: pluginSource,
-                      dedupeKey
-                    }
-                  }
-                });
-              }
-              return { action: "continue" };
-            }
-          }
-        },
-        { enable: true }
-      );
-    }
-
-    if (!hasPlugin(mascotPluginId)) {
-      const clip = (input: string, max = 48): string => {
-        const text = String(input || "").trim();
-        if (!text) return "";
-        return text.length > max ? `${text.slice(0, max)}…` : text;
-      };
-
-      const prettyAction = (action: string): string => {
-        const text = String(action || "").trim();
-        if (!text) return "步骤";
-        return text.replaceAll("_", " ");
-      };
-
-      orchestrator.registerPlugin(
-        {
-          manifest: {
-            id: mascotPluginId,
-            name: "builtin-mission-hud-dog",
-            version: "1.0.0",
-            permissions: {
-              hooks: [
-                "runtime.route.after",
-                "tool.before_call",
-                "step.after_execute",
-                "agent_end.after"
-              ]
-            }
-          },
-          hooks: {
-            "runtime.route.after": (event) => {
-              const routeType = String(event?.type || "").trim();
-              if (routeType !== "brain.run.start" && routeType !== "brain.run.stop") {
-                return { action: "continue" };
-              }
-              const routeResult = toRecord(event?.result);
-              const routeMessage = toRecord(event?.message);
-              if (routeType === "brain.run.start") {
-                if (routeResult.ok !== true) return { action: "continue" };
-                const prompt = String(routeMessage.prompt || "").trim();
-                const skillIds = toStringList(routeMessage.skillIds);
-                if (!prompt && skillIds.length === 0) return { action: "continue" };
-                const data = toRecord(routeResult.data);
-                const sessionId = String(data.sessionId || routeMessage.sessionId || "").trim();
-                emitMascot("thinking", "汪！我先闻闻线索，马上开始。", {
-                  sessionId,
-                  durationMs: 3000
-                });
-              } else {
-                const sessionId = String(routeMessage.sessionId || "").trim();
-                emitMascot("done", "收到停止指令，我已经停下啦。", {
-                  sessionId,
-                  durationMs: 2200
-                });
-              }
-              return { action: "continue" };
-            },
-            "tool.before_call": (event) => {
-              const input = toRecord(event?.input);
-              const sessionId = String(input.sessionId || "").trim();
-              const action = prettyAction(String(input.action || ""));
-              if (!sessionId) return { action: "continue" };
-              emitMascot("tool", `我去执行：${action}`, {
-                sessionId,
-                durationMs: 2200
-              });
-              return { action: "continue" };
-            },
-            "step.after_execute": (event) => {
-              const input = toRecord(event?.input);
-              const result = toRecord(event?.result);
-              const sessionId = String(input.sessionId || "").trim();
-              if (!sessionId) return { action: "continue" };
-              if (result.ok !== true) {
-                const errorText = clip(String(result.error || ""));
-                emitMascot("error", errorText ? `唔，出错了：${errorText}` : "唔，这一步失败了。", {
-                  sessionId,
-                  durationMs: 3600
-                });
-                return { action: "continue" };
-              }
-              if (result.verified === true) {
-                emitMascot("verify", "我核对过了，这一步通过。", {
-                  sessionId,
-                  durationMs: 1800
-                });
-              } else {
-                emitMascot("verify", "步骤完成，我继续盯着变化。", {
-                  sessionId,
-                  durationMs: 1500
-                });
-              }
-              return { action: "continue" };
-            },
-            "agent_end.after": (event) => {
-              const input = toRecord(event?.input);
-              const decision = toRecord(event?.decision);
-              const sessionId = String(decision.sessionId || input.sessionId || "").trim();
-              const action = String(decision.action || "").trim();
-              if (!sessionId) return { action: "continue" };
-              if (action === "retry") {
-                emitMascot("thinking", "刚才有点小插曲，我再试一次。", {
-                  sessionId,
-                  durationMs: 2800
-                });
-                return { action: "continue" };
-              }
-              if (action !== "done") return { action: "continue" };
-              const errorText = clip(String(toRecord(input.error).message || ""));
-              if (errorText) {
-                emitMascot("error", `这轮遇到问题：${errorText}`, {
-                  sessionId,
-                  durationMs: 3800
-                });
-                return { action: "continue" };
-              }
-              emitMascot("done", "任务完成！我摇着尾巴汇报完毕。", {
-                sessionId,
-                durationMs: 2600
-              });
-              return { action: "continue" };
-            }
-          }
-        },
-        { enable: true }
-      );
-    }
+    registerPackage(exampleSendSuccessPluginPackage, registerExampleSendSuccessPlugin as never);
+    registerPackage(exampleMissionHudDogPluginPackage, registerExampleMissionHudDogPlugin as never);
   };
 
   const ensureBuiltinCapabilityPlugins = (): void => {
@@ -3506,7 +3348,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
   };
 
-  ensureBuiltinRoutePlugins();
+  ensureDefaultExampleRoutePlugins();
   ensureBuiltinCapabilityPlugins();
   ensureBuiltinBridgeCapabilityProviders();
   ensureBuiltinSandboxCapabilityProviders();
@@ -8186,6 +8028,37 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         toolSteps: toolStep
       });
       const runtimeAfterDone = orchestrator.getRunState(sessionId);
+      if (!runtimeAfterDone.stopped && runtimeAfterDone.queue.steer > 0) {
+        const steers = orchestrator.dequeueQueuedPrompts(sessionId, "steer");
+        const nextSteer = steers[0];
+        if (nextSteer) {
+          const runtimeAfterDequeue = orchestrator.getRunState(sessionId);
+          orchestrator.events.emit("message.dequeued", sessionId, {
+            behavior: "steer",
+            id: nextSteer.id,
+            text: clipText(nextSteer.text, 3000),
+            total: runtimeAfterDequeue.queue.total,
+            steer: runtimeAfterDequeue.queue.steer,
+            followUp: runtimeAfterDequeue.queue.followUp
+          });
+          orchestrator.events.emit("input.steer", sessionId, {
+            text: clipText(nextSteer.text, 3000),
+            id: nextSteer.id
+          });
+          void startFromPrompt({
+            sessionId,
+            prompt: nextSteer.text,
+            skillIds: nextSteer.skillIds,
+            autoRun: true
+          }).catch((error) => {
+            orchestrator.events.emit("loop_internal_error", sessionId, {
+              error: error instanceof Error ? error.message : String(error),
+              reason: "steer_start_failed"
+            });
+          });
+          return;
+        }
+      }
       if (!runtimeAfterDone.stopped && runtimeAfterDone.queue.followUp > 0) {
         const followUps = orchestrator.dequeueQueuedPrompts(sessionId, "followUp");
         const nextFollowUp = followUps[0];

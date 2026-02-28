@@ -1,0 +1,22 @@
+{
+  "manifest": {
+    "id": "plugin.example.ui.mission-hud.dog",
+    "name": "example-mission-hud-dog",
+    "version": "1.0.0",
+    "permissions": {
+      "hooks": [
+        "runtime.route.after",
+        "tool.before_call",
+        "step.after_execute",
+        "agent_end.after"
+      ],
+      "runtimeMessages": [
+        "bbloop.ui.mascot"
+      ]
+    }
+  },
+  "modulePath": "plugins/example-mission-hud-dog/index.js",
+  "exportName": "default",
+  "uiModulePath": "plugins/example-mission-hud-dog/ui.js",
+  "uiExportName": "default"
+}
