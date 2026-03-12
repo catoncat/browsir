@@ -101,6 +101,10 @@ function buildSessionNamespaceStorageKey(sessionId: string): string {
   )}`;
 }
 
+function buildSystemNamespaceStorageKey(sessionId: string): string {
+  return `ephemeral:${normalizeSessionSegment(sessionId)}:__bbl`;
+}
+
 function sessionUnixRoot(sessionId: string): string {
   return `${SESSION_ROOT}/${normalizeSessionSegment(sessionId)}/mem`;
 }
@@ -135,7 +139,7 @@ function createPluginsNamespace(): VirtualNamespaceDescriptor {
 
 function createSystemNamespace(sessionId: string): VirtualNamespaceDescriptor {
   return {
-    key: `ephemeral:${normalizeSessionSegment(sessionId)}:__bbl`,
+    key: buildSystemNamespaceStorageKey(sessionId),
     scope: "ephemeral",
     unixRoot: systemUnixRoot(sessionId)
   };
@@ -214,6 +218,11 @@ function decodeUtf8(bytes: Uint8Array): string {
 
 function encodeUtf8(text: string): Uint8Array {
   return new TextEncoder().encode(text);
+}
+
+function isMissingFileError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /ENOENT|no such file or directory/i.test(String(error.message || ""));
 }
 
 function applyFindReplace(input: string, edit: JsonRecord): { content: string; replacements: number } {
@@ -339,7 +348,6 @@ async function restoreNamespaceFiles(
   sandbox: Sandbox
 ): Promise<void> {
   for (const descriptor of descriptors) {
-    if (descriptor.scope === "ephemeral") continue;
     const files = await loadNamespaceFiles(descriptor.key);
     if (files.size <= 0) continue;
     const entries = [...files.entries()].sort(([a], [b]) =>
@@ -359,7 +367,6 @@ async function captureNamespaceFiles(
   sandbox: Sandbox
 ): Promise<void> {
   for (const descriptor of descriptors) {
-    if (descriptor.scope === "ephemeral") continue;
     const next = new Map<string, Uint8Array>();
     const root = descriptor.unixRoot;
     const rootPrefix = `${root}/`;
@@ -427,7 +434,18 @@ async function readFrame(args: JsonRecord, sessionId: string): Promise<JsonRecor
   return await withSessionSandbox(sessionId, async (sandbox) => {
     const resolved = resolveVirtualPath(args.path, sessionId);
 
-    const fullBytes = (await sandbox.fs.readFile(resolved.unixPath, null as null)) as Uint8Array;
+    let fullBytes: Uint8Array;
+    try {
+      fullBytes = (await sandbox.fs.readFile(
+        resolved.unixPath,
+        null as null
+      )) as Uint8Array;
+    } catch (error) {
+      if (isMissingFileError(error)) {
+        throw new Error(`virtual file not found: ${resolved.uri}`);
+      }
+      throw error;
+    }
     const offset = Math.max(0, toInt(args.offset, 0));
     const limit = Math.max(1, Math.min(MAX_READ_BYTES, toInt(args.limit, MAX_READ_BYTES)));
     const start = Math.min(offset, fullBytes.byteLength);
@@ -575,23 +593,36 @@ export async function initLifoAdapter(): Promise<void> {
 export async function clearVirtualFilesForSession(
   sessionId: string
 ): Promise<string[]> {
-  const storageKey = buildSessionNamespaceStorageKey(sessionId);
+  const storageKeys = [
+    buildSessionNamespaceStorageKey(sessionId),
+    buildSystemNamespaceStorageKey(sessionId)
+  ];
   await enqueueAdapterTask(async () => {
-    await clearPersistedNamespace(storageKey);
+    for (const storageKey of storageKeys) {
+      await clearPersistedNamespace(storageKey);
+    }
   });
-  return [storageKey];
+  return storageKeys;
 }
 
-export async function clearPersistedSessionVirtualFiles(): Promise<string[]> {
-  const keys = (await kvKeys()).filter((key) =>
+export async function clearSessionScopedVirtualFiles(): Promise<string[]> {
+  const persistedKeys = (await kvKeys()).filter((key) =>
     String(key || "").startsWith(SESSION_VIRTUAL_NAMESPACE_KEY_PREFIX)
   );
+  const ephemeralKeys = [...namespaceFiles.keys()].filter((key) =>
+    String(key || "").startsWith("ephemeral:")
+  );
+  const keys = Array.from(new Set([...persistedKeys, ...ephemeralKeys]));
   await enqueueAdapterTask(async () => {
     for (const key of keys) {
       await clearPersistedNamespace(key);
     }
   });
   return keys;
+}
+
+export async function clearPersistedSessionVirtualFiles(): Promise<string[]> {
+  return await clearSessionScopedVirtualFiles();
 }
 
 export async function clearAllPersistedVirtualFiles(): Promise<string[]> {

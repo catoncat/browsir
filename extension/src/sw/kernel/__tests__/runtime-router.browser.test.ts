@@ -3,9 +3,10 @@ import "./test-setup";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetLifoAdapterForTest } from "../browser-unix-runtime/lifo-adapter";
 import { compact, prepareCompaction } from "../compaction.browser";
-import { getDB, kvKeys } from "../idb-storage";
+import { getDB, kvGet, kvKeys } from "../idb-storage";
 import { BrainOrchestrator } from "../orchestrator.browser";
 import { registerRuntimeRouter } from "../runtime-router";
+import { invokeVirtualFrame } from "../virtual-fs.browser";
 import type { LlmResolvedRoute } from "../llm-provider";
 import { readTraceChunk } from "../session-store.browser";
 
@@ -6565,6 +6566,182 @@ describe("runtime-router.browser", () => {
     ).toBe(false);
   });
 
+  it("brain.plugin.register should persist function capability provider + llm provider across runtime reload", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const pluginId = "plugin.route.register.reload";
+    const registered = await invokeRuntime({
+      type: "brain.plugin.register",
+      plugin: {
+        manifest: {
+          id: pluginId,
+          name: "plugin-route-register-reload",
+          version: "1.0.0",
+          permissions: {
+            capabilities: ["fs.read"],
+            llmProviders: ["route.proxy"],
+          },
+        },
+        providers: {
+          capabilities: {
+            "fs.read": {
+              id: "plugin.route.register.reload.fs-read",
+              mode: "script",
+              priority: 90,
+              canHandle: (input) => {
+                const args =
+                  input.args && typeof input.args === "object"
+                    ? (input.args as Record<string, unknown>)
+                    : {};
+                const frame =
+                  args.frame && typeof args.frame === "object"
+                    ? (args.frame as Record<string, unknown>)
+                    : {};
+                return String(frame.tool || "") === "read";
+              },
+              invoke: async (input) => {
+                const args =
+                  input.args && typeof input.args === "object"
+                    ? (input.args as Record<string, unknown>)
+                    : {};
+                const frame =
+                  args.frame && typeof args.frame === "object"
+                    ? (args.frame as Record<string, unknown>)
+                    : {};
+                const frameArgs =
+                  frame.args && typeof frame.args === "object"
+                    ? (frame.args as Record<string, unknown>)
+                    : {};
+                return {
+                  source: "plugin-capability",
+                  path: String(frameArgs.path || ""),
+                };
+              },
+            },
+          },
+        },
+        llmProviders: [
+          {
+            id: "route.proxy",
+            transport: "openai_compatible",
+            baseUrl: "https://proxy.example.com/v1",
+          },
+        ],
+      },
+    });
+    expect(registered.ok).toBe(true);
+
+    const rawRegistry = await kvGet("brain.plugin.registry:v1");
+    const registry = Array.isArray(rawRegistry)
+      ? (rawRegistry as Array<Record<string, unknown>>)
+      : [];
+    const persisted = registry.find(
+      (item) => String(item.pluginId || "") === pluginId,
+    );
+    expect(String(persisted?.kind || "")).toBe("extension");
+    const persistedSource = (persisted?.source || {}) as Record<
+      string,
+      unknown
+    >;
+    expect(String(persistedSource.modulePath || "")).toBe(
+      `mem://plugins/${pluginId}/index.js`,
+    );
+
+    const { sessionId: beforeReloadSessionId } = await orchestrator.createSession(
+      {
+        title: "plugin-register-reload-before",
+      },
+    );
+    const beforeReloadRead = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId: beforeReloadSessionId,
+      capability: "fs.read",
+      action: "invoke",
+      args: {
+        frame: {
+          tool: "read",
+          args: {
+            path: "mem://plugins/reload-check.txt",
+            runtime: "sandbox",
+          },
+        },
+      },
+      verifyPolicy: "off",
+    });
+    expect(beforeReloadRead.ok).toBe(true);
+    expect(
+      (
+        ((beforeReloadRead.data as Record<string, unknown>)?.data ||
+          {}) as Record<string, unknown>
+      ).source,
+    ).toBe("plugin-capability");
+
+    runtimeListeners = [];
+    resetRuntimeOnMessageMock();
+
+    const reloadedOrchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(reloadedOrchestrator);
+
+    const listed = await invokeRuntime({ type: "brain.plugin.list" });
+    expect(listed.ok).toBe(true);
+    const listedPlugins = Array.isArray(
+      (listed.data as Record<string, unknown>)?.plugins,
+    )
+      ? ((listed.data as Record<string, unknown>).plugins as Array<
+          Record<string, unknown>
+        >)
+      : [];
+    expect(
+      listedPlugins.some(
+        (item) => String(item.id || "") === pluginId && item.enabled === true,
+      ),
+    ).toBe(true);
+
+    const reloadedProvider = reloadedOrchestrator.getLlmProvider("route.proxy");
+    expect(reloadedProvider).toBeDefined();
+    expect(reloadedProvider?.resolveRequestUrl(createDummyRoute())).toBe(
+      "https://proxy.example.com/v1/chat/completions",
+    );
+
+    const { sessionId: afterReloadSessionId } =
+      await reloadedOrchestrator.createSession({
+        title: "plugin-register-reload-after",
+      });
+    const afterReloadRead = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId: afterReloadSessionId,
+      capability: "fs.read",
+      action: "invoke",
+      args: {
+        frame: {
+          tool: "read",
+          args: {
+            path: "mem://plugins/reload-check.txt",
+            runtime: "sandbox",
+          },
+        },
+      },
+      verifyPolicy: "off",
+    });
+    expect(afterReloadRead.ok).toBe(true);
+    const afterReloadPayload = ((afterReloadRead.data as Record<
+      string,
+      unknown
+    >) || {}) as Record<string, unknown>;
+    expect(
+      String(
+        ((afterReloadPayload.data || {}) as Record<string, unknown>).source ||
+          "",
+      ),
+    ).toBe("plugin-capability");
+    expect(
+      String(
+        ((afterReloadPayload.data || {}) as Record<string, unknown>).path || "",
+      ),
+    ).toBe("mem://plugins/reload-check.txt");
+  });
+
   it("supports brain.plugin.register_extension with PI-style default export module", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -7933,6 +8110,158 @@ description missing`,
     expect(sessions.some((item) => String(item.id || "") === sessionId)).toBe(
       false,
     );
+  });
+
+  it("brain.session.delete should clear in-memory step stream cache", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "session delete runtime cache",
+      autoRun: false,
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    orchestrator.events.emit("loop_done", sessionId, {
+      reason: "runtime-cache-check",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const cachedBeforeDelete = await invokeRuntime({
+      type: "brain.step.stream",
+      sessionId,
+    });
+    expect(cachedBeforeDelete.ok).toBe(true);
+    const streamBeforeDelete = Array.isArray(
+      (cachedBeforeDelete.data as Record<string, unknown>)?.stream,
+    )
+      ? ((cachedBeforeDelete.data as Record<string, unknown>).stream as Array<
+          Record<string, unknown>
+        >)
+      : [];
+    expect(streamBeforeDelete.length).toBeGreaterThan(0);
+    await invokeVirtualFrame({
+      tool: "write",
+      args: {
+        path: "mem://__bbl/delete-check.txt",
+        content: "delete-me",
+        mode: "overwrite",
+        runtime: "sandbox",
+      },
+      sessionId,
+    });
+
+    const deleted = await invokeRuntime({
+      type: "brain.session.delete",
+      sessionId,
+    });
+    expect(deleted.ok).toBe(true);
+
+    const cachedAfterDelete = await invokeRuntime({
+      type: "brain.step.stream",
+      sessionId,
+    });
+    expect(cachedAfterDelete.ok).toBe(true);
+    const streamAfterDelete = Array.isArray(
+      (cachedAfterDelete.data as Record<string, unknown>)?.stream,
+    )
+      ? ((cachedAfterDelete.data as Record<string, unknown>).stream as Array<
+          Record<string, unknown>
+        >)
+      : [];
+    expect(streamAfterDelete).toEqual([]);
+    await expect(
+      invokeVirtualFrame({
+        tool: "read",
+        args: {
+          path: "mem://__bbl/delete-check.txt",
+          runtime: "sandbox",
+        },
+        sessionId,
+      }),
+    ).rejects.toThrow("virtual file not found");
+  });
+
+  it("brain.storage.reset should clear runtime step stream cache", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "storage reset runtime cache",
+      autoRun: false,
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    orchestrator.events.emit("loop_done", sessionId, {
+      reason: "storage-reset-cache-check",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const cachedBeforeReset = await invokeRuntime({
+      type: "brain.step.stream",
+      sessionId,
+    });
+    expect(cachedBeforeReset.ok).toBe(true);
+    const streamBeforeReset = Array.isArray(
+      (cachedBeforeReset.data as Record<string, unknown>)?.stream,
+    )
+      ? ((cachedBeforeReset.data as Record<string, unknown>).stream as Array<
+          Record<string, unknown>
+        >)
+      : [];
+    expect(streamBeforeReset.length).toBeGreaterThan(0);
+    await invokeVirtualFrame({
+      tool: "write",
+      args: {
+        path: "mem://__bbl/reset-check.txt",
+        content: "reset-me",
+        mode: "overwrite",
+        runtime: "sandbox",
+      },
+      sessionId,
+    });
+
+    const reset = await invokeRuntime({
+      type: "brain.storage.reset",
+      options: {
+        includeTrace: true,
+      },
+    });
+    expect(reset.ok).toBe(true);
+
+    const cachedAfterReset = await invokeRuntime({
+      type: "brain.step.stream",
+      sessionId,
+    });
+    expect(cachedAfterReset.ok).toBe(true);
+    const streamAfterReset = Array.isArray(
+      (cachedAfterReset.data as Record<string, unknown>)?.stream,
+    )
+      ? ((cachedAfterReset.data as Record<string, unknown>).stream as Array<
+          Record<string, unknown>
+        >)
+      : [];
+    expect(streamAfterReset).toEqual([]);
+    await expect(
+      invokeVirtualFrame({
+        tool: "read",
+        args: {
+          path: "mem://__bbl/reset-check.txt",
+          runtime: "sandbox",
+        },
+        sessionId,
+      }),
+    ).rejects.toThrow("virtual file not found");
   });
 
   it("brain.session.delete should remove persisted trace and session memfs files", async () => {

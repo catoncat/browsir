@@ -1,6 +1,7 @@
 import "./test-setup";
 
 import { beforeEach, describe, expect, it } from "vitest";
+import { kvKeys } from "../idb-storage";
 import {
   disposeLifoAdapter,
   invokeLifoFrame,
@@ -199,6 +200,48 @@ describe("lifo-adapter.browser", () => {
 
     expect(Number(out.exitCode)).toBe(0);
     expect(String(out.stdout || "")).toContain("line-1");
+  });
+
+  it("keeps mem://__bbl only in memory across sandbox invocations", async () => {
+    const sessionId = "sess-system-namespace";
+    await invokeLifoFrame({
+      sessionId,
+      tool: "write",
+      args: {
+        path: "mem://__bbl/plugin-host-runner.cjs",
+        content: "module.exports = 1;",
+        mode: "overwrite",
+        runtime: "sandbox"
+      }
+    });
+
+    const readBeforeDispose = await invokeLifoFrame({
+      sessionId,
+      tool: "read",
+      args: {
+        path: "mem://__bbl/plugin-host-runner.cjs",
+        runtime: "sandbox"
+      }
+    });
+    expect(String(readBeforeDispose.content || "")).toBe("module.exports = 1;");
+
+    const keys = await kvKeys();
+    expect(
+      keys.some((key) => String(key || "").includes("__bbl"))
+    ).toBe(false);
+
+    await disposeLifoAdapter();
+
+    await expect(
+      invokeLifoFrame({
+        sessionId,
+        tool: "read",
+        args: {
+          path: "mem://__bbl/plugin-host-runner.cjs",
+          runtime: "sandbox"
+        }
+      })
+    ).rejects.toThrow("virtual file not found");
   });
 
   it("does not persist shell aliases across invocations in same session", async () => {

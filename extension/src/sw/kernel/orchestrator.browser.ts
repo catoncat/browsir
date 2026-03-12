@@ -174,6 +174,7 @@ export class BrainOrchestrator {
   private readonly runStateBySession = new Map<string, RunState>();
   private readonly streamBySession = new Map<string, StepTraceRecord[]>();
   private readonly traceWriteTailBySession = new Map<string, Promise<void>>();
+  private readonly blockedTraceSessions = new Set<string>();
 
   private createEmptyQueueState(): RunState["queue"] {
     return {
@@ -415,6 +416,9 @@ export class BrainOrchestrator {
   }
 
   private async persistEvent(event: BrainEventEnvelope): Promise<void> {
+    if (this.blockedTraceSessions.has(event.sessionId)) {
+      return;
+    }
     const traceId = `session-${event.sessionId}`;
     const records = this.streamBySession.get(event.sessionId) ?? [];
     const record: StepTraceRecord = {
@@ -434,6 +438,9 @@ export class BrainOrchestrator {
 
   private schedulePersistEvent(event: BrainEventEnvelope): void {
     const key = String(event.sessionId || "").trim();
+    if (!key || this.blockedTraceSessions.has(key)) {
+      return;
+    }
     const previous = this.traceWriteTailBySession.get(key) ?? Promise.resolve();
     const run = previous.catch(() => undefined).then(() => this.persistEvent(event));
     const nextTail = run.then(
@@ -450,6 +457,7 @@ export class BrainOrchestrator {
 
   async createSession(input?: Parameters<BrowserSessionManager["createSession"]>[0]): Promise<{ sessionId: string }> {
     const meta = await this.sessions.createSession(input);
+    this.blockedTraceSessions.delete(meta.header.id);
     this.runStateBySession.set(meta.header.id, this.createRunState(meta.header.id));
     return { sessionId: meta.header.id };
   }
@@ -1033,6 +1041,37 @@ export class BrainOrchestrator {
 
     this.streamBySession.set(sessionId, loaded);
     return loaded.slice();
+  }
+
+  async flushSessionTraceWrites(sessionId: string): Promise<void> {
+    const key = String(sessionId || "").trim();
+    if (!key) return;
+    await (this.traceWriteTailBySession.get(key) ?? Promise.resolve());
+  }
+
+  async evictSessionRuntime(sessionId: string): Promise<void> {
+    const key = String(sessionId || "").trim();
+    if (!key) return;
+    this.blockedTraceSessions.add(key);
+    await this.flushSessionTraceWrites(key);
+    this.streamBySession.delete(key);
+    this.traceWriteTailBySession.delete(key);
+    this.runStateBySession.delete(key);
+  }
+
+  async resetRuntimeState(): Promise<void> {
+    const sessionIds = new Set<string>([
+      ...this.runStateBySession.keys(),
+      ...this.streamBySession.keys(),
+      ...this.traceWriteTailBySession.keys()
+    ]);
+    for (const sessionId of sessionIds) {
+      this.blockedTraceSessions.add(sessionId);
+    }
+    await Promise.all([...sessionIds].map((sessionId) => this.flushSessionTraceWrites(sessionId)));
+    this.streamBySession.clear();
+    this.traceWriteTailBySession.clear();
+    this.runStateBySession.clear();
   }
 
   private async runCompaction(sessionId: string, reason: "overflow" | "threshold", willRetry: boolean): Promise<void> {

@@ -3,7 +3,7 @@ import {
   type SessionIndex,
   initSessionIndex
 } from "./session-store.browser";
-import { clearPersistedSessionVirtualFiles } from "./browser-unix-runtime/lifo-adapter";
+import { clearSessionScopedVirtualFiles } from "./browser-unix-runtime/lifo-adapter";
 import { getDB } from "./idb-storage";
 
 export interface ResetSessionStoreOptions {
@@ -58,7 +58,7 @@ export async function resetSessionStore(options: ResetSessionStoreOptions = {}):
   }
 
   await tx.done;
-  const virtualKeys = await clearPersistedSessionVirtualFiles();
+  const virtualKeys = await clearSessionScopedVirtualFiles();
   removedKeys.push(...virtualKeys);
   removedCount += virtualKeys.length;
   const index = await initSessionIndex();

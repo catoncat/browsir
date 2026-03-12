@@ -71,17 +71,20 @@ const UI_EXTENSION_STORAGE_KEY = "brain.plugin.ui_extensions";
 const PLUGIN_REGISTRY_STORAGE_KEY = "brain.plugin.registry:v1";
 const PLUGIN_EXAMPLE_SEED_STORAGE_KEY = "brain.plugin.seed.examples:v1";
 const PLUGIN_SANDBOX_DEFAULT_SESSION_ID = "plugin-studio";
-const PLUGIN_SANDBOX_RUNNER_PATH = "mem://.bbl/plugin-host-runner.cjs";
+const PLUGIN_SANDBOX_RUNNER_PATH = "mem://__bbl/plugin-host-runner.cjs";
 const PLUGIN_SANDBOX_RESULT_PREFIX = "__BBL_PLUGIN_RESULT__";
 const DEFAULT_SKILL_DISCOVER_ROOTS: Array<{ root: string; source: string }> = [
   { root: "mem://skills", source: "browser" },
 ];
-const PLUGIN_SANDBOX_RUNNER_SOURCE = String.raw`const { pathToFileURL } = require("url");
-
-const RESULT_PREFIX = "__BBL_PLUGIN_RESULT__";
+const PLUGIN_SANDBOX_RUNNER_SOURCE = String.raw`const RESULT_PREFIX = "__BBL_PLUGIN_RESULT__";
 
 function toRecord(value) {
   return value && typeof value === "object" ? value : {};
+}
+
+function clonePlain(value) {
+  if (value === undefined) return undefined;
+  return JSON.parse(JSON.stringify(value));
 }
 
 function emit(payload) {
@@ -90,10 +93,40 @@ function emit(payload) {
 
 async function loadFactory(modulePath, exportName) {
   let moduleNs;
-  try {
-    moduleNs = require(modulePath);
-  } catch (_error) {
-    moduleNs = await import(pathToFileURL(modulePath).href);
+  const moduleSourceBase64 = String(
+    process.env.BBL_PLUGIN_MODULE_SOURCE_BASE64 || "",
+  ).trim();
+  if (moduleSourceBase64) {
+    const moduleSource = Buffer.from(moduleSourceBase64, "base64").toString(
+      "utf8",
+    );
+    const module = {
+      exports: {},
+    };
+    const exports = module.exports;
+    const normalizedPath = String(modulePath || "");
+    const lastSlash = normalizedPath.lastIndexOf("/");
+    const moduleDir =
+      lastSlash >= 0 ? normalizedPath.slice(0, lastSlash) || "/" : "/";
+    const executeModule = new Function(
+      "module",
+      "exports",
+      "require",
+      "__filename",
+      "__dirname",
+      String(moduleSource || ""),
+    );
+    executeModule(module, exports, require, normalizedPath, moduleDir);
+    moduleNs = module.exports;
+  } else {
+    try {
+      moduleNs = require(modulePath);
+    } catch (_error) {
+      const fileUrl = String(modulePath || "").startsWith("file://")
+        ? String(modulePath || "")
+        : encodeURI("file://" + String(modulePath || ""));
+      moduleNs = await import(fileUrl);
+    }
   }
   const target = String(exportName || "default").trim() || "default";
   const setup = target === "default" ? ((moduleNs && moduleNs.default) || moduleNs) : moduleNs?.[target];
@@ -118,28 +151,132 @@ function installChromeBridge(state) {
   };
 }
 
+function normalizePriority(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.floor(n);
+}
+
+function normalizeHookDecision(result) {
+  const row = toRecord(result);
+  const action = String(row.action || "").trim();
+  if (action === "block") {
+    return {
+      action: "block",
+      reason: String(row.reason || "").trim() || undefined
+    };
+  }
+  if (action === "patch") {
+    return {
+      action: "patch",
+      patch: toRecord(row.patch)
+    };
+  }
+  return {
+    action: "continue"
+  };
+}
+
+async function serializeResponse(response) {
+  const headers = {};
+  if (response && response.headers && typeof response.headers.forEach === "function") {
+    response.headers.forEach((value, key) => {
+      headers[key] = value;
+    });
+  }
+  const bodyText = await response.text();
+  return {
+    status: Number(response && response.status) || 200,
+    statusText: String((response && response.statusText) || ""),
+    headers,
+    bodyText: String(bodyText || "")
+  };
+}
+
 function createApi(registry) {
   return {
     on(hook, handler, options = {}) {
       const name = String(hook || "").trim();
       if (!name || typeof handler !== "function") return;
       if (!Array.isArray(registry.hooks[name])) registry.hooks[name] = [];
-      registry.hooks[name].push({ handler, options: toRecord(options) });
+      registry.sequence += 1;
+      const normalizedOptions = toRecord(options);
+      const entry = {
+        hook: name,
+        handlerId: String(normalizedOptions.id || "").trim() || name + "#" + registry.sequence,
+        handler,
+        options: normalizedOptions
+      };
+      registry.hooks[name].push(entry);
+      registry.hookRegistrations.push({
+        hook: entry.hook,
+        handlerId: entry.handlerId,
+        options: normalizedOptions
+      });
     },
-    registerTool() {
-      return;
+    registerTool(contract) {
+      const row = toRecord(contract);
+      const name = String(row.name || "").trim();
+      if (!name) return;
+      registry.tools[name] = clonePlain(row);
     },
-    registerModeProvider() {
-      return;
+    registerModeProvider(mode, provider) {
+      const normalizedMode = String(mode || "").trim();
+      const row = toRecord(provider);
+      const id = String(row.id || "").trim() || "mode:" + normalizedMode;
+      if (!normalizedMode || typeof provider?.invoke !== "function") return;
+      registry.modeProviders[normalizedMode] = {
+        provider,
+        meta: {
+          mode: normalizedMode,
+          id,
+          priority: normalizePriority(row.priority)
+        }
+      };
     },
-    registerCapabilityProvider() {
-      return;
+    registerCapabilityProvider(capability, provider) {
+      const normalizedCapability = String(capability || "").trim();
+      const row = toRecord(provider);
+      const id =
+        String(row.id || "").trim() || "capability:" + normalizedCapability;
+      if (!normalizedCapability || typeof provider?.invoke !== "function") return;
+      registry.capabilityProviders[normalizedCapability] = {
+        provider,
+        meta: {
+          capability: normalizedCapability,
+          id,
+          mode: String(row.mode || "").trim() || undefined,
+          priority: normalizePriority(row.priority),
+          hasCanHandle: typeof provider?.canHandle === "function"
+        }
+      };
     },
-    registerCapabilityPolicy() {
-      return;
+    registerCapabilityPolicy(capability, policy) {
+      const normalizedCapability = String(capability || "").trim();
+      if (!normalizedCapability) return;
+      registry.capabilityPolicies[normalizedCapability] = clonePlain(toRecord(policy));
     },
-    registerProvider() {
-      return;
+    registerProvider(name, provider) {
+      const id = String(name || "").trim();
+      const staticRequestUrl = String(
+        provider?.__bblStaticRequestUrl || provider?.staticRequestUrl || ""
+      ).trim();
+      if (
+        !id ||
+        !provider ||
+        typeof provider !== "object" ||
+        typeof provider.resolveRequestUrl !== "function" ||
+        typeof provider.send !== "function"
+      ) {
+        return;
+      }
+      registry.llmProviders[id] = {
+        provider,
+        meta: {
+          id,
+          staticRequestUrl: staticRequestUrl || undefined
+        }
+      };
     }
   };
 }
@@ -149,23 +286,17 @@ async function runHook(handlers, payload) {
   const mergedPatch = {};
   let current = payload;
   for (const item of handlers) {
-    const result = await Promise.resolve(item.handler(current));
-    const row = toRecord(result);
-    const action = String(row.action || "").trim();
-    if (action === "block") {
-      return {
-        action: "block",
-        reason: String(row.reason || "").trim() || undefined
-      };
+    const decision = normalizeHookDecision(await Promise.resolve(item.handler(current)));
+    if (decision.action === "block") {
+      return decision;
     }
-    if (action === "patch") {
-      const patch = toRecord(row.patch);
-      Object.assign(mergedPatch, patch);
+    if (decision.action === "patch") {
+      Object.assign(mergedPatch, decision.patch);
       hasPatch = true;
       if (current && typeof current === "object" && !Array.isArray(current)) {
         current = {
           ...current,
-          ...patch
+          ...decision.patch
         };
       }
     }
@@ -179,6 +310,15 @@ async function runHook(handlers, payload) {
   return {
     action: "continue"
   };
+}
+
+async function runHookRegistration(registry, hook, handlerId, payload) {
+  const handlers = Array.isArray(registry.hooks[hook]) ? registry.hooks[hook] : [];
+  const target = handlers.find((item) => item.handlerId === handlerId);
+  if (!target) {
+    throw new Error("hook registration not found: " + hook + ":" + handlerId);
+  }
+  return normalizeHookDecision(await Promise.resolve(target.handler(payload)));
 }
 
 (async () => {
@@ -196,7 +336,14 @@ async function runHook(handlers, payload) {
     installChromeBridge(state);
 
     const registry = {
-      hooks: {}
+      sequence: 0,
+      hooks: {},
+      hookRegistrations: [],
+      modeProviders: {},
+      capabilityProviders: {},
+      capabilityPolicies: {},
+      tools: {},
+      llmProviders: {}
     };
     const setup = await loadFactory(modulePath, String(input.exportName || "default"));
     await Promise.resolve(setup(createApi(registry)));
@@ -205,7 +352,16 @@ async function runHook(handlers, payload) {
     if (op === "describe") {
       emit({
         ok: true,
-        hooks: Object.keys(registry.hooks)
+        hooks: Object.keys(registry.hooks),
+        hookRegistrations: registry.hookRegistrations,
+        modeProviders: Object.values(registry.modeProviders).map((item) => item.meta),
+        capabilityProviders: Object.values(registry.capabilityProviders).map((item) => item.meta),
+        capabilityPolicies: Object.entries(registry.capabilityPolicies).map(([capability, policy]) => ({
+          capability,
+          policy
+        })),
+        tools: Object.values(registry.tools),
+        llmProviders: Object.values(registry.llmProviders).map((item) => item.meta)
       });
       return;
     }
@@ -217,6 +373,102 @@ async function runHook(handlers, payload) {
       emit({
         ok: true,
         hookResult,
+        runtimeMessages: state.runtimeMessages
+      });
+      return;
+    }
+
+    if (op === "runHookRegistration") {
+      const hook = String(input.hook || "").trim();
+      const handlerId = String(input.handlerId || "").trim();
+      const hookResult = await runHookRegistration(registry, hook, handlerId, input.payload);
+      emit({
+        ok: true,
+        hookResult,
+        runtimeMessages: state.runtimeMessages
+      });
+      return;
+    }
+
+    if (op === "runModeProviderInvoke") {
+      const mode = String(input.mode || "").trim();
+      const target = registry.modeProviders[mode];
+      if (!target) {
+        throw new Error("mode provider not found: " + mode);
+      }
+      const data = await Promise.resolve(target.provider.invoke(input.input));
+      emit({
+        ok: true,
+        data,
+        runtimeMessages: state.runtimeMessages
+      });
+      return;
+    }
+
+    if (op === "runCapabilityProviderCanHandle") {
+      const capability = String(input.capability || "").trim();
+      const target = registry.capabilityProviders[capability];
+      if (!target) {
+        throw new Error("capability provider not found: " + capability);
+      }
+      const accepted =
+        typeof target.provider.canHandle === "function"
+          ? await Promise.resolve(target.provider.canHandle(input.input))
+          : true;
+      emit({
+        ok: true,
+        accepted: accepted === true,
+        runtimeMessages: state.runtimeMessages
+      });
+      return;
+    }
+
+    if (op === "runCapabilityProviderInvoke") {
+      const capability = String(input.capability || "").trim();
+      const target = registry.capabilityProviders[capability];
+      if (!target) {
+        throw new Error("capability provider not found: " + capability);
+      }
+      const data = await Promise.resolve(target.provider.invoke(input.input));
+      emit({
+        ok: true,
+        data,
+        runtimeMessages: state.runtimeMessages
+      });
+      return;
+    }
+
+    if (op === "runLlmProviderResolveRequestUrl") {
+      const providerId = String(input.providerId || "").trim();
+      const target = registry.llmProviders[providerId];
+      if (!target) {
+        throw new Error("llm provider not found: " + providerId);
+      }
+      const requestUrl = await Promise.resolve(target.provider.resolveRequestUrl(input.route));
+      emit({
+        ok: true,
+        requestUrl: String(requestUrl || ""),
+        runtimeMessages: state.runtimeMessages
+      });
+      return;
+    }
+
+    if (op === "runLlmProviderSend") {
+      const providerId = String(input.providerId || "").trim();
+      const target = registry.llmProviders[providerId];
+      if (!target) {
+        throw new Error("llm provider not found: " + providerId);
+      }
+      const controller = new AbortController();
+      if (input.signalAborted === true) controller.abort();
+      const providerInput = {
+        ...toRecord(input.input),
+        signal: controller.signal
+      };
+      const response = await Promise.resolve(target.provider.send(providerInput));
+      emit({
+        ok: true,
+        response: await serializeResponse(response),
         runtimeMessages: state.runtimeMessages
       });
       return;
@@ -478,31 +730,74 @@ function parsePluginSandboxResult(output: unknown): Record<string, unknown> {
   );
 }
 
+type PluginSandboxRunnerOp =
+  | "describe"
+  | "runHook"
+  | "runHookRegistration"
+  | "runModeProviderInvoke"
+  | "runCapabilityProviderCanHandle"
+  | "runCapabilityProviderInvoke"
+  | "runLlmProviderResolveRequestUrl"
+  | "runLlmProviderSend";
+
 async function invokePluginSandboxRunnerInBrowser(input: {
   sessionId: string;
   modulePath: string;
   exportName: string;
-  op: "describe" | "runHook";
+  op: PluginSandboxRunnerOp;
   hook?: string;
+  handlerId?: string;
+  mode?: string;
+  capability?: string;
+  providerId?: string;
   payload?: unknown;
+  route?: unknown;
+  signalAborted?: boolean;
+  runnerInput?: unknown;
 }): Promise<Record<string, unknown>> {
   const sessionId =
     String(input.sessionId || "").trim() || PLUGIN_SANDBOX_DEFAULT_SESSION_ID;
+  const payload: Record<string, unknown> = {
+    op: input.op,
+    exportName: input.exportName,
+  };
+  if (input.op === "runHook" || input.op === "runHookRegistration") {
+    payload.hook = String(input.hook || "").trim();
+    if (input.op === "runHookRegistration") {
+      payload.handlerId = String(input.handlerId || "").trim();
+    }
+    payload.payload = input.payload;
+  }
+  if (input.op === "runModeProviderInvoke") {
+    payload.mode = String(input.mode || "").trim();
+    payload.input = input.runnerInput;
+  }
+  if (
+    input.op === "runCapabilityProviderCanHandle" ||
+    input.op === "runCapabilityProviderInvoke"
+  ) {
+    payload.capability = String(input.capability || "").trim();
+    payload.input = input.runnerInput;
+  }
+  if (input.op === "runLlmProviderResolveRequestUrl") {
+    payload.providerId = String(input.providerId || "").trim();
+    payload.route = input.route;
+  }
+  if (input.op === "runLlmProviderSend") {
+    payload.providerId = String(input.providerId || "").trim();
+    payload.input = input.runnerInput;
+    payload.signalAborted = input.signalAborted === true;
+  }
+  const payloadBase64 = encodeBase64Utf8(JSON.stringify(payload));
+  const moduleSourceBase64 = encodeBase64Utf8(
+    await readVirtualTextFile(input.modulePath, "plugin sandbox module", sessionId),
+  );
   await writeVirtualTextFile(
     PLUGIN_SANDBOX_RUNNER_PATH,
     PLUGIN_SANDBOX_RUNNER_SOURCE,
     sessionId,
   );
-  const payload: Record<string, unknown> = {
-    op: input.op,
-    exportName: input.exportName,
-  };
-  if (input.op === "runHook") {
-    payload.hook = String(input.hook || "").trim();
-    payload.payload = input.payload;
-  }
-  const payloadBase64 = encodeBase64Utf8(JSON.stringify(payload));
-  const command = `BBL_PLUGIN_INPUT_BASE64=${quoteForShellSingle(payloadBase64)} node ${PLUGIN_SANDBOX_RUNNER_PATH} ${input.modulePath}`;
+  const command = `BBL_PLUGIN_MODULE_SOURCE_BASE64=${quoteForShellSingle(moduleSourceBase64)} BBL_PLUGIN_INPUT_BASE64=${quoteForShellSingle(payloadBase64)} node ${PLUGIN_SANDBOX_RUNNER_PATH} ${input.modulePath}`;
   const raw = await invokeVirtualFrame({
     tool: "bash",
     args: {
@@ -525,11 +820,202 @@ async function invokePluginSandboxRunner(input: {
   sessionId: string;
   modulePath: string;
   exportName: string;
-  op: "describe" | "runHook";
+  op: PluginSandboxRunnerOp;
   hook?: string;
+  handlerId?: string;
+  mode?: string;
+  capability?: string;
+  providerId?: string;
   payload?: unknown;
+  route?: unknown;
+  signalAborted?: boolean;
+  runnerInput?: unknown;
 }): Promise<Record<string, unknown>> {
   return await invokePluginSandboxRunnerInBrowser(input);
+}
+
+interface PluginSandboxHookRegistrationView {
+  hook: string;
+  handlerId: string;
+  options: Record<string, unknown>;
+}
+
+interface PluginSandboxModeProviderView {
+  mode: string;
+  id: string;
+  priority?: number;
+}
+
+interface PluginSandboxCapabilityProviderView {
+  capability: string;
+  id: string;
+  mode?: string;
+  priority?: number;
+  hasCanHandle?: boolean;
+}
+
+interface PluginSandboxCapabilityPolicyView {
+  capability: string;
+  policy: Record<string, unknown>;
+}
+
+interface PluginSandboxLlmProviderView {
+  id: string;
+  staticRequestUrl?: string;
+}
+
+function normalizePluginSandboxHookRegistrations(
+  input: unknown,
+): PluginSandboxHookRegistrationView[] {
+  if (!Array.isArray(input)) return [];
+  const out: PluginSandboxHookRegistrationView[] = [];
+  const seen = new Set<string>();
+  for (const item of input) {
+    const row = toRecord(item);
+    const hook = String(row.hook || "").trim();
+    const handlerId = String(row.handlerId || "").trim();
+    if (!hook || !handlerId) continue;
+    const key = `${hook}:${handlerId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      hook,
+      handlerId,
+      options: toRecord(row.options),
+    });
+  }
+  return out;
+}
+
+function normalizePluginSandboxModeProviders(
+  input: unknown,
+): PluginSandboxModeProviderView[] {
+  if (!Array.isArray(input)) return [];
+  const out: PluginSandboxModeProviderView[] = [];
+  const seen = new Set<string>();
+  for (const item of input) {
+    const row = toRecord(item);
+    const mode = String(row.mode || "").trim();
+    const id = String(row.id || "").trim();
+    if (!mode || !id || seen.has(mode)) continue;
+    seen.add(mode);
+    out.push({
+      mode,
+      id,
+      ...(Number.isFinite(Number(row.priority))
+        ? { priority: Math.floor(Number(row.priority)) }
+        : {}),
+    });
+  }
+  return out;
+}
+
+function normalizePluginSandboxCapabilityProviders(
+  input: unknown,
+): PluginSandboxCapabilityProviderView[] {
+  if (!Array.isArray(input)) return [];
+  const out: PluginSandboxCapabilityProviderView[] = [];
+  const seen = new Set<string>();
+  for (const item of input) {
+    const row = toRecord(item);
+    const capability = String(row.capability || "").trim();
+    const id = String(row.id || "").trim();
+    if (!capability || !id || seen.has(capability)) continue;
+    seen.add(capability);
+    out.push({
+      capability,
+      id,
+      ...(String(row.mode || "").trim()
+        ? { mode: String(row.mode || "").trim() }
+        : {}),
+      ...(Number.isFinite(Number(row.priority))
+        ? { priority: Math.floor(Number(row.priority)) }
+        : {}),
+      ...(row.hasCanHandle === true ? { hasCanHandle: true } : {}),
+    });
+  }
+  return out;
+}
+
+function normalizePluginSandboxCapabilityPolicies(
+  input: unknown,
+): PluginSandboxCapabilityPolicyView[] {
+  if (!Array.isArray(input)) return [];
+  const out: PluginSandboxCapabilityPolicyView[] = [];
+  const seen = new Set<string>();
+  for (const item of input) {
+    const row = toRecord(item);
+    const capability = String(row.capability || "").trim();
+    if (!capability || seen.has(capability)) continue;
+    seen.add(capability);
+    out.push({
+      capability,
+      policy: toRecord(row.policy),
+    });
+  }
+  return out;
+}
+
+function normalizePluginSandboxTools(input: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(input)) return [];
+  const out: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+  for (const item of input) {
+    const row = toRecord(item);
+    const name = String(row.name || "").trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push(row);
+  }
+  return out;
+}
+
+function normalizePluginSandboxLlmProviders(
+  input: unknown,
+): PluginSandboxLlmProviderView[] {
+  if (!Array.isArray(input)) return [];
+  const out: PluginSandboxLlmProviderView[] = [];
+  const seen = new Set<string>();
+  for (const item of input) {
+    const row = toRecord(item);
+    const id = String(row.id || "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      ...(String(row.staticRequestUrl || "").trim()
+        ? { staticRequestUrl: String(row.staticRequestUrl || "").trim() }
+        : {}),
+    });
+  }
+  return out;
+}
+
+function toPluginSandboxRuntimeMessages(input: unknown): unknown[] {
+  return Array.isArray(input) ? input : [];
+}
+
+function emitPluginSandboxRuntimeMessages(messages: unknown[]): void {
+  for (const message of messages) {
+    emitPluginRuntimeMessage(message);
+  }
+}
+
+function toPluginSandboxHookResult(input: unknown): Record<string, unknown> {
+  return toRecord(toRecord(input).hookResult);
+}
+
+function normalizePluginSandboxHeaders(
+  input: unknown,
+): Record<string, string> {
+  const headers = toRecord(input);
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const name = String(key || "").trim();
+    if (!name) continue;
+    out[name] = String(value ?? "");
+  }
+  return out;
 }
 
 async function loadExtensionFactoryFromVirtualModule(input: {
@@ -544,83 +1030,583 @@ async function loadExtensionFactoryFromVirtualModule(input: {
     exportName: input.exportName,
     op: "describe",
   });
-  const discoveredHooks = toStringList(describe.hooks) || [];
-  const declaredHooks =
-    toStringList(toRecord(input.manifest.permissions).hooks) || [];
-  const hookSet = new Set<string>([...discoveredHooks, ...declaredHooks]);
-  const hooks = [...hookSet].filter(Boolean);
+  const hookRegistrations = normalizePluginSandboxHookRegistrations(
+    describe.hookRegistrations,
+  );
+  const modeProviders = normalizePluginSandboxModeProviders(
+    describe.modeProviders,
+  );
+  const capabilityProviders = normalizePluginSandboxCapabilityProviders(
+    describe.capabilityProviders,
+  );
+  const capabilityPolicies = normalizePluginSandboxCapabilityPolicies(
+    describe.capabilityPolicies,
+  );
+  const tools = normalizePluginSandboxTools(describe.tools);
+  const llmProviders = normalizePluginSandboxLlmProviders(describe.llmProviders);
 
   return (api) => {
-    for (const hookName of hooks) {
-      api.on(hookName as never, async (eventPayload: unknown) => {
-        const startedAt = Date.now();
-        try {
+    for (const registration of hookRegistrations) {
+      api.on(
+        registration.hook as never,
+        async (eventPayload: unknown) => {
+          const startedAt = Date.now();
+          try {
+            const executed = await invokePluginSandboxRunner({
+              sessionId: input.sessionId,
+              modulePath: input.modulePath,
+              exportName: input.exportName,
+              op: "runHookRegistration",
+              hook: registration.hook,
+              handlerId: registration.handlerId,
+              payload: eventPayload,
+            });
+
+            const runtimeMessages = toPluginSandboxRuntimeMessages(
+              executed.runtimeMessages,
+            );
+            emitPluginSandboxRuntimeMessages(runtimeMessages);
+
+            const hookResult = toPluginSandboxHookResult(executed);
+            emitPluginHookTrace({
+              traceType: "sw_hook",
+              pluginId: String(input.manifest.id || "").trim(),
+              hook: registration.hook,
+              handlerId: registration.handlerId,
+              modulePath: input.modulePath,
+              exportName: input.exportName,
+              sessionId: input.sessionId,
+              startedAt: new Date(startedAt).toISOString(),
+              durationMs: Math.max(0, Date.now() - startedAt),
+              requestPreview: previewJsonText(eventPayload),
+              responsePreview: previewJsonText(hookResult),
+              runtimeMessageCount: runtimeMessages.length,
+            });
+
+            const action = String(hookResult.action || "").trim();
+            if (action === "patch") {
+              return {
+                action: "patch",
+                patch: toRecord(hookResult.patch),
+              };
+            }
+            if (action === "block") {
+              const reason = String(hookResult.reason || "").trim();
+              return {
+                action: "block",
+                ...(reason ? { reason } : {}),
+              };
+            }
+            return {
+              action: "continue",
+            };
+          } catch (error) {
+            emitPluginHookTrace({
+              traceType: "sw_hook",
+              pluginId: String(input.manifest.id || "").trim(),
+              hook: registration.hook,
+              handlerId: registration.handlerId,
+              modulePath: input.modulePath,
+              exportName: input.exportName,
+              sessionId: input.sessionId,
+              startedAt: new Date(startedAt).toISOString(),
+              durationMs: Math.max(0, Date.now() - startedAt),
+              requestPreview: previewJsonText(eventPayload),
+              error: error instanceof Error ? error.message : String(error),
+            });
+            throw error;
+          }
+        },
+        registration.options,
+      );
+    }
+
+    for (const provider of modeProviders) {
+      api.registerModeProvider(provider.mode as never, {
+        id: provider.id,
+        mode: provider.mode as never,
+        ...(typeof provider.priority === "number"
+          ? { priority: provider.priority }
+          : {}),
+        invoke: async (providerInput) => {
           const executed = await invokePluginSandboxRunner({
             sessionId: input.sessionId,
             modulePath: input.modulePath,
             exportName: input.exportName,
-            op: "runHook",
-            hook: hookName,
-            payload: eventPayload,
+            op: "runModeProviderInvoke",
+            mode: provider.mode,
+            runnerInput: providerInput,
           });
+          emitPluginSandboxRuntimeMessages(
+            toPluginSandboxRuntimeMessages(executed.runtimeMessages),
+          );
+          return executed.data;
+        },
+      });
+    }
 
-          const runtimeMessages = Array.isArray(executed.runtimeMessages)
-            ? executed.runtimeMessages
-            : [];
-          for (const message of runtimeMessages) {
-            emitPluginRuntimeMessage(message);
-          }
-
-          const hookResult = toRecord(executed.hookResult);
-          emitPluginHookTrace({
-            traceType: "sw_hook",
-            pluginId: String(input.manifest.id || "").trim(),
-            hook: hookName,
+    for (const provider of capabilityProviders) {
+      api.registerCapabilityProvider(provider.capability as never, {
+        id: provider.id,
+        ...(provider.mode ? { mode: provider.mode as never } : {}),
+        ...(typeof provider.priority === "number"
+          ? { priority: provider.priority }
+          : {}),
+        ...(provider.hasCanHandle
+          ? {
+              canHandle: async (providerInput) => {
+                const executed = await invokePluginSandboxRunner({
+                  sessionId: input.sessionId,
+                  modulePath: input.modulePath,
+                  exportName: input.exportName,
+                  op: "runCapabilityProviderCanHandle",
+                  capability: provider.capability,
+                  runnerInput: providerInput,
+                });
+                emitPluginSandboxRuntimeMessages(
+                  toPluginSandboxRuntimeMessages(executed.runtimeMessages),
+                );
+                return executed.accepted === true;
+              },
+            }
+          : {}),
+        invoke: async (providerInput) => {
+          const executed = await invokePluginSandboxRunner({
+            sessionId: input.sessionId,
             modulePath: input.modulePath,
             exportName: input.exportName,
-            sessionId: input.sessionId,
-            startedAt: new Date(startedAt).toISOString(),
-            durationMs: Math.max(0, Date.now() - startedAt),
-            requestPreview: previewJsonText(eventPayload),
-            responsePreview: previewJsonText(hookResult),
-            runtimeMessageCount: runtimeMessages.length,
+            op: "runCapabilityProviderInvoke",
+            capability: provider.capability,
+            runnerInput: providerInput,
           });
+          emitPluginSandboxRuntimeMessages(
+            toPluginSandboxRuntimeMessages(executed.runtimeMessages),
+          );
+          return executed.data;
+        },
+      });
+    }
 
-          const action = String(hookResult.action || "").trim();
-          if (action === "patch") {
-            return {
-              action: "patch",
-              patch: toRecord(hookResult.patch),
-            };
+    for (const policy of capabilityPolicies) {
+      api.registerCapabilityPolicy(policy.capability as never, policy.policy);
+    }
+
+    for (const tool of tools) {
+      api.registerTool(tool as never);
+    }
+
+    for (const provider of llmProviders) {
+      api.registerProvider(provider.id, {
+        resolveRequestUrl(route) {
+          return (
+            String(provider.staticRequestUrl || "").trim() ||
+            String(route.llmBase || "").trim() ||
+            `plugin+sandbox://${provider.id}`
+          );
+        },
+        send: async (sendInput: LlmProviderSendInput) => {
+          let requestUrl = String(sendInput.requestUrl || "").trim();
+          const fallbackRequestUrl = String(sendInput.route.llmBase || "")
+            .trim();
+          if (!requestUrl || requestUrl === fallbackRequestUrl) {
+            const resolved = await invokePluginSandboxRunner({
+              sessionId: input.sessionId,
+              modulePath: input.modulePath,
+              exportName: input.exportName,
+              op: "runLlmProviderResolveRequestUrl",
+              providerId: provider.id,
+              route: sendInput.route,
+            });
+            emitPluginSandboxRuntimeMessages(
+              toPluginSandboxRuntimeMessages(resolved.runtimeMessages),
+            );
+            requestUrl = String(resolved.requestUrl || "").trim() || requestUrl;
           }
-          if (action === "block") {
-            const reason = String(hookResult.reason || "").trim();
-            return {
-              action: "block",
-              ...(reason ? { reason } : {}),
-            };
-          }
-          return {
-            action: "continue",
-          };
-        } catch (error) {
-          emitPluginHookTrace({
-            traceType: "sw_hook",
-            pluginId: String(input.manifest.id || "").trim(),
-            hook: hookName,
+          const executed = await invokePluginSandboxRunner({
+            sessionId: input.sessionId,
             modulePath: input.modulePath,
             exportName: input.exportName,
-            sessionId: input.sessionId,
-            startedAt: new Date(startedAt).toISOString(),
-            durationMs: Math.max(0, Date.now() - startedAt),
-            requestPreview: previewJsonText(eventPayload),
-            error: error instanceof Error ? error.message : String(error),
+            op: "runLlmProviderSend",
+            providerId: provider.id,
+            signalAborted: sendInput.signal.aborted,
+            runnerInput: {
+              sessionId: sendInput.sessionId,
+              step: sendInput.step,
+              route: sendInput.route,
+              payload: sendInput.payload,
+              ...(requestUrl ? { requestUrl } : {}),
+            },
           });
-          throw error;
-        }
+          emitPluginSandboxRuntimeMessages(
+            toPluginSandboxRuntimeMessages(executed.runtimeMessages),
+          );
+          const response = toRecord(executed.response);
+          return new Response(String(response.bodyText || ""), {
+            status: Number(response.status) || 200,
+            statusText: String(response.statusText || ""),
+            headers: normalizePluginSandboxHeaders(response.headers),
+          });
+        },
       });
     }
   };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function describePluginModuleValue(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  if (value instanceof Date) return "Date";
+  if (value instanceof RegExp) return "RegExp";
+  if (typeof value === "function") return "function";
+  if (typeof value === "object") {
+    return value?.constructor?.name || "object";
+  }
+  return typeof value;
+}
+
+function normalizeFunctionModuleSource(
+  value: (...args: any[]) => unknown,
+  path: string,
+): string {
+  const source = Function.prototype.toString.call(value).trim();
+  if (!source) {
+    throw new Error(`${path} 函数源码为空`);
+  }
+  if (/^(async\s+)?function\b/.test(source)) {
+    return `(${source})`;
+  }
+  if (/^(get|set)\s+[A-Za-z_$][\w$]*\s*\(/.test(source)) {
+    throw new Error(`${path} 暂不支持 getter/setter 序列化`);
+  }
+  if (source.includes("=>")) {
+    return `(${source})`;
+  }
+  if (/^(async\s+)?function\b/.test(source) || /^class\b/.test(source)) {
+    return `(${source})`;
+  }
+  if (/^async\s+[A-Za-z_$][\w$]*\s*\(/.test(source)) {
+    return `(async function ${source.slice("async ".length)})`;
+  }
+  if (/^[A-Za-z_$][\w$]*\s*\(/.test(source)) {
+    return `(function ${source})`;
+  }
+  return `(${source})`;
+}
+
+function serializeValueToModuleSource(
+  value: unknown,
+  path: string,
+  seen = new WeakSet<object>(),
+): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (Number.isNaN(value)) return "Number.NaN";
+    if (value === Number.POSITIVE_INFINITY) return "Number.POSITIVE_INFINITY";
+    if (value === Number.NEGATIVE_INFINITY) return "Number.NEGATIVE_INFINITY";
+    return String(value);
+  }
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "bigint") return `${value}n`;
+  if (typeof value === "function") {
+    return normalizeFunctionModuleSource(value, path);
+  }
+  if (Array.isArray(value)) {
+    return `[${value
+      .map((item, index) =>
+        serializeValueToModuleSource(item, `${path}[${index}]`, seen),
+      )
+      .join(", ")}]`;
+  }
+  if (value instanceof Date) {
+    return `new Date(${JSON.stringify(value.toISOString())})`;
+  }
+  if (value instanceof RegExp) {
+    return value.toString();
+  }
+  if (!isPlainObject(value)) {
+    throw new Error(
+      `${path} 含不支持的值类型: ${describePluginModuleValue(value)}`,
+    );
+  }
+  if (seen.has(value)) {
+    throw new Error(`${path} 存在循环引用，无法持久化`);
+  }
+  seen.add(value);
+  try {
+    return `{${Object.entries(value)
+      .map(
+        ([key, entryValue]) =>
+          `${JSON.stringify(key)}: ${serializeValueToModuleSource(
+            entryValue,
+            `${path}.${key}`,
+            seen,
+          )}`,
+      )
+      .join(", ")}}`;
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function buildDeclarativeLlmProviderModuleSource(
+  spec: DeclarativeLlmProviderSpec,
+): string {
+  const headersSource = serializeValueToModuleSource(
+    spec.headers,
+    `llmProviders.${spec.id}.headers`,
+  );
+  const requestUrl = spec.baseUrl + spec.endpointPath;
+  return `{
+    id: ${JSON.stringify(spec.id)},
+    __bblStaticRequestUrl: ${JSON.stringify(requestUrl)},
+    resolveRequestUrl(route) {
+      return ${JSON.stringify(requestUrl)};
+    },
+    async send(input) {
+      const requestUrl = String(input.requestUrl || "").trim() || this.resolveRequestUrl(input.route);
+      const authHeader = (() => {
+        if (${JSON.stringify(spec.authMode)} === "none") return "";
+        if (${JSON.stringify(spec.authMode)} === "static_bearer") {
+          return "Bearer " + ${JSON.stringify(spec.staticApiKey)};
+        }
+        return "Bearer " + String(input.route && input.route.llmKey || "");
+      })();
+      const headers = {
+        "content-type": "application/json",
+        ...${headersSource}
+      };
+      if (authHeader) {
+        headers.authorization = authHeader;
+      }
+      return await fetch(requestUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(input.payload),
+        signal: input.signal
+      });
+    }
+  }`;
+}
+
+function buildDefinitionPluginModuleSource(
+  source: Record<string, unknown>,
+): string {
+  const lines = ["module.exports = function registerPlugin(pi) {"];
+  const hooks = toRecord(source.hooks);
+  for (const [hookName, hookEntries] of Object.entries(hooks)) {
+    const list = Array.isArray(hookEntries) ? hookEntries : [hookEntries];
+    for (let index = 0; index < list.length; index += 1) {
+      const entry = list[index];
+      const row = typeof entry === "function" ? {} : toRecord(entry);
+      const handler =
+        typeof entry === "function" ? entry : row.handler;
+      if (typeof handler !== "function") {
+        throw new Error(`plugin.hooks.${hookName}[${index}] handler 必须是函数`);
+      }
+      const options =
+        typeof entry === "function" ? {} : toRecord(row.options);
+      lines.push(
+        `  pi.on(${JSON.stringify(hookName)}, ${serializeValueToModuleSource(
+          handler,
+          `hooks.${hookName}[${index}].handler`,
+        )}, ${serializeValueToModuleSource(
+          options,
+          `hooks.${hookName}[${index}].options`,
+        )});`,
+      );
+    }
+  }
+
+  const providers = toRecord(source.providers);
+  const modeProviders = toRecord(providers.modes);
+  for (const [mode, provider] of Object.entries(modeProviders)) {
+    lines.push(
+      `  pi.registerModeProvider(${JSON.stringify(mode)}, ${serializeValueToModuleSource(
+        provider,
+        `providers.modes.${mode}`,
+      )});`,
+    );
+  }
+  const capabilityProviders = toRecord(providers.capabilities);
+  for (const [capability, provider] of Object.entries(capabilityProviders)) {
+    lines.push(
+      `  pi.registerCapabilityProvider(${JSON.stringify(
+        capability,
+      )}, ${serializeValueToModuleSource(
+        provider,
+        `providers.capabilities.${capability}`,
+      )});`,
+    );
+  }
+
+  const policies = toRecord(source.policies);
+  const capabilityPolicies = toRecord(policies.capabilities);
+  for (const [capability, policy] of Object.entries(capabilityPolicies)) {
+    lines.push(
+      `  pi.registerCapabilityPolicy(${JSON.stringify(
+        capability,
+      )}, ${serializeValueToModuleSource(
+        policy,
+        `policies.capabilities.${capability}`,
+      )});`,
+    );
+  }
+
+  const tools = Array.isArray(source.tools) ? source.tools : [];
+  for (let index = 0; index < tools.length; index += 1) {
+    lines.push(
+      `  pi.registerTool(${serializeValueToModuleSource(
+        tools[index],
+        `tools[${index}]`,
+      )});`,
+    );
+  }
+
+  const llmProviders = Array.isArray(source.llmProviders)
+    ? source.llmProviders
+    : [];
+  for (let index = 0; index < llmProviders.length; index += 1) {
+    const provider = llmProviders[index];
+    const row = toRecord(provider);
+    const providerId = String(row.id || "").trim();
+    if (!providerId) {
+      throw new Error(`llmProviders[${index}] 缺少 id`);
+    }
+    const providerSource =
+      typeof row.resolveRequestUrl === "function" &&
+      typeof row.send === "function"
+        ? `{
+    id: ${JSON.stringify(providerId)},
+    ${
+      String(row.__bblStaticRequestUrl || row.staticRequestUrl || "").trim()
+        ? `__bblStaticRequestUrl: ${JSON.stringify(
+            String(
+              row.__bblStaticRequestUrl || row.staticRequestUrl || "",
+            ).trim(),
+          )},`
+        : ""
+    }
+    resolveRequestUrl: ${serializeValueToModuleSource(
+      row.resolveRequestUrl,
+      `llmProviders[${index}].resolveRequestUrl`,
+    )},
+    send: ${serializeValueToModuleSource(
+      row.send,
+      `llmProviders[${index}].send`,
+    )}
+  }`
+        : buildDeclarativeLlmProviderModuleSource(
+            normalizeDeclarativeLlmProviderSpec(provider),
+          );
+    lines.push(
+      `  pi.registerProvider(${JSON.stringify(providerId)}, ${providerSource});`,
+    );
+  }
+
+  lines.push("};");
+  return lines.join("\n");
+}
+
+async function materializeDefinitionPluginSource(
+  source: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const manifest = normalizePluginManifest(source.manifest);
+  const paths = buildPluginVirtualSourcePaths(manifest.id);
+  const moduleSessionId =
+    String(
+      source.moduleSessionId ||
+        source.sessionId ||
+        PLUGIN_SANDBOX_DEFAULT_SESSION_ID,
+    ).trim() || PLUGIN_SANDBOX_DEFAULT_SESSION_ID;
+  const moduleSource = buildDefinitionPluginModuleSource({
+    ...source,
+    manifest,
+  });
+  await writeVirtualTextFile(paths.indexPath, moduleSource, moduleSessionId);
+  const next: Record<string, unknown> = {
+    manifest,
+    modulePath: paths.indexPath,
+    exportName: "default",
+    moduleSessionId,
+  };
+  const copyFields = [
+    "uiModuleUrl",
+    "uiModulePath",
+    "uiModule",
+    "uiExportName",
+    "uiModuleSessionId",
+    "sessionId",
+  ] as const;
+  for (const key of copyFields) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+    const value = source[key];
+    if (value === undefined) continue;
+    next[key] = value;
+  }
+  await writeVirtualTextFile(
+    paths.packagePath,
+    JSON.stringify(next, null, 2),
+    moduleSessionId,
+  );
+  return next;
+}
+
+async function materializeExtensionFactoryPluginSource(
+  source: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const manifest = normalizePluginManifest(source.manifest);
+  const setup = source.setup;
+  if (typeof setup !== "function") {
+    throw new Error("plugin.setup 必须是函数");
+  }
+  const paths = buildPluginVirtualSourcePaths(manifest.id);
+  const moduleSessionId =
+    String(
+      source.moduleSessionId ||
+        source.sessionId ||
+        PLUGIN_SANDBOX_DEFAULT_SESSION_ID,
+    ).trim() || PLUGIN_SANDBOX_DEFAULT_SESSION_ID;
+  const moduleSource = `module.exports = ${serializeValueToModuleSource(
+    setup,
+    "setup",
+  )};`;
+  await writeVirtualTextFile(paths.indexPath, moduleSource, moduleSessionId);
+  const next: Record<string, unknown> = {
+    manifest,
+    modulePath: paths.indexPath,
+    exportName: "default",
+    moduleSessionId,
+  };
+  const copyFields = [
+    "uiModuleUrl",
+    "uiModulePath",
+    "uiModule",
+    "uiExportName",
+    "uiModuleSessionId",
+    "sessionId",
+  ] as const;
+  for (const key of copyFields) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+    const value = source[key];
+    if (value === undefined) continue;
+    next[key] = value;
+  }
+  await writeVirtualTextFile(
+    paths.packagePath,
+    JSON.stringify(next, null, 2),
+    moduleSessionId,
+  );
+  return next;
 }
 
 async function materializeInlinePluginSources(
@@ -1085,20 +2071,8 @@ async function persistDefinitionPluginRegistration(
   source: Record<string, unknown>,
   enabled: boolean,
 ): Promise<PersistedPluginRecord | null> {
-  const clonedSource = clonePersistableRecord(source);
-  const manifest = toRecord(toRecord(clonedSource).manifest);
-  const pluginId = String(manifest.id || "").trim();
-  if (!clonedSource || typeof clonedSource !== "object" || !pluginId) {
-    return null;
-  }
-  return upsertPersistedPluginRecord({
-    pluginId,
-    kind: "definition",
-    enabled,
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
-    source: clonedSource as Record<string, unknown>,
-  });
+  const compiledSource = await materializeDefinitionPluginSource(source);
+  return await persistExtensionPluginRegistration(compiledSource, enabled);
 }
 
 function defaultExamplePluginSources(): Array<Record<string, unknown>> {
@@ -2788,11 +3762,13 @@ async function handleSession(
   if (action === "brain.session.delete") {
     const sessionId = requireSessionId(payload);
     const metaKey = `session:${sessionId}:meta`;
+    orchestrator.stop(sessionId);
+    await orchestrator.flushSessionTraceWrites(sessionId);
     await removeSessionMeta(sessionId);
     const removedTraceCount = await removeTraceRecords(`session-${sessionId}`);
     const removedVirtualKeys = await clearVirtualFilesForSession(sessionId);
     const index = await removeSessionIndexEntry(sessionId, nowIso());
-    orchestrator.stop(sessionId);
+    await orchestrator.evictSessionRuntime(sessionId);
     return ok({
       sessionId,
       deleted: true,
@@ -2856,11 +3832,16 @@ async function handleStep(
   return fail(`unsupported step action: ${type}`);
 }
 
-async function handleStorage(message: unknown): Promise<RuntimeResult> {
+async function handleStorage(
+  orchestrator: BrainOrchestrator,
+  message: unknown,
+): Promise<RuntimeResult> {
   const payload = toRecord(message);
   const action = String(payload.type || "");
   if (action === "brain.storage.reset") {
-    return ok(await resetSessionStore(toRecord(payload.options)));
+    const result = await resetSessionStore(toRecord(payload.options));
+    await orchestrator.resetRuntimeState();
+    return ok(result);
   }
   if (action === "brain.storage.init") {
     return ok(await initSessionIndex());
@@ -3729,9 +4710,10 @@ async function handleBrainPlugin(
       source,
       current?.enabled === true,
     );
-    if (!isPluginPersistenceHydrate) {
-      await persistExtensionPluginRegistration(
-        {
+    try {
+      if (!isPluginPersistenceHydrate) {
+        const persistenceSourceBase = {
+          ...source,
           manifest,
           moduleUrl,
           exportName,
@@ -3745,18 +4727,39 @@ async function handleBrainPlugin(
                   : {}),
               }
             : {}),
-        },
-        current?.enabled === true,
-      );
-    }
-    if (uiDescriptor) {
-      await upsertUiExtensionDescriptor(uiDescriptor);
-      if (!isPluginPersistenceHydrate) {
-        notifyUiExtensionLifecycle(
-          "brain.plugin.ui_extension.registered",
-          uiDescriptor,
+        } as Record<string, unknown>;
+        const persistenceSource =
+          typeof setupRaw === "function" && !String(moduleUrl || "").trim()
+            ? await materializeExtensionFactoryPluginSource(
+                persistenceSourceBase,
+              )
+            : persistenceSourceBase;
+        const persisted = await persistExtensionPluginRegistration(
+          persistenceSource,
+          current?.enabled === true,
         );
+        if (!persisted) {
+          throw new Error(`plugin 持久化失败: ${pluginId}`);
+        }
       }
+      if (uiDescriptor) {
+        await upsertUiExtensionDescriptor(uiDescriptor);
+        if (!isPluginPersistenceHydrate) {
+          notifyUiExtensionLifecycle(
+            "brain.plugin.ui_extension.registered",
+            uiDescriptor,
+          );
+        }
+      }
+    } catch (error) {
+      orchestrator.unregisterPlugin(pluginId);
+      if (uiDescriptor) {
+        await removeUiExtensionDescriptor(pluginId).catch(() => null);
+      }
+      if (!isPluginPersistenceHydrate) {
+        await removePersistedPluginRecord(pluginId).catch(() => false);
+      }
+      return fail(error);
     }
     return ok({
       pluginId,
@@ -3789,15 +4792,6 @@ async function handleBrainPlugin(
       uiSource,
       current?.enabled === true,
     );
-    if (uiDescriptor) {
-      await upsertUiExtensionDescriptor(uiDescriptor);
-      if (!isPluginPersistenceHydrate) {
-        notifyUiExtensionLifecycle(
-          "brain.plugin.ui_extension.registered",
-          uiDescriptor,
-        );
-      }
-    }
     const persistedDefinitionSource = {
       ...pluginRaw,
       ...("uiModuleUrl" in payload ? { uiModuleUrl: payload.uiModuleUrl } : {}),
@@ -3816,11 +4810,34 @@ async function handleBrainPlugin(
         : {}),
       ...("sessionId" in payload ? { sessionId: payload.sessionId } : {}),
     } as Record<string, unknown>;
-    if (!isPluginPersistenceHydrate) {
-      await persistDefinitionPluginRegistration(
-        persistedDefinitionSource,
-        current?.enabled === true,
-      );
+    try {
+      if (!isPluginPersistenceHydrate) {
+        const persisted = await persistDefinitionPluginRegistration(
+          persistedDefinitionSource,
+          current?.enabled === true,
+        );
+        if (!persisted) {
+          throw new Error(`plugin 持久化失败: ${pluginId}`);
+        }
+      }
+      if (uiDescriptor) {
+        await upsertUiExtensionDescriptor(uiDescriptor);
+        if (!isPluginPersistenceHydrate) {
+          notifyUiExtensionLifecycle(
+            "brain.plugin.ui_extension.registered",
+            uiDescriptor,
+          );
+        }
+      }
+    } catch (error) {
+      orchestrator.unregisterPlugin(pluginId);
+      if (uiDescriptor) {
+        await removeUiExtensionDescriptor(pluginId).catch(() => null);
+      }
+      if (!isPluginPersistenceHydrate) {
+        await removePersistedPluginRecord(pluginId).catch(() => false);
+      }
+      return fail(error);
     }
     return ok({
       pluginId,
@@ -4327,7 +5344,7 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
         }
 
         if (type.startsWith("brain.storage.")) {
-          return await applyAfter(await handleStorage(routeMessage));
+          return await applyAfter(await handleStorage(orchestrator, routeMessage));
         }
 
         if (type.startsWith("brain.skill.")) {
