@@ -4,6 +4,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createCursorHelpWebProvider, handleWebChatRuntimeMessage } from "../web-chat-executor.browser";
 import type { LlmResolvedRoute } from "../llm-provider";
 import { CURSOR_HELP_WEB_API_KEY, CURSOR_HELP_WEB_BASE_URL } from "../../../shared/llm-provider-config";
+import { CURSOR_HELP_REWRITE_STRATEGY, CURSOR_HELP_RUNTIME_VERSION } from "../../../shared/cursor-help-runtime-meta";
+
+const CURSOR_HELP_SESSION_SLOT_STORAGE_KEY = "cursor_help_web.session_slots";
 
 function createRoute(): LlmResolvedRoute {
   return {
@@ -27,6 +30,7 @@ function createRoute(): LlmResolvedRoute {
 }
 
 function buildChromeMock() {
+  const tabRemovedListeners: Array<(tabId: number, removeInfo: { windowId: number; isWindowClosing: boolean }) => void> = [];
   const sendMessage = vi.fn(async (_tabId: number, message: Record<string, unknown>) => {
     const type = String(message.type || "").trim();
     if (type === "webchat.inspect") {
@@ -39,7 +43,12 @@ function buildChromeMock() {
         url: "https://cursor.com/help",
         selectedModel: "Sonnet 4.6",
         availableModels: ["Sonnet 4.6"],
-        senderKind: "react_chat_input_on_submit"
+        senderKind: "react_chat_input_on_submit",
+        pageRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
+        contentRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
+        runtimeExpectedVersion: CURSOR_HELP_RUNTIME_VERSION,
+        rewriteStrategy: CURSOR_HELP_REWRITE_STRATEGY,
+        runtimeMismatch: false
       };
     }
     if (type === "webchat.execute" || type === "webchat.abort") {
@@ -57,7 +66,12 @@ function buildChromeMock() {
     })),
     query: vi.fn(async () => []),
     sendMessage,
-    update: vi.fn(async (tabId: number) => ({ id: tabId }))
+    update: vi.fn(async (tabId: number) => ({ id: tabId })),
+    onRemoved: {
+      addListener: vi.fn((listener: (tabId: number, removeInfo: { windowId: number; isWindowClosing: boolean }) => void) => {
+        tabRemovedListeners.push(listener);
+      })
+    }
   };
   (chrome as unknown as Record<string, unknown>).windows = {
     create: vi.fn(),
@@ -66,7 +80,17 @@ function buildChromeMock() {
   (chrome as unknown as Record<string, unknown>).scripting = {
     executeScript: vi.fn(async () => [])
   };
-  return { sendMessage };
+  return {
+    sendMessage,
+    emitTabRemoved(tabId: number, windowId = 2) {
+      for (const listener of tabRemovedListeners) {
+        listener(tabId, {
+          windowId,
+          isWindowClosing: false
+        });
+      }
+    }
+  };
 }
 
 async function readResponseText(response: Response): Promise<string> {
@@ -222,5 +246,151 @@ describe("web-chat-executor.browser", () => {
       transportType: "stream_end"
     });
     await readResponseText(first);
+  });
+
+  it("rejects stale runtime version before execute", async () => {
+    const sendMessage = (chrome.tabs as unknown as Record<string, unknown>).sendMessage as ReturnType<typeof vi.fn>;
+    (chrome.windows as unknown as Record<string, unknown>).create = vi.fn(async () => ({
+      tabs: [
+        {
+          id: 11,
+          status: "complete",
+          url: "https://cursor.com/help",
+          windowId: 3
+        }
+      ]
+    }));
+    sendMessage.mockImplementation(async (_tabId: number, message: Record<string, unknown>) => {
+      const type = String(message.type || "").trim();
+      if (type === "webchat.inspect") {
+        return {
+          ok: true,
+          pageHookReady: true,
+          fetchHookReady: true,
+          senderReady: true,
+          canExecute: false,
+          url: "https://cursor.com/help",
+          selectedModel: "Sonnet 4.6",
+          availableModels: ["Sonnet 4.6"],
+          senderKind: "react_chat_input_on_submit",
+          pageRuntimeVersion: "stale-runtime",
+          contentRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
+          runtimeExpectedVersion: CURSOR_HELP_RUNTIME_VERSION,
+          rewriteStrategy: CURSOR_HELP_REWRITE_STRATEGY,
+          runtimeMismatch: true,
+          runtimeMismatchReason: "Cursor Help 页面运行时版本不一致。page=stale-runtime expected=current"
+        };
+      }
+      if (type === "webchat.execute" || type === "webchat.abort") {
+        return { ok: true };
+      }
+      throw new Error(`unexpected tab message: ${type}`);
+    });
+
+    const provider = createCursorHelpWebProvider();
+    await expect(
+      provider.send({
+        sessionId: "stale-runtime-session",
+        step: 1,
+        route: createRoute(),
+        signal: new AbortController().signal,
+        payload: {
+          stream: true,
+          messages: [{ role: "user", content: "Say hello" }],
+          tools: [],
+          tool_choice: "auto"
+        }
+      })
+    ).rejects.toThrow("Cursor Help 运行时版本不一致");
+
+    expect(
+      sendMessage.mock.calls.some(
+        ([, message]) => String((message as Record<string, unknown>).type || "") === "webchat.execute"
+      )
+    ).toBe(false);
+  });
+
+  it("clears bound session slot when the Cursor Help tab closes", async () => {
+    const { emitTabRemoved } = buildChromeMock();
+    createCursorHelpWebProvider();
+
+    await chrome.storage.local.set({
+      [CURSOR_HELP_SESSION_SLOT_STORAGE_KEY]: {
+        "session-stale": {
+          sessionId: "session-stale",
+          tabId: 7,
+          windowId: 2,
+          lastKnownUrl: "https://cursor.com/help",
+          lastReadyAt: 1
+        },
+        "session-keep": {
+          sessionId: "session-keep",
+          tabId: 9,
+          windowId: 2,
+          lastKnownUrl: "https://cursor.com/help",
+          lastReadyAt: 1
+        }
+      }
+    });
+
+    emitTabRemoved(7);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const stored = await chrome.storage.local.get(CURSOR_HELP_SESSION_SLOT_STORAGE_KEY);
+    expect(stored[CURSOR_HELP_SESSION_SLOT_STORAGE_KEY]).toEqual({
+      "session-keep": {
+        sessionId: "session-keep",
+        tabId: 9,
+        windowId: 2,
+        lastKnownUrl: "https://cursor.com/help",
+        lastReadyAt: 1
+      }
+    });
+  });
+
+  it("drops the stale slot binding after startup timeout before any request_started event", async () => {
+    vi.useFakeTimers();
+    try {
+      buildChromeMock();
+      const provider = createCursorHelpWebProvider();
+
+      await chrome.storage.local.set({
+        [CURSOR_HELP_SESSION_SLOT_STORAGE_KEY]: {
+          "session-stale": {
+            sessionId: "session-stale",
+            tabId: 7,
+            windowId: 2,
+            lastKnownUrl: "https://cursor.com/help",
+            lastReadyAt: 1
+          }
+        }
+      });
+
+      const response = await provider.send({
+        sessionId: "session-stale",
+        step: 1,
+        route: createRoute(),
+        signal: new AbortController().signal,
+        payload: {
+          stream: true,
+          messages: [{ role: "user", content: "Say hello" }],
+          tools: [],
+          tool_choice: "auto"
+        }
+      });
+
+      const textErrorPromise = readResponseText(response).catch((error) => error);
+      await vi.advanceTimersByTimeAsync(20_000);
+      const error = await textErrorPromise;
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain("网页 provider 请求未启动");
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const stored = await chrome.storage.local.get(CURSOR_HELP_SESSION_SLOT_STORAGE_KEY);
+      expect(stored[CURSOR_HELP_SESSION_SLOT_STORAGE_KEY]).toEqual({});
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

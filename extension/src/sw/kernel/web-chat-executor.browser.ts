@@ -12,6 +12,7 @@ import {
   resolveCursorHelpApiModel,
   type CursorHelpSenderInspect
 } from "../../shared/cursor-help-protocol";
+import { CURSOR_HELP_RUNTIME_VERSION } from "../../shared/cursor-help-runtime-meta";
 import type { LlmProviderSendInput } from "./llm-provider";
 
 type JsonRecord = Record<string, unknown>;
@@ -68,6 +69,9 @@ const encoder = new TextEncoder();
 const CONTENT_SCRIPT_FILE = "assets/cursor-help-content.js";
 const PAGE_HOOK_SCRIPT_FILE = "assets/cursor-help-page-hook.js";
 const CURSOR_HELP_SESSION_SLOT_STORAGE_KEY = "cursor_help_web.session_slots";
+const CURSOR_HELP_CONTAINER_WIDTH = 1280;
+const CURSOR_HELP_CONTAINER_HEIGHT = 900;
+let cursorHelpSlotLifecycleBoundTabs: typeof chrome.tabs | null = null;
 
 function emitProviderDebugLog(step: string, status: "running" | "done" | "failed", detail: string): void {
   void chrome.runtime.sendMessage({
@@ -85,6 +89,30 @@ function emitProviderDebugLog(step: string, status: "running" | "done" | "failed
 
 function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" ? (value as JsonRecord) : {};
+}
+
+function formatRewriteDebugSummary(raw: unknown): string {
+  const debug = toRecord(raw);
+  if (Object.keys(debug).length <= 0) return "";
+  const targetMessageIndex = debug.targetMessageIndex;
+  const targetLabel =
+    typeof targetMessageIndex === "number"
+      ? `messages[${targetMessageIndex}]`
+      : String(debug.targetKind || "").trim() === "input"
+        ? "input"
+        : "none";
+  return [
+    `runtime=${String(debug.runtimeVersion || "").trim() || CURSOR_HELP_RUNTIME_VERSION}`,
+    `strategy=${String(debug.rewriteStrategy || "").trim() || "(unknown)"}`,
+    `target=${targetLabel}`,
+    `targetKind=${String(debug.targetKind || "").trim() || "none"}`,
+    `system=${debug.systemMessageInjected === true ? "1" : "0"}`,
+    `user=${debug.userPromptInjected === true ? "1" : "0"}`,
+    `promptHash=${String(debug.compiledPromptHash || "").trim() || "-"}`,
+    `promptLen=${Number(debug.compiledPromptLength || 0)}`,
+    `origLen=${Number(debug.originalTargetLength || 0)}`,
+    `nextLen=${Number(debug.rewrittenTargetLength || 0)}`
+  ].join(" ");
 }
 
 function buildChunk(requestId: string, model: string, delta: JsonRecord, finishReason: string | null = null): string {
@@ -172,6 +200,19 @@ function failExecution(entry: PendingExecution, error: string): void {
   ACTIVE_BY_REQUEST_ID.delete(entry.requestId);
   ACTIVE_REQUEST_ID_BY_TAB.delete(entry.tabId);
   ACTIVE_REQUEST_ID_BY_SESSION.delete(entry.sessionId);
+  if (entry.startedAt === null) {
+    void clearSessionSlotIfMatches(entry.sessionId, entry.tabId)
+      .then(() => {
+        emitProviderDebugLog(
+          "provider.slot_reset",
+          "done",
+          `session=${entry.sessionId} startup failed, reset slot tab=${entry.tabId}`
+        );
+      })
+      .catch(() => {
+        // noop
+      });
+  }
   if (entry.controller) {
     entry.controller.error(new Error(error));
   }
@@ -229,18 +270,27 @@ async function inspectCursorTab(tabId: number): Promise<CursorHelpInspectResult 
   const pageHookReady = row.pageHookReady === true || row.isReady === true;
   const fetchHookReady = row.fetchHookReady === true;
   const senderReady = row.senderReady === true;
+  const runtimeMismatch = row.runtimeMismatch === true;
   return {
     pageHookReady,
     fetchHookReady,
     senderReady,
-    canExecute: row.canExecute === true || (pageHookReady && fetchHookReady && senderReady),
+    canExecute:
+      row.canExecute === true ||
+      (!("canExecute" in row) && pageHookReady && fetchHookReady && senderReady && !runtimeMismatch),
     url: String(row.url || ""),
     selectedModel: String(row.selectedModel || "").trim() || undefined,
     availableModels: Array.isArray(row.availableModels)
       ? row.availableModels.map((item) => String(item || "").trim()).filter(Boolean)
       : undefined,
     senderKind: String(row.senderKind || "").trim() || undefined,
-    lastSenderError: String(row.lastSenderError || "").trim() || undefined
+    lastSenderError: String(row.lastSenderError || "").trim() || undefined,
+    pageRuntimeVersion: String(row.pageRuntimeVersion || "").trim() || undefined,
+    contentRuntimeVersion: String(row.contentRuntimeVersion || "").trim() || undefined,
+    runtimeExpectedVersion: String(row.runtimeExpectedVersion || "").trim() || undefined,
+    rewriteStrategy: String(row.rewriteStrategy || "").trim() || undefined,
+    runtimeMismatch,
+    runtimeMismatchReason: String(row.runtimeMismatchReason || "").trim() || undefined
   };
 }
 
@@ -284,9 +334,7 @@ async function loadSessionSlots(): Promise<Record<string, CursorHelpSlotRecord>>
   return slots;
 }
 
-async function saveSessionSlot(slot: CursorHelpSlotRecord): Promise<void> {
-  const slots = await loadSessionSlots();
-  slots[slot.sessionId] = slot;
+async function persistSessionSlots(slots: Record<string, CursorHelpSlotRecord>): Promise<void> {
   await chrome.storage.local
     .set({
       [CURSOR_HELP_SESSION_SLOT_STORAGE_KEY]: slots
@@ -296,16 +344,48 @@ async function saveSessionSlot(slot: CursorHelpSlotRecord): Promise<void> {
     });
 }
 
+async function saveSessionSlot(slot: CursorHelpSlotRecord): Promise<void> {
+  const slots = await loadSessionSlots();
+  slots[slot.sessionId] = slot;
+  await persistSessionSlots(slots);
+}
+
 async function clearSessionSlot(sessionId: string): Promise<void> {
   const slots = await loadSessionSlots();
   delete slots[sessionId];
-  await chrome.storage.local
-    .set({
-      [CURSOR_HELP_SESSION_SLOT_STORAGE_KEY]: slots
-    })
-    .catch(() => {
-      // noop
-    });
+  await persistSessionSlots(slots);
+}
+
+async function clearSessionSlotIfMatches(sessionId: string, tabId: number): Promise<void> {
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId || !Number.isInteger(tabId) || tabId <= 0) return;
+  const slots = await loadSessionSlots();
+  if (Number(slots[normalizedSessionId]?.tabId) !== tabId) return;
+  delete slots[normalizedSessionId];
+  await persistSessionSlots(slots);
+}
+
+async function clearSessionSlotsByTabId(tabId: number): Promise<void> {
+  if (!Number.isInteger(tabId) || tabId <= 0) return;
+  const slots = await loadSessionSlots();
+  let changed = false;
+  for (const [sessionId, slot] of Object.entries(slots)) {
+    if (Number(slot.tabId) !== tabId) continue;
+    delete slots[sessionId];
+    changed = true;
+  }
+  if (!changed) return;
+  await persistSessionSlots(slots);
+}
+
+function ensureCursorHelpSlotLifecycle(): void {
+  const tabsApi = chrome.tabs;
+  if (!tabsApi?.onRemoved?.addListener) return;
+  if (cursorHelpSlotLifecycleBoundTabs === tabsApi) return;
+  cursorHelpSlotLifecycleBoundTabs = tabsApi;
+  tabsApi.onRemoved.addListener((tabId) => {
+    void clearSessionSlotsByTabId(tabId);
+  });
 }
 
 async function sendTabMessageWithRetry(tabId: number, message: Record<string, unknown>, retries = 12): Promise<unknown> {
@@ -325,11 +405,20 @@ function formatInspectFailure(inspect: CursorHelpInspectResult | null): string {
   if (!inspect) return "未找到可用的 Cursor Help 页面。请确认页面已完成加载。";
   if (!inspect.pageHookReady) return "Cursor Help 页面 hook 未就绪，请稍后重试。";
   if (!inspect.fetchHookReady) return "Cursor Help 请求接管未就绪，请稍后重试。";
+  if (inspect.runtimeMismatch) {
+    const suffix = inspect.runtimeMismatchReason ? ` ${inspect.runtimeMismatchReason}` : "";
+    return `Cursor Help 运行时版本不一致。${suffix}`.trim();
+  }
   if (!inspect.senderReady) {
     const suffix = inspect.lastSenderError ? ` ${inspect.lastSenderError}` : "";
     return `Cursor Help 内部入口未就绪。${suffix}`.trim();
   }
   return "Cursor Help 页面暂不可执行正式链路。";
+}
+
+function shouldPropagateInspectFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || "");
+  return /运行时版本不一致/i.test(message);
 }
 
 async function tryUseTabForSession(
@@ -340,6 +429,9 @@ async function tryUseTabForSession(
   if (!tab?.id) return null;
   await waitForCursorHelpTabReady(tab.id);
   const inspect = await inspectCursorTabEnsured(tab.id);
+  if (inspect?.runtimeMismatch) {
+    throw new Error(formatInspectFailure(inspect));
+  }
   if (!inspect?.canExecute) return null;
   await saveSessionSlot({
     sessionId,
@@ -369,7 +461,10 @@ async function resolveTargetSlot(
 
   const existingSlot = slots[sessionId];
   if (existingSlot?.tabId) {
-    const resolved = await tryUseTabForSession(sessionId, existingSlot.tabId).catch(() => null);
+    const resolved = await tryUseTabForSession(sessionId, existingSlot.tabId).catch((error) => {
+      if (shouldPropagateInspectFailure(error)) throw error;
+      return null;
+    });
     if (resolved) {
       return {
         sessionId,
@@ -386,7 +481,10 @@ async function resolveTargetSlot(
       (slot) => slot.sessionId !== sessionId && slot.tabId === preferredTabId
     );
     if (!alreadyBoundSession) {
-      const resolved = await tryUseTabForSession(sessionId, preferredTabId).catch(() => null);
+      const resolved = await tryUseTabForSession(sessionId, preferredTabId).catch((error) => {
+        if (shouldPropagateInspectFailure(error)) throw error;
+        return null;
+      });
       if (resolved) {
         return {
           sessionId,
@@ -401,7 +499,10 @@ async function resolveTargetSlot(
   for (const tab of existingTabs) {
     if (!tab.id) continue;
     if (boundTabIds.has(tab.id)) continue;
-    const resolved = await tryUseTabForSession(sessionId, tab.id).catch(() => null);
+    const resolved = await tryUseTabForSession(sessionId, tab.id).catch((error) => {
+      if (shouldPropagateInspectFailure(error)) throw error;
+      return null;
+    });
     if (resolved) {
       return {
         sessionId,
@@ -415,14 +516,14 @@ async function resolveTargetSlot(
     url: CURSOR_HELP_URL,
     focused: false,
     type: "popup",
-    width: 420,
-    height: 640
+    width: CURSOR_HELP_CONTAINER_WIDTH,
+    height: CURSOR_HELP_CONTAINER_HEIGHT
   }).catch(async () => {
     return chrome.windows.create({
       url: CURSOR_HELP_URL,
       focused: false,
-      width: 420,
-      height: 640
+      width: CURSOR_HELP_CONTAINER_WIDTH,
+      height: CURSOR_HELP_CONTAINER_HEIGHT
     });
   });
   const created = Array.isArray(createdWindow?.tabs) ? createdWindow.tabs[0] : null;
@@ -454,6 +555,7 @@ async function resolveTargetSlot(
 }
 
 export function createCursorHelpWebProvider() {
+  ensureCursorHelpSlotLifecycle();
   return {
     id: PROVIDER_ID,
     resolveRequestUrl() {
@@ -553,6 +655,9 @@ export function createCursorHelpWebProvider() {
         ACTIVE_BY_REQUEST_ID.delete(requestId);
         ACTIVE_REQUEST_ID_BY_TAB.delete(resolved.tabId);
         ACTIVE_REQUEST_ID_BY_SESSION.delete(resolved.sessionId);
+        void clearSessionSlotIfMatches(resolved.sessionId, resolved.tabId).catch(() => {
+          // noop
+        });
         emitProviderDebugLog("provider.execute", "failed", error instanceof Error ? error.message : String(error));
         throw error instanceof Error ? error : new Error(String(error));
       }
@@ -636,6 +741,10 @@ export async function handleWebChatRuntimeMessage(message: unknown, senderTabId?
       "done",
       `tab=${entry.tabId} 页面内聊天请求已发出${entry.sessionKey ? ` sessionKey=${entry.sessionKey}` : ""}`
     );
+    const rewriteSummary = formatRewriteDebugSummary(payload.rewriteDebug);
+    if (rewriteSummary) {
+      emitProviderDebugLog("provider.request_rewrite", "done", rewriteSummary);
+    }
     return true;
   }
 
