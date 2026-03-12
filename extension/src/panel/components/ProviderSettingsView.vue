@@ -624,10 +624,10 @@ onMounted(() => {
             Model Setup
           </p>
           <h3 class="text-[16px] font-semibold tracking-tight text-ui-text">
-            把模型职责收口成三件事
+            为常用场景选好模型
           </h3>
           <p class="text-[12px] text-ui-text-muted leading-relaxed">
-            主对话固定用一套模型闭环执行。标题、摘要这类轻量任务可以单独指定辅助模型；主模型连续失败时，最多切到一个兜底模型。
+            默认模型用于大多数对话。你也可以单独为标题和摘要指定模型，并准备一个备用模型。
           </p>
         </div>
 
@@ -635,7 +635,7 @@ onMounted(() => {
           <label class="space-y-1.5">
             <span
               class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
-              >主对话模型</span
+              >默认模型</span
             >
             <select
               :id="defaultProfileId"
@@ -650,22 +650,20 @@ onMounted(() => {
                 {{ getProfileOptionLabel(profile) }}
               </option>
             </select>
-            <p class="text-[11px] text-ui-text-muted/75">
-              带工具调用的主流程始终从这里开始。
-            </p>
+            <p class="text-[11px] text-ui-text-muted/75">新对话默认使用它。</p>
           </label>
 
           <label class="space-y-1.5">
             <span
               class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
-              >辅助任务模型</span
+              >标题与摘要</span
             >
             <select
               :id="auxProfileId"
               v-model="config.llmAuxProfile"
               class="w-full bg-ui-bg border border-ui-border rounded-sm px-3 py-2 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
             >
-              <option value="">跟随主对话模型</option>
+              <option value="">使用默认模型</option>
               <option
                 v-for="profile in secondaryProfileOptions"
                 :key="profile.id"
@@ -675,21 +673,21 @@ onMounted(() => {
               </option>
             </select>
             <p class="text-[11px] text-ui-text-muted/75">
-              用于标题、摘要等旁路任务，不影响主会话上下文。
+              只影响自动标题和摘要。
             </p>
           </label>
 
           <label class="space-y-1.5">
             <span
               class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
-              >失败后升级</span
+              >备用模型</span
             >
             <select
               :id="fallbackProfileId"
               v-model="config.llmFallbackProfile"
               class="w-full bg-ui-bg border border-ui-border rounded-sm px-3 py-2 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
             >
-              <option value="">不自动切换</option>
+              <option value="">不使用备用模型</option>
               <option
                 v-for="profile in secondaryProfileOptions"
                 :key="profile.id"
@@ -699,7 +697,7 @@ onMounted(() => {
               </option>
             </select>
             <p class="text-[11px] text-ui-text-muted/75">
-              仅在主模型连续失败时切换一次，适合把强模型放在后面兜底。
+              默认模型连续失败时，再尝试它。
             </p>
           </label>
         </div>
@@ -717,7 +715,7 @@ onMounted(() => {
             </h3>
             <p class="text-[12px] text-ui-text-muted leading-relaxed">
               把 Cursor Help
-              接成一个可选模型方案，适合临时复用网页里的账号状态和当前模型。
+              保存成一个可直接使用的模型方案，方便复用网页里的登录状态。
             </p>
             <p class="text-[11px] text-ui-text-muted/80">
               {{
@@ -757,7 +755,7 @@ onMounted(() => {
               模型方案
             </h3>
             <p class="text-[12px] text-ui-text-muted">
-              每个方案定义一个模型入口。主对话、辅助任务和失败升级都从这里挑选。
+              先保存可用模型，再在上面选择默认、标题摘要和备用方案。
             </p>
           </div>
           <button
@@ -786,19 +784,19 @@ onMounted(() => {
                   v-if="isDefaultProfile(profile)"
                   class="inline-flex items-center rounded-full border border-ui-accent/30 bg-ui-accent/10 px-2 py-0.5 text-[10px] font-semibold text-ui-accent"
                 >
-                  主对话
+                  默认
                 </span>
                 <span
                   v-if="isAuxProfile(profile)"
                   class="inline-flex items-center rounded-full border border-sky-400/30 bg-sky-400/10 px-2 py-0.5 text-[10px] font-semibold text-sky-500"
                 >
-                  辅助任务
+                  标题/摘要
                 </span>
                 <span
                   v-if="isFallbackProfile(profile)"
                   class="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 text-[10px] font-semibold text-amber-600"
                 >
-                  失败升级
+                  备用
                 </span>
                 <span
                   class="inline-flex items-center rounded-full border border-ui-border bg-ui-surface px-2 py-0.5 text-[10px] text-ui-text-muted"
