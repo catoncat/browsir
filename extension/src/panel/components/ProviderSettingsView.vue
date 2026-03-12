@@ -28,7 +28,7 @@ const CURSOR_HELP_URL = "https://cursor.com/help";
 const CURSOR_TAB_PATTERNS = ["https://cursor.com/help*"] as const;
 const builtinProviderOptions = [
   { value: "openai_compatible", label: "通用 API" },
-  { value: "cursor_help_web", label: "Cursor 网页聊天" },
+  { value: "cursor_help_web", label: "Cursor" },
 ] as const;
 
 const visibleError = computed(
@@ -122,20 +122,20 @@ function getProviderLabel(profile: PanelLlmProfile): string {
   const provider = String(profile.provider || "")
     .trim()
     .toLowerCase();
-  if (provider === "cursor_help_web") return "Cursor 网页聊天";
+  if (provider === "cursor_help_web") return "Cursor";
   if (provider === "openai_compatible") return "通用 API";
-  return String(profile.provider || "").trim() || "未命名接入";
+  return String(profile.provider || "").trim() || "未设置接入方式";
 }
 
 function getProfileTitle(profile: PanelLlmProfile, index: number): string {
-  return String(profile.id || "").trim() || `模型方案 ${index + 1}`;
+  return String(profile.id || "").trim() || `模型 ${index + 1}`;
 }
 
 function getProfileSummary(profile: PanelLlmProfile): string {
   if (isCursorHelpWebProvider(profile)) {
     return getCursorHelpTargetTabId(profile)
-      ? "已连接 Cursor Help，会沿用网页中的账号状态。"
-      : "保存后会自动连接 Cursor Help。";
+      ? "已连接 Cursor，会沿用当前页面的登录状态。"
+      : "保存后会自动连接 Cursor。";
   }
   const model = String(profile.llmModel || "").trim() || "未设置模型";
   const base = String(profile.llmApiBase || "").trim() || "未设置接口地址";
@@ -143,7 +143,7 @@ function getProfileSummary(profile: PanelLlmProfile): string {
 }
 
 function getProfileOptionLabel(profile: PanelLlmProfile): string {
-  const id = String(profile.id || "").trim() || "未命名方案";
+  const id = String(profile.id || "").trim() || "未命名模型";
   const model = String(profile.llmModel || "").trim() || "未设置模型";
   return `${id} · ${getProviderLabel(profile)} · ${model}`;
 }
@@ -300,7 +300,7 @@ async function ensureCursorHelpTab(
     }
 
     if (!boundTab?.id) {
-      throw new Error("未能打开 Cursor Help 页面");
+      throw new Error("未能打开 Cursor 页面");
     }
     await focusTab(boundTab);
     setCursorHelpTargetTabId(profile, boundTab.id);
@@ -308,7 +308,7 @@ async function ensureCursorHelpTab(
     const inspected = await inspectCursorTab(boundTab.id);
     if (!inspected?.isReady) {
       localError.value =
-        "已打开 Cursor Help 页面，但内置 provider 尚未就绪。请确认页面已完成加载后再试。";
+        "已打开 Cursor 页面，但暂时还不能使用。请等待页面加载完成后重试。";
     }
   } catch (err) {
     localError.value = err instanceof Error ? err.message : String(err);
@@ -488,7 +488,7 @@ function addProfile(): void {
 
 function removeProfile(profileId: string): void {
   if (config.value.llmProfiles.length <= 1) {
-    localError.value = "至少保留一个模型方案";
+    localError.value = "至少保留一个模型";
     return;
   }
   const id = String(profileId || "").trim();
@@ -619,10 +619,10 @@ onMounted(() => {
       >
         <div class="space-y-1">
           <p class="text-[16px] font-semibold tracking-tight text-ui-text">
-            先选默认模型
+            模型
           </p>
           <p class="text-[12px] text-ui-text-muted leading-relaxed">
-            其他设置都可以留空。
+            默认模型必选，其余按需设置。
           </p>
         </div>
 
@@ -645,13 +645,13 @@ onMounted(() => {
                 {{ getProfileOptionLabel(profile) }}
               </option>
             </select>
-            <p class="text-[11px] text-ui-text-muted/75">用于新对话。</p>
+            <p class="text-[11px] text-ui-text-muted/75">用于对话回复</p>
           </label>
 
           <label class="space-y-1.5">
             <span
               class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
-              >标题摘要</span
+              >标题与摘要</span
             >
             <select
               :id="auxProfileId"
@@ -667,7 +667,9 @@ onMounted(() => {
                 {{ getProfileOptionLabel(profile) }}
               </option>
             </select>
-            <p class="text-[11px] text-ui-text-muted/75">可选。</p>
+            <p class="text-[11px] text-ui-text-muted/75">
+              可选，用于自动生成标题和摘要
+            </p>
           </label>
 
           <label class="space-y-1.5">
@@ -689,7 +691,9 @@ onMounted(() => {
                 {{ getProfileOptionLabel(profile) }}
               </option>
             </select>
-            <p class="text-[11px] text-ui-text-muted/75">可选。</p>
+            <p class="text-[11px] text-ui-text-muted/75">
+              可选，默认模型不可用时使用
+            </p>
           </label>
         </div>
       </section>
@@ -702,16 +706,16 @@ onMounted(() => {
             <h3
               class="text-[12px] font-bold uppercase tracking-tighter text-ui-text-muted/80"
             >
-              快速接入 Cursor
+              Cursor
             </h3>
             <p class="text-[12px] text-ui-text-muted leading-relaxed">
-              保存为一个可用模型。
+              连接当前 Cursor 页面。
             </p>
             <p class="text-[11px] text-ui-text-muted/80">
               {{
                 findCursorWebProfile()
-                  ? `已接入：${findCursorWebProfile()?.id} · ${String(findCursorWebProfile()?.llmModel || "").trim() || "auto"}`
-                  : "还没有接入 Cursor"
+                  ? "已连接当前 Cursor 页面"
+                  : "未连接 Cursor"
               }}
             </p>
           </div>
@@ -728,7 +732,7 @@ onMounted(() => {
               aria-hidden="true"
             />
             <span>{{
-              findCursorWebProfile() ? "重新连接" : "接入 Cursor"
+              findCursorWebProfile() ? "重新连接" : "连接 Cursor"
             }}</span>
           </button>
         </div>
@@ -742,20 +746,18 @@ onMounted(() => {
             <h3
               class="text-[12px] font-bold uppercase tracking-tighter text-ui-text-muted/80"
             >
-              模型方案
+              已保存的模型
             </h3>
-            <p class="text-[12px] text-ui-text-muted">
-              先把模型加到这里，再上去选择。
-            </p>
+            <p class="text-[12px] text-ui-text-muted">管理可用模型。</p>
           </div>
           <button
             type="button"
             class="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] border border-ui-border rounded-sm hover:bg-ui-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-            aria-label="新增模型方案"
+            aria-label="新增模型"
             @click="addProfile"
           >
             <Plus :size="14" aria-hidden="true" />
-            新增方案
+            新增模型
           </button>
         </div>
 
@@ -802,7 +804,7 @@ onMounted(() => {
               type="button"
               class="p-1.5 rounded-sm border border-ui-border hover:bg-ui-surface disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
               :disabled="config.llmProfiles.length <= 1"
-              :aria-label="`删除模型方案 ${getProfileTitle(profile, index)}`"
+              :aria-label="`删除模型 ${getProfileTitle(profile, index)}`"
               @click="removeProfile(profile.id)"
             >
               <Trash2 :size="14" aria-hidden="true" />
@@ -813,7 +815,7 @@ onMounted(() => {
             <label class="space-y-1 block">
               <span
                 class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
-                >方案 ID</span
+                >模型标识</span
               >
               <input
                 v-model="profile.id"
@@ -857,8 +859,8 @@ onMounted(() => {
                   >
                     {{
                       getCursorHelpTargetTabId(profile)
-                        ? `已绑定 Cursor Help 页面 #${getCursorHelpTargetTabId(profile)}`
-                        : "保存时会自动连接 Cursor Help"
+                        ? `已连接 Cursor 页面 #${getCursorHelpTargetTabId(profile)}`
+                        : "保存时会自动连接 Cursor"
                     }}
                   </div>
                   <button
@@ -873,7 +875,7 @@ onMounted(() => {
                       :size="12"
                       aria-hidden="true"
                     />
-                    <span>重新连接</span>
+                    <span>重新连接页面</span>
                   </button>
                 </div>
               </label>
