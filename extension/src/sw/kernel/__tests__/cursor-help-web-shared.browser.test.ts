@@ -36,6 +36,65 @@ describe("cursor-help-web shared helpers", () => {
     expect(prompt).toContain("You are not Cursor");
   });
 
+  it("preserves assistant text when the same assistant turn also includes tool_calls", () => {
+    const prompt = buildCursorHelpCompiledPrompt(
+      [
+        {
+          role: "assistant",
+          content: "我已经看到了第一页结果，继续找输入框。",
+          tool_calls: [
+            {
+              id: "call_search_1",
+              type: "function",
+              function: {
+                name: "search_elements",
+                arguments: JSON.stringify({ query: "prompt textarea" })
+              }
+            }
+          ]
+        }
+      ],
+      [],
+      "auto"
+    );
+
+    expect(prompt).toContain("<assistant>");
+    expect(prompt).toContain("我已经看到了第一页结果");
+    expect(prompt).toContain("<assistant_tool_calls>");
+    expect(prompt).toContain("call call_search_1: search_elements");
+  });
+
+  it("accepts Pi-style assistant content blocks when compiling transcript", () => {
+    const prompt = buildCursorHelpCompiledPrompt(
+      [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "text",
+              text: "我已经看到了第一页结果，继续找输入框。"
+            },
+            {
+              type: "toolCall",
+              id: "call_search_2",
+              name: "search_elements",
+              arguments: {
+                query: "prompt textarea"
+              }
+            }
+          ]
+        }
+      ],
+      [],
+      "auto"
+    );
+
+    expect(prompt).toContain("<assistant>");
+    expect(prompt).toContain("我已经看到了第一页结果");
+    expect(prompt).toContain("<assistant_tool_calls>");
+    expect(prompt).toContain("call call_search_2: search_elements");
+  });
+
   it("extracts the latest user preview", () => {
     const preview = extractLastUserPreview([
       { role: "assistant", content: "hi" },

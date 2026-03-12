@@ -48,6 +48,44 @@ function normalizeTextContent(raw: unknown): string {
   return "";
 }
 
+function normalizeToolCalls(raw: unknown): WebToolCall[] {
+  if (!Array.isArray(raw)) return [];
+  const out: WebToolCall[] = [];
+  for (let i = 0; i < raw.length; i += 1) {
+    const row = toRecord(raw[i]);
+    const fn = toRecord(row.function);
+    const name = String(row.name || fn.name || "").trim();
+    if (!name) continue;
+    const rawArguments = row.arguments ?? fn.arguments ?? {};
+    out.push({
+      id: String(row.id || `toolcall_${i + 1}`),
+      type: "function",
+      function: {
+        name,
+        arguments:
+          typeof rawArguments === "string"
+            ? rawArguments
+            : safeJsonStringify(rawArguments)
+      }
+    });
+  }
+  return out;
+}
+
+function extractToolCalls(rawMessage: JsonRecord): WebToolCall[] {
+  const direct = normalizeToolCalls(rawMessage.tool_calls);
+  if (direct.length > 0) return direct;
+  return normalizeToolCalls(
+    Array.isArray(rawMessage.content)
+      ? rawMessage.content.filter((item) => {
+          const row = toRecord(item);
+          const blockType = String(row.type || "").trim();
+          return blockType === "toolCall" || blockType === "tool_call";
+        })
+      : []
+  );
+}
+
 function formatToolDefinition(raw: unknown): string | null {
   const item = toRecord(raw);
   const fn = toRecord(item.function);
@@ -67,7 +105,7 @@ function formatMessageBlock(raw: unknown): string | null {
   const role = String(row.role || "").trim().toLowerCase();
   const content = normalizeTextContent(row.content).trim();
   const toolCallId = String(row.tool_call_id || "").trim();
-  const toolCalls = Array.isArray(row.tool_calls) ? row.tool_calls : [];
+  const toolCalls = extractToolCalls(row);
 
   if (role === "assistant" && toolCalls.length > 0) {
     const lines = toolCalls
@@ -81,11 +119,12 @@ function formatMessageBlock(raw: unknown): string | null {
       })
       .filter((value): value is string => Boolean(value));
     if (lines.length === 0) return content ? `<assistant>\n${content}\n</assistant>` : null;
-    return [
-      "<assistant_tool_calls>",
-      ...lines,
-      "</assistant_tool_calls>"
-    ].join("\n");
+    const blocks: string[] = [];
+    if (content) {
+      blocks.push("<assistant>", content, "</assistant>");
+    }
+    blocks.push("<assistant_tool_calls>", ...lines, "</assistant_tool_calls>");
+    return blocks.join("\n");
   }
 
   if (role === "tool") {
