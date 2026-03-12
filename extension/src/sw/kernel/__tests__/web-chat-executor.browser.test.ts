@@ -204,6 +204,106 @@ describe("web-chat-executor.browser", () => {
     expect(text).toContain('"finish_reason":"tool_calls"');
   });
 
+  it("withholds provisional text when the turn resolves to tool_calls", async () => {
+    const provider = createCursorHelpWebProvider();
+    const response = await provider.send({
+      sessionId: "session-2b",
+      step: 1,
+      route: createRoute(),
+      signal: new AbortController().signal,
+      payload: {
+        stream: true,
+        messages: [{ role: "user", content: "Continue" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "scroll_page",
+              description: "Scroll page",
+              parameters: { type: "object", properties: { deltaY: { type: "number" } } }
+            }
+          }
+        ],
+        tool_choice: "auto"
+      }
+    });
+
+    const requestId = getLastExecuteRequestId();
+    expect(requestId).not.toBe("");
+
+    const textPromise = readResponseText(response);
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      requestId,
+      transportType: "request_started"
+    });
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      requestId,
+      transportType: "sse_line",
+      line: 'data: {"type":"text-delta","delta":"我已经看到回复了，现在继续找输入框。"}'
+    });
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      requestId,
+      transportType: "sse_line",
+      line: 'data: {"type":"text-delta","delta":"\\n[TM_TOOL_CALL_START:call_scroll]\\nawait mcp.call(\\"scroll_page\\", {\\"deltaY\\":500})\\n[TM_TOOL_CALL_END:call_scroll]"}'
+    });
+
+    const text = await textPromise;
+    expect(text).toContain('"tool_calls"');
+    expect(text).toContain('"name":"scroll_page"');
+    expect(text).not.toContain("我已经看到回复了");
+    expect(text).toContain('"finish_reason":"tool_calls"');
+  });
+
+  it("buffers plain text until stream_end when no tool protocol appears", async () => {
+    const provider = createCursorHelpWebProvider();
+    const response = await provider.send({
+      sessionId: "session-2c",
+      step: 1,
+      route: createRoute(),
+      signal: new AbortController().signal,
+      payload: {
+        stream: true,
+        messages: [{ role: "user", content: "Say hello" }],
+        tools: [],
+        tool_choice: "auto"
+      }
+    });
+
+    const requestId = getLastExecuteRequestId();
+    expect(requestId).not.toBe("");
+
+    const textPromise = readResponseText(response);
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      requestId,
+      transportType: "request_started"
+    });
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      requestId,
+      transportType: "sse_line",
+      line: 'data: {"type":"text-delta","delta":"hello"}'
+    });
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      requestId,
+      transportType: "sse_line",
+      line: 'data: {"type":"text-delta","delta":" world"}'
+    });
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      requestId,
+      transportType: "stream_end"
+    });
+
+    const text = await textPromise;
+    expect(text).toContain('"content":"hello world"');
+    expect(text).toContain('"finish_reason":"stop"');
+  });
+
   it("locks execution by session instead of only by tab singleton", async () => {
     const provider = createCursorHelpWebProvider();
     const first = await provider.send({

@@ -708,12 +708,20 @@ function emitToolCalls(entry: PendingExecution, toolCalls: WebToolCall[]): void 
   closeExecution(entry);
 }
 
+function emitBufferedText(entry: PendingExecution): void {
+  if (!entry.stream) return;
+  const text = String(entry.outputText || "");
+  if (!text) return;
+  enqueueSse(entry, buildChunk(entry.requestId, entry.model, { content: text }));
+}
+
 function emitFinalDone(entry: PendingExecution): void {
   if (!entry.stream) {
     enqueueSse(entry, buildJsonResponseBody(entry));
     closeExecution(entry);
     return;
   }
+  emitBufferedText(entry);
   enqueueSse(entry, buildChunk(entry.requestId, entry.model, {}, "stop"));
   enqueueSse(entry, "data: [DONE]\n\n");
   closeExecution(entry);
@@ -770,9 +778,6 @@ export async function handleWebChatRuntimeMessage(message: unknown, senderTabId?
     if (protocol?.toolCalls.length) {
       emitToolCalls(entry, protocol.toolCalls);
       return true;
-    }
-    if (entry.stream) {
-      enqueueSse(entry, buildChunk(entry.requestId, entry.model, { content: text }));
     }
     if (!entry.firstDeltaLogged) {
       entry.firstDeltaLogged = true;
