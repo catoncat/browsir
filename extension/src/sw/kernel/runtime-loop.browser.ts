@@ -9,6 +9,7 @@ import {
 } from "./orchestrator.browser";
 import { SUMMARIZATION_SYSTEM_PROMPT } from "./compaction.browser";
 import {
+  buildAssistantContentBlocks,
   buildCompactionSummaryLlmMessage,
   convertSessionContextMessagesToLlm,
   transformMessagesForLlm,
@@ -9252,8 +9253,7 @@ export function createRuntimeLoopController(
 
         messages.push({
           role: "assistant",
-          content: assistantText,
-          tool_calls: toolCalls,
+          content: buildAssistantContentBlocks(assistantText, toolCalls),
         });
 
         if (toolCalls.length === 0) {

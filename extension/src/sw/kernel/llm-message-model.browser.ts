@@ -11,14 +11,34 @@ export interface LlmToolCall {
 
 export type LlmMessageRole = "system" | "user" | "assistant" | "tool";
 
-export interface LlmMessage {
-  role: LlmMessageRole;
+export interface LlmTextBlock {
+  type: "text";
+  text: string;
+}
+
+export interface LlmToolCallBlock {
+  type: "toolCall";
+  id: string;
+  name: string;
+  arguments: string;
+}
+
+export type LlmAssistantContentBlock = LlmTextBlock | LlmToolCallBlock;
+
+export interface LlmAssistantMessage {
+  role: "assistant";
+  content: LlmAssistantContentBlock[];
+  stopReason?: string;
+}
+
+export interface LlmContextMessage {
+  role: "system" | "user" | "tool";
   content: string;
   name?: string;
   tool_call_id?: string;
-  tool_calls?: LlmToolCall[];
-  stopReason?: string;
 }
+
+export type LlmMessage = LlmAssistantMessage | LlmContextMessage;
 
 export interface SessionContextMessageLike {
   role: string;
@@ -84,7 +104,17 @@ function normalizeTextContent(raw: unknown): string {
   }
   const row = toRecord(raw);
   if (typeof row.text === "string") return row.text;
+  if (typeof row.thinking === "string") return row.thinking;
   return typeof raw === "number" || typeof raw === "boolean" ? String(raw) : "";
+}
+
+function appendTextBlock(blocks: LlmAssistantContentBlock[], rawText: unknown): void {
+  const text = normalizeTextContent(rawText);
+  if (!text) return;
+  blocks.push({
+    type: "text",
+    text
+  });
 }
 
 function hashFNV1a(input: string): string {
@@ -138,18 +168,115 @@ function normalizeToolCalls(rawToolCalls: unknown): LlmToolCall[] {
   return out;
 }
 
+function toAssistantToolCallBlock(call: LlmToolCall): LlmToolCallBlock {
+  return {
+    type: "toolCall",
+    id: call.id,
+    name: call.function.name,
+    arguments: call.function.arguments
+  };
+}
+
+function toToolCallFromBlock(rawBlock: unknown, fallbackSeed = ""): LlmToolCall | null {
+  const row = toRecord(rawBlock);
+  const blockType = String(row.type || "").trim();
+  if (blockType !== "toolCall" && blockType !== "tool_call") return null;
+  const fn = toRecord(row.function);
+  const name = String(row.name || row.toolName || fn.name || "").trim();
+  if (!name) return null;
+  const rawArguments = row.arguments ?? fn.arguments ?? {};
+  const argumentsText =
+    typeof rawArguments === "string"
+      ? rawArguments
+      : safeJsonStringify(rawArguments);
+  return {
+    id: String(row.id || fallbackSeed || "toolcall_1"),
+    type: "function",
+    function: {
+      name,
+      arguments: argumentsText
+    }
+  };
+}
+
+function normalizeAssistantContent(
+  rawContent: unknown,
+  rawToolCalls: unknown
+): LlmAssistantContentBlock[] {
+  const blocks: LlmAssistantContentBlock[] = [];
+  let hasToolCallBlock = false;
+
+  if (Array.isArray(rawContent)) {
+    for (let i = 0; i < rawContent.length; i += 1) {
+      const item = rawContent[i];
+      const toolCall = toToolCallFromBlock(item, `toolcall_${i + 1}`);
+      if (toolCall) {
+        hasToolCallBlock = true;
+        blocks.push(toAssistantToolCallBlock(toolCall));
+        continue;
+      }
+      appendTextBlock(blocks, item);
+    }
+  } else {
+    const toolCall = toToolCallFromBlock(rawContent, "toolcall_1");
+    if (toolCall) {
+      hasToolCallBlock = true;
+      blocks.push(toAssistantToolCallBlock(toolCall));
+    } else {
+      appendTextBlock(blocks, rawContent);
+    }
+  }
+
+  if (!hasToolCallBlock) {
+    for (const call of normalizeToolCalls(rawToolCalls)) {
+      blocks.push(toAssistantToolCallBlock(call));
+    }
+  }
+
+  return blocks;
+}
+
+export function buildAssistantContentBlocks(
+  rawContent: unknown,
+  rawToolCalls: unknown = []
+): LlmAssistantContentBlock[] {
+  return normalizeAssistantContent(rawContent, rawToolCalls);
+}
+
+function getAssistantTextContent(content: LlmAssistantContentBlock[]): string {
+  return content
+    .filter((block): block is LlmTextBlock => block.type === "text")
+    .map((block) => block.text)
+    .join("");
+}
+
+function getAssistantToolCalls(content: LlmAssistantContentBlock[]): LlmToolCall[] {
+  const out: LlmToolCall[] = [];
+  for (const block of content) {
+    if (block.type !== "toolCall") continue;
+    out.push({
+      id: block.id,
+      type: "function",
+      function: {
+        name: block.name,
+        arguments: block.arguments
+      }
+    });
+  }
+  return out;
+}
+
 function normalizeIncomingMessage(raw: unknown, index: number): LlmMessage | null {
   const row = toRecord(raw);
   const roleRaw = String(row.role || "").trim().toLowerCase();
   const content = normalizeTextContent(row.content);
   if (roleRaw === "assistant") {
-    const toolCalls = normalizeToolCalls(row.tool_calls);
+    const assistantContent = normalizeAssistantContent(row.content, row.tool_calls);
     const stopReason = String(row.stopReason || row.stop_reason || "").trim().toLowerCase();
-    if (!content && toolCalls.length === 0) return null;
+    if (assistantContent.length === 0) return null;
     return {
       role: "assistant",
-      content,
-      tool_calls: toolCalls,
+      content: assistantContent,
       stopReason: stopReason || undefined
     };
   }
@@ -197,7 +324,7 @@ function insertSyntheticAssistantForOrphanToolResults(messages: LlmMessage[]): L
 
   for (const message of messages) {
     if (message.role === "assistant") {
-      const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+      const toolCalls = getAssistantToolCalls(message.content);
       for (const call of toolCalls) {
         declaredToolCalls.add(call.id);
       }
@@ -213,8 +340,7 @@ function insertSyntheticAssistantForOrphanToolResults(messages: LlmMessage[]): L
     if (toolCallId && !declaredToolCalls.has(toolCallId)) {
       out.push({
         role: "assistant",
-        content: "",
-        tool_calls: [
+        content: buildAssistantContentBlocks("", [
           {
             id: toolCallId,
             type: "function",
@@ -223,7 +349,7 @@ function insertSyntheticAssistantForOrphanToolResults(messages: LlmMessage[]): L
               arguments: "{}"
             }
           }
-        ]
+        ])
       });
       declaredToolCalls.add(toolCallId);
     }
@@ -243,23 +369,23 @@ function patchToolCallIds(messages: LlmMessage[]): LlmMessage[] {
       if (message.stopReason === "error" || message.stopReason === "aborted") {
         continue;
       }
-      const rawToolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
-      const normalizedToolCalls: LlmToolCall[] = [];
-      for (let j = 0; j < rawToolCalls.length; j += 1) {
-        const call = rawToolCalls[j];
-        const rawId = String(call.id || `toolcall_${i + 1}_${j + 1}`);
-        const normalizedId = normalizeToolCallId(rawId, `${call.function.name}_${i + 1}_${j + 1}`);
+      const normalizedContent = message.content.map((block) => ({ ...block }));
+      for (let j = 0; j < normalizedContent.length; j += 1) {
+        const block = normalizedContent[j];
+        if (block.type !== "toolCall") continue;
+        const rawId = String(block.id || `toolcall_${i + 1}_${j + 1}`);
+        const normalizedId = normalizeToolCallId(rawId, `${block.name}_${i + 1}_${j + 1}`);
         if (normalizedId !== rawId) {
           map.set(rawId, normalizedId);
         }
-        normalizedToolCalls.push({
-          ...call,
+        normalizedContent[j] = {
+          ...block,
           id: normalizedId
-        });
+        };
       }
       out.push({
         ...message,
-        tool_calls: normalizedToolCalls
+        content: normalizedContent
       });
       continue;
     }
@@ -299,7 +425,7 @@ function appendSyntheticMissingToolResults(messages: LlmMessage[]): LlmMessage[]
         pendingToolCalls = [];
         existingToolResultIds = new Set<string>();
       }
-      const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+      const toolCalls = getAssistantToolCalls(message.content);
       if (toolCalls.length > 0) {
         pendingToolCalls = toolCalls;
         existingToolResultIds = new Set<string>();
@@ -333,11 +459,11 @@ function appendSyntheticMissingToolResults(messages: LlmMessage[]): LlmMessage[]
 
 function toSerializableMessage(message: LlmMessage): JsonRecord {
   if (message.role === "assistant") {
+    const toolCalls = getAssistantToolCalls(message.content);
     const out: JsonRecord = {
       role: "assistant",
-      content: String(message.content || "")
+      content: getAssistantTextContent(message.content)
     };
-    const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
     if (toolCalls.length > 0) {
       out.tool_calls = toolCalls.map((call) => ({
         id: call.id,

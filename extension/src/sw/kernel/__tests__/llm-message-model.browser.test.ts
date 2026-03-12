@@ -6,6 +6,38 @@ function asMessages(value: unknown): Array<Record<string, unknown>> {
 }
 
 describe("llm-message-model.browser", () => {
+  it("assistant mixed text + toolCall block 会在输出阶段同时保留文本和 tool_calls", () => {
+    const out = asMessages(
+      transformMessagesForLlm([
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "text",
+              text: "先读取页面状态。"
+            },
+            {
+              type: "toolCall",
+              id: "call_search_1",
+              name: "search_elements",
+              arguments: {
+                query: "prompt textarea"
+              }
+            }
+          ]
+        }
+      ])
+    );
+
+    expect(out).toHaveLength(1);
+    expect(String(out[0]?.role || "")).toBe("assistant");
+    expect(String(out[0]?.content || "")).toBe("先读取页面状态。");
+    const toolCalls = asMessages(out[0]?.tool_calls);
+    expect(toolCalls).toHaveLength(1);
+    expect(String(toolCalls[0]?.id || "")).toBe("call_search_1");
+    expect(String((toolCalls[0]?.function as Record<string, unknown> | undefined)?.name || "")).toBe("search_elements");
+  });
+
   it("为孤立 tool 结果补前置 assistant tool_call", () => {
     const out = asMessages(
       transformMessagesForLlm([
@@ -60,6 +92,39 @@ describe("llm-message-model.browser", () => {
     expect(normalizedId).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
     expect(String(out[1]?.tool_call_id || "")).toBe(normalizedId);
     expect(String(out[1]?.content || "")).toBe("No result provided");
+  });
+
+  it("stopReason=error|aborted 的 assistant turn 不应回放进下游请求", () => {
+    const out = asMessages(
+      transformMessagesForLlm([
+        {
+          role: "assistant",
+          stopReason: "error",
+          content: [
+            {
+              type: "text",
+              text: "半截旁白"
+            },
+            {
+              type: "toolCall",
+              id: "call_err_1",
+              name: "search_elements",
+              arguments: "{\"query\":\"prompt\"}"
+            }
+          ]
+        },
+        {
+          role: "assistant",
+          stop_reason: "aborted",
+          content: "另一段中止内容"
+        },
+        { role: "user", content: "继续" }
+      ])
+    );
+
+    expect(out).toHaveLength(1);
+    expect(String(out[0]?.role || "")).toBe("user");
+    expect(String(out[0]?.content || "")).toBe("继续");
   });
 
   it("buildCompactionSummaryLlmMessage 按新路径生成 compaction summary 消息", () => {
