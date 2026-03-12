@@ -1,4 +1,10 @@
+import {
+  CURSOR_HELP_REWRITE_STRATEGY,
+  CURSOR_HELP_RUNTIME_VERSION
+} from "./cursor-help-runtime-meta";
+
 type JsonRecord = Record<string, unknown>;
+export type CursorHelpRewriteStrategy = "system_message" | "user_prefix" | "system_message+user_prefix";
 
 export interface CursorHelpParsedSseEvent {
   kind: "delta" | "done" | "error" | "ignore";
@@ -31,6 +37,12 @@ export interface CursorHelpSenderInspect {
   availableModels?: string[];
   senderKind?: string;
   lastSenderError?: string;
+  pageRuntimeVersion?: string;
+  contentRuntimeVersion?: string;
+  runtimeExpectedVersion?: string;
+  rewriteStrategy?: string;
+  runtimeMismatch?: boolean;
+  runtimeMismatchReason?: string;
 }
 
 export interface CursorHelpRewritePlan {
@@ -39,18 +51,36 @@ export interface CursorHelpRewritePlan {
   latestUserPrompt: string;
   requestedModel: string;
   detectedModel?: string;
+  rewriteStrategy?: string;
 }
 
 export interface CursorHelpNativeEnvelope {
   body: JsonRecord;
   sessionKey: string;
   rewritten: boolean;
+  rewriteDebug: CursorHelpRewriteDebug;
 }
 
 export interface CursorHelpTargetMessagePointer {
   existingText: string;
   kind: "message_part_text" | "message_content_string" | "message_content_part_text" | "input";
   path: string[];
+}
+
+export interface CursorHelpRewriteDebug {
+  runtimeVersion: string;
+  rewriteStrategy: string;
+  targetMessageIndex: number | null;
+  targetKind: CursorHelpTargetMessagePointer["kind"] | "none";
+  systemMessageInjected: boolean;
+  strippedNativeControlMessageCount: number;
+  userPromptInjected: boolean;
+  compiledPromptHash: string;
+  compiledPromptLength: number;
+  originalTargetHash: string | null;
+  originalTargetLength: number;
+  rewrittenTargetHash: string | null;
+  rewrittenTargetLength: number;
 }
 
 export const CURSOR_HELP_PRIMARY_REQUEST_PATH = "/api/chat";
@@ -87,6 +117,17 @@ function cloneJsonRecord(value: unknown): JsonRecord {
 
 function normalizeModelText(text: string): string {
   return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+export function normalizeCursorHelpRewriteStrategy(
+  raw: unknown,
+  fallback: CursorHelpRewriteStrategy = CURSOR_HELP_REWRITE_STRATEGY as CursorHelpRewriteStrategy
+): CursorHelpRewriteStrategy {
+  const normalized = String(raw || "").trim().toLowerCase();
+  if (normalized === "system_message") return "system_message";
+  if (normalized === "user_prefix") return "user_prefix";
+  if (normalized === "system_message+user_prefix") return "system_message+user_prefix";
+  return fallback;
 }
 
 function buildPromptEnvelope(compiledPrompt: string, requestId: string): string {
@@ -156,6 +197,13 @@ function stableHash(input: string): string {
     hash = Math.imul(hash, 16777619);
   }
   return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function getTargetMessageIndex(pointer: CursorHelpTargetMessagePointer | null): number | null {
+  if (!pointer) return null;
+  if (pointer.path[0] !== "messages") return null;
+  const index = Number(pointer.path[1]);
+  return Number.isInteger(index) ? index : null;
 }
 
 export function resolveCursorHelpApiModel(requestedModel: string, detectedModel = ""): string {
@@ -280,15 +328,25 @@ function getMessageText(rawMessage: unknown): string {
   return "";
 }
 
+function getMessageRole(rawMessage: unknown): string {
+  return String(toRecord(rawMessage).role || "").trim().toLowerCase();
+}
+
 function isInjectedSystemMessage(rawMessage: unknown): boolean {
   const message = toRecord(rawMessage);
-  const role = String(message.role || "").trim().toLowerCase();
+  const role = getMessageRole(message);
   if (role !== "system") return false;
   const text = getMessageText(message);
   return (
     text.includes(CURSOR_HELP_SYSTEM_PROMPT_START_PREFIX) &&
     text.includes(CURSOR_HELP_SYSTEM_PROMPT_END_PREFIX)
   );
+}
+
+function isNativeControlMessage(rawMessage: unknown): boolean {
+  const role = getMessageRole(rawMessage);
+  if (role !== "system" && role !== "developer") return false;
+  return !isInjectedSystemMessage(rawMessage);
 }
 
 function buildInjectedSystemMessage(body: JsonRecord, compiledPrompt: string, requestId: string): JsonRecord {
@@ -332,12 +390,44 @@ function buildInjectedSystemMessage(body: JsonRecord, compiledPrompt: string, re
   };
 }
 
-function upsertInjectedSystemMessage(body: JsonRecord, compiledPrompt: string, requestId: string): boolean {
-  if (!Array.isArray(body.messages)) return false;
-  const messages = body.messages.filter((message) => !isInjectedSystemMessage(message));
-  messages.unshift(buildInjectedSystemMessage(body, compiledPrompt, requestId));
+function upsertInjectedSystemMessage(
+  body: JsonRecord,
+  compiledPrompt: string,
+  requestId: string
+): { injected: boolean; strippedNativeControlMessageCount: number } {
+  if (!Array.isArray(body.messages)) {
+    return {
+      injected: false,
+      strippedNativeControlMessageCount: 0
+    };
+  }
+  let strippedNativeControlMessageCount = 0;
+  const messages = body.messages.filter((message) => {
+    if (isInjectedSystemMessage(message)) return false;
+    if (isNativeControlMessage(message)) {
+      strippedNativeControlMessageCount += 1;
+      return false;
+    }
+    return true;
+  });
+  const targetPointer = extractCursorHelpTargetMessagePointer({
+    ...body,
+    messages
+  });
+  const targetIndex = getTargetMessageIndex(targetPointer);
+  const fallbackInsertIndex = messages.reduce((insertAt, rawMessage, index) => {
+    const role = String(toRecord(rawMessage).role || "").trim().toLowerCase();
+    if (role === "system" || role === "developer") return index + 1;
+    return insertAt;
+  }, 0);
+  const insertIndex =
+    targetIndex !== null && targetIndex >= 0 && targetIndex <= messages.length ? targetIndex : fallbackInsertIndex;
+  messages.splice(insertIndex, 0, buildInjectedSystemMessage(body, compiledPrompt, requestId));
   body.messages = messages;
-  return true;
+  return {
+    injected: true,
+    strippedNativeControlMessageCount
+  };
 }
 
 export function deriveCursorHelpSessionKey(rawBody: unknown, requestUrl = ""): string {
@@ -376,13 +466,27 @@ export function deriveCursorHelpSessionKey(rawBody: unknown, requestUrl = ""): s
 
 export function rewriteCursorHelpNativeRequestBody(rawBody: unknown, rewritePlan: CursorHelpRewritePlan): CursorHelpNativeEnvelope {
   const body = cloneJsonRecord(rawBody);
-  let rewritten = upsertInjectedSystemMessage(body, rewritePlan.compiledPrompt, rewritePlan.requestId);
+  const rewriteStrategy = normalizeCursorHelpRewriteStrategy(rewritePlan.rewriteStrategy);
+  const injectSystemMessage = rewriteStrategy === "system_message" || rewriteStrategy === "system_message+user_prefix";
+  const injectUserPrefix = rewriteStrategy === "user_prefix" || rewriteStrategy === "system_message+user_prefix";
+  const systemRewrite = injectSystemMessage
+    ? upsertInjectedSystemMessage(body, rewritePlan.compiledPrompt, rewritePlan.requestId)
+    : {
+        injected: false,
+        strippedNativeControlMessageCount: 0
+      };
+  const systemMessageInjected = systemRewrite.injected;
+  let rewritten = systemMessageInjected || systemRewrite.strippedNativeControlMessageCount > 0;
   const pointer = extractCursorHelpTargetMessagePointer(body);
-  if (pointer) {
-    const nextText = String(rewritePlan.latestUserPrompt || "").trim() || pointer.existingText;
+  let rewrittenTargetText = pointer?.existingText || "";
+  let userPromptInjected = false;
+  if (pointer && injectUserPrefix) {
+    const nextText = injectCompiledPromptIdempotent(pointer.existingText, rewritePlan.compiledPrompt, rewritePlan.requestId);
     if (nextText !== pointer.existingText) {
       writePathValue(body, pointer.path, nextText);
       rewritten = true;
+      userPromptInjected = true;
+      rewrittenTargetText = nextText;
     }
   }
 
@@ -390,10 +494,27 @@ export function rewriteCursorHelpNativeRequestBody(rawBody: unknown, rewritePlan
     body.model = resolveCursorHelpApiModel(rewritePlan.requestedModel, rewritePlan.detectedModel || String(body.model || ""));
   }
 
+  const sessionKey = deriveCursorHelpSessionKey(body);
+
   return {
     body,
-    sessionKey: deriveCursorHelpSessionKey(body),
-    rewritten
+    sessionKey,
+    rewritten,
+    rewriteDebug: {
+      runtimeVersion: CURSOR_HELP_RUNTIME_VERSION,
+      rewriteStrategy,
+      targetMessageIndex: getTargetMessageIndex(pointer),
+      targetKind: pointer?.kind || "none",
+      systemMessageInjected,
+      strippedNativeControlMessageCount: systemRewrite.strippedNativeControlMessageCount,
+      userPromptInjected,
+      compiledPromptHash: stableHash(rewritePlan.compiledPrompt),
+      compiledPromptLength: String(rewritePlan.compiledPrompt || "").length,
+      originalTargetHash: pointer ? stableHash(pointer.existingText) : null,
+      originalTargetLength: pointer ? pointer.existingText.length : 0,
+      rewrittenTargetHash: pointer ? stableHash(rewrittenTargetText) : null,
+      rewrittenTargetLength: pointer ? rewrittenTargetText.length : 0
+    }
   };
 }
 

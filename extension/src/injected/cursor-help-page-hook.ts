@@ -1,10 +1,19 @@
+import { locateCursorHelpNativeSender, type NativeSender } from "./cursor-help-native-sender";
+
 const PAGE_SOURCE = "bbl-cursor-help-page";
 const CONTENT_SOURCE = "bbl-cursor-help-content";
 const PAGE_HOOK_READY_ATTR = "data-bbl-cursor-help-page-ready";
 const FETCH_HOOK_READY_ATTR = "data-bbl-cursor-help-fetch-ready";
 const PAGE_HOOK_INSTALLED_FLAG = "__bblCursorHelpPageHookInstalled";
+// Keep injected MAIN-world script self-contained. Do not import shared runtime-meta here.
+const CURSOR_HELP_RUNTIME_VERSION = "cursor-help-runtime-2026-03-12-r1";
+const CURSOR_HELP_REWRITE_STRATEGY = "system_message+user_prefix";
+const CURSOR_HELP_REWRITE_STRATEGY_OVERRIDE_STORAGE_KEY = "__bblCursorHelpRewriteStrategy";
+const CURSOR_HELP_PAGE_RUNTIME_VERSION_ATTR = "data-bbl-cursor-help-runtime-version";
+const CURSOR_HELP_PAGE_REWRITE_STRATEGY_ATTR = "data-bbl-cursor-help-rewrite-strategy";
 
 type JsonRecord = Record<string, unknown>;
+type CursorHelpRewriteStrategy = "system_message" | "user_prefix" | "system_message+user_prefix";
 type CursorHelpTransportEventType =
   | "request_started"
   | "sse_line"
@@ -30,6 +39,12 @@ interface CursorHelpSenderInspect {
   availableModels?: string[];
   senderKind?: string;
   lastSenderError?: string;
+  pageRuntimeVersion?: string;
+  contentRuntimeVersion?: string;
+  runtimeExpectedVersion?: string;
+  rewriteStrategy?: string;
+  runtimeMismatch?: boolean;
+  runtimeMismatchReason?: string;
 }
 
 interface CursorHelpRewritePlan {
@@ -38,12 +53,14 @@ interface CursorHelpRewritePlan {
   latestUserPrompt: string;
   requestedModel: string;
   detectedModel?: string;
+  rewriteStrategy?: string;
 }
 
 interface CursorHelpNativeEnvelope {
   body: JsonRecord;
   sessionKey: string;
   rewritten: boolean;
+  rewriteDebug: CursorHelpRewriteDebug;
 }
 
 interface CursorHelpTargetMessagePointer {
@@ -52,17 +69,28 @@ interface CursorHelpTargetMessagePointer {
   path: string[];
 }
 
+interface CursorHelpRewriteDebug {
+  runtimeVersion: string;
+  rewriteStrategy: string;
+  targetMessageIndex: number | null;
+  targetKind: CursorHelpTargetMessagePointer["kind"] | "none";
+  systemMessageInjected: boolean;
+  strippedNativeControlMessageCount: number;
+  userPromptInjected: boolean;
+  compiledPromptHash: string;
+  compiledPromptLength: number;
+  originalTargetHash: string | null;
+  originalTargetLength: number;
+  rewrittenTargetHash: string | null;
+  rewrittenTargetLength: number;
+}
+
 interface PendingExecution extends CursorHelpExecutionPayload {
   createdAt: number;
   state: "pending" | "sender_invoked" | "request_started";
   matchedUrl: string | null;
   sessionKey: string | null;
   controller: AbortController | null;
-}
-
-interface NativeSender {
-  senderKind: string;
-  submit: (compiledPrompt: string, requestedModel?: string) => Promise<void>;
 }
 
 const pendingExecutions = new Map<string, PendingExecution>();
@@ -99,6 +127,29 @@ function cloneJsonRecord(value: unknown): JsonRecord {
 
 function normalizeModelText(text: string): string {
   return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeCursorHelpRewriteStrategy(
+  raw: unknown,
+  fallback: CursorHelpRewriteStrategy = CURSOR_HELP_REWRITE_STRATEGY as CursorHelpRewriteStrategy
+): CursorHelpRewriteStrategy {
+  const normalized = String(raw || "").trim().toLowerCase();
+  if (normalized === "system_message") return "system_message";
+  if (normalized === "user_prefix") return "user_prefix";
+  if (normalized === "system_message+user_prefix") return "system_message+user_prefix";
+  return fallback;
+}
+
+function resolveCursorHelpRewriteStrategy(): CursorHelpRewriteStrategy {
+  try {
+    return normalizeCursorHelpRewriteStrategy(localStorage.getItem(CURSOR_HELP_REWRITE_STRATEGY_OVERRIDE_STORAGE_KEY));
+  } catch {
+    return CURSOR_HELP_REWRITE_STRATEGY as CursorHelpRewriteStrategy;
+  }
+}
+
+function syncRewriteStrategyAttr(strategy = resolveCursorHelpRewriteStrategy()): void {
+  document.documentElement?.setAttribute(CURSOR_HELP_PAGE_REWRITE_STRATEGY_ATTR, strategy);
 }
 
 function buildPromptEnvelope(compiledPrompt: string, requestId: string): string {
@@ -168,6 +219,13 @@ function stableHash(input: string): string {
     hash = Math.imul(hash, 16777619);
   }
   return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function getTargetMessageIndex(pointer: CursorHelpTargetMessagePointer | null): number | null {
+  if (!pointer) return null;
+  if (pointer.path[0] !== "messages") return null;
+  const index = Number(pointer.path[1]);
+  return Number.isInteger(index) ? index : null;
 }
 
 function resolveCursorHelpApiModel(requestedModel: string, detectedModel = ""): string {
@@ -292,15 +350,25 @@ function getMessageText(rawMessage: unknown): string {
   return "";
 }
 
+function getMessageRole(rawMessage: unknown): string {
+  return String(toRecord(rawMessage).role || "").trim().toLowerCase();
+}
+
 function isInjectedSystemMessage(rawMessage: unknown): boolean {
   const message = toRecord(rawMessage);
-  const role = String(message.role || "").trim().toLowerCase();
+  const role = getMessageRole(message);
   if (role !== "system") return false;
   const text = getMessageText(message);
   return (
     text.includes(CURSOR_HELP_SYSTEM_PROMPT_START_PREFIX) &&
     text.includes(CURSOR_HELP_SYSTEM_PROMPT_END_PREFIX)
   );
+}
+
+function isNativeControlMessage(rawMessage: unknown): boolean {
+  const role = getMessageRole(rawMessage);
+  if (role !== "system" && role !== "developer") return false;
+  return !isInjectedSystemMessage(rawMessage);
 }
 
 function buildInjectedSystemMessage(body: JsonRecord, compiledPrompt: string, requestId: string): JsonRecord {
@@ -344,12 +412,44 @@ function buildInjectedSystemMessage(body: JsonRecord, compiledPrompt: string, re
   };
 }
 
-function upsertInjectedSystemMessage(body: JsonRecord, compiledPrompt: string, requestId: string): boolean {
-  if (!Array.isArray(body.messages)) return false;
-  const messages = body.messages.filter((message) => !isInjectedSystemMessage(message));
-  messages.unshift(buildInjectedSystemMessage(body, compiledPrompt, requestId));
+function upsertInjectedSystemMessage(
+  body: JsonRecord,
+  compiledPrompt: string,
+  requestId: string
+): { injected: boolean; strippedNativeControlMessageCount: number } {
+  if (!Array.isArray(body.messages)) {
+    return {
+      injected: false,
+      strippedNativeControlMessageCount: 0
+    };
+  }
+  let strippedNativeControlMessageCount = 0;
+  const messages = body.messages.filter((message) => {
+    if (isInjectedSystemMessage(message)) return false;
+    if (isNativeControlMessage(message)) {
+      strippedNativeControlMessageCount += 1;
+      return false;
+    }
+    return true;
+  });
+  const targetPointer = extractCursorHelpTargetMessagePointer({
+    ...body,
+    messages
+  });
+  const targetIndex = getTargetMessageIndex(targetPointer);
+  const fallbackInsertIndex = messages.reduce((insertAt, rawMessage, index) => {
+    const role = String(toRecord(rawMessage).role || "").trim().toLowerCase();
+    if (role === "system" || role === "developer") return index + 1;
+    return insertAt;
+  }, 0);
+  const insertIndex =
+    targetIndex !== null && targetIndex >= 0 && targetIndex <= messages.length ? targetIndex : fallbackInsertIndex;
+  messages.splice(insertIndex, 0, buildInjectedSystemMessage(body, compiledPrompt, requestId));
   body.messages = messages;
-  return true;
+  return {
+    injected: true,
+    strippedNativeControlMessageCount
+  };
 }
 
 function deriveCursorHelpSessionKey(rawBody: unknown, requestUrl = ""): string {
@@ -388,13 +488,27 @@ function deriveCursorHelpSessionKey(rawBody: unknown, requestUrl = ""): string {
 
 function rewriteCursorHelpNativeRequestBody(rawBody: unknown, rewritePlan: CursorHelpRewritePlan): CursorHelpNativeEnvelope {
   const body = cloneJsonRecord(rawBody);
-  let rewritten = upsertInjectedSystemMessage(body, rewritePlan.compiledPrompt, rewritePlan.requestId);
+  const rewriteStrategy = normalizeCursorHelpRewriteStrategy(rewritePlan.rewriteStrategy);
+  const injectSystemMessage = rewriteStrategy === "system_message" || rewriteStrategy === "system_message+user_prefix";
+  const injectUserPrefix = rewriteStrategy === "user_prefix" || rewriteStrategy === "system_message+user_prefix";
+  const systemRewrite = injectSystemMessage
+    ? upsertInjectedSystemMessage(body, rewritePlan.compiledPrompt, rewritePlan.requestId)
+    : {
+        injected: false,
+        strippedNativeControlMessageCount: 0
+      };
+  const systemMessageInjected = systemRewrite.injected;
+  let rewritten = systemMessageInjected || systemRewrite.strippedNativeControlMessageCount > 0;
   const pointer = extractCursorHelpTargetMessagePointer(body);
-  if (pointer) {
-    const nextText = String(rewritePlan.latestUserPrompt || "").trim() || pointer.existingText;
+  let rewrittenTargetText = pointer?.existingText || "";
+  let userPromptInjected = false;
+  if (pointer && injectUserPrefix) {
+    const nextText = injectCompiledPromptIdempotent(pointer.existingText, rewritePlan.compiledPrompt, rewritePlan.requestId);
     if (nextText !== pointer.existingText) {
       writePathValue(body, pointer.path, nextText);
       rewritten = true;
+      userPromptInjected = true;
+      rewrittenTargetText = nextText;
     }
   }
 
@@ -402,10 +516,27 @@ function rewriteCursorHelpNativeRequestBody(rawBody: unknown, rewritePlan: Curso
     body.model = resolveCursorHelpApiModel(rewritePlan.requestedModel, rewritePlan.detectedModel || String(body.model || ""));
   }
 
+  const sessionKey = deriveCursorHelpSessionKey(body);
+
   return {
     body,
-    sessionKey: deriveCursorHelpSessionKey(body),
-    rewritten
+    sessionKey,
+    rewritten,
+    rewriteDebug: {
+      runtimeVersion: CURSOR_HELP_RUNTIME_VERSION,
+      rewriteStrategy,
+      targetMessageIndex: getTargetMessageIndex(pointer),
+      targetKind: pointer?.kind || "none",
+      systemMessageInjected,
+      strippedNativeControlMessageCount: systemRewrite.strippedNativeControlMessageCount,
+      userPromptInjected,
+      compiledPromptHash: stableHash(rewritePlan.compiledPrompt),
+      compiledPromptLength: String(rewritePlan.compiledPrompt || "").length,
+      originalTargetHash: pointer ? stableHash(pointer.existingText) : null,
+      originalTargetLength: pointer ? pointer.existingText.length : 0,
+      rewrittenTargetHash: pointer ? stableHash(rewrittenTargetText) : null,
+      rewrittenTargetLength: pointer ? rewrittenTargetText.length : 0
+    }
   };
 }
 
@@ -461,72 +592,37 @@ function replyRpc(rpcId: string, payload: Record<string, unknown>): void {
   });
 }
 
-function getReactFiber(node: Element): Record<string, unknown> | null {
-  const ownKeys = Object.getOwnPropertyNames(node);
-  const fiberKey = ownKeys.find((key) => key.startsWith("__reactFiber"));
-  const fiber = fiberKey ? (node as Element & Record<string, unknown>)[fiberKey] : null;
-  return fiber && typeof fiber === "object" ? (fiber as Record<string, unknown>) : null;
-}
-
-function getFiberDisplayName(fiber: Record<string, unknown>): string {
-  const type = fiber.type;
-  if (typeof type === "string") return type;
-  const row = toRecord(type);
-  return String(row.displayName || row.name || "").trim();
-}
-
-function getFiberMemoizedProps(fiber: Record<string, unknown>): JsonRecord {
-  return toRecord(fiber.memoizedProps);
-}
-
 function locateNativeSender(): NativeSender | null {
-  const chatInput = document.querySelector("textarea[aria-label='Chat message']");
-  if (!(chatInput instanceof HTMLTextAreaElement)) {
-    lastSenderError = "未找到 Cursor Help 聊天输入组件";
-    return null;
-  }
+  const discovery = locateCursorHelpNativeSender(document);
+  lastSenderError = discovery.error;
+  return discovery.sender;
+}
 
-  let fiber = getReactFiber(chatInput);
-  let depth = 0;
-  while (fiber && depth < 32) {
-    const props = getFiberMemoizedProps(fiber);
-    const displayName = getFiberDisplayName(fiber);
-    if (displayName === "ChatInput" && typeof props.onSubmit === "function") {
-      const submit = props.onSubmit as (compiledPrompt: string, context?: unknown, requestedModel?: string) => Promise<void>;
-      lastSenderError = "";
-      return {
-        senderKind: "react_chat_input_on_submit",
-        submit(compiledPrompt: string, requestedModel?: string) {
-          return Promise.resolve(
-            submit(
-              String(compiledPrompt || ""),
-              undefined,
-              requestedModel && requestedModel.toLowerCase() !== "auto" ? requestedModel : undefined
-            )
-          );
-        }
-      };
-    }
-    const parent = fiber.return;
-    fiber = parent && typeof parent === "object" ? (parent as Record<string, unknown>) : null;
-    depth += 1;
+async function waitForNativeSender(timeoutMs = 2_500): Promise<NativeSender | null> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const sender = locateNativeSender();
+    if (sender) return sender;
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
-
-  lastSenderError = "Cursor Help 内部发送入口未定位";
-  return null;
+  return locateNativeSender();
 }
 
 function inspectSender(): CursorHelpSenderInspect {
   const sender = locateNativeSender();
   const senderReady = Boolean(sender);
   const senderKind = sender?.senderKind;
+  const rewriteStrategy = resolveCursorHelpRewriteStrategy();
+  syncRewriteStrategyAttr(rewriteStrategy);
   return {
     pageHookReady: true,
     fetchHookReady: document.documentElement?.getAttribute(FETCH_HOOK_READY_ATTR) === "1",
     senderReady,
     canExecute: Boolean(sender && document.documentElement?.getAttribute(FETCH_HOOK_READY_ATTR) === "1"),
     senderKind,
-    lastSenderError: senderReady ? "" : lastSenderError
+    lastSenderError: senderReady ? "" : lastSenderError,
+    pageRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
+    rewriteStrategy
   };
 }
 
@@ -691,6 +787,9 @@ function installFetchHook(): void {
     }
 
     let rewrittenBody: JsonRecord;
+    let rewriteDebug: CursorHelpRewriteDebug | null = null;
+    const rewriteStrategy = resolveCursorHelpRewriteStrategy();
+    syncRewriteStrategyAttr(rewriteStrategy);
     try {
       const rawBody = await readRequestBody(input, init);
       const rewritten = rewriteCursorHelpNativeRequestBody(rawBody, {
@@ -698,7 +797,8 @@ function installFetchHook(): void {
         compiledPrompt: execution.compiledPrompt,
         latestUserPrompt: execution.latestUserPrompt,
         requestedModel: execution.requestedModel,
-        detectedModel: ""
+        detectedModel: "",
+        rewriteStrategy
       });
       if (!rewritten.rewritten) {
         throw new Error("Cursor Help 原生请求体无法定位目标消息");
@@ -707,6 +807,7 @@ function installFetchHook(): void {
       execution.matchedUrl = requestUrl;
       execution.sessionKey = rewritten.sessionKey;
       rewrittenBody = rewritten.body;
+      rewriteDebug = rewritten.rewriteDebug;
     } catch (error) {
       cleanupExecution(execution.requestId);
       const message = error instanceof Error ? error.message : String(error);
@@ -721,7 +822,10 @@ function installFetchHook(): void {
 
     emitTransportEvent(execution.requestId, "request_started", {
       url: requestUrl,
-      sessionKey: execution.sessionKey || undefined
+      sessionKey: execution.sessionKey || undefined,
+      runtimeVersion: CURSOR_HELP_RUNTIME_VERSION,
+      rewriteStrategy,
+      rewriteDebug: rewriteDebug || undefined
     });
     logToContent("transport.request_started", "done", `${execution.requestId} -> ${requestUrl}`);
 
@@ -775,11 +879,13 @@ function installFetchHook(): void {
   };
 
   document.documentElement?.setAttribute(FETCH_HOOK_READY_ATTR, "1");
+  document.documentElement?.setAttribute(CURSOR_HELP_PAGE_RUNTIME_VERSION_ATTR, CURSOR_HELP_RUNTIME_VERSION);
+  syncRewriteStrategyAttr();
   logToContent("boot.fetch_hook", "done", "cursor help fetch hook 已安装");
 }
 
 async function executeNativeSend(payload: CursorHelpExecutionPayload): Promise<Record<string, unknown>> {
-  const sender = locateNativeSender();
+  const sender = await waitForNativeSender();
   if (!sender) {
     return {
       ok: false,
@@ -800,7 +906,25 @@ async function executeNativeSend(payload: CursorHelpExecutionPayload): Promise<R
     const execution = pendingExecutions.get(payload.requestId);
     if (!execution) throw new Error("执行上下文已丢失");
     execution.state = "sender_invoked";
-    await sender.submit(payload.latestUserPrompt || payload.compiledPrompt, payload.requestedModel);
+    void Promise.resolve(sender.submit(payload.compiledPrompt, payload.requestedModel))
+      .then(() => {
+        const latest = pendingExecutions.get(payload.requestId);
+        if (!latest) return;
+        logToContent("execute.sender_resolved", "done", `native sender promise resolved requestId=${payload.requestId}`);
+      })
+      .catch((error) => {
+        const latest = pendingExecutions.get(payload.requestId);
+        const message = error instanceof Error ? error.message : String(error);
+        lastSenderError = message;
+        logToContent("execute.sender_rejected", "failed", `native sender promise rejected: ${message}`);
+        if (!latest || latest.state === "request_started") {
+          return;
+        }
+        cleanupExecution(payload.requestId);
+        emitTransportEvent(payload.requestId, "network_error", {
+          error: message
+        });
+      });
     return {
       ok: true,
       senderKind: sender.senderKind
@@ -818,11 +942,7 @@ async function executeNativeSend(payload: CursorHelpExecutionPayload): Promise<R
   }
 }
 
-if (!(window as typeof window & Record<string, unknown>)[PAGE_HOOK_INSTALLED_FLAG]) {
-  (window as typeof window & Record<string, unknown>)[PAGE_HOOK_INSTALLED_FLAG] = true;
-
-  installFetchHook();
-
+function installPageMessageBridge(): void {
   window.addEventListener("message", (event) => {
     if (event.source !== window) return;
     const data = event.data;
@@ -877,11 +997,28 @@ if (!(window as typeof window & Record<string, unknown>)[PAGE_HOOK_INSTALLED_FLA
       logToContent("abort", "done", `收到中止请求 requestId=${requestId}`);
     }
   });
+}
 
+function bootPageHook(): void {
+  installFetchHook();
+  installPageMessageBridge();
   document.documentElement?.setAttribute(PAGE_HOOK_READY_ATTR, "1");
+  document.documentElement?.setAttribute(CURSOR_HELP_PAGE_RUNTIME_VERSION_ATTR, CURSOR_HELP_RUNTIME_VERSION);
+  syncRewriteStrategyAttr();
   logToContent("boot", "done", "cursor help page hook 已安装（native sender mode）");
   postPageMessage("WEBCHAT_PAGE_READY", {
     pageHookReady: true,
     fetchHookReady: true
   });
+}
+
+if (!(window as typeof window & Record<string, unknown>)[PAGE_HOOK_INSTALLED_FLAG]) {
+  (window as typeof window & Record<string, unknown>)[PAGE_HOOK_INSTALLED_FLAG] = true;
+  try {
+    bootPageHook();
+  } catch (error) {
+    lastSenderError = error instanceof Error ? error.message : String(error);
+    logToContent("boot", "failed", lastSenderError);
+    console.error("[bbl] cursor help page hook boot failed", error);
+  }
 }
