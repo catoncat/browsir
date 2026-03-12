@@ -1,5 +1,5 @@
 import { nowIso, type SessionEntry, type SessionHeader, type SessionMeta } from "./types";
-import { getDB, kvGet, kvSet, kvRemove } from "./idb-storage";
+import { getDB, kvGet, kvKeys, kvSet, kvRemove } from "./idb-storage";
 
 export const SESSION_INDEX_KEY = "session:index";
 
@@ -109,20 +109,6 @@ function normalizeSessionMeta(raw: unknown, fallbackHeader?: SessionHeader): Ses
   };
 }
 
-async function storageGet(keys: string | string[] | null): Promise<Record<string, unknown>> {
-  if (keys === null) {
-    const bag = await (await storage()).get(null);
-    return bag as Record<string, unknown>;
-  }
-  
-  const keyList = Array.isArray(keys) ? keys : [keys];
-  const result: Record<string, unknown> = {};
-  for (const key of keyList) {
-    result[key] = await kvGet(key);
-  }
-  return result;
-}
-
 async function storageSet(items: Record<string, unknown>): Promise<void> {
   for (const [key, value] of Object.entries(items)) {
     await kvSet(key, value);
@@ -133,10 +119,6 @@ async function storageRemove(keys: string[]): Promise<void> {
   for (const key of keys) {
     await kvRemove(key);
   }
-}
-
-function storage(): chrome.storage.StorageArea {
-  return chrome.storage.local;
 }
 
 export function buildSessionMetaKey(sessionId: string): string {
@@ -330,9 +312,24 @@ export async function appendTraceChunk<TTrace = unknown>(
   return readTraceChunk<TTrace>(traceId, chunk);
 }
 
+export async function removeTraceRecords(traceId: string): Promise<number> {
+  const id = sanitizeId(traceId, "trace");
+  const db = await getDB();
+  const tx = db.transaction("traces", "readwrite");
+  const index = tx.store.index("by-trace");
+  let removed = 0;
+  let cursor = await index.openKeyCursor(IDBKeyRange.only(id));
+  while (cursor) {
+    await tx.store.delete(cursor.primaryKey);
+    removed += 1;
+    cursor = await cursor.continue();
+  }
+  await tx.done;
+  return removed;
+}
+
 export async function listStorageKeys(): Promise<string[]> {
-  const bag = await storageGet(null);
-  return Object.keys(bag);
+  return await kvKeys();
 }
 
 export async function removeStorageKeys(keys: string[]): Promise<void> {

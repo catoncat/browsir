@@ -1,10 +1,13 @@
 import "./test-setup";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetLifoAdapterForTest } from "../browser-unix-runtime/lifo-adapter";
 import { compact, prepareCompaction } from "../compaction.browser";
+import { getDB, kvKeys } from "../idb-storage";
 import { BrainOrchestrator } from "../orchestrator.browser";
 import { registerRuntimeRouter } from "../runtime-router";
 import type { LlmResolvedRoute } from "../llm-provider";
+import { readTraceChunk } from "../session-store.browser";
 
 type RuntimeListener = (
   message: unknown,
@@ -131,6 +134,18 @@ function resetRuntimeOnMessageMock(): void {
   onMessage.hasListener = (cb) => runtimeListeners.includes(cb);
 }
 
+async function resetRuntimeRouterTestState(): Promise<void> {
+  const db = await getDB();
+  const tx = db.transaction(["sessions", "entries", "traces", "kv"], "readwrite");
+  await tx.objectStore("sessions").clear();
+  await tx.objectStore("entries").clear();
+  await tx.objectStore("traces").clear();
+  await tx.objectStore("kv").clear();
+  await tx.done;
+  await resetLifoAdapterForTest();
+  await chrome.storage.local.clear();
+}
+
 function invokeRuntime(
   message: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
@@ -231,9 +246,10 @@ async function waitForStreamEvent(
 }
 
 describe("runtime-router.browser", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     runtimeListeners = [];
     resetRuntimeOnMessageMock();
+    await resetRuntimeRouterTestState();
   });
   afterEach(() => {
     vi.restoreAllMocks();
@@ -7614,5 +7630,76 @@ description missing`,
     expect(sessions.some((item) => String(item.id || "") === sessionId)).toBe(
       false,
     );
+  });
+
+  it("brain.session.delete should remove persisted trace and session memfs files", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "session delete cleanup",
+      autoRun: false,
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    const wrote = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.write",
+      action: "invoke",
+      args: {
+        frame: {
+          tool: "write",
+          args: {
+            path: "mem://notes/delete-me.txt",
+            content: "cleanup-target",
+            mode: "overwrite",
+            runtime: "browser",
+          },
+        },
+      },
+      verifyPolicy: "off",
+    });
+    expect(wrote.ok).toBe(true);
+
+    orchestrator.events.emit("loop_done", sessionId, {
+      reason: "cleanup-check",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const beforeTrace = await readTraceChunk(`session-${sessionId}`, 0);
+    expect(beforeTrace.length).toBeGreaterThan(0);
+
+    const sessionVirtualKeysBefore = (await kvKeys()).filter((key) =>
+      key.includes(`session:${sessionId}`),
+    );
+    expect(sessionVirtualKeysBefore.length).toBeGreaterThan(0);
+
+    const deleted = await invokeRuntime({
+      type: "brain.session.delete",
+      sessionId,
+    });
+    expect(deleted.ok).toBe(true);
+    const deletedData = (deleted.data || {}) as Record<string, unknown>;
+    expect(deletedData.deleted).toBe(true);
+    expect(
+      Array.isArray(deletedData.removedKeys) &&
+        (deletedData.removedKeys as unknown[]).some((item) =>
+          String(item || "").includes(`session:${sessionId}`),
+        ),
+    ).toBe(true);
+
+    const afterTrace = await readTraceChunk(`session-${sessionId}`, 0);
+    expect(afterTrace).toEqual([]);
+
+    const sessionVirtualKeysAfter = (await kvKeys()).filter((key) =>
+      key.includes(`session:${sessionId}`),
+    );
+    expect(sessionVirtualKeysAfter).toEqual([]);
   });
 });

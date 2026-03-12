@@ -9,6 +9,7 @@ import {
   createRuntimeLoopController,
   type RuntimeLoopController,
 } from "./runtime-loop.browser";
+import { clearVirtualFilesForSession } from "./browser-unix-runtime/lifo-adapter";
 import { invokeVirtualFrame, isVirtualUri } from "./virtual-fs.browser";
 import { registerExtension, type ExtensionFactory } from "./extension-api";
 import type {
@@ -22,6 +23,7 @@ import { handleWebChatRuntimeMessage } from "./web-chat-executor.browser";
 import {
   removeSessionIndexEntry,
   removeSessionMeta,
+  removeTraceRecords,
   writeSessionMeta,
 } from "./session-store.browser";
 import {
@@ -2714,13 +2716,19 @@ async function handleSession(
     const sessionId = requireSessionId(payload);
     const metaKey = `session:${sessionId}:meta`;
     await removeSessionMeta(sessionId);
+    const removedTraceCount = await removeTraceRecords(`session-${sessionId}`);
+    const removedVirtualKeys = await clearVirtualFilesForSession(sessionId);
     const index = await removeSessionIndexEntry(sessionId, nowIso());
     orchestrator.stop(sessionId);
     return ok({
       sessionId,
       deleted: true,
-      removedCount: 1,
-      removedKeys: [metaKey],
+      removedCount: 1 + removedTraceCount + removedVirtualKeys.length,
+      removedKeys: [
+        metaKey,
+        ...removedVirtualKeys,
+        ...(removedTraceCount > 0 ? [`trace:session-${sessionId}`] : []),
+      ],
       index,
     });
   }

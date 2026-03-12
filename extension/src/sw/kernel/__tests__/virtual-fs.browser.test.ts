@@ -1,13 +1,12 @@
 import "./test-setup";
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { getDB } from "../idb-storage";
+import { resetLifoAdapterForTest } from "../browser-unix-runtime/lifo-adapter";
 import { frameMatchesVirtualCapability, invokeVirtualFrame, shouldRouteFrameToBrowserVfs } from "../virtual-fs.browser";
 
 describe("virtual-fs.browser", () => {
   beforeEach(async () => {
-    const db = await getDB();
-    await db.clear("kv");
+    await resetLifoAdapterForTest();
   });
 
   it("supports write/read/edit through virtual frame invoke", async () => {
@@ -133,11 +132,11 @@ describe("virtual-fs.browser", () => {
       args: {
         cmdId: "bash.exec",
         runtime: "browser",
-        args: ["rm mem://docs/a.md"]
+        args: ["not_a_real_command_12345"]
       }
     });
-    expect(Number(unsupported.exitCode || 0)).toBe(1);
-    expect(String(unsupported.stderr || "")).toContain("不支持命令");
+    expect(Number(unsupported.exitCode || 0)).not.toBe(0);
+    expect(String(unsupported.stderr || "")).not.toBe("");
   });
 
   it("routes frame to browser vfs by runtime/path semantics", () => {
@@ -175,6 +174,13 @@ describe("virtual-fs.browser", () => {
         runtime: "browser"
       }
     };
+    const readForcedSandbox = {
+      tool: "read",
+      args: {
+        path: "/tmp/todo.md",
+        runtime: "sandbox"
+      }
+    };
 
     expect(frameMatchesVirtualCapability(readMemFrame, "fs.read")).toBe(true);
     expect(shouldRouteFrameToBrowserVfs(readMemFrame)).toBe(true);
@@ -184,6 +190,7 @@ describe("virtual-fs.browser", () => {
 
     expect(shouldRouteFrameToBrowserVfs(readMemForcedLocal)).toBe(false);
     expect(shouldRouteFrameToBrowserVfs(readLocalForcedBrowser)).toBe(true);
+    expect(shouldRouteFrameToBrowserVfs(readForcedSandbox)).toBe(true);
   });
 
   it("rejects unsupported edit mode and unsupported tool frame", async () => {
@@ -230,6 +237,15 @@ describe("virtual-fs.browser", () => {
         }
       })
     ).rejects.toThrow(/仅支持 cmdId=bash.exec/i);
+
+    await expect(
+      invokeVirtualFrame({
+        tool: "read",
+        args: {
+          path: "vfs://docs/legacy.txt"
+        }
+      })
+    ).rejects.toThrow(/仅支持 mem:\/\//i);
 
     await expect(invokeVirtualFrame({} as Record<string, unknown>)).rejects.toThrow(/缺少 tool/i);
     await expect(

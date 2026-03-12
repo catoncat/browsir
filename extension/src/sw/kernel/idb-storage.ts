@@ -74,3 +74,9 @@ export async function kvRemove(key: string): Promise<void> {
   const db = await getDB();
   await db.delete("kv", key);
 }
+
+export async function kvKeys(): Promise<string[]> {
+  const db = await getDB();
+  const keys = await db.getAllKeys("kv");
+  return keys.map((key) => String(key));
+}
