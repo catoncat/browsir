@@ -3568,10 +3568,7 @@ async function handleBrainDebug(
       || ({} as Record<string, unknown>);
     const activeProvider = String(activeProfile.provider || "openai_compatible").trim() || "openai_compatible";
     const activeModel = String(activeProfile.llmModel || "").trim();
-    const hasLlmApiKey =
-      activeProvider === "cursor_help_web"
-        ? true
-        : !!String(activeProfile.llmApiKey || "").trim();
+    const hasLlmApiKey = !!String(activeProfile.llmApiKey || "").trim();
     const systemPromptPreview = await runtimeLoop.getSystemPromptPreview();
     return ok({
       bridgeUrl: String(cfg.bridgeUrl || ""),
@@ -3663,7 +3660,7 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
           return await applyAfter(await handleBrainDebug(orchestrator, runtimeLoop, infra, routeMessage));
         }
 
-        if (type.startsWith("webchat.")) {
+        if (type === "webchat.transport") {
           const senderTabId = Number((_sender?.tab?.id ?? 0) || 0);
           const handled = await handleWebChatRuntimeMessage(routeMessage, Number.isInteger(senderTabId) && senderTabId > 0 ? senderTabId : undefined);
           return await applyAfter(handled ? ok({ handled: true }) : fail(`Unknown message type: ${type}`));

@@ -4,6 +4,7 @@ import {
   normalizeBrowserRuntimeStrategy,
   type BrowserRuntimeStrategy
 } from "../../sw/kernel/browser-runtime-strategy";
+import { normalizeProviderConnectionConfig } from "../../shared/llm-provider-config";
 
 interface RuntimeResponse<T = any> {
   ok: boolean;
@@ -461,11 +462,16 @@ function createDefaultLlmProfile(defaults: LlmProfileDefaults): PanelLlmProfile 
 function normalizeSingleLlmProfile(raw: Record<string, unknown>, defaults: LlmProfileDefaults): PanelLlmProfile {
   const base = createDefaultLlmProfile(defaults);
   const id = String(raw.id || base.id).trim() || base.id;
+  const connection = normalizeProviderConnectionConfig({
+    provider: raw.provider || base.provider,
+    llmApiBase: raw.llmApiBase ?? base.llmApiBase,
+    llmApiKey: raw.llmApiKey ?? base.llmApiKey
+  });
   return {
     id,
     provider: String(raw.provider || base.provider).trim() || base.provider,
-    llmApiBase: String(raw.llmApiBase ?? base.llmApiBase).trim(),
-    llmApiKey: String(raw.llmApiKey ?? base.llmApiKey),
+    llmApiBase: connection.llmApiBase,
+    llmApiKey: connection.llmApiKey,
     llmModel: String(raw.llmModel || base.llmModel).trim() || base.llmModel,
     providerOptions: toRecord(raw.providerOptions),
     role: String(raw.role || base.role).trim() || base.role,

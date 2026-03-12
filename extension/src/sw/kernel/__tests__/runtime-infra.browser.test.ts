@@ -2,6 +2,7 @@ import "./test-setup";
 
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { createRuntimeInfraHandler } from "../runtime-infra.browser";
+import { CURSOR_HELP_WEB_API_KEY, CURSOR_HELP_WEB_BASE_URL } from "../../../shared/llm-provider-config";
 
 class FakeWebSocket {
   static readonly CONNECTING = 0;
@@ -277,6 +278,39 @@ describe("runtime infra handler", () => {
     if (!afterInvalid || afterInvalid.ok !== true) return;
     const afterInvalidData = (afterInvalid.data ?? {}) as Record<string, unknown>;
     expect(afterInvalidData.browserRuntimeStrategy).toBe("browser-first");
+  });
+
+  it("normalizes cursor_help_web profiles during config.save", async () => {
+    const infra = createRuntimeInfraHandler();
+
+    const saved = await infra.handleMessage({
+      type: "config.save",
+      payload: {
+        llmDefaultProfile: "cursor-help",
+        llmProfiles: [
+          {
+            id: "cursor-help",
+            provider: "cursor_help_web",
+            llmApiBase: "",
+            llmApiKey: "",
+            llmModel: "auto",
+            providerOptions: {
+              targetSite: "cursor_help"
+            },
+            role: "worker"
+          }
+        ]
+      }
+    });
+    expect(saved?.ok).toBe(true);
+
+    const after = await infra.handleMessage({ type: "config.get" });
+    expect(after?.ok).toBe(true);
+    if (!after || after.ok !== true) return;
+    const data = (after.data ?? {}) as Record<string, unknown>;
+    const profile = Array.isArray(data.llmProfiles) ? (data.llmProfiles[0] as Record<string, unknown>) : {};
+    expect(String(profile.llmApiBase || "")).toBe(CURSOR_HELP_WEB_BASE_URL);
+    expect(String(profile.llmApiKey || "")).toBe(CURSOR_HELP_WEB_API_KEY);
   });
 
   it("supports lease acquire/heartbeat/release contract", async () => {

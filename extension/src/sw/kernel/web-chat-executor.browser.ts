@@ -1,15 +1,24 @@
-import { buildCursorHelpCompiledPrompt, extractLastUserPreview, type WebToolCall } from "../../shared/cursor-help-web-shared";
-import { resolveCursorHelpApiModel } from "../../shared/cursor-help-protocol";
+import { buildCursorHelpCompiledPrompt, type WebToolCall, parseToolProtocolFromText } from "../../shared/cursor-help-web-shared";
+import { CURSOR_HELP_WEB_BASE_URL } from "../../shared/llm-provider-config";
+import {
+  CURSOR_HELP_REQUEST_PATH,
+  buildCursorHelpRequestBody,
+  classifyCursorHelpHttpError,
+  classifyCursorHelpInvalidResponse,
+  createCursorHelpClientId,
+  parseCursorHelpSseLine
+} from "../../shared/cursor-help-protocol";
 import type { LlmProviderSendInput } from "./llm-provider";
 
 type JsonRecord = Record<string, unknown>;
 
-type WebChatEventType =
-  | "webchat.request_started"
-  | "webchat.delta"
-  | "webchat.done"
-  | "webchat.error"
-  | "webchat.tool_call_detected";
+type WebChatTransportType =
+  | "request_started"
+  | "sse_line"
+  | "stream_end"
+  | "http_error"
+  | "invalid_response"
+  | "network_error";
 
 interface PendingExecution {
   requestId: string;
@@ -24,12 +33,13 @@ interface PendingExecution {
   controller: ReadableStreamDefaultController<Uint8Array> | null;
   queue: Uint8Array[];
   outputText: string;
+  firstDeltaLogged: boolean;
   closed: boolean;
 }
 
 const PROVIDER_ID = "cursor_help_web";
 const CURSOR_HELP_URL = "https://cursor.com/help";
-const CURSOR_TAB_PATTERNS = ["https://cursor.com/help*", "https://cursor.com/*"] as const;
+const CURSOR_TAB_PATTERNS = ["https://cursor.com/help*"] as const;
 const ACTIVE_BY_REQUEST_ID = new Map<string, PendingExecution>();
 const ACTIVE_REQUEST_ID_BY_TAB = new Map<number, string>();
 const EXECUTION_BOOT_TIMEOUT_MS = 20_000;
@@ -114,6 +124,21 @@ function buildJsonResponseBody(entry: PendingExecution, finishReason: string | n
       }
     ]
   });
+}
+
+function normalizeTransportErrorMessage(payload: JsonRecord): string {
+  const transportType = String(payload.transportType || "").trim();
+  if (transportType === "http_error") {
+    return classifyCursorHelpHttpError(Number(payload.status || 0), String(payload.bodyText || ""));
+  }
+  if (transportType === "invalid_response") {
+    return classifyCursorHelpInvalidResponse(
+      Number(payload.status || 0),
+      String(payload.contentType || ""),
+      String(payload.bodyText || "")
+    );
+  }
+  return String(payload.error || "网页聊天执行失败");
 }
 
 function failExecution(entry: PendingExecution, error: string): void {
@@ -327,7 +352,7 @@ export function createCursorHelpWebProvider() {
   return {
     id: PROVIDER_ID,
     resolveRequestUrl() {
-      return "browser-brain-loop://cursor-help-web/chat/completions";
+      return `${CURSOR_HELP_WEB_BASE_URL}/chat/completions`;
     },
     async send(input: LlmProviderSendInput): Promise<Response> {
       emitProviderDebugLog("provider.resolve_tab", "running", "开始解析目标 Cursor Help 标签页");
@@ -346,14 +371,20 @@ export function createCursorHelpWebProvider() {
         input.payload.tools,
         input.payload.tool_choice
       );
+      const requestedModel = String(input.route.llmModel || "").trim();
+      const detectedModel = String(toRecord(input.route.providerOptions).detectedModel || "").trim();
+      const requestBody = buildCursorHelpRequestBody({
+        prompt: compiledPrompt,
+        requestId,
+        messageId: createCursorHelpClientId(),
+        requestedModel,
+        detectedModel
+      });
       const entry: PendingExecution = {
         requestId,
         sessionId: String(input.sessionId || "").trim() || "default",
         tabId,
-        model: resolveCursorHelpApiModel(
-          String(input.route.llmModel || "").trim(),
-          String(toRecord(input.route.providerOptions).detectedModel || "").trim()
-        ),
+        model: requestBody.model,
         stream: input.payload.stream !== false,
         createdAt: Date.now(),
         lastEventAt: Date.now(),
@@ -362,6 +393,7 @@ export function createCursorHelpWebProvider() {
         controller: null,
         queue: [],
         outputText: "",
+        firstDeltaLogged: false,
         closed: false
       };
 
@@ -401,10 +433,8 @@ export function createCursorHelpWebProvider() {
           type: "webchat.execute",
           requestId,
           targetSite: "cursor_help",
-          compiledPrompt,
-          requestedModel: String(input.route.llmModel || "").trim(),
-          detectedModel: String(toRecord(input.route.providerOptions).detectedModel || "").trim(),
-          userVisibleText: extractLastUserPreview(input.payload.messages)
+          requestUrl: CURSOR_HELP_REQUEST_PATH,
+          requestBody
         });
         const row = toRecord(response);
         if (row.ok !== true) {
@@ -477,7 +507,7 @@ function emitFinalDone(entry: PendingExecution): void {
 
 export async function handleWebChatRuntimeMessage(message: unknown, senderTabId?: number): Promise<boolean> {
   const payload = toRecord(message);
-  if (String(payload.type || "").trim() !== "webchat.event") return false;
+  if (String(payload.type || "").trim() !== "webchat.transport") return false;
 
   const requestId = String(payload.requestId || "").trim();
   if (!requestId) return true;
@@ -485,55 +515,58 @@ export async function handleWebChatRuntimeMessage(message: unknown, senderTabId?
   if (!entry) return true;
   if (senderTabId && entry.tabId !== senderTabId) return true;
 
-  const eventType = String(payload.eventType || "").trim() as WebChatEventType;
+  const transportType = String(payload.transportType || "").trim() as WebChatTransportType;
   touchExecution(entry);
-  if (eventType === "webchat.request_started") {
+  if (transportType === "request_started") {
     entry.startedAt = Date.now();
     armExecutionWatchdog(entry, EXECUTION_STALE_MS, "网页 provider 请求长时间未结束");
     emitProviderDebugLog("provider.request_started", "done", `tab=${entry.tabId} 页面内聊天请求已发出`);
     return true;
   }
 
-  if (eventType === "webchat.delta") {
-    const text = String(payload.text || "");
-    if (text) {
-      entry.outputText += text;
-      if (entry.stream) {
-        enqueueSse(entry, buildChunk(entry.requestId, entry.model, { content: text }));
-      }
+  if (transportType === "sse_line") {
+    const parsedEvent = parseCursorHelpSseLine(String(payload.line || ""));
+    if (parsedEvent.kind === "ignore") return true;
+    if (parsedEvent.kind === "error") {
+      emitProviderDebugLog("provider.error", "failed", String(parsedEvent.error || "网页聊天执行失败"));
+      failExecution(entry, String(parsedEvent.error || "网页聊天执行失败"));
+      return true;
+    }
+    if (parsedEvent.kind === "done") {
+      if (!entry.closed) emitFinalDone(entry);
+      emitProviderDebugLog("provider.done", "done", "网页 provider 请求完成");
+      return true;
+    }
+
+    const text = String(parsedEvent.text || "");
+    if (!text) return true;
+    entry.outputText += text;
+    const protocol = parseToolProtocolFromText(entry.outputText);
+    if (protocol?.toolCalls.length) {
+      emitToolCalls(entry, protocol.toolCalls);
+      return true;
+    }
+    if (entry.stream) {
+      enqueueSse(entry, buildChunk(entry.requestId, entry.model, { content: text }));
+    }
+    if (!entry.firstDeltaLogged) {
+      entry.firstDeltaLogged = true;
       emitProviderDebugLog("provider.first_delta", "done", `收到输出片段，长度=${text.length}`);
     }
     armExecutionWatchdog(entry, EXECUTION_STALE_MS, "网页 provider 请求长时间无新输出");
     return true;
   }
 
-  if (eventType === "webchat.tool_call_detected") {
-    const toolCalls = Array.isArray(payload.toolCalls)
-      ? payload.toolCalls
-          .map((item) => toRecord(item))
-          .map((item) => ({
-            id: String(item.id || "").trim() || `tool_${Date.now()}`,
-            type: "function" as const,
-            function: {
-              name: String(toRecord(item.function).name || "").trim(),
-              arguments: String(toRecord(item.function).arguments || "{}")
-            }
-          }))
-          .filter((item) => item.function.name)
-      : [];
-    emitToolCalls(entry, toolCalls);
-    return true;
-  }
-
-  if (eventType === "webchat.done") {
+  if (transportType === "stream_end") {
     if (!entry.closed) emitFinalDone(entry);
-    emitProviderDebugLog("provider.done", "done", "网页 provider 请求完成");
+    emitProviderDebugLog("provider.done", "done", "网页 provider 数据流结束");
     return true;
   }
 
-  if (eventType === "webchat.error") {
-    emitProviderDebugLog("provider.error", "failed", String(payload.error || "网页聊天执行失败"));
-    failExecution(entry, String(payload.error || "网页聊天执行失败"));
+  if (transportType === "http_error" || transportType === "invalid_response" || transportType === "network_error") {
+    const error = normalizeTransportErrorMessage(payload);
+    emitProviderDebugLog("provider.error", "failed", error);
+    failExecution(entry, error);
     return true;
   }
 

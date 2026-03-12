@@ -31,6 +31,22 @@ export interface CursorHelpParsedSseEvent {
   error?: string;
 }
 
+export type CursorHelpTransportEventType =
+  | "request_started"
+  | "sse_line"
+  | "stream_end"
+  | "http_error"
+  | "invalid_response"
+  | "network_error";
+
+export interface CursorHelpTransportExecutePayload {
+  requestId: string;
+  requestUrl: string;
+  requestBody: CursorHelpRequestBody;
+}
+
+export const CURSOR_HELP_REQUEST_PATH = "/api/chat";
+
 const MODEL_ALIASES: Array<{ match: RegExp; apiModel: string }> = [
   { match: /anthropic\/claude-sonnet-4\.6|claude-sonnet-4\.6|sonnet 4\.6/i, apiModel: "anthropic/claude-sonnet-4.6" },
   { match: /anthropic\/claude-sonnet-4|claude-sonnet-4|sonnet 4/i, apiModel: "anthropic/claude-sonnet-4" },
@@ -46,6 +62,17 @@ const MODEL_ALIASES: Array<{ match: RegExp; apiModel: string }> = [
 
 function normalizeModelText(text: string): string {
   return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+export function createCursorHelpClientId(length = 16): string {
+  const size = Number.isInteger(length) && length > 0 ? length : 16;
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const bytes = crypto.getRandomValues(new Uint8Array(size));
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    out += chars[bytes[i] % chars.length];
+  }
+  return out;
 }
 
 export function resolveCursorHelpApiModel(requestedModel: string, detectedModel = ""): string {
@@ -88,6 +115,24 @@ export function buildCursorHelpRequestBody(input: {
     ],
     trigger: "submit-message"
   };
+}
+
+export function classifyCursorHelpHttpError(status: number, bodyText: string): string {
+  const detail = String(bodyText || "").trim();
+  const suffix = detail ? ` ${detail}` : "";
+  if (status === 401) return `Cursor Help 未登录或登录态失效。请先在 cursor.com 登录。${suffix}`.trim();
+  if (status === 403) return `Cursor Help 当前账号无权访问该请求。${suffix}`.trim();
+  if (status === 404) return `Cursor Help /api/chat 不可用。${suffix}`.trim();
+  if (status === 429) return `Cursor Help 请求过于频繁，已被限流。${suffix}`.trim();
+  if (status >= 500) return `Cursor Help 服务暂时异常 (${status})。${suffix}`.trim();
+  return detail ? `/api/chat 请求失败: ${status} ${detail}` : `/api/chat 请求失败: ${status}`;
+}
+
+export function classifyCursorHelpInvalidResponse(status: number, contentType: string, bodyText = ""): string {
+  const normalizedType = String(contentType || "").trim() || "(empty)";
+  const detail = String(bodyText || "").trim();
+  const suffix = detail ? ` ${detail}` : "";
+  return `Cursor Help 返回非 SSE 响应 (${status}, ${normalizedType})。${suffix}`.trim();
 }
 
 export function parseCursorHelpSseLine(line: string): CursorHelpParsedSseEvent {

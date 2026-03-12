@@ -46,9 +46,9 @@ function emitDemoLog(step: string, status: "running" | "done" | "failed", detail
   });
 }
 
-function emitWebchatEvent(payload: Record<string, unknown>): void {
+function emitWebchatTransport(payload: Record<string, unknown>): void {
   void chrome.runtime.sendMessage({
-    type: "webchat.event",
+    type: "webchat.transport",
     ...payload
   }).catch(() => {
     // background may be reloading
@@ -184,9 +184,9 @@ window.addEventListener("message", (event) => {
     return;
   }
 
-  if (data.type === "WEBCHAT_EVENT") {
+  if (data.type === "WEBCHAT_TRANSPORT_EVENT") {
     const payload = data.payload && typeof data.payload === "object" ? (data.payload as Record<string, unknown>) : {};
-    emitWebchatEvent(payload);
+    emitWebchatTransport(payload);
   }
 });
 
@@ -199,15 +199,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         emitDemoLog("content.execute", "running", "收到 webchat.execute");
         await ensurePageHookInjected();
         const requestId = String(message.requestId || "").trim();
-        const compiledPrompt = String(message.compiledPrompt || "");
-        const requestedModel = String(message.requestedModel || "").trim();
-        const detectedModel = String(message.detectedModel || "").trim();
+        const requestUrl = String(message.requestUrl || "").trim() || "/api/chat";
+        const requestBody =
+          message?.requestBody && typeof message.requestBody === "object"
+            ? (message.requestBody as Record<string, unknown>)
+            : {};
         emitDemoLog("content.execute", "running", `postMessage 到 page hook requestId=${requestId}`);
         postToPage("WEBCHAT_EXECUTE", {
           requestId,
-          compiledPrompt,
-          requestedModel,
-          detectedModel
+          requestUrl,
+          requestBody
         });
         emitDemoLog("content.execute", "done", "page hook 已接管请求执行");
         sendResponse({ ok: true });

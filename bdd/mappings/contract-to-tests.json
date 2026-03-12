@@ -173,7 +173,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/__tests__/llm-provider-registry.browser.test.ts::registers and resolves providers by id + extension/src/sw/kernel/__tests__/llm-profile-resolver.browser.test.ts::returns profile_not_found when llmProfiles is missing + extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts::使用 profile 配置时应发出 llm.route.selected 并命中 provider/model + profile 指向未注册 provider 时应 llm.route.blocked 并 failed_execute"
+          "target": "extension/src/sw/kernel/__tests__/llm-provider-registry.browser.test.ts::registers and resolves providers by id + extension/src/sw/kernel/__tests__/llm-profile-resolver.browser.test.ts::returns profile_not_found when llmProfiles is missing + extension/src/sw/kernel/__tests__/llm-profile-resolver.cursor-help.browser.test.ts::rejects cursor_help_web profiles that bypass core base/key config||accepts normalized cursor_help_web provider config + extension/src/sw/kernel/__tests__/runtime-infra.browser.test.ts::normalizes cursor_help_web profiles during config.save + extension/src/sw/kernel/__tests__/web-chat-executor.browser.test.ts::parses transport SSE lines in SW and emits final text stream||detects tool protocol from transport SSE lines inside SW + extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts::使用 profile 配置时应发出 llm.route.selected 并命中 provider/model + profile 指向未注册 provider 时应 llm.route.blocked 并 failed_execute"
         },
         {
           "layer": "browser-cdp",

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildCursorHelpRequestBody, parseCursorHelpSseLine, resolveCursorHelpApiModel } from "../../../shared/cursor-help-protocol";
+import {
+  buildCursorHelpRequestBody,
+  classifyCursorHelpHttpError,
+  parseCursorHelpSseLine,
+  resolveCursorHelpApiModel
+} from "../../../shared/cursor-help-protocol";
 
 describe("cursor-help-protocol", () => {
   it("maps UI label to Cursor Help api model", () => {
@@ -40,5 +45,10 @@ describe("cursor-help-protocol", () => {
     expect(parseCursorHelpSseLine('data: [DONE]')).toEqual({
       kind: "done"
     });
+  });
+
+  it("classifies transport-level http errors in SW", () => {
+    expect(classifyCursorHelpHttpError(401, "login required")).toContain("未登录");
+    expect(classifyCursorHelpHttpError(500, "server exploded")).toContain("服务暂时异常");
   });
 });

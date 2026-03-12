@@ -1,5 +1,6 @@
 import { normalizeBrowserRuntimeStrategy, type BrowserRuntimeStrategy } from "./browser-runtime-strategy";
 import { defaultPipeline as enrichmentPipeline } from "./snapshot-enricher";
+import { normalizeProviderConnectionConfig } from "../../shared/llm-provider-config";
 
 const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:8787/ws";
 const DEFAULT_BRIDGE_TOKEN = "dev-token-change-me";
@@ -101,6 +102,23 @@ interface TelemetryState {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function normalizeStoredLlmProfiles(raw: unknown): unknown {
+  if (!Array.isArray(raw)) return raw;
+  return raw.map((item) => {
+    const row = asRecord(item);
+    const connection = normalizeProviderConnectionConfig({
+      provider: row.provider,
+      llmApiBase: row.llmApiBase,
+      llmApiKey: row.llmApiKey
+    });
+    return {
+      ...row,
+      llmApiBase: connection.llmApiBase,
+      llmApiKey: connection.llmApiKey
+    };
+  });
 }
 
 function randomId(prefix = "id"): string {
@@ -623,7 +641,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         DEFAULT_BROWSER_RUNTIME_STRATEGY
       ),
       llmDefaultProfile: String(data.llmDefaultProfile || "default"),
-      llmProfiles: data.llmProfiles,
+      llmProfiles: normalizeStoredLlmProfiles(data.llmProfiles),
       llmProfileChains: data.llmProfileChains,
       llmEscalationPolicy: String(data.llmEscalationPolicy || "upgrade_only"),
       llmSystemPromptCustom: normalizeCustomSystemPrompt(data.llmSystemPromptCustom, ""),
@@ -665,7 +683,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         current.browserRuntimeStrategy || DEFAULT_BROWSER_RUNTIME_STRATEGY
       ),
       llmDefaultProfile: String(source.llmDefaultProfile || current.llmDefaultProfile || "default").trim() || "default",
-      llmProfiles: source.llmProfiles !== undefined ? source.llmProfiles : current.llmProfiles,
+      llmProfiles: normalizeStoredLlmProfiles(source.llmProfiles !== undefined ? source.llmProfiles : current.llmProfiles),
       llmProfileChains: source.llmProfileChains !== undefined ? source.llmProfileChains : current.llmProfileChains,
       llmEscalationPolicy: String(source.llmEscalationPolicy || current.llmEscalationPolicy || "upgrade_only").trim() || "upgrade_only",
       llmSystemPromptCustom: normalizeCustomSystemPrompt(source.llmSystemPromptCustom, current.llmSystemPromptCustom || ""),
