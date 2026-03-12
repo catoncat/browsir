@@ -8861,6 +8861,22 @@ export function createRuntimeLoopController(
         .join("||");
     };
 
+    const isToolCallRequiringBrowserProof = (
+      toolCall: ToolCallItem,
+      canonicalToolName: string,
+    ): boolean => {
+      if (!BROWSER_PROOF_REQUIRED_TOOL_NAMES.has(canonicalToolName)) {
+        return false;
+      }
+      if (canonicalToolName !== "computer") return true;
+      const args = parseToolCallArgs(toolCall.function.arguments || "");
+      const action = String(args?.action || "")
+        .trim()
+        .toLowerCase();
+      if (!action) return false;
+      return !["wait", "hover", "scroll", "scroll_to"].includes(action);
+    };
+
     const didToolProvideBrowserProof = (
       toolName: string,
       responsePayload: JsonRecord,
@@ -9264,7 +9280,7 @@ export function createRuntimeLoopController(
           )
             .trim()
             .toLowerCase();
-          if (BROWSER_PROOF_REQUIRED_TOOL_NAMES.has(canonicalToolName)) {
+          if (isToolCallRequiringBrowserProof(tc, canonicalToolName)) {
             browserProofRequired = true;
             stepUsedBrowserProofRequiredTool = true;
           }

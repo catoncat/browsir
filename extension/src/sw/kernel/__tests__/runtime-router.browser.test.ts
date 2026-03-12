@@ -5240,6 +5240,166 @@ describe("runtime-router.browser", () => {
     expect(guardEvents).toHaveLength(1);
   });
 
+  it("computer(wait) 不应触发 browser proof guard", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    let verifyInvoked = 0;
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.browser.verify.after-wait",
+        name: "browser-verify-after-wait",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["browser.verify"],
+        },
+      },
+      providers: {
+        capabilities: {
+          "browser.verify": {
+            id: "plugin.browser.verify.after-wait.provider",
+            mode: "script",
+            priority: 80,
+            invoke: async () => {
+              verifyInvoked += 1;
+              return {
+                data: {
+                  ok: true,
+                },
+                verified: true,
+                verifyReason: "verified",
+              };
+            },
+          },
+        },
+      },
+    });
+
+    let llmCall = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
+      if (llmCall === 1 || llmCall === 2) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: `call_wait_${llmCall}`,
+                      type: "function",
+                      function: {
+                        name: "computer",
+                        arguments: JSON.stringify({
+                          action: "wait",
+                          tabId: 1,
+                          duration: 1,
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      }
+      if (llmCall === 3) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_wait_verify",
+                      type: "function",
+                      function: {
+                        name: "browser_verify",
+                        arguments: JSON.stringify({
+                          tabId: 1,
+                          expect: {
+                            urlContains: "example.com",
+                          },
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "完成",
+              },
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
+        llmRetryMaxAttempts: 0,
+      },
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "等待两次后继续验证页面结果",
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId, 5000);
+    expect(verifyInvoked).toBe(1);
+    const done = stream.find(
+      (item) => String(item.type || "") === "loop_done",
+    ) as Record<string, unknown> | undefined;
+    const donePayload = (done?.payload || {}) as Record<string, unknown>;
+    expect(String(donePayload.status || "")).toBe("done");
+
+    const browserGuardEvents = stream.filter((item) => {
+      if (String(item.type || "") !== "loop_no_progress") return false;
+      const payload = ((item as Record<string, unknown>).payload ||
+        {}) as Record<string, unknown>;
+      return String(payload.reason || "") === "browser_proof_guard";
+    });
+    expect(browserGuardEvents).toHaveLength(0);
+  });
+
   it("LLM 抛出字符串错误时应稳定收口，避免 details 写入字符串导致二次异常", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
