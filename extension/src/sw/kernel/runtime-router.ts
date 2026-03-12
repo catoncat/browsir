@@ -1263,6 +1263,13 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 function describePluginModuleValue(value: unknown): string {
   if (value === null) return "null";
   if (Array.isArray(value)) return "array";
+  if (value instanceof Map) return "Map";
+  if (value instanceof Set) return "Set";
+  if (value instanceof URL) return "URL";
+  if (value instanceof ArrayBuffer) return "ArrayBuffer";
+  if (ArrayBuffer.isView(value)) {
+    return value.constructor?.name || "TypedArray";
+  }
   if (value instanceof Date) return "Date";
   if (value instanceof RegExp) return "RegExp";
   if (typeof value === "function") return "function";
@@ -1301,6 +1308,99 @@ function normalizeFunctionModuleSource(
   return `(${source})`;
 }
 
+function serializeAccessorFunctionToModuleSource(
+  value: (...args: any[]) => unknown,
+  kind: "get" | "set",
+  path: string,
+): string {
+  const source = Function.prototype.toString.call(value).trim();
+  if (!source) {
+    throw new Error(`${path} ${kind}ter 源码为空`);
+  }
+  if (source.startsWith(`${kind} `)) {
+    return `(() => {
+  const accessorHolder = { ${source} };
+  return Object.getOwnPropertyDescriptor(
+    accessorHolder,
+    Object.keys(accessorHolder)[0],
+  )?.${kind};
+})()`;
+  }
+  return normalizeFunctionModuleSource(value, path);
+}
+
+function serializePlainObjectToModuleSource(
+  value: Record<string, unknown>,
+  path: string,
+  seen: WeakSet<object>,
+): string {
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Object.keys(descriptors).filter(
+    (key) => descriptors[key]?.enumerable === true,
+  );
+  const hasAccessor = keys.some((key) => {
+    const descriptor = descriptors[key];
+    return !!descriptor && (descriptor.get || descriptor.set);
+  });
+  if (!hasAccessor) {
+    return `{${keys
+      .map((key) => {
+        const descriptor = descriptors[key];
+        return `${JSON.stringify(key)}: ${serializeValueToModuleSource(
+          descriptor?.value,
+          `${path}.${key}`,
+          seen,
+        )}`;
+      })
+      .join(", ")}}`;
+  }
+
+  const lines = ["(() => {", "  const obj = {};"];
+  for (const key of keys) {
+    const descriptor = descriptors[key];
+    if (!descriptor) continue;
+    if (descriptor.get || descriptor.set) {
+      const descriptorParts = [
+        `enumerable: ${descriptor.enumerable === false ? "false" : "true"}`,
+        `configurable: ${descriptor.configurable === false ? "false" : "true"}`,
+      ];
+      if (typeof descriptor.get === "function") {
+        descriptorParts.push(
+          `get: ${serializeAccessorFunctionToModuleSource(
+            descriptor.get,
+            "get",
+            `${path}.${key}`,
+          )}`,
+        );
+      }
+      if (typeof descriptor.set === "function") {
+        descriptorParts.push(
+          `set: ${serializeAccessorFunctionToModuleSource(
+            descriptor.set,
+            "set",
+            `${path}.${key}`,
+          )}`,
+        );
+      }
+      lines.push(
+        `  Object.defineProperty(obj, ${JSON.stringify(
+          key,
+        )}, { ${descriptorParts.join(", ")} });`,
+      );
+      continue;
+    }
+    lines.push(
+      `  obj[${JSON.stringify(key)}] = ${serializeValueToModuleSource(
+        descriptor.value,
+        `${path}.${key}`,
+        seen,
+      )};`,
+    );
+  }
+  lines.push("  return obj;", "})()");
+  return lines.join("\n");
+}
+
 function serializeValueToModuleSource(
   value: unknown,
   path: string,
@@ -1327,6 +1427,68 @@ function serializeValueToModuleSource(
       )
       .join(", ")}]`;
   }
+  if (value instanceof Map) {
+    return `new Map([${[...value.entries()]
+      .map(
+        ([entryKey, entryValue], index) =>
+          `[${serializeValueToModuleSource(
+            entryKey,
+            `${path}.keys()[${index}]`,
+            seen,
+          )}, ${serializeValueToModuleSource(
+            entryValue,
+            `${path}.values()[${index}]`,
+            seen,
+          )}]`,
+      )
+      .join(", ")}])`;
+  }
+  if (value instanceof Set) {
+    return `new Set([${[...value.values()]
+      .map((entryValue, index) =>
+        serializeValueToModuleSource(
+          entryValue,
+          `${path}.values()[${index}]`,
+          seen,
+        ),
+      )
+      .join(", ")}])`;
+  }
+  if (value instanceof URL) {
+    return `new URL(${JSON.stringify(value.toString())})`;
+  }
+  if (value instanceof ArrayBuffer) {
+    return `Uint8Array.from(${serializeValueToModuleSource(
+      [...new Uint8Array(value)],
+      `${path}.bytes`,
+      seen,
+    )}).buffer`;
+  }
+  if (ArrayBuffer.isView(value)) {
+    if (value instanceof DataView) {
+      return `new DataView(Uint8Array.from(${serializeValueToModuleSource(
+        [
+          ...new Uint8Array(
+            value.buffer.slice(
+              value.byteOffset,
+              value.byteOffset + value.byteLength,
+            ),
+          ),
+        ],
+        `${path}.bytes`,
+        seen,
+      )}).buffer)`;
+    }
+    const ctorName = value.constructor?.name || "";
+    if (!ctorName) {
+      throw new Error(`${path} 含不支持的 TypedArray 构造器`);
+    }
+    return `new ${ctorName}(${serializeValueToModuleSource(
+      [...value],
+      `${path}.items`,
+      seen,
+    )})`;
+  }
   if (value instanceof Date) {
     return `new Date(${JSON.stringify(value.toISOString())})`;
   }
@@ -1343,19 +1505,23 @@ function serializeValueToModuleSource(
   }
   seen.add(value);
   try {
-    return `{${Object.entries(value)
-      .map(
-        ([key, entryValue]) =>
-          `${JSON.stringify(key)}: ${serializeValueToModuleSource(
-            entryValue,
-            `${path}.${key}`,
-            seen,
-          )}`,
-      )
-      .join(", ")}}`;
+    return serializePlainObjectToModuleSource(value, path, seen);
   } finally {
     seen.delete(value);
   }
+}
+
+async function validateMaterializedPluginModule(input: {
+  modulePath: string;
+  exportName: string;
+  sessionId: string;
+}): Promise<void> {
+  await invokePluginSandboxRunner({
+    sessionId: input.sessionId,
+    modulePath: input.modulePath,
+    exportName: input.exportName,
+    op: "describe",
+  });
 }
 
 function buildDeclarativeLlmProviderModuleSource(
@@ -1485,26 +1651,7 @@ function buildDefinitionPluginModuleSource(
     const providerSource =
       typeof row.resolveRequestUrl === "function" &&
       typeof row.send === "function"
-        ? `{
-    id: ${JSON.stringify(providerId)},
-    ${
-      String(row.__bblStaticRequestUrl || row.staticRequestUrl || "").trim()
-        ? `__bblStaticRequestUrl: ${JSON.stringify(
-            String(
-              row.__bblStaticRequestUrl || row.staticRequestUrl || "",
-            ).trim(),
-          )},`
-        : ""
-    }
-    resolveRequestUrl: ${serializeValueToModuleSource(
-      row.resolveRequestUrl,
-      `llmProviders[${index}].resolveRequestUrl`,
-    )},
-    send: ${serializeValueToModuleSource(
-      row.send,
-      `llmProviders[${index}].send`,
-    )}
-  }`
+        ? serializeValueToModuleSource(provider, `llmProviders[${index}]`)
         : buildDeclarativeLlmProviderModuleSource(
             normalizeDeclarativeLlmProviderSpec(provider),
           );
@@ -1558,6 +1705,11 @@ async function materializeDefinitionPluginSource(
     JSON.stringify(next, null, 2),
     moduleSessionId,
   );
+  await validateMaterializedPluginModule({
+    modulePath: paths.indexPath,
+    exportName: "default",
+    sessionId: moduleSessionId,
+  });
   return next;
 }
 
@@ -1606,6 +1758,11 @@ async function materializeExtensionFactoryPluginSource(
     JSON.stringify(next, null, 2),
     moduleSessionId,
   );
+  await validateMaterializedPluginModule({
+    modulePath: paths.indexPath,
+    exportName: "default",
+    sessionId: moduleSessionId,
+  });
   return next;
 }
 
@@ -2711,6 +2868,7 @@ async function forkSessionFromLeaf(
     parentSessionId: sourceSessionId,
     title: forkTitle,
     model: sourceMeta.header.model,
+    workingContext: sourceMeta.header.workingContext,
     metadata: {
       ...sourceMetadata,
       forkedFrom: {

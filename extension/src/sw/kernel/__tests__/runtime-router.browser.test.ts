@@ -6742,6 +6742,194 @@ describe("runtime-router.browser", () => {
     ).toBe("mem://plugins/reload-check.txt");
   });
 
+  it("brain.plugin.register should persist getter + set/url/typed-array function plugins across reload", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const pluginId = "plugin.route.structured.values";
+    const registered = await invokeRuntime({
+      type: "brain.plugin.register",
+      plugin: {
+        manifest: {
+          id: pluginId,
+          name: "plugin-route-structured-values",
+          version: "1.0.0",
+          permissions: {
+            capabilities: ["fs.read"],
+            llmProviders: ["route.structured"],
+          },
+        },
+        providers: {
+          capabilities: {
+            "fs.read": {
+              get id() {
+                return "plugin.route.structured.values.fs-read";
+              },
+              get mode() {
+                return "script";
+              },
+              matcher: new Set(["read"]),
+              origin: new URL("https://assets.example.com/root/"),
+              bytes: new Uint8Array([1, 2, 3]),
+              canHandle(input) {
+                const args =
+                  input.args && typeof input.args === "object"
+                    ? (input.args as Record<string, unknown>)
+                    : {};
+                const frame =
+                  args.frame && typeof args.frame === "object"
+                    ? (args.frame as Record<string, unknown>)
+                    : {};
+                return this.matcher.has(String(frame.tool || ""));
+              },
+              invoke(input) {
+                const args =
+                  input.args && typeof input.args === "object"
+                    ? (input.args as Record<string, unknown>)
+                    : {};
+                const frame =
+                  args.frame && typeof args.frame === "object"
+                    ? (args.frame as Record<string, unknown>)
+                    : {};
+                const frameArgs =
+                  frame.args && typeof frame.args === "object"
+                    ? (frame.args as Record<string, unknown>)
+                    : {};
+                return {
+                  source: "plugin-structured",
+                  providerId: this.id,
+                  matcherSize: this.matcher.size,
+                  origin: this.origin.toString(),
+                  bytes: Array.from(this.bytes),
+                  path: String(frameArgs.path || ""),
+                };
+              },
+            },
+          },
+        },
+        llmProviders: [
+          {
+            get id() {
+              return "route.structured";
+            },
+            base: new URL("https://proxy.example.com/v1/"),
+            get __bblStaticRequestUrl() {
+              return "https://proxy.example.com/v1/chat/completions";
+            },
+            markers: new Map([
+              ["x-plugin", "structured"],
+              ["x-kind", "function"],
+            ]),
+            bytes: new Uint8Array([7, 8, 9]),
+            resolveRequestUrl() {
+              return this.__bblStaticRequestUrl;
+            },
+            async send(input) {
+              return new Response(
+                JSON.stringify({
+                  requestUrl: String(input.requestUrl || ""),
+                  plugin: this.markers.get("x-plugin") || "",
+                  base: this.base.toString(),
+                  bytes: Array.from(this.bytes),
+                }),
+                {
+                  status: 200,
+                  headers: {
+                    "content-type": "application/json",
+                  },
+                },
+              );
+            },
+          },
+        ],
+      },
+    });
+    expect(registered.ok).toBe(true);
+
+    runtimeListeners = [];
+    resetRuntimeOnMessageMock();
+
+    const reloadedOrchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(reloadedOrchestrator);
+
+    const listed = await invokeRuntime({ type: "brain.plugin.list" });
+    expect(listed.ok).toBe(true);
+    const listedPlugins = Array.isArray(
+      (listed.data as Record<string, unknown>)?.plugins,
+    )
+      ? ((listed.data as Record<string, unknown>).plugins as Array<
+          Record<string, unknown>
+        >)
+      : [];
+    expect(
+      listedPlugins.some(
+        (item) => String(item.id || "") === pluginId && item.enabled === true,
+      ),
+    ).toBe(true);
+
+    const { sessionId } = await reloadedOrchestrator.createSession({
+      title: "plugin-structured-values-after",
+    });
+    const routedRead = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.read",
+      action: "invoke",
+      args: {
+        frame: {
+          tool: "read",
+          args: {
+            path: "mem://plugins/structured-values.txt",
+            runtime: "sandbox",
+          },
+        },
+      },
+      verifyPolicy: "off",
+    });
+    expect(routedRead.ok).toBe(true);
+    expect(
+      ((routedRead.data as Record<string, unknown>)?.data || {}) as Record<
+        string,
+        unknown
+      >,
+    ).toEqual({
+      source: "plugin-structured",
+      providerId: "plugin.route.structured.values.fs-read",
+      matcherSize: 1,
+      origin: "https://assets.example.com/root/",
+      bytes: [1, 2, 3],
+      path: "mem://plugins/structured-values.txt",
+    });
+
+    const reloadedProvider =
+      reloadedOrchestrator.getLlmProvider("route.structured");
+    expect(reloadedProvider).toBeDefined();
+    expect(reloadedProvider?.resolveRequestUrl(createDummyRoute())).toBe(
+      "https://proxy.example.com/v1/chat/completions",
+    );
+
+    const providerResponse = await reloadedProvider?.send({
+      sessionId,
+      step: 1,
+      route: createDummyRoute({
+        llmBase: "https://fallback.example.com/v1",
+      }),
+      payload: {
+        message: "ping",
+      },
+      signal: new AbortController().signal,
+      requestUrl: "",
+    });
+    expect(providerResponse).toBeDefined();
+    expect(providerResponse?.status).toBe(200);
+    await expect(providerResponse?.json()).resolves.toEqual({
+      requestUrl: "https://proxy.example.com/v1/chat/completions",
+      plugin: "structured",
+      base: "https://proxy.example.com/v1/",
+      bytes: [7, 8, 9],
+    });
+  });
+
   it("supports brain.plugin.register_extension with PI-style default export module", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
