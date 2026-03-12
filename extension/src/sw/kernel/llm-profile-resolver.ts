@@ -3,7 +3,7 @@ import {
   DEFAULT_LLM_PROFILE_ID,
   DEFAULT_LLM_PROVIDER_ID,
   DEFAULT_LLM_ROLE,
-  type LlmResolvedRoute
+  type LlmResolvedRoute,
 } from "./llm-provider";
 import type { LlmProfileEscalationPolicy } from "./llm-profile-policy";
 
@@ -19,7 +19,6 @@ interface LlmProfileDef {
   llmTimeoutMs: number;
   llmRetryMaxAttempts: number;
   llmMaxRetryDelayMs: number;
-  role: string;
 }
 
 export interface ResolveLlmRouteInput {
@@ -43,11 +42,9 @@ export type ResolveLlmRouteResult =
     };
 
 function asRecord(value: unknown): JsonRecord {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
-}
-
-function normalizePolicy(raw: unknown): LlmProfileEscalationPolicy {
-  return String(raw || "").trim().toLowerCase() === "disabled" ? "disabled" : "upgrade_only";
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as JsonRecord)
+    : {};
 }
 
 function normalizeRole(raw: unknown): string {
@@ -60,7 +57,16 @@ function normalizeProfileId(raw: unknown): string {
   return id || DEFAULT_LLM_PROFILE_ID;
 }
 
-function toIntInRange(raw: unknown, fallback: number, min: number, max: number): number {
+function normalizeOptionalProfileId(raw: unknown): string {
+  return String(raw || "").trim();
+}
+
+function toIntInRange(
+  raw: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
   const n = Number(raw);
   if (!Number.isFinite(n)) return fallback;
   const floored = Math.floor(n);
@@ -69,16 +75,37 @@ function toIntInRange(raw: unknown, fallback: number, min: number, max: number):
   return floored;
 }
 
-function normalizeProfileDef(raw: JsonRecord, fallbackId: string, fallbackConfig: BridgeConfig): LlmProfileDef | null {
+function normalizeProfileDef(
+  raw: JsonRecord,
+  fallbackId: string,
+  fallbackConfig: BridgeConfig,
+): LlmProfileDef | null {
   const id = normalizeProfileId(raw.id || fallbackId);
-  const provider = String(raw.provider || DEFAULT_LLM_PROVIDER_ID).trim() || DEFAULT_LLM_PROVIDER_ID;
+  const provider =
+    String(raw.provider || DEFAULT_LLM_PROVIDER_ID).trim() ||
+    DEFAULT_LLM_PROVIDER_ID;
   const llmBase = String(raw.llmApiBase || "").trim();
   const llmKey = String(raw.llmApiKey || "").trim();
-  const llmModel = String(raw.llmModel || "gpt-5.3-codex").trim() || "gpt-5.3-codex";
-  const role = normalizeRole(raw.role);
-  const llmTimeoutMs = toIntInRange(raw.llmTimeoutMs, fallbackConfig.llmTimeoutMs, 1_000, 300_000);
-  const llmRetryMaxAttempts = toIntInRange(raw.llmRetryMaxAttempts, fallbackConfig.llmRetryMaxAttempts, 0, 6);
-  const llmMaxRetryDelayMs = toIntInRange(raw.llmMaxRetryDelayMs, fallbackConfig.llmMaxRetryDelayMs, 0, 300_000);
+  const llmModel =
+    String(raw.llmModel || "gpt-5.3-codex").trim() || "gpt-5.3-codex";
+  const llmTimeoutMs = toIntInRange(
+    raw.llmTimeoutMs,
+    fallbackConfig.llmTimeoutMs,
+    1_000,
+    300_000,
+  );
+  const llmRetryMaxAttempts = toIntInRange(
+    raw.llmRetryMaxAttempts,
+    fallbackConfig.llmRetryMaxAttempts,
+    0,
+    6,
+  );
+  const llmMaxRetryDelayMs = toIntInRange(
+    raw.llmMaxRetryDelayMs,
+    fallbackConfig.llmMaxRetryDelayMs,
+    0,
+    300_000,
+  );
   if (!id) return null;
   return {
     id,
@@ -90,14 +117,14 @@ function normalizeProfileDef(raw: JsonRecord, fallbackId: string, fallbackConfig
     llmTimeoutMs,
     llmRetryMaxAttempts,
     llmMaxRetryDelayMs,
-    role
   };
 }
 
 function collectProfiles(config: BridgeConfig): Map<string, LlmProfileDef> {
   const map = new Map<string, LlmProfileDef>();
 
-  const rawProfiles = (config as BridgeConfig & { llmProfiles?: unknown }).llmProfiles;
+  const rawProfiles = (config as BridgeConfig & { llmProfiles?: unknown })
+    .llmProfiles;
   if (!Array.isArray(rawProfiles)) return map;
 
   for (const item of rawProfiles) {
@@ -113,48 +140,64 @@ function collectProfiles(config: BridgeConfig): Map<string, LlmProfileDef> {
 
 function resolveOrderedProfiles(
   config: BridgeConfig,
-  role: string,
   selectedProfile: string,
-  profiles: Map<string, LlmProfileDef>
+  profiles: Map<string, LlmProfileDef>,
 ): string[] {
-  const chains = asRecord((config as BridgeConfig & { llmProfileChains?: unknown }).llmProfileChains);
-  const roleChainRaw = chains[role];
-  const chain = Array.isArray(roleChainRaw)
-    ? roleChainRaw
-        .map((item) => String(item || "").trim())
-        .filter((id) => id && profiles.has(id))
-    : [];
-
-  if (chain.length > 0) {
-    if (!chain.includes(selectedProfile)) return [selectedProfile, ...chain];
-    return chain;
+  const fallbackProfile = normalizeOptionalProfileId(
+    (config as BridgeConfig & { llmFallbackProfile?: unknown })
+      .llmFallbackProfile,
+  );
+  if (
+    !fallbackProfile ||
+    fallbackProfile === selectedProfile ||
+    !profiles.has(fallbackProfile)
+  ) {
+    return [selectedProfile];
   }
-
-  const sameRole = Array.from(profiles.values())
-    .filter((item) => item.role === role)
-    .map((item) => item.id);
-  if (sameRole.length > 0) {
-    if (!sameRole.includes(selectedProfile)) return [selectedProfile, ...sameRole];
-    return sameRole;
-  }
-
-  return [selectedProfile];
+  return [selectedProfile, fallbackProfile];
 }
 
-export function resolveLlmRoute(input: ResolveLlmRouteInput): ResolveLlmRouteResult {
+function resolveEscalationPolicy(
+  config: BridgeConfig,
+  raw: unknown,
+): LlmProfileEscalationPolicy {
+  const explicit = String(raw || "")
+    .trim()
+    .toLowerCase();
+  if (explicit === "disabled" || explicit === "upgrade_only") {
+    return explicit;
+  }
+  const fallbackProfile = normalizeOptionalProfileId(
+    (config as BridgeConfig & { llmFallbackProfile?: unknown })
+      .llmFallbackProfile,
+  );
+  return fallbackProfile ? "upgrade_only" : "disabled";
+}
+
+export function resolveLlmRoute(
+  input: ResolveLlmRouteInput,
+): ResolveLlmRouteResult {
   const { config } = input;
   const profiles = collectProfiles(config);
 
   const profile =
     normalizeProfileId(
-      input.profile || (config as BridgeConfig & { llmDefaultProfile?: unknown }).llmDefaultProfile || DEFAULT_LLM_PROFILE_ID
+      input.profile ||
+        (config as BridgeConfig & { llmDefaultProfile?: unknown })
+          .llmDefaultProfile ||
+        DEFAULT_LLM_PROFILE_ID,
     ) || DEFAULT_LLM_PROFILE_ID;
   const preferredRoleRaw = String(input.role || "").trim();
-  const escalationPolicy = normalizePolicy(input.escalationPolicy || (config as BridgeConfig & { llmEscalationPolicy?: unknown }).llmEscalationPolicy);
+  const escalationPolicy = resolveEscalationPolicy(
+    config,
+    input.escalationPolicy,
+  );
 
   const selected =
     profiles.get(profile) ||
-    (profile !== DEFAULT_LLM_PROFILE_ID ? profiles.get(DEFAULT_LLM_PROFILE_ID) : undefined) ||
+    (profile !== DEFAULT_LLM_PROFILE_ID
+      ? profiles.get(DEFAULT_LLM_PROFILE_ID)
+      : undefined) ||
     Array.from(profiles.values())[0];
   if (!selected) {
     return {
@@ -162,18 +205,21 @@ export function resolveLlmRoute(input: ResolveLlmRouteInput): ResolveLlmRouteRes
       reason: "profile_not_found",
       message: `未找到可用 llm profile: ${profile}`,
       profile,
-      role: normalizeRole(preferredRoleRaw)
+      role: normalizeRole(preferredRoleRaw),
     };
   }
-  const role = normalizeRole(preferredRoleRaw || selected.role);
+  const role = normalizeRole(preferredRoleRaw);
 
-  if (!String(selected.llmBase || "").trim() || !String(selected.llmKey || "").trim()) {
+  if (
+    !String(selected.llmBase || "").trim() ||
+    !String(selected.llmKey || "").trim()
+  ) {
     return {
       ok: false,
       reason: "missing_llm_config",
       message: "执行失败：当前未配置可用 LLM（llmApiBase/llmApiKey）。",
       profile: selected.id,
-      role
+      role,
     };
   }
 
@@ -191,8 +237,8 @@ export function resolveLlmRoute(input: ResolveLlmRouteInput): ResolveLlmRouteRes
       llmMaxRetryDelayMs: selected.llmMaxRetryDelayMs,
       role,
       escalationPolicy,
-      orderedProfiles: resolveOrderedProfiles(config, role, selected.id, profiles),
-      fromLegacy: false
-    }
+      orderedProfiles: resolveOrderedProfiles(config, selected.id, profiles),
+      fromLegacy: false,
+    },
   };
 }

@@ -2,7 +2,10 @@ import "./test-setup";
 
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { createRuntimeInfraHandler } from "../runtime-infra.browser";
-import { CURSOR_HELP_WEB_API_KEY, CURSOR_HELP_WEB_BASE_URL } from "../../../shared/llm-provider-config";
+import {
+  CURSOR_HELP_WEB_API_KEY,
+  CURSOR_HELP_WEB_BASE_URL,
+} from "../../../shared/llm-provider-config";
 
 class FakeWebSocket {
   static readonly CONNECTING = 0;
@@ -38,8 +41,8 @@ class FakeWebSocket {
           data: JSON.stringify({
             id: payload.id,
             ok: false,
-            error: pendingError
-          })
+            error: pendingError,
+          }),
         } as MessageEvent<string>);
         return;
       }
@@ -47,8 +50,8 @@ class FakeWebSocket {
         data: JSON.stringify({
           id: payload.id,
           ok: true,
-          data: { echoedTool: payload.tool || "" }
-        })
+          data: { echoedTool: payload.tool || "" },
+        }),
       } as MessageEvent<string>);
     });
   }
@@ -58,7 +61,7 @@ class FakeWebSocket {
     this.onclose?.({
       code: 1000,
       reason: "closed",
-      wasClean: true
+      wasClean: true,
     } as CloseEvent);
   }
 }
@@ -69,7 +72,11 @@ async function flushMicrotasks(turns = 2): Promise<void> {
   }
 }
 
-function buildWorkerLlmConfig(options?: { id?: string; model?: string; apiKey?: string }): Record<string, unknown> {
+function buildWorkerLlmConfig(options?: {
+  id?: string;
+  model?: string;
+  apiKey?: string;
+}): Record<string, unknown> {
   const id = String(options?.id || "default");
   return {
     llmDefaultProfile: id,
@@ -80,12 +87,9 @@ function buildWorkerLlmConfig(options?: { id?: string; model?: string; apiKey?: 
         llmApiBase: "https://example.com/v1",
         llmApiKey: options?.apiKey ?? "k1",
         llmModel: options?.model || "gpt-test",
-        role: "worker"
-      }
+        role: "worker",
+      },
     ],
-    llmProfileChains: {
-      worker: [id]
-    }
   };
 }
 
@@ -96,14 +100,18 @@ describe("runtime infra handler", () => {
     FakeWebSocket.instances = [];
     FakeWebSocket.nextError = null;
     // vitest 环境下 bridge 不需要真实网络。
-    (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+      FakeWebSocket as unknown as typeof WebSocket;
     (chrome as unknown as { debugger: any }).debugger = {
       attach: async () => {},
       detach: async () => {},
       sendCommand: async (_target: any, method: string, params: any = {}) => {
         if (method === "Runtime.evaluate") {
           const expression = String(params.expression || "");
-          if (expression.includes("readyState") && expression.includes("nodeCount")) {
+          if (
+            expression.includes("readyState") &&
+            expression.includes("nodeCount")
+          ) {
             return {
               result: {
                 value: {
@@ -111,12 +119,15 @@ describe("runtime infra handler", () => {
                   title: "Example",
                   readyState: "complete",
                   textLength: 120,
-                  nodeCount: 12
-                }
-              }
+                  nodeCount: 12,
+                },
+              },
             };
           }
-          if (expression.includes("nodes") && expression.includes("selector not found")) {
+          if (
+            expression.includes("nodes") &&
+            expression.includes("selector not found")
+          ) {
             return {
               result: {
                 value: {
@@ -131,25 +142,25 @@ describe("runtime infra handler", () => {
                       selector: "#submit",
                       disabled: false,
                       focused: false,
-                      tag: "button"
-                    }
-                  ]
-                }
-              }
+                      tag: "button",
+                    },
+                  ],
+                },
+              },
             };
           }
           if (expression.includes("document.body?.innerText")) {
             return {
               result: {
-                value: "example body text"
-              }
+                value: "example body text",
+              },
             };
           }
           if (expression.includes("document.querySelector")) {
             return {
               result: {
-                value: true
-              }
+                value: true,
+              },
             };
           }
           return {
@@ -158,9 +169,9 @@ describe("runtime infra handler", () => {
                 ok: true,
                 clicked: true,
                 url: "https://example.com/page",
-                title: "Example"
-              }
-            }
+                title: "Example",
+              },
+            },
           };
         }
 
@@ -176,9 +187,9 @@ describe("runtime infra handler", () => {
                 backendDOMNodeId: 101,
                 role: { value: "button" },
                 name: { value: "提交" },
-                properties: [{ name: "focusable", value: { value: true } }]
-              }
-            ]
+                properties: [{ name: "focusable", value: { value: true } }],
+              },
+            ],
           };
         }
 
@@ -202,25 +213,26 @@ describe("runtime infra handler", () => {
                 editable: false,
                 selector: "#submit",
                 disabled: false,
-                focused: false
-              }
-            }
+                focused: false,
+              },
+            },
           };
         }
 
         return {};
       },
       onEvent: {
-        addListener: () => {}
+        addListener: () => {},
       },
       onDetach: {
-        addListener: () => {}
-      }
+        addListener: () => {},
+      },
     };
   });
 
   afterEach(() => {
-    (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = originalWebSocket;
+    (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+      originalWebSocket;
   });
 
   it("supports config.get + config.save roundtrip", async () => {
@@ -245,8 +257,8 @@ describe("runtime infra handler", () => {
         bridgeInvokeTimeoutMs: 180000,
         llmTimeoutMs: 175000,
         llmRetryMaxAttempts: 4,
-        llmMaxRetryDelayMs: 45000
-      }
+        llmMaxRetryDelayMs: 45000,
+      },
     });
     expect(saved?.ok).toBe(true);
 
@@ -257,9 +269,13 @@ describe("runtime infra handler", () => {
     expect(updated.bridgeUrl).toBe("ws://127.0.0.1:18787/ws");
     expect(updated.bridgeToken).toBe("token-x");
     expect(updated.browserRuntimeStrategy).toBe("browser-first");
-    const profiles = Array.isArray(updated.llmProfiles) ? (updated.llmProfiles as Array<Record<string, unknown>>) : [];
+    const profiles = Array.isArray(updated.llmProfiles)
+      ? (updated.llmProfiles as Array<Record<string, unknown>>)
+      : [];
     expect(String((profiles[0] || {}).llmModel || "")).toBe("gpt-test");
-    expect(updated.llmSystemPromptCustom).toBe("Always provide concise evidence.");
+    expect(updated.llmSystemPromptCustom).toBe(
+      "Always provide concise evidence.",
+    );
     expect(updated.autoTitleInterval).toBe(7);
     expect(updated.bridgeInvokeTimeoutMs).toBe(180000);
     expect(updated.llmTimeoutMs).toBe(175000);
@@ -269,14 +285,17 @@ describe("runtime infra handler", () => {
     const invalidSaved = await infra.handleMessage({
       type: "config.save",
       payload: {
-        browserRuntimeStrategy: "invalid"
-      }
+        browserRuntimeStrategy: "invalid",
+      },
     });
     expect(invalidSaved?.ok).toBe(true);
     const afterInvalid = await infra.handleMessage({ type: "config.get" });
     expect(afterInvalid?.ok).toBe(true);
     if (!afterInvalid || afterInvalid.ok !== true) return;
-    const afterInvalidData = (afterInvalid.data ?? {}) as Record<string, unknown>;
+    const afterInvalidData = (afterInvalid.data ?? {}) as Record<
+      string,
+      unknown
+    >;
     expect(afterInvalidData.browserRuntimeStrategy).toBe("browser-first");
   });
 
@@ -295,12 +314,12 @@ describe("runtime infra handler", () => {
             llmApiKey: "",
             llmModel: "auto",
             providerOptions: {
-              targetSite: "cursor_help"
+              targetSite: "cursor_help",
             },
-            role: "worker"
-          }
-        ]
-      }
+            role: "worker",
+          },
+        ],
+      },
     });
     expect(saved?.ok).toBe(true);
 
@@ -308,7 +327,9 @@ describe("runtime infra handler", () => {
     expect(after?.ok).toBe(true);
     if (!after || after.ok !== true) return;
     const data = (after.data ?? {}) as Record<string, unknown>;
-    const profile = Array.isArray(data.llmProfiles) ? (data.llmProfiles[0] as Record<string, unknown>) : {};
+    const profile = Array.isArray(data.llmProfiles)
+      ? (data.llmProfiles[0] as Record<string, unknown>)
+      : {};
     expect(String(profile.llmApiBase || "")).toBe(CURSOR_HELP_WEB_BASE_URL);
     expect(String(profile.llmApiKey || "")).toBe(CURSOR_HELP_WEB_API_KEY);
   });
@@ -321,7 +342,7 @@ describe("runtime infra handler", () => {
       type: "lease.acquire",
       tabId,
       owner: "owner-a",
-      ttlMs: 5000
+      ttlMs: 5000,
     });
     expect(acquired?.ok).toBe(true);
     if (!acquired || acquired.ok !== true) return;
@@ -331,7 +352,7 @@ describe("runtime infra handler", () => {
     const conflict = await infra.handleMessage({
       type: "lease.acquire",
       tabId,
-      owner: "owner-b"
+      owner: "owner-b",
     });
     expect(conflict?.ok).toBe(true);
     if (!conflict || conflict.ok !== true) return;
@@ -343,7 +364,7 @@ describe("runtime infra handler", () => {
       type: "lease.heartbeat",
       tabId,
       owner: "owner-a",
-      ttlMs: 7000
+      ttlMs: 7000,
     });
     expect(heartbeat?.ok).toBe(true);
     if (!heartbeat || heartbeat.ok !== true) return;
@@ -353,7 +374,7 @@ describe("runtime infra handler", () => {
     const released = await infra.handleMessage({
       type: "lease.release",
       tabId,
-      owner: "owner-a"
+      owner: "owner-a",
     });
     expect(released?.ok).toBe(true);
     if (!released || released.ok !== true) return;
@@ -372,13 +393,14 @@ describe("runtime infra handler", () => {
       type: "bridge.invoke",
       payload: {
         tool: "read",
-        args: { path: "/tmp/demo.txt" }
-      }
+        args: { path: "/tmp/demo.txt" },
+      },
     });
     expect(invoked?.ok).toBe(true);
     if (!invoked || invoked.ok !== true) return;
     const invokeData = (invoked.data ?? {}) as Record<string, unknown>;
-    const innerData = ((invokeData.data as Record<string, unknown>) ?? {}) as Record<string, unknown>;
+    const innerData = ((invokeData.data as Record<string, unknown>) ??
+      {}) as Record<string, unknown>;
     expect(invokeData.ok).toBe(true);
     expect(innerData.echoedTool).toBe("read");
     expect(FakeWebSocket.instances.length).toBeGreaterThan(0);
@@ -386,23 +408,37 @@ describe("runtime infra handler", () => {
 
   it("broadcasts bridge.status on connect/disconnect", async () => {
     const sent: Array<Record<string, unknown>> = [];
-    (chrome as unknown as { runtime: { sendMessage: (message: Record<string, unknown>) => Promise<unknown> } }).runtime.sendMessage =
-      async (message: Record<string, unknown>) => {
-        sent.push(message);
-        return { ok: true };
-      };
+    (
+      chrome as unknown as {
+        runtime: {
+          sendMessage: (message: Record<string, unknown>) => Promise<unknown>;
+        };
+      }
+    ).runtime.sendMessage = async (message: Record<string, unknown>) => {
+      sent.push(message);
+      return { ok: true };
+    };
 
     const infra = createRuntimeInfraHandler();
     const connect = await infra.handleMessage({ type: "bridge.connect" });
     expect(connect?.ok).toBe(true);
-    expect(sent.some((item) => item.type === "bridge.status" && item.status === "connected")).toBe(true);
+    expect(
+      sent.some(
+        (item) => item.type === "bridge.status" && item.status === "connected",
+      ),
+    ).toBe(true);
 
     const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
     expect(ws).toBeTruthy();
     ws?.close();
     await flushMicrotasks();
 
-    expect(sent.some((item) => item.type === "bridge.status" && item.status === "disconnected")).toBe(true);
+    expect(
+      sent.some(
+        (item) =>
+          item.type === "bridge.status" && item.status === "disconnected",
+      ),
+    ).toBe(true);
   });
 
   it("propagates bridge invoke error code/details", async () => {
@@ -414,8 +450,8 @@ describe("runtime infra handler", () => {
       code: "E_BUSY",
       message: "Bridge concurrency limit reached",
       details: {
-        maxConcurrency: 1
-      }
+        maxConcurrency: 1,
+      },
     };
 
     await expect(
@@ -423,13 +459,13 @@ describe("runtime infra handler", () => {
         type: "bridge.invoke",
         payload: {
           tool: "read",
-          args: { path: "/tmp/demo.txt" }
-        }
-      })
+          args: { path: "/tmp/demo.txt" },
+        },
+      }),
     ).rejects.toMatchObject({
       message: "Bridge concurrency limit reached",
       code: "E_BUSY",
-      retryable: true
+      retryable: true,
     });
   });
 
@@ -450,8 +486,8 @@ describe("runtime infra handler", () => {
       type: "bridge.invoke",
       payload: {
         tool: "read",
-        args: { path: "/tmp/response-first.txt" }
-      }
+        args: { path: "/tmp/response-first.txt" },
+      },
     });
     expect(invoked?.ok).toBe(true);
     if (!invoked || invoked.ok !== true) return;
@@ -479,13 +515,13 @@ describe("runtime infra handler", () => {
       type: "bridge.invoke",
       payload: {
         tool: "read",
-        args: { path: "/tmp/disconnect.txt" }
-      }
+        args: { path: "/tmp/disconnect.txt" },
+      },
     });
     await expect(disconnectedInvoke).rejects.toMatchObject({
       message: expect.stringContaining("Bridge disconnected"),
       code: "E_BRIDGE_DISCONNECTED",
-      retryable: true
+      retryable: true,
     });
 
     const reconnected = await infra.handleMessage({ type: "bridge.connect" });
@@ -498,8 +534,8 @@ describe("runtime infra handler", () => {
       type: "bridge.invoke",
       payload: {
         tool: "read",
-        args: { path: "/tmp/recovered.txt" }
-      }
+        args: { path: "/tmp/recovered.txt" },
+      },
     });
     expect(recovered?.ok).toBe(true);
     if (!recovered || recovered.ok !== true) return;
@@ -526,8 +562,8 @@ describe("runtime infra handler", () => {
       payload: {
         tool: "read",
         args: { path: "/tmp/abort-by-session.txt" },
-        sessionId: "session-stop-1"
-      }
+        sessionId: "session-stop-1",
+      },
     });
 
     await flushMicrotasks();
@@ -539,8 +575,8 @@ describe("runtime infra handler", () => {
       retryable: false,
       details: {
         sessionId: "session-stop-1",
-        reason: "stop"
-      }
+        reason: "stop",
+      },
     });
   });
 
@@ -561,21 +597,25 @@ describe("runtime infra handler", () => {
       payload: {
         tool: "read",
         args: { path: "/tmp/abort-by-steer.txt" },
-        sessionId: "session-steer-1"
-      }
+        sessionId: "session-steer-1",
+      },
     });
 
     await flushMicrotasks();
-    expect(infra.abortBridgeInvokesBySession("session-steer-1", "steer_preempt")).toBe(1);
-    expect(infra.abortBridgeInvokesBySession("session-steer-1", "steer_preempt")).toBe(0);
+    expect(
+      infra.abortBridgeInvokesBySession("session-steer-1", "steer_preempt"),
+    ).toBe(1);
+    expect(
+      infra.abortBridgeInvokesBySession("session-steer-1", "steer_preempt"),
+    ).toBe(0);
 
     await expect(pendingInvoke).rejects.toMatchObject({
       code: "E_BRIDGE_INTERRUPTED",
       retryable: false,
       details: {
         sessionId: "session-steer-1",
-        reason: "steer_preempt"
-      }
+        reason: "steer_preempt",
+      },
     });
   });
 
@@ -595,13 +635,15 @@ describe("runtime infra handler", () => {
       tabId,
       options: {
         mode: "interactive",
-        filter: "interactive"
-      }
+        filter: "interactive",
+      },
     });
     expect(snapped?.ok).toBe(true);
     if (!snapped || snapped.ok !== true) return;
     const snapData = (snapped.data ?? {}) as Record<string, unknown>;
-    const nodes = Array.isArray(snapData.nodes) ? (snapData.nodes as Array<Record<string, unknown>>) : [];
+    const nodes = Array.isArray(snapData.nodes)
+      ? (snapData.nodes as Array<Record<string, unknown>>)
+      : [];
     expect(nodes.length).toBeGreaterThan(0);
     const firstRef = String(nodes[0].ref || "");
     expect(firstRef).toMatch(/^(bn-\d+|dom-[a-f0-9]+)$/);
@@ -610,7 +652,7 @@ describe("runtime infra handler", () => {
     const acquired = await infra.handleMessage({
       type: "lease.acquire",
       tabId,
-      owner: "runner-1"
+      owner: "runner-1",
     });
     expect(acquired?.ok).toBe(true);
 
@@ -620,8 +662,8 @@ describe("runtime infra handler", () => {
       owner: "runner-1",
       action: {
         kind: "click",
-        ref: firstRef
-      }
+        ref: firstRef,
+      },
     });
     expect(acted?.ok).toBe(true);
 
@@ -630,9 +672,9 @@ describe("runtime infra handler", () => {
       tabId,
       action: {
         expect: {
-          urlContains: "example.com"
-        }
-      }
+          urlContains: "example.com",
+        },
+      },
     });
     expect(verified?.ok).toBe(true);
     if (!verified || verified.ok !== true) return;
@@ -655,24 +697,29 @@ describe("runtime infra handler", () => {
                 backendDOMNodeId: 101,
                 role: { value: "textbox" },
                 name: { value: "Editor" },
-                properties: [{ name: "focusable", value: { value: true } }]
-              }
-            ]
+                properties: [{ name: "focusable", value: { value: true } }],
+              },
+            ],
           };
         }
         if (method === "Runtime.evaluate") {
           const expression = String(params.expression || "");
-          if (expression.includes("{ url: location.href, title: document.title }")) {
+          if (
+            expression.includes("{ url: location.href, title: document.title }")
+          ) {
             return {
               result: {
                 value: {
                   url: "https://example.com/editor",
-                  title: "Editor"
-                }
-              }
+                  title: "Editor",
+                },
+              },
             };
           }
-          if (expression.includes("readyState") && expression.includes("nodeCount")) {
+          if (
+            expression.includes("readyState") &&
+            expression.includes("nodeCount")
+          ) {
             return {
               result: {
                 value: {
@@ -680,9 +727,9 @@ describe("runtime infra handler", () => {
                   title: "Editor",
                   readyState: "complete",
                   textLength: 18,
-                  nodeCount: 4
-                }
-              }
+                  nodeCount: 4,
+                },
+              },
             };
           }
           return { result: { value: { ok: true } } };
@@ -706,9 +753,9 @@ describe("runtime infra handler", () => {
                   ariaLabel: "",
                   selector: "#editor",
                   disabled: false,
-                  focused: false
-                }
-              }
+                  focused: false,
+                },
+              },
             };
           }
           return { result: { value: { ok: true } } };
@@ -716,19 +763,21 @@ describe("runtime infra handler", () => {
         return {};
       },
       onEvent: { addListener: () => {} },
-      onDetach: { addListener: () => {} }
+      onDetach: { addListener: () => {} },
     };
 
     const infra = createRuntimeInfraHandler();
     const snapped = await infra.handleMessage({
       type: "cdp.snapshot",
       tabId: 11,
-      options: { mode: "interactive", filter: "interactive" }
+      options: { mode: "interactive", filter: "interactive" },
     });
     expect(snapped?.ok).toBe(true);
     if (!snapped || snapped.ok !== true) return;
     const data = (snapped.data ?? {}) as Record<string, unknown>;
-    const nodes = Array.isArray(data.nodes) ? (data.nodes as Array<Record<string, unknown>>) : [];
+    const nodes = Array.isArray(data.nodes)
+      ? (data.nodes as Array<Record<string, unknown>>)
+      : [];
     expect(data.source).toBe("ax");
     expect(nodes.length).toBe(1);
     expect(nodes[0].backendNodeId).toBe(101);
@@ -749,17 +798,26 @@ describe("runtime infra handler", () => {
                 backendDOMNodeId: 301,
                 role: { value: "button" },
                 name: { value: "提交" },
-                properties: [{ name: "focusable", value: { value: true } }]
-              }
-            ]
+                properties: [{ name: "focusable", value: { value: true } }],
+              },
+            ],
           };
         }
         if (method === "Runtime.evaluate") {
           const expression = String(params.expression || "");
-          if (expression.includes("{ url: location.href, title: document.title }")) {
-            return { result: { value: { url: "https://example.com/form", title: "Form" } } };
+          if (
+            expression.includes("{ url: location.href, title: document.title }")
+          ) {
+            return {
+              result: {
+                value: { url: "https://example.com/form", title: "Form" },
+              },
+            };
           }
-          if (expression.includes("readyState") && expression.includes("nodeCount")) {
+          if (
+            expression.includes("readyState") &&
+            expression.includes("nodeCount")
+          ) {
             return {
               result: {
                 value: {
@@ -767,9 +825,9 @@ describe("runtime infra handler", () => {
                   title: "Form",
                   readyState: "complete",
                   textLength: 10,
-                  nodeCount: 3
-                }
-              }
+                  nodeCount: 3,
+                },
+              },
             };
           }
           return { result: { value: { ok: true } } };
@@ -793,9 +851,9 @@ describe("runtime infra handler", () => {
                   ariaLabel: "",
                   selector: "#submit",
                   disabled: false,
-                  focused: false
-                }
-              }
+                  focused: false,
+                },
+              },
             };
           }
           if (fn.includes("backend-node")) {
@@ -807,9 +865,9 @@ describe("runtime infra handler", () => {
                   clicked: true,
                   via: "backend-node",
                   url: "https://example.com/form",
-                  title: "Form"
-                }
-              }
+                  title: "Form",
+                },
+              },
             };
           }
           return { result: { value: { ok: true } } };
@@ -818,19 +876,21 @@ describe("runtime infra handler", () => {
         return {};
       },
       onEvent: { addListener: () => {} },
-      onDetach: { addListener: () => {} }
+      onDetach: { addListener: () => {} },
     };
 
     const infra = createRuntimeInfraHandler();
     const snapped = await infra.handleMessage({
       type: "cdp.snapshot",
       tabId: 21,
-      options: { mode: "interactive" }
+      options: { mode: "interactive" },
     });
     expect(snapped?.ok).toBe(true);
     if (!snapped || snapped.ok !== true) return;
     const snapData = (snapped.data ?? {}) as Record<string, unknown>;
-    const snapNodes = Array.isArray(snapData.nodes) ? (snapData.nodes as Array<Record<string, unknown>>) : [];
+    const snapNodes = Array.isArray(snapData.nodes)
+      ? (snapData.nodes as Array<Record<string, unknown>>)
+      : [];
     expect(snapNodes.length).toBeGreaterThan(0);
     const firstRef = String(snapNodes[0].ref || "");
     expect(firstRef).toBe("bn-301");
@@ -838,7 +898,7 @@ describe("runtime infra handler", () => {
     const acquired = await infra.handleMessage({
       type: "lease.acquire",
       tabId: 21,
-      owner: "runner-ax"
+      owner: "runner-ax",
     });
     expect(acquired?.ok).toBe(true);
 
@@ -848,8 +908,8 @@ describe("runtime infra handler", () => {
       owner: "runner-ax",
       action: {
         kind: "click",
-        ref: firstRef
-      }
+        ref: firstRef,
+      },
     });
     expect(acted?.ok).toBe(true);
     if (!acted || acted.ok !== true) return;
@@ -871,17 +931,22 @@ describe("runtime infra handler", () => {
         }
         if (method === "Runtime.evaluate") {
           const expression = String(params.expression || "");
-          if (expression.includes("{ url: location.href, title: document.title }")) {
+          if (
+            expression.includes("{ url: location.href, title: document.title }")
+          ) {
             return {
               result: {
                 value: {
                   url: "https://example.com/uid-fallback",
-                  title: "UID Fallback"
-                }
-              }
+                  title: "UID Fallback",
+                },
+              },
             };
           }
-          if (expression.includes("nodes") && expression.includes("selector not found")) {
+          if (
+            expression.includes("nodes") &&
+            expression.includes("selector not found")
+          ) {
             return {
               result: {
                 value: {
@@ -897,19 +962,19 @@ describe("runtime infra handler", () => {
                       disabled: false,
                       focused: false,
                       tag: "button",
-                      brainUid: dangerousUid
-                    }
-                  ]
-                }
-              }
+                      brainUid: dangerousUid,
+                    },
+                  ],
+                },
+              },
             };
           }
           if (expression.includes('querySelectorAll("[data-brain-uid]")')) {
             uidResolveExpression = expression;
             return {
               result: {
-                objectId: "obj-uid-901"
-              }
+                objectId: "obj-uid-901",
+              },
             };
           }
           return { result: { value: { ok: true } } };
@@ -919,7 +984,7 @@ describe("runtime infra handler", () => {
         }
         if (method === "Runtime.callFunctionOn") {
           const fn = String(params.functionDeclaration || "");
-          if (fn.includes("if (kind === \"read\")")) {
+          if (fn.includes('if (kind === "read")')) {
             return {
               result: {
                 value: {
@@ -928,9 +993,9 @@ describe("runtime infra handler", () => {
                   length: 6,
                   via: "backend-node-text",
                   url: "https://example.com/uid-fallback",
-                  title: "UID Fallback"
-                }
-              }
+                  title: "UID Fallback",
+                },
+              },
             };
           }
           return { result: { value: { ok: true } } };
@@ -939,19 +1004,21 @@ describe("runtime infra handler", () => {
         return {};
       },
       onEvent: { addListener: () => {} },
-      onDetach: { addListener: () => {} }
+      onDetach: { addListener: () => {} },
     };
 
     const infra = createRuntimeInfraHandler();
     const snapped = await infra.handleMessage({
       type: "cdp.snapshot",
       tabId: 26,
-      options: { mode: "interactive" }
+      options: { mode: "interactive" },
     });
     expect(snapped?.ok).toBe(true);
     if (!snapped || snapped.ok !== true) return;
     const snapData = (snapped.data ?? {}) as Record<string, unknown>;
-    const snapNodes = Array.isArray(snapData.nodes) ? (snapData.nodes as Array<Record<string, unknown>>) : [];
+    const snapNodes = Array.isArray(snapData.nodes)
+      ? (snapData.nodes as Array<Record<string, unknown>>)
+      : [];
     expect(snapNodes.length).toBeGreaterThan(0);
     const firstRef = String(snapNodes[0].ref || "");
 
@@ -961,17 +1028,23 @@ describe("runtime infra handler", () => {
       action: {
         kind: "read",
         ref: firstRef,
-        backendNodeId: 901
-      }
+        backendNodeId: 901,
+      },
     });
     expect(acted?.ok).toBe(true);
     if (!acted || acted.ok !== true) return;
     const data = (acted.data ?? {}) as Record<string, unknown>;
     const result = (data.result ?? {}) as Record<string, unknown>;
     expect(result.via).toBe("backend-node-text");
-    expect(uidResolveExpression).toContain('querySelectorAll("[data-brain-uid]")');
-    expect(uidResolveExpression).toContain('getAttribute?.("data-brain-uid") === uid');
-    expect(uidResolveExpression).not.toContain("document.querySelector('[data-brain-uid=");
+    expect(uidResolveExpression).toContain(
+      'querySelectorAll("[data-brain-uid]")',
+    );
+    expect(uidResolveExpression).toContain(
+      'getAttribute?.("data-brain-uid") === uid',
+    );
+    expect(uidResolveExpression).not.toContain(
+      "document.querySelector('[data-brain-uid=",
+    );
     expect(uidResolveExpression).not.toContain(dangerousUid);
   });
 
@@ -990,17 +1063,26 @@ describe("runtime infra handler", () => {
                 backendDOMNodeId: 701,
                 role: { value: "button" },
                 name: { value: "提交" },
-                properties: [{ name: "focusable", value: { value: true } }]
-              }
-            ]
+                properties: [{ name: "focusable", value: { value: true } }],
+              },
+            ],
           };
         }
         if (method === "Runtime.evaluate") {
           const expression = String(params.expression || "");
-          if (expression.includes("{ url: location.href, title: document.title }")) {
-            return { result: { value: { url: "https://example.com/click", title: "Click" } } };
+          if (
+            expression.includes("{ url: location.href, title: document.title }")
+          ) {
+            return {
+              result: {
+                value: { url: "https://example.com/click", title: "Click" },
+              },
+            };
           }
-          if (expression.includes("readyState") && expression.includes("nodeCount")) {
+          if (
+            expression.includes("readyState") &&
+            expression.includes("nodeCount")
+          ) {
             return {
               result: {
                 value: {
@@ -1008,9 +1090,9 @@ describe("runtime infra handler", () => {
                   title: "Click",
                   readyState: "complete",
                   textLength: 10,
-                  nodeCount: 2
-                }
-              }
+                  nodeCount: 2,
+                },
+              },
             };
           }
           return { result: { value: { ok: true } } };
@@ -1035,9 +1117,9 @@ describe("runtime infra handler", () => {
                   selector: "#submit",
                   disabled: false,
                   focused: false,
-                  brainUid: "brain-click-701"
-                }
-              }
+                  brainUid: "brain-click-701",
+                },
+              },
             };
           }
           if (fn.includes("shouldNativeClick")) {
@@ -1050,9 +1132,9 @@ describe("runtime infra handler", () => {
                   x: 120,
                   y: 80,
                   url: "https://example.com/click",
-                  title: "Click"
-                }
-              }
+                  title: "Click",
+                },
+              },
             };
           }
           if (fn.includes("this.click?.();")) {
@@ -1069,19 +1151,21 @@ describe("runtime infra handler", () => {
         return {};
       },
       onEvent: { addListener: () => {} },
-      onDetach: { addListener: () => {} }
+      onDetach: { addListener: () => {} },
     };
 
     const infra = createRuntimeInfraHandler();
     const snapped = await infra.handleMessage({
       type: "cdp.snapshot",
       tabId: 27,
-      options: { mode: "interactive" }
+      options: { mode: "interactive" },
     });
     expect(snapped?.ok).toBe(true);
     if (!snapped || snapped.ok !== true) return;
     const snapData = (snapped.data ?? {}) as Record<string, unknown>;
-    const snapNodes = Array.isArray(snapData.nodes) ? (snapData.nodes as Array<Record<string, unknown>>) : [];
+    const snapNodes = Array.isArray(snapData.nodes)
+      ? (snapData.nodes as Array<Record<string, unknown>>)
+      : [];
     expect(snapNodes.length).toBeGreaterThan(0);
     const firstRef = String(snapNodes[0].ref || "");
     expect(firstRef).toBe("bn-701");
@@ -1089,7 +1173,7 @@ describe("runtime infra handler", () => {
     const acquired = await infra.handleMessage({
       type: "lease.acquire",
       tabId: 27,
-      owner: "runner-click-fallback"
+      owner: "runner-click-fallback",
     });
     expect(acquired?.ok).toBe(true);
 
@@ -1099,8 +1183,8 @@ describe("runtime infra handler", () => {
       owner: "runner-click-fallback",
       action: {
         kind: "click",
-        ref: firstRef
-      }
+        ref: firstRef,
+      },
     });
     expect(acted?.ok).toBe(true);
     if (!acted || acted.ok !== true) return;
@@ -1124,10 +1208,10 @@ describe("runtime infra handler", () => {
               frame: { id: "main-frame" },
               childFrames: [
                 {
-                  frame: { id: "child-frame-1" }
-                }
-              ]
-            }
+                  frame: { id: "child-frame-1" },
+                },
+              ],
+            },
           };
         }
         if (method === "Accessibility.getFullAXTree") {
@@ -1139,9 +1223,9 @@ describe("runtime infra handler", () => {
                   backendDOMNodeId: 401,
                   role: { value: "textbox" },
                   name: { value: "Main Input" },
-                  properties: [{ name: "focusable", value: { value: true } }]
-                }
-              ]
+                  properties: [{ name: "focusable", value: { value: true } }],
+                },
+              ],
             };
           }
           if (params.frameId === "child-frame-1") {
@@ -1152,19 +1236,31 @@ describe("runtime infra handler", () => {
                   backendDOMNodeId: 402,
                   role: { value: "button" },
                   name: { value: "Child Submit" },
-                  properties: [{ name: "focusable", value: { value: true } }]
-                }
-              ]
+                  properties: [{ name: "focusable", value: { value: true } }],
+                },
+              ],
             };
           }
           return { nodes: [] };
         }
         if (method === "Runtime.evaluate") {
           const expression = String(params.expression || "");
-          if (expression.includes("{ url: location.href, title: document.title }")) {
-            return { result: { value: { url: "https://example.com/frame", title: "Frame Demo" } } };
+          if (
+            expression.includes("{ url: location.href, title: document.title }")
+          ) {
+            return {
+              result: {
+                value: {
+                  url: "https://example.com/frame",
+                  title: "Frame Demo",
+                },
+              },
+            };
           }
-          if (expression.includes("readyState") && expression.includes("nodeCount")) {
+          if (
+            expression.includes("readyState") &&
+            expression.includes("nodeCount")
+          ) {
             return {
               result: {
                 value: {
@@ -1172,9 +1268,9 @@ describe("runtime infra handler", () => {
                   title: "Frame Demo",
                   readyState: "complete",
                   textLength: 22,
-                  nodeCount: 8
-                }
-              }
+                  nodeCount: 8,
+                },
+              },
             };
           }
           return { result: { value: { ok: true } } };
@@ -1201,9 +1297,9 @@ describe("runtime infra handler", () => {
                     ariaLabel: "",
                     selector: "#main-input",
                     disabled: false,
-                    focused: false
-                  }
-                }
+                    focused: false,
+                  },
+                },
               };
             }
             return {
@@ -1219,9 +1315,9 @@ describe("runtime infra handler", () => {
                   ariaLabel: "",
                   selector: "#child-submit",
                   disabled: false,
-                  focused: false
-                }
-              }
+                  focused: false,
+                },
+              },
             };
           }
           return { result: { value: { ok: true } } };
@@ -1230,19 +1326,21 @@ describe("runtime infra handler", () => {
         return {};
       },
       onEvent: { addListener: () => {} },
-      onDetach: { addListener: () => {} }
+      onDetach: { addListener: () => {} },
     };
 
     const infra = createRuntimeInfraHandler();
     const snapped = await infra.handleMessage({
       type: "cdp.snapshot",
       tabId: 31,
-      options: { mode: "interactive" }
+      options: { mode: "interactive" },
     });
     expect(snapped?.ok).toBe(true);
     if (!snapped || snapped.ok !== true) return;
     const data = (snapped.data ?? {}) as Record<string, unknown>;
-    const nodes = Array.isArray(data.nodes) ? (data.nodes as Array<Record<string, unknown>>) : [];
+    const nodes = Array.isArray(data.nodes)
+      ? (data.nodes as Array<Record<string, unknown>>)
+      : [];
     expect(data.source).toBe("ax");
     expect(nodes.length).toBe(2);
     const frameIds = nodes.map((node) => String(node.frameId || ""));
@@ -1258,7 +1356,10 @@ describe("runtime infra handler", () => {
       sendCommand: async (_target: any, method: string, params: any = {}) => {
         if (method === "Runtime.evaluate") {
           const expression = String(params.expression || "");
-          if (expression.includes("readyState") && expression.includes("nodeCount")) {
+          if (
+            expression.includes("readyState") &&
+            expression.includes("nodeCount")
+          ) {
             return {
               result: {
                 value: {
@@ -1266,17 +1367,17 @@ describe("runtime infra handler", () => {
                   title: "Polling",
                   readyState: "complete",
                   textLength: 12,
-                  nodeCount: 3
-                }
-              }
+                  nodeCount: 3,
+                },
+              },
             };
           }
           if (expression.includes("existsIn(document)")) {
             selectorChecks += 1;
             return {
               result: {
-                value: selectorChecks >= 2
-              }
+                value: selectorChecks >= 2,
+              },
             };
           }
           return { result: { value: { ok: true } } };
@@ -1284,7 +1385,7 @@ describe("runtime infra handler", () => {
         return {};
       },
       onEvent: { addListener: () => {} },
-      onDetach: { addListener: () => {} }
+      onDetach: { addListener: () => {} },
     };
 
     const infra = createRuntimeInfraHandler();
@@ -1295,9 +1396,9 @@ describe("runtime infra handler", () => {
         expect: {
           selectorExists: "#ready",
           waitForMs: 500,
-          pollIntervalMs: 10
-        }
-      }
+          pollIntervalMs: 10,
+        },
+      },
     });
     expect(verified?.ok).toBe(true);
     if (!verified || verified.ok !== true) return;

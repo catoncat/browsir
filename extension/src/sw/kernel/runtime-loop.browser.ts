@@ -5,35 +5,47 @@ import {
   type ExecuteStepResult,
   type RuntimeView,
   type ToolContract,
-  type ToolDefinition
+  type ToolDefinition,
 } from "./orchestrator.browser";
 import { SUMMARIZATION_SYSTEM_PROMPT } from "./compaction.browser";
 import {
   buildCompactionSummaryLlmMessage,
   convertSessionContextMessagesToLlm,
   transformMessagesForLlm,
-  type SessionContextMessageLike
+  type SessionContextMessageLike,
 } from "./llm-message-model.browser";
-import { decideProfileEscalation, type LlmProfileEscalationPolicy } from "./llm-profile-policy";
-import {
-  type LlmResolvedRoute
-} from "./llm-provider";
+import { decideProfileEscalation } from "./llm-profile-policy";
+import { DEFAULT_LLM_ROLE, type LlmResolvedRoute } from "./llm-provider";
 import { LlmProviderRegistry } from "./llm-provider-registry";
 import { resolveLlmRoute } from "./llm-profile-resolver";
 import { writeSessionMeta } from "./session-store.browser";
-import { type BridgeConfig, type RuntimeInfraHandler } from "./runtime-infra.browser";
-import { type CapabilityExecutionPolicy, type StepVerifyPolicy } from "./capability-policy";
+import {
+  type BridgeConfig,
+  type RuntimeInfraHandler,
+} from "./runtime-infra.browser";
+import {
+  type CapabilityExecutionPolicy,
+  type StepVerifyPolicy,
+} from "./capability-policy";
 import type { SkillMetadata } from "./skill-registry";
-import { normalizeBrowserRuntimeStrategy, resolveBrowserRuntimeHint } from "./browser-runtime-strategy";
+import {
+  normalizeBrowserRuntimeStrategy,
+  resolveBrowserRuntimeHint,
+} from "./browser-runtime-strategy";
 import { normalizeSkillCreateRequest } from "./skill-create";
 import {
   frameMatchesVirtualCapability,
   invokeVirtualFrame,
   isVirtualUri,
-  shouldRouteFrameToBrowserVfs
+  shouldRouteFrameToBrowserVfs,
 } from "./virtual-fs.browser";
 import { registerExtension } from "./extension-api";
-import { nowIso, type SessionEntry, type SessionMeta, type StreamingBehavior } from "./types";
+import {
+  nowIso,
+  type SessionEntry,
+  type SessionMeta,
+  type StreamingBehavior,
+} from "./types";
 import exampleSendSuccessPluginPackage from "../../../plugins/example-send-success-global-message/plugin.json";
 import exampleMissionHudDogPluginPackage from "../../../plugins/example-mission-hud-dog/plugin.json";
 import registerExampleSendSuccessPlugin from "../../../plugins/example-send-success-global-message/index.js";
@@ -67,9 +79,22 @@ const NO_PROGRESS_SIGNATURE_HISTORY_LIMIT = 6;
 type ToolRetryAction = "auto_replay" | "llm_replan" | "fail_fast";
 type FailureReason = "failed_execute" | "failed_verify" | "progress_uncertain";
 type FailurePhase = "plan" | "execute" | "verify" | "progress_guard";
-type FailureCategory = "timeout" | "busy" | "missing_target" | "verify_failed" | "focus_required" | "no_progress" | "unknown";
-type ResumeStrategy = "retry_same_args" | "retry_with_fresh_snapshot" | "replan";
-type NoProgressReason = "repeat_signature" | "ping_pong" | "browser_proof_guard";
+type FailureCategory =
+  | "timeout"
+  | "busy"
+  | "missing_target"
+  | "verify_failed"
+  | "focus_required"
+  | "no_progress"
+  | "unknown";
+type ResumeStrategy =
+  | "retry_same_args"
+  | "retry_with_fresh_snapshot"
+  | "replan";
+type NoProgressReason =
+  | "repeat_signature"
+  | "ping_pong"
+  | "browser_proof_guard";
 
 interface ToolCallItem {
   id: string;
@@ -122,8 +147,12 @@ type RuntimeErrorWithMeta = Error & {
 };
 
 export interface RuntimeLoopController {
-  startFromPrompt(input: RunStartInput): Promise<{ sessionId: string; runtime: RuntimeView }>;
-  startFromRegenerate(input: RegenerateRunInput): Promise<{ sessionId: string; runtime: RuntimeView }>;
+  startFromPrompt(
+    input: RunStartInput,
+  ): Promise<{ sessionId: string; runtime: RuntimeView }>;
+  startFromRegenerate(
+    input: RegenerateRunInput,
+  ): Promise<{ sessionId: string; runtime: RuntimeView }>;
   executeStep(input: {
     sessionId: string;
     mode?: ExecuteMode;
@@ -132,7 +161,10 @@ export interface RuntimeLoopController {
     args?: JsonRecord;
     verifyPolicy?: "off" | "on_critical" | "always";
   }): Promise<ExecuteStepResult>;
-  refreshSessionTitle(sessionId: string, options?: { force?: boolean }): Promise<string>;
+  refreshSessionTitle(
+    sessionId: string,
+    options?: { force?: boolean },
+  ): Promise<string>;
   getSystemPromptPreview(): Promise<string>;
 }
 
@@ -143,7 +175,7 @@ const CAPABILITIES = {
   fsEdit: "fs.edit",
   browserSnapshot: "browser.snapshot",
   browserAction: "browser.action",
-  browserVerify: "browser.verify"
+  browserVerify: "browser.verify",
 } as const;
 
 const CANONICAL_BROWSER_TOOL_NAMES = [
@@ -184,14 +216,23 @@ const CANONICAL_BROWSER_TOOL_NAMES = [
   "read_skill_reference",
   "get_skill_asset",
   "list_skills",
-  "get_skill_info"
+  "get_skill_info",
 ] as const;
 
-const BUILTIN_BRIDGE_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [];
+const BUILTIN_BRIDGE_CAPABILITY_PROVIDERS: Array<{
+  capability: ExecuteCapability;
+  providerId: string;
+}> = [];
 
-const BUILTIN_SANDBOX_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [];
+const BUILTIN_SANDBOX_CAPABILITY_PROVIDERS: Array<{
+  capability: ExecuteCapability;
+  providerId: string;
+}> = [];
 
-const BUILTIN_BROWSER_CAPABILITY_PROVIDERS: Array<{ capability: ExecuteCapability; providerId: string }> = [];
+const BUILTIN_BROWSER_CAPABILITY_PROVIDERS: Array<{
+  capability: ExecuteCapability;
+  providerId: string;
+}> = [];
 
 const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
   "host_bash",
@@ -202,14 +243,14 @@ const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
   "browser_write_file",
   "host_edit_file",
   "browser_edit_file",
-  ...CANONICAL_BROWSER_TOOL_NAMES
+  ...CANONICAL_BROWSER_TOOL_NAMES,
 ]);
 const BASH_RUNTIME_TOOL_NAMES = new Set(["host_bash", "browser_bash"]);
 
 const NO_PROGRESS_CONTINUE_BUDGET: Record<NoProgressReason, number> = {
   repeat_signature: 1,
   ping_pong: 0,
-  browser_proof_guard: 1
+  browser_proof_guard: 1,
 };
 
 const BROWSER_PROOF_REQUIRED_TOOL_NAMES = new Set([
@@ -230,14 +271,20 @@ const BROWSER_PROOF_REQUIRED_TOOL_NAMES = new Set([
   "capture_tab_screenshot",
   "capture_screenshot_with_highlight",
   "download_image",
-  "download_chat_images"
+  "download_chat_images",
 ]);
 
 function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" ? (value as JsonRecord) : {};
 }
 
-const FORBIDDEN_TOP_LEVEL_TOOL_SCHEMA_KEYS = ["oneOf", "anyOf", "allOf", "enum", "not"] as const;
+const FORBIDDEN_TOP_LEVEL_TOOL_SCHEMA_KEYS = [
+  "oneOf",
+  "anyOf",
+  "allOf",
+  "enum",
+  "not",
+] as const;
 
 function normalizeSchemaRequiredList(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
@@ -274,8 +321,13 @@ function formatConstraintRequiredSet(input: string[]): string {
   return input.join(" + ");
 }
 
-function buildTopLevelSchemaConstraintHint(parameters: unknown, providerId: string): string {
-  const provider = String(providerId || "").trim().toLowerCase();
+function buildTopLevelSchemaConstraintHint(
+  parameters: unknown,
+  providerId: string,
+): string {
+  const provider = String(providerId || "")
+    .trim()
+    .toLowerCase();
   if (provider !== "openai_compatible") return "";
   const schema = toRecord(parameters);
   const fragments: string[] = [];
@@ -283,18 +335,27 @@ function buildTopLevelSchemaConstraintHint(parameters: unknown, providerId: stri
   if (topLevelRequired.length > 0) {
     fragments.push(`required: ${topLevelRequired.join(", ")}`);
   }
-  const combinators: Array<"anyOf" | "oneOf" | "allOf"> = ["anyOf", "oneOf", "allOf"];
+  const combinators: Array<"anyOf" | "oneOf" | "allOf"> = [
+    "anyOf",
+    "oneOf",
+    "allOf",
+  ];
   for (const key of combinators) {
     const requiredSets = readTopLevelConstraintRequiredSets(schema[key]);
     if (requiredSets.length === 0) continue;
-    const formatted = requiredSets.map((set) => `(${formatConstraintRequiredSet(set)})`).join(" | ");
+    const formatted = requiredSets
+      .map((set) => `(${formatConstraintRequiredSet(set)})`)
+      .join(" | ");
     fragments.push(`${key}: ${formatted}`);
   }
   if (fragments.length === 0) return "";
   return `Schema constraint hints: ${fragments.join("; ")}.`;
 }
 
-function appendConstraintHintToDescription(description: string, hint: string): string {
+function appendConstraintHintToDescription(
+  description: string,
+  hint: string,
+): string {
   const base = String(description || "").trim();
   const extra = String(hint || "").trim();
   if (!extra) return base;
@@ -302,12 +363,17 @@ function appendConstraintHintToDescription(description: string, hint: string): s
   return `${base}\n${extra}`;
 }
 
-function sanitizeTopLevelToolSchemaForProvider(parameters: unknown, providerId: string): JsonRecord {
+function sanitizeTopLevelToolSchemaForProvider(
+  parameters: unknown,
+  providerId: string,
+): JsonRecord {
   const schema = toRecord(parameters);
-  const provider = String(providerId || "").trim().toLowerCase();
+  const provider = String(providerId || "")
+    .trim()
+    .toLowerCase();
   if (provider !== "openai_compatible") {
     return {
-      ...schema
+      ...schema,
     };
   }
 
@@ -315,7 +381,7 @@ function sanitizeTopLevelToolSchemaForProvider(parameters: unknown, providerId: 
     ...schema,
     type: "object",
     properties: toRecord(schema.properties),
-    required: normalizeSchemaRequiredList(schema.required)
+    required: normalizeSchemaRequiredList(schema.required),
   };
 
   for (const key of FORBIDDEN_TOP_LEVEL_TOOL_SCHEMA_KEYS) {
@@ -324,19 +390,31 @@ function sanitizeTopLevelToolSchemaForProvider(parameters: unknown, providerId: 
   return sanitized;
 }
 
-function sanitizeLlmToolDefinitionForProvider(definition: unknown, providerId: string): JsonRecord {
+function sanitizeLlmToolDefinitionForProvider(
+  definition: unknown,
+  providerId: string,
+): JsonRecord {
   const def = toRecord(definition);
   const fn = toRecord(def.function);
-  const constraintHint = buildTopLevelSchemaConstraintHint(fn.parameters, providerId);
+  const constraintHint = buildTopLevelSchemaConstraintHint(
+    fn.parameters,
+    providerId,
+  );
   return {
     ...def,
     type: "function",
     function: {
       ...fn,
       name: String(fn.name || "").trim(),
-      description: appendConstraintHintToDescription(String(fn.description || ""), constraintHint),
-      parameters: sanitizeTopLevelToolSchemaForProvider(fn.parameters, providerId)
-    }
+      description: appendConstraintHintToDescription(
+        String(fn.description || ""),
+        constraintHint,
+      ),
+      parameters: sanitizeTopLevelToolSchemaForProvider(
+        fn.parameters,
+        providerId,
+      ),
+    },
   };
 }
 
@@ -374,7 +452,10 @@ function readContractExecution(contract: ToolContract | null): {
   const capability = String(contract.execution.capability || "").trim();
   if (!capability) return null;
   const modeRaw = String(contract.execution.mode || "").trim();
-  const mode = modeRaw === "script" || modeRaw === "cdp" || modeRaw === "bridge" ? modeRaw : undefined;
+  const mode =
+    modeRaw === "script" || modeRaw === "cdp" || modeRaw === "bridge"
+      ? modeRaw
+      : undefined;
   const action = String(contract.execution.action || "").trim() || undefined;
   const verifyRaw = String(contract.execution.verifyPolicy || "").trim();
   const verifyPolicy =
@@ -385,7 +466,7 @@ function readContractExecution(contract: ToolContract | null): {
     capability,
     ...(mode ? { mode } : {}),
     ...(action ? { action } : {}),
-    ...(verifyPolicy ? { verifyPolicy } : {})
+    ...(verifyPolicy ? { verifyPolicy } : {}),
   };
 }
 
@@ -425,7 +506,10 @@ function extractContentText(content: unknown): string {
 
 function sanitizePromptForTrace(text: string): string {
   return String(text || "")
-    .replace(/<skill_command\b[\s\S]*?<\/skill_command>/gi, "[skill command omitted]")
+    .replace(
+      /<skill_command\b[\s\S]*?<\/skill_command>/gi,
+      "[skill command omitted]",
+    )
     .replace(/<skill\b[\s\S]*?<\/skill>/gi, "[skill omitted]");
 }
 
@@ -449,7 +533,9 @@ function summarizeLlmRequestPayload(payload: JsonRecord): JsonRecord {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = toRecord(messages[i]);
     if (String(message.role || "") !== "user") continue;
-    const text = sanitizePromptForTrace(extractContentText(message.content)).trim();
+    const text = sanitizePromptForTrace(
+      extractContentText(message.content),
+    ).trim();
     if (!text) continue;
     lastUserSnippet = clipText(text, LLM_TRACE_USER_SNIPPET_MAX_CHARS);
     break;
@@ -460,11 +546,14 @@ function summarizeLlmRequestPayload(payload: JsonRecord): JsonRecord {
     messageChars,
     maxMessageChars,
     toolMessageCount,
-    toolDefinitionCount: Array.isArray(payload.tools) ? payload.tools.length : 0,
+    toolDefinitionCount: Array.isArray(payload.tools)
+      ? payload.tools.length
+      : 0,
     requestBytes: estimateJsonBytes(payload),
     stream: payload.stream === true,
-    temperature: typeof payload.temperature === "number" ? payload.temperature : undefined,
-    lastUserSnippet
+    temperature:
+      typeof payload.temperature === "number" ? payload.temperature : undefined,
+    lastUserSnippet,
   };
 }
 
@@ -485,7 +574,7 @@ function buildLlmRawTracePayload(input: {
     retryDelayHintMs: input.retryDelayHintMs,
     bodyPreview: clipText(body, LLM_TRACE_BODY_PREVIEW_MAX_CHARS),
     bodyLength: body.length,
-    bodyTruncated: body.length > LLM_TRACE_BODY_PREVIEW_MAX_CHARS
+    bodyTruncated: body.length > LLM_TRACE_BODY_PREVIEW_MAX_CHARS,
   };
 }
 
@@ -495,7 +584,12 @@ function parsePositiveInt(raw: unknown): number | null {
   return n;
 }
 
-function normalizeIntInRange(raw: unknown, fallback: number, min: number, max: number): number {
+function normalizeIntInRange(
+  raw: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
   const n = Number(raw);
   if (!Number.isFinite(n)) return fallback;
   const floored = Math.floor(n);
@@ -513,7 +607,11 @@ function isPlainJsonRecord(value: unknown): value is JsonRecord {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function createNonRetryableRuntimeError(code: string, message: string, details?: unknown): RuntimeErrorWithMeta {
+function createNonRetryableRuntimeError(
+  code: string,
+  message: string,
+  details?: unknown,
+): RuntimeErrorWithMeta {
   const err = new Error(message) as RuntimeErrorWithMeta;
   err.code = code;
   err.retryable = false;
@@ -530,7 +628,9 @@ function normalizeErrorCode(code: unknown): string {
 }
 
 function isSideEffectingToolName(toolName: string): boolean {
-  const normalized = String(toolName || "").trim().toLowerCase();
+  const normalized = String(toolName || "")
+    .trim()
+    .toLowerCase();
   return [
     "host_write_file",
     "browser_write_file",
@@ -556,11 +656,14 @@ function isSideEffectingToolName(toolName: string): boolean {
     "request_intervention",
     "cancel_intervention",
     "create_skill",
-    "execute_skill_script"
+    "execute_skill_script",
   ].includes(normalized);
 }
 
-function classifyToolRetryDecision(toolName: string, errorCode: string): {
+function classifyToolRetryDecision(
+  toolName: string,
+  errorCode: string,
+): {
   action: ToolRetryAction;
   retryable: boolean;
   retryHint: string;
@@ -572,7 +675,7 @@ function classifyToolRetryDecision(toolName: string, errorCode: string): {
     return {
       action: "auto_replay",
       retryable: true,
-      retryHint: "Bridge is busy, retry after a short delay."
+      retryHint: "Bridge is busy, retry after a short delay.",
     };
   }
 
@@ -580,7 +683,7 @@ function classifyToolRetryDecision(toolName: string, errorCode: string): {
     return {
       action: "auto_replay",
       retryable: true,
-      retryHint: "Bridge connection was unstable; retry this tool call."
+      retryHint: "Bridge connection was unstable; retry this tool call.",
     };
   }
 
@@ -588,10 +691,13 @@ function classifyToolRetryDecision(toolName: string, errorCode: string): {
     return {
       action: "llm_replan",
       retryable: true,
-      retryHint:
-        ["host_bash", "browser_bash"].includes(String(toolName || "").trim().toLowerCase())
-          ? "Increase timeoutMs and retry the same goal."
-          : "Operation timed out; adjust parameters and retry the same goal."
+      retryHint: ["host_bash", "browser_bash"].includes(
+        String(toolName || "")
+          .trim()
+          .toLowerCase(),
+      )
+        ? "Increase timeoutMs and retry the same goal."
+        : "Operation timed out; adjust parameters and retry the same goal.",
     };
   }
 
@@ -600,28 +706,35 @@ function classifyToolRetryDecision(toolName: string, errorCode: string): {
       return {
         action: "llm_replan",
         retryable: true,
-        retryHint: "Client timed out. Re-evaluate state with a fresh read/snapshot before retrying side effects."
+        retryHint:
+          "Client timed out. Re-evaluate state with a fresh read/snapshot before retrying side effects.",
       };
     }
     return {
       action: "auto_replay",
       retryable: true,
-      retryHint: "Client timed out before receiving result; retry the same call."
+      retryHint:
+        "Client timed out before receiving result; retry the same call.",
     };
   }
 
-  if (normalizedCode === "E_NO_TAB" || normalizedCode === "E_REF_REQUIRED" || normalizedCode === "E_VERIFY_FAILED") {
+  if (
+    normalizedCode === "E_NO_TAB" ||
+    normalizedCode === "E_REF_REQUIRED" ||
+    normalizedCode === "E_VERIFY_FAILED"
+  ) {
     return {
       action: "llm_replan",
       retryable: true,
-      retryHint: "Refresh context (get_all_tabs/search_elements) and retry with updated target."
+      retryHint:
+        "Refresh context (get_all_tabs/search_elements) and retry with updated target.",
     };
   }
 
   return {
     action: "fail_fast",
     retryable: false,
-    retryHint: "Retry only when the failure is transient."
+    retryHint: "Retry only when the failure is transient.",
   };
 }
 
@@ -643,7 +756,9 @@ function buildToolRetryHint(toolName: string, errorCode: string): string {
 }
 
 function normalizeFailureReason(raw: unknown): FailureReason {
-  const reason = String(raw || "").trim().toLowerCase();
+  const reason = String(raw || "")
+    .trim()
+    .toLowerCase();
   if (reason === "failed_verify") return "failed_verify";
   if (reason === "progress_uncertain") return "progress_uncertain";
   return "failed_execute";
@@ -657,7 +772,9 @@ function inferFailurePhase(reason: FailureReason): FailurePhase {
 
 function isBrowserToolName(toolName: string): boolean {
   return CANONICAL_BROWSER_TOOL_NAMES.includes(
-    String(toolName || "").trim().toLowerCase() as (typeof CANONICAL_BROWSER_TOOL_NAMES)[number]
+    String(toolName || "")
+      .trim()
+      .toLowerCase() as (typeof CANONICAL_BROWSER_TOOL_NAMES)[number],
   );
 }
 
@@ -675,7 +792,7 @@ function inferModeEscalationDirective(input: {
   const combined = [
     String(input.errorText || ""),
     String(input.retryHint || ""),
-    safeStringify(input.details || null, 600)
+    safeStringify(input.details || null, 600),
   ]
     .join(" ")
     .toLowerCase();
@@ -693,13 +810,20 @@ function inferModeEscalationDirective(input: {
       "highlight_text_inline",
       "fill_form",
       "computer",
-      "browser_verify"
-    ].includes(String(input.toolName || "").trim().toLowerCase()) &&
-    (input.errorReason === "failed_execute" || input.errorReason === "failed_verify");
+      "browser_verify",
+    ].includes(
+      String(input.toolName || "")
+        .trim()
+        .toLowerCase(),
+    ) &&
+    (input.errorReason === "failed_execute" ||
+      input.errorReason === "failed_verify");
   const hasFocusSignal =
     errorCode === "E_VERIFY_FAILED" ||
     errorCode.startsWith("E_CDP_") ||
-    /focus|foreground|background|active tab|user.?gesture|lease|后台/.test(combined) ||
+    /focus|foreground|background|active tab|user.?gesture|lease|后台/.test(
+      combined,
+    ) ||
     browserWriteFailureFallback;
   if (!hasFocusSignal) return null;
 
@@ -707,9 +831,13 @@ function inferModeEscalationDirective(input: {
     suggested: true,
     from: "background",
     to: "focus",
-    trigger: input.errorReason === "failed_verify" ? "verify_unstable" : "focus_required",
-    prompt: "当前步骤疑似受后台执行限制。请切换到 focus 模式并续跑当前 step（无需重开会话）。",
-    errorCode: errorCode || undefined
+    trigger:
+      input.errorReason === "failed_verify"
+        ? "verify_unstable"
+        : "focus_required",
+    prompt:
+      "当前步骤疑似受后台执行限制。请切换到 focus 模式并续跑当前 step（无需重开会话）。",
+    errorCode: errorCode || undefined,
   };
 }
 
@@ -720,10 +848,20 @@ function inferFailureCategory(input: {
 }): FailureCategory {
   const errorCode = normalizeErrorCode(input.errorCode);
   if (input.errorReason === "progress_uncertain") return "no_progress";
-  if (input.errorReason === "failed_verify" || errorCode === "E_VERIFY_FAILED") return "verify_failed";
+  if (input.errorReason === "failed_verify" || errorCode === "E_VERIFY_FAILED")
+    return "verify_failed";
   if (errorCode === "E_BUSY") return "busy";
-  if (["E_TIMEOUT", "E_CLIENT_TIMEOUT", "E_CDP_TIMEOUT"].includes(errorCode)) return "timeout";
-  if (["E_NO_TAB", "E_REF_REQUIRED", "E_CDP_RESOLVE_NODE", "E_CDP_AXTREE_EMPTY", "E_CDP_AXTREE_NO_NODES"].includes(errorCode)) {
+  if (["E_TIMEOUT", "E_CLIENT_TIMEOUT", "E_CDP_TIMEOUT"].includes(errorCode))
+    return "timeout";
+  if (
+    [
+      "E_NO_TAB",
+      "E_REF_REQUIRED",
+      "E_CDP_RESOLVE_NODE",
+      "E_CDP_AXTREE_EMPTY",
+      "E_CDP_AXTREE_NO_NODES",
+    ].includes(errorCode)
+  ) {
     return "missing_target";
   }
   if (input.modeEscalation) return "focus_required";
@@ -736,16 +874,19 @@ function inferResumeStrategy(input: {
   modeEscalation: JsonRecord | null;
   retryable: boolean;
 }): ResumeStrategy {
-  if (input.errorReason === "progress_uncertain") return "retry_with_fresh_snapshot";
+  if (input.errorReason === "progress_uncertain")
+    return "retry_with_fresh_snapshot";
   if (input.modeEscalation) return "retry_same_args";
   if (input.retryAction === "auto_replay") return "retry_same_args";
-  if (input.retryAction === "llm_replan" && input.retryable) return "retry_with_fresh_snapshot";
+  if (input.retryAction === "llm_replan" && input.retryable)
+    return "retry_with_fresh_snapshot";
   return "replan";
 }
 
 function mapNextBestAction(strategy: ResumeStrategy): string {
   if (strategy === "retry_same_args") return "retry_same_args";
-  if (strategy === "retry_with_fresh_snapshot") return "refresh_snapshot_then_retry";
+  if (strategy === "retry_with_fresh_snapshot")
+    return "refresh_snapshot_then_retry";
   return "replan_with_new_toolcall";
 }
 
@@ -760,15 +901,25 @@ function attachFailureProtocol(
     modeEscalation?: JsonRecord | null;
     resumeStrategy?: ResumeStrategy;
     stepRef?: JsonRecord | null;
-  } = {}
+  } = {},
 ): JsonRecord {
-  const normalizedToolName = String(toolName || "").trim().toLowerCase();
+  const normalizedToolName = String(toolName || "")
+    .trim()
+    .toLowerCase();
   const errorCode = normalizeErrorCode(payload.errorCode);
-  const errorReason = normalizeFailureReason(options.errorReason || payload.errorReason);
-  const retryDecision = classifyToolRetryDecision(normalizedToolName, errorCode);
+  const errorReason = normalizeFailureReason(
+    options.errorReason || payload.errorReason,
+  );
+  const retryDecision = classifyToolRetryDecision(
+    normalizedToolName,
+    errorCode,
+  );
   const defaultRetryable = options.defaultRetryable === true;
-  const retryable = payload.retryable === true || defaultRetryable || retryDecision.retryable;
-  const retryHintBase = String(payload.retryHint || buildToolRetryHint(normalizedToolName, errorCode));
+  const retryable =
+    payload.retryable === true || defaultRetryable || retryDecision.retryable;
+  const retryHintBase = String(
+    payload.retryHint || buildToolRetryHint(normalizedToolName, errorCode),
+  );
   const modeEscalation =
     options.modeEscalation !== undefined
       ? options.modeEscalation
@@ -778,10 +929,13 @@ function attachFailureProtocol(
           errorText: String(payload.error || ""),
           retryHint: retryHintBase,
           details: payload.details || payload.errorDetails || null,
-          errorReason
+          errorReason,
         });
   let retryHint = retryHintBase;
-  if (modeEscalation && !/focus|foreground|前台/.test(retryHint.toLowerCase())) {
+  if (
+    modeEscalation &&
+    !/focus|foreground|前台/.test(retryHint.toLowerCase())
+  ) {
     retryHint = `${retryHint} Switch to focus mode and resume the current step without restarting the session.`;
   }
   const failureCategory =
@@ -789,26 +943,27 @@ function attachFailureProtocol(
     inferFailureCategory({
       errorCode,
       errorReason,
-      modeEscalation
+      modeEscalation,
     });
-  const retryAction = errorReason === "progress_uncertain" ? "llm_replan" : retryDecision.action;
+  const retryAction =
+    errorReason === "progress_uncertain" ? "llm_replan" : retryDecision.action;
   const resumeStrategy =
     options.resumeStrategy ||
     inferResumeStrategy({
       errorReason,
       retryAction,
       modeEscalation,
-      retryable
+      retryable,
     });
   const failureClass: JsonRecord = {
     phase: options.phase || inferFailurePhase(errorReason),
     reason: errorReason,
     category: failureCategory,
-    retryAction
+    retryAction,
   };
   const resume: JsonRecord = {
     action: "resume_current_step",
-    strategy: resumeStrategy
+    strategy: resumeStrategy,
   };
   if (modeEscalation) resume.mode = "focus";
 
@@ -821,10 +976,11 @@ function attachFailureProtocol(
     next_best_action: mapNextBestAction(resumeStrategy),
     details: payload.details || payload.errorDetails || null,
     failureClass,
-    resume
+    resume,
   };
   if (modeEscalation) out.modeEscalation = modeEscalation;
-  if (options.stepRef && Object.keys(options.stepRef).length > 0) out.stepRef = options.stepRef;
+  if (options.stepRef && Object.keys(options.stepRef).length > 0)
+    out.stepRef = options.stepRef;
   return out;
 }
 
@@ -874,16 +1030,25 @@ function normalizeSessionTitle(value: unknown, fallback = ""): string {
 
 function readSessionTitleSource(meta: SessionMeta | null): string {
   const metadata = toRecord(meta?.header?.metadata);
-  const source = String(metadata.titleSource || "").trim().toLowerCase();
-  if (source === SESSION_TITLE_SOURCE_MANUAL || source === SESSION_TITLE_SOURCE_AI) {
+  const source = String(metadata.titleSource || "")
+    .trim()
+    .toLowerCase();
+  if (
+    source === SESSION_TITLE_SOURCE_MANUAL ||
+    source === SESSION_TITLE_SOURCE_AI
+  ) {
     return source;
   }
   return "";
 }
 
-function withSessionTitleMeta(meta: SessionMeta, title: string, source: string): SessionMeta {
+function withSessionTitleMeta(
+  meta: SessionMeta,
+  title: string,
+  source: string,
+): SessionMeta {
   const metadata = {
-    ...toRecord(meta.header.metadata)
+    ...toRecord(meta.header.metadata),
   };
   if (source) {
     metadata.titleSource = source;
@@ -895,59 +1060,62 @@ function withSessionTitleMeta(meta: SessionMeta, title: string, source: string):
     header: {
       ...meta.header,
       title,
-      metadata
+      metadata,
     },
-    updatedAt: nowIso()
+    updatedAt: nowIso(),
   };
 }
 
 interface SessionLlmRoutePrefs {
   profile?: string;
   role?: string;
-  escalationPolicy?: LlmProfileEscalationPolicy;
 }
 
-function readSessionLlmRoutePrefs(meta: SessionMeta | null): SessionLlmRoutePrefs {
+function readSessionLlmRoutePrefs(
+  meta: SessionMeta | null,
+): SessionLlmRoutePrefs {
   const metadata = toRecord(meta?.header?.metadata);
   const profile = String(metadata.llmProfile || "").trim();
   const role = String(metadata.llmRole || "").trim();
-  const escalationPolicyRaw = String(metadata.llmEscalationPolicy || "").trim().toLowerCase();
-  const escalationPolicy: LlmProfileEscalationPolicy | undefined =
-    escalationPolicyRaw === "disabled" ? "disabled" : escalationPolicyRaw === "upgrade_only" ? "upgrade_only" : undefined;
   return {
     profile: profile || undefined,
     role: role || undefined,
-    escalationPolicy
   };
 }
 
-function withSessionLlmRouteMeta(meta: SessionMeta, route: LlmResolvedRoute): SessionMeta {
+function withSessionLlmRouteMeta(
+  meta: SessionMeta,
+  route: LlmResolvedRoute,
+): SessionMeta {
   const metadata = {
     ...toRecord(meta.header.metadata),
-    llmProfile: route.profile,
-    llmProvider: route.provider,
-    llmModel: route.llmModel,
-    llmRole: route.role,
-    llmEscalationPolicy: route.escalationPolicy
+    llmResolvedProfile: route.profile,
+    llmResolvedProvider: route.provider,
+    llmResolvedModel: route.llmModel,
+    llmResolvedRole: route.role,
+    llmResolvedEscalationPolicy: route.escalationPolicy,
   };
   return {
     ...meta,
     header: {
       ...meta.header,
-      metadata
+      metadata,
     },
-    updatedAt: nowIso()
+    updatedAt: nowIso(),
   };
 }
 
-function buildLlmRoutePayload(route: LlmResolvedRoute, extra: JsonRecord = {}): JsonRecord {
+function buildLlmRoutePayload(
+  route: LlmResolvedRoute,
+  extra: JsonRecord = {},
+): JsonRecord {
   return {
     profile: route.profile,
     provider: route.provider,
     model: route.llmModel,
     role: route.role,
     fromLegacy: route.fromLegacy,
-    ...extra
+    ...extra,
   };
 }
 
@@ -971,7 +1139,8 @@ function parseLlmContent(message: unknown): string {
         if (typeof part === "string") return part;
         const item = toRecord(part);
         if (typeof item.text === "string") return item.text;
-        if (item.type === "text" && typeof item.value === "string") return item.value;
+        if (item.type === "text" && typeof item.value === "string")
+          return item.value;
         return "";
       })
       .filter(Boolean);
@@ -985,24 +1154,38 @@ function parseLlmContent(message: unknown): string {
 function normalizeVerifyExpect(raw: unknown): JsonRecord | null {
   const source = toRecord(raw);
   const out: JsonRecord = {};
-  if (typeof source.urlContains === "string" && source.urlContains.trim()) out.urlContains = source.urlContains.trim();
-  if (typeof source.titleContains === "string" && source.titleContains.trim()) out.titleContains = source.titleContains.trim();
-  if (typeof source.textIncludes === "string" && source.textIncludes.trim()) out.textIncludes = source.textIncludes.trim();
-  if (typeof source.selectorExists === "string" && source.selectorExists.trim()) out.selectorExists = source.selectorExists.trim();
+  if (typeof source.urlContains === "string" && source.urlContains.trim())
+    out.urlContains = source.urlContains.trim();
+  if (typeof source.titleContains === "string" && source.titleContains.trim())
+    out.titleContains = source.titleContains.trim();
+  if (typeof source.textIncludes === "string" && source.textIncludes.trim())
+    out.textIncludes = source.textIncludes.trim();
+  if (typeof source.selectorExists === "string" && source.selectorExists.trim())
+    out.selectorExists = source.selectorExists.trim();
   if (source.urlChanged === true) out.urlChanged = true;
-  if (typeof source.previousUrl === "string" && source.previousUrl.trim()) out.previousUrl = source.previousUrl.trim();
+  if (typeof source.previousUrl === "string" && source.previousUrl.trim())
+    out.previousUrl = source.previousUrl.trim();
   return Object.keys(out).length > 0 ? out : null;
 }
 
-function buildObserveProgressVerify(beforeObserve: unknown, afterObserve: unknown): JsonRecord {
+function buildObserveProgressVerify(
+  beforeObserve: unknown,
+  afterObserve: unknown,
+): JsonRecord {
   const beforePage = toRecord(toRecord(beforeObserve).page);
   const afterPage = toRecord(toRecord(afterObserve).page);
-  
-  const urlChanged = String(beforePage.url || "") !== String(afterPage.url || "");
-  const titleChanged = String(beforePage.title || "") !== String(afterPage.title || "");
-  const textDiff = Math.abs(Number(afterPage.textLength || 0) - Number(beforePage.textLength || 0));
-  const nodeDiff = Math.abs(Number(afterPage.nodeCount || 0) - Number(beforePage.nodeCount || 0));
-  
+
+  const urlChanged =
+    String(beforePage.url || "") !== String(afterPage.url || "");
+  const titleChanged =
+    String(beforePage.title || "") !== String(afterPage.title || "");
+  const textDiff = Math.abs(
+    Number(afterPage.textLength || 0) - Number(beforePage.textLength || 0),
+  );
+  const nodeDiff = Math.abs(
+    Number(afterPage.nodeCount || 0) - Number(beforePage.nodeCount || 0),
+  );
+
   const textLengthChanged = textDiff >= 1; // Any text change is progress
   const nodeCountChanged = nodeDiff > 10; // Ignore tiny background noise
 
@@ -1011,35 +1194,36 @@ function buildObserveProgressVerify(beforeObserve: unknown, afterObserve: unknow
       name: "urlChanged",
       pass: urlChanged,
       before: beforePage.url || "",
-      after: afterPage.url || ""
+      after: afterPage.url || "",
     },
     {
       name: "titleChanged",
       pass: titleChanged,
       before: beforePage.title || "",
-      after: afterPage.title || ""
+      after: afterPage.title || "",
     },
     {
       name: "textLengthChanged",
       pass: textLengthChanged,
       before: Number(beforePage.textLength || 0),
-      after: Number(afterPage.textLength || 0)
+      after: Number(afterPage.textLength || 0),
     },
     {
       name: "nodeCountChanged",
       pass: nodeCountChanged,
       before: Number(beforePage.nodeCount || 0),
-      after: Number(afterPage.nodeCount || 0)
-    }
+      after: Number(afterPage.nodeCount || 0),
+    },
   ];
 
   // Logic: Navigation or significant content structure change
-  const ok = urlChanged || titleChanged || (textLengthChanged && nodeCountChanged);
+  const ok =
+    urlChanged || titleChanged || (textLengthChanged && nodeCountChanged);
 
   return {
     ok,
     checks,
-    observation: afterObserve
+    observation: afterObserve,
   };
 }
 
@@ -1051,21 +1235,25 @@ function normalizeToolCalls(rawToolCalls: unknown): ToolCallItem[] {
       const fn = toRecord(row.function);
       const name = String(fn.name || "").trim();
       if (!name) return null;
-      const argsText = typeof fn.arguments === "string" ? fn.arguments : safeStringify(fn.arguments || {});
+      const argsText =
+        typeof fn.arguments === "string"
+          ? fn.arguments
+          : safeStringify(fn.arguments || {});
       return {
         id: String(row.id || `toolcall-${index + 1}`),
         type: "function" as const,
         function: {
           name,
-          arguments: argsText
-        }
+          arguments: argsText,
+        },
       };
     })
     .filter((item): item is ToolCallItem => item !== null);
 }
 
 function sortJsonForSignature(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map((item) => sortJsonForSignature(item));
+  if (Array.isArray(value))
+    return value.map((item) => sortJsonForSignature(item));
   if (!value || typeof value !== "object") return value;
   const source = value as Record<string, unknown>;
   const out: Record<string, unknown> = {};
@@ -1097,7 +1285,8 @@ function parseToolCallArgs(raw: string): JsonRecord | null {
   const text = String(raw || "").trim();
   if (!text) return null;
   const parsed = safeJsonParse(text);
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    return null;
   return parsed as JsonRecord;
 }
 
@@ -1109,8 +1298,12 @@ function stringifyToolCallArgs(args: JsonRecord): string {
   }
 }
 
-function buildFocusEscalationToolCall(toolCall: ToolCallItem): ToolCallItem | null {
-  const normalized = String(toolCall.function.name || "").trim().toLowerCase();
+function buildFocusEscalationToolCall(
+  toolCall: ToolCallItem,
+): ToolCallItem | null {
+  const normalized = String(toolCall.function.name || "")
+    .trim()
+    .toLowerCase();
   if (
     ![
       "click",
@@ -1123,7 +1316,7 @@ function buildFocusEscalationToolCall(toolCall: ToolCallItem): ToolCallItem | nu
       "scroll_to_element",
       "highlight_element",
       "highlight_text_inline",
-      "fill_form"
+      "fill_form",
     ].includes(normalized)
   ) {
     return null;
@@ -1132,26 +1325,32 @@ function buildFocusEscalationToolCall(toolCall: ToolCallItem): ToolCallItem | nu
   if (!args) return null;
   const nextArgs: JsonRecord = {
     ...args,
-    forceFocus: true
+    forceFocus: true,
   };
   const nestedAction = toRecord(nextArgs.action);
   if (Object.keys(nestedAction).length > 0) {
     nextArgs.action = {
       ...nestedAction,
-      forceFocus: true
+      forceFocus: true,
     };
   }
   return {
     ...toolCall,
     function: {
       ...toolCall.function,
-      arguments: stringifyToolCallArgs(nextArgs)
-    }
+      arguments: stringifyToolCallArgs(nextArgs),
+    },
   };
 }
 
-function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs: string): string {
-  const normalized = String(toolName || "").trim().toLowerCase();
+function summarizeToolTarget(
+  toolName: string,
+  args: JsonRecord | null,
+  rawArgs: string,
+): string {
+  const normalized = String(toolName || "")
+    .trim()
+    .toLowerCase();
   const raw = String(rawArgs || "").trim();
   const pick = (key: string) => String(args?.[key] || "").trim();
 
@@ -1165,11 +1364,15 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
   }
   if (normalized === "get_tab_info") {
     const tabId = pick("tabId");
-    return tabId ? `读取标签页详情 · tabId=${clipText(tabId, 80)}` : "读取标签页详情";
+    return tabId
+      ? `读取标签页详情 · tabId=${clipText(tabId, 80)}`
+      : "读取标签页详情";
   }
   if (normalized === "close_tab") {
     const tabId = pick("tabId");
-    return tabId ? `关闭标签页 · tabId=${clipText(tabId, 80)}` : "关闭当前标签页";
+    return tabId
+      ? `关闭标签页 · tabId=${clipText(tabId, 80)}`
+      : "关闭当前标签页";
   }
   if (normalized === "ungroup_tabs") {
     return "取消标签页分组";
@@ -1181,7 +1384,7 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
       "host_write_file",
       "browser_write_file",
       "host_edit_file",
-      "browser_edit_file"
+      "browser_edit_file",
     ].includes(normalized)
   ) {
     const path = pick("path");
@@ -1190,7 +1393,8 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
   if (normalized === "search_elements") {
     const query = pick("query");
     const selector = pick("selector");
-    if (query && selector) return `元素检索：${clipText(query, 120)} · 作用域：${clipText(selector, 120)}`;
+    if (query && selector)
+      return `元素检索：${clipText(query, 120)} · 作用域：${clipText(selector, 120)}`;
     if (query) return `元素检索：${clipText(query, 120)}`;
     if (selector) return `元素检索作用域：${clipText(selector, 120)}`;
     return "元素检索";
@@ -1206,7 +1410,8 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
   if (normalized === "select_option_by_uid") {
     const target = pick("uid") || pick("ref") || pick("selector");
     const value = pick("value");
-    if (target && value) return `选择选项 · ${clipText(target, 120)} = ${clipText(value, 120)}`;
+    if (target && value)
+      return `选择选项 · ${clipText(target, 120)} = ${clipText(value, 120)}`;
     return target ? `选择选项 · ${clipText(target, 180)}` : "选择选项";
   }
   if (normalized === "hover_element_by_uid") {
@@ -1215,7 +1420,9 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
   }
   if (normalized === "get_editor_value") {
     const target = pick("uid") || pick("ref") || pick("selector");
-    return target ? `读取编辑器内容 · ${clipText(target, 180)}` : "读取编辑器内容";
+    return target
+      ? `读取编辑器内容 · ${clipText(target, 180)}`
+      : "读取编辑器内容";
   }
   if (normalized === "press_key") {
     const key = pick("key") || pick("value");
@@ -1249,7 +1456,8 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
   if (normalized === "highlight_text_inline") {
     const selector = pick("selector");
     const text = pick("searchText");
-    if (selector && text) return `高亮文本 · ${clipText(text, 120)} @ ${clipText(selector, 120)}`;
+    if (selector && text)
+      return `高亮文本 · ${clipText(text, 120)} @ ${clipText(selector, 120)}`;
     return "高亮文本";
   }
   if (normalized === "capture_screenshot") return "截图";
@@ -1290,19 +1498,22 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
   if (normalized === "execute_skill_script") {
     const name = pick("skillName");
     const scriptPath = pick("scriptPath");
-    if (name && scriptPath) return `执行技能脚本 · ${clipText(name, 120)}:${clipText(scriptPath, 120)}`;
+    if (name && scriptPath)
+      return `执行技能脚本 · ${clipText(name, 120)}:${clipText(scriptPath, 120)}`;
     return "执行技能脚本";
   }
   if (normalized === "read_skill_reference") {
     const name = pick("skillName");
     const refPath = pick("refPath");
-    if (name && refPath) return `读取技能参考 · ${clipText(name, 120)}:${clipText(refPath, 120)}`;
+    if (name && refPath)
+      return `读取技能参考 · ${clipText(name, 120)}:${clipText(refPath, 120)}`;
     return "读取技能参考";
   }
   if (normalized === "get_skill_asset") {
     const name = pick("skillName");
     const assetPath = pick("assetPath");
-    if (name && assetPath) return `读取技能资产 · ${clipText(name, 120)}:${clipText(assetPath, 120)}`;
+    if (name && assetPath)
+      return `读取技能资产 · ${clipText(name, 120)}:${clipText(assetPath, 120)}`;
     return "读取技能资产";
   }
   if (normalized === "list_skills") return "读取技能列表";
@@ -1317,7 +1528,10 @@ function summarizeToolTarget(toolName: string, args: JsonRecord | null, rawArgs:
   return "";
 }
 
-function scoreSearchNode(node: JsonRecord, needles: string[]): { score: number; matchedNeedles: number } {
+function scoreSearchNode(
+  node: JsonRecord,
+  needles: string[],
+): { score: number; matchedNeedles: number } {
   if (needles.length === 0) return { score: 0, matchedNeedles: 0 };
   const role = String(node.role || "").toLowerCase();
   const tag = String(node.tag || "").toLowerCase();
@@ -1326,7 +1540,15 @@ function scoreSearchNode(node: JsonRecord, needles: string[]): { score: number; 
   const placeholder = String(node.placeholder || "").toLowerCase();
   const ariaLabel = String(node.ariaLabel || "").toLowerCase();
   const selector = String(node.selector || "").toLowerCase();
-  const haystack = [role, tag, name, value, placeholder, ariaLabel, selector].join(" ");
+  const haystack = [
+    role,
+    tag,
+    name,
+    value,
+    placeholder,
+    ariaLabel,
+    selector,
+  ].join(" ");
 
   let score = 0;
   let matchedNeedles = 0;
@@ -1334,19 +1556,25 @@ function scoreSearchNode(node: JsonRecord, needles: string[]): { score: number; 
     if (!needle) continue;
     let hit = false;
 
-    const exactInPrimary = [placeholder, ariaLabel, name].some((item) => item === needle);
+    const exactInPrimary = [placeholder, ariaLabel, name].some(
+      (item) => item === needle,
+    );
     if (exactInPrimary) {
       score += 42;
       hit = true;
     }
 
-    const startsInPrimary = [placeholder, ariaLabel, name].some((item) => item.startsWith(needle));
+    const startsInPrimary = [placeholder, ariaLabel, name].some((item) =>
+      item.startsWith(needle),
+    );
     if (startsInPrimary) {
       score += 24;
       hit = true;
     }
 
-    const containsInPrimary = [placeholder, ariaLabel, name].some((item) => item.includes(needle));
+    const containsInPrimary = [placeholder, ariaLabel, name].some((item) =>
+      item.includes(needle),
+    );
     if (containsInPrimary) {
       score += 16;
       hit = true;
@@ -1379,17 +1607,34 @@ function scoreSearchNode(node: JsonRecord, needles: string[]): { score: number; 
   }
 
   if (["input", "textarea", "button", "a", "select"].includes(tag)) score += 6;
-  if (["textbox", "searchbox", "button", "link", "combobox"].includes(role)) score += 6;
+  if (["textbox", "searchbox", "button", "link", "combobox"].includes(role))
+    score += 6;
   if (node.focused === true) score += 2;
   if (node.disabled === true) score -= 20;
-  if (selector.includes("[data-testid=") || selector.includes("[aria-label=") || selector.includes("[placeholder=")) {
+  if (
+    selector.includes("[data-testid=") ||
+    selector.includes("[aria-label=") ||
+    selector.includes("[placeholder=")
+  ) {
     score += 2;
   }
   const editable = node.editable === true;
   const typingIntent = needles.some((needle) =>
-    ["input", "textarea", "textbox", "text", "type", "fill", "write", "compose", "edit", "输入", "文本", "回复", "comment"].some(
-      (token) => needle.includes(token) || token.includes(needle)
-    )
+    [
+      "input",
+      "textarea",
+      "textbox",
+      "text",
+      "type",
+      "fill",
+      "write",
+      "compose",
+      "edit",
+      "输入",
+      "文本",
+      "回复",
+      "comment",
+    ].some((token) => needle.includes(token) || token.includes(needle)),
   );
   if (typingIntent) {
     const looksTypable =
@@ -1405,19 +1650,25 @@ function scoreSearchNode(node: JsonRecord, needles: string[]): { score: number; 
   return { score, matchedNeedles };
 }
 
-function buildToolFailurePayload(toolCall: ToolCallItem, result: JsonRecord): JsonRecord {
+function buildToolFailurePayload(
+  toolCall: ToolCallItem,
+  result: JsonRecord,
+): JsonRecord {
   const toolName = String(toolCall.function.name || "").trim();
   const rawArgs = String(toolCall.function.arguments || "").trim();
   const args = parseToolCallArgs(rawArgs);
   const target = summarizeToolTarget(toolName, args, rawArgs);
   const errorCode = normalizeErrorCode(result.errorCode);
-  const retryable = result.retryable === true || isRetryableToolErrorCode(toolName, errorCode);
+  const retryable =
+    result.retryable === true || isRetryableToolErrorCode(toolName, errorCode);
   return {
     error: String(result.error || "工具执行失败"),
     errorReason: String(result.errorReason || "failed_execute"),
     errorCode: errorCode || undefined,
     retryable,
-    retryHint: String(result.retryHint || buildToolRetryHint(toolName, errorCode)),
+    retryHint: String(
+      result.retryHint || buildToolRetryHint(toolName, errorCode),
+    ),
     tool: toolName,
     target,
     args: args || null,
@@ -1429,20 +1680,27 @@ function buildToolFailurePayload(toolCall: ToolCallItem, result: JsonRecord): Js
     failureClass: result.failureClass || undefined,
     modeEscalation: result.modeEscalation || undefined,
     resume: result.resume || undefined,
-    stepRef: result.stepRef || undefined
+    stepRef: result.stepRef || undefined,
   };
 }
 
 function buildToolSuccessPayload(
   toolCall: ToolCallItem,
   data: unknown,
-  meta: { modeUsed?: unknown; providerId?: unknown; fallbackFrom?: unknown } = {}
+  meta: {
+    modeUsed?: unknown;
+    providerId?: unknown;
+    fallbackFrom?: unknown;
+  } = {},
 ): JsonRecord {
   const toolName = String(toolCall.function.name || "").trim();
   const rawArgs = String(toolCall.function.arguments || "").trim();
   const args = parseToolCallArgs(rawArgs);
   const target = summarizeToolTarget(toolName, args, rawArgs);
-  const base = data && typeof data === "object" && !Array.isArray(data) ? ({ ...(data as JsonRecord) } as JsonRecord) : { data };
+  const base =
+    data && typeof data === "object" && !Array.isArray(data)
+      ? ({ ...(data as JsonRecord) } as JsonRecord)
+      : { data };
   return {
     ...base,
     tool: toolName,
@@ -1450,7 +1708,7 @@ function buildToolSuccessPayload(
     args: args || null,
     modeUsed: String(meta.modeUsed || "") || undefined,
     providerId: String(meta.providerId || "") || undefined,
-    fallbackFrom: String(meta.fallbackFrom || "") || undefined
+    fallbackFrom: String(meta.fallbackFrom || "") || undefined,
   };
 }
 
@@ -1480,12 +1738,14 @@ function parseLlmMessageFromSse(rawBody: string): JsonRecord {
         const prev = toolByIndex.get(idx) || {
           id: "",
           type: "function",
-          function: { name: "", arguments: "" }
+          function: { name: "", arguments: "" },
         };
         if (typeof call.id === "string" && call.id) prev.id = call.id;
         const fn = toRecord(call.function);
         if (typeof fn.name === "string" && fn.name) {
-          prev.function.name = prev.function.name ? `${prev.function.name}${fn.name}` : fn.name;
+          prev.function.name = prev.function.name
+            ? `${prev.function.name}${fn.name}`
+            : fn.name;
         }
         if (typeof fn.arguments === "string" && fn.arguments) {
           prev.function.arguments = `${prev.function.arguments || ""}${fn.arguments}`;
@@ -1500,7 +1760,7 @@ function parseLlmMessageFromSse(rawBody: string): JsonRecord {
     tool_calls: Array.from(toolByIndex.keys())
       .sort((a, b) => a - b)
       .map((idx) => toolByIndex.get(idx))
-      .filter((item): item is ToolCallItem => Boolean(item))
+      .filter((item): item is ToolCallItem => Boolean(item)),
   };
 }
 
@@ -1529,7 +1789,10 @@ function extractDeltaText(delta: JsonRecord): string {
   return out;
 }
 
-function appendDeltaToolCalls(toolByIndex: Map<number, ToolCallItem>, delta: JsonRecord): void {
+function appendDeltaToolCalls(
+  toolByIndex: Map<number, ToolCallItem>,
+  delta: JsonRecord,
+): void {
   const toolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
   for (const rawCall of toolCalls) {
     const call = toRecord(rawCall);
@@ -1537,12 +1800,14 @@ function appendDeltaToolCalls(toolByIndex: Map<number, ToolCallItem>, delta: Jso
     const prev = toolByIndex.get(idx) || {
       id: "",
       type: "function" as const,
-      function: { name: "", arguments: "" }
+      function: { name: "", arguments: "" },
     };
     if (typeof call.id === "string" && call.id) prev.id = call.id;
     const fn = toRecord(call.function);
     if (typeof fn.name === "string" && fn.name) {
-      prev.function.name = prev.function.name ? `${prev.function.name}${fn.name}` : fn.name;
+      prev.function.name = prev.function.name
+        ? `${prev.function.name}${fn.name}`
+        : fn.name;
     }
     if (typeof fn.arguments === "string" && fn.arguments) {
       prev.function.arguments = `${prev.function.arguments || ""}${fn.arguments}`;
@@ -1553,7 +1818,7 @@ function appendDeltaToolCalls(toolByIndex: Map<number, ToolCallItem>, delta: Jso
 
 async function readLlmMessageFromSseStream(
   body: ReadableStream<Uint8Array>,
-  onDeltaText?: (chunk: string) => void
+  onDeltaText?: (chunk: string) => void,
 ): Promise<LlmSseStreamResult> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -1608,20 +1873,26 @@ async function readLlmMessageFromSseStream(
     tool_calls: Array.from(toolByIndex.keys())
       .sort((a, b) => a - b)
       .map((idx) => toolByIndex.get(idx))
-      .filter((item): item is ToolCallItem => Boolean(item))
+      .filter((item): item is ToolCallItem => Boolean(item)),
   };
 
   return {
     message,
     rawBody: rawPackets.join("\n"),
-    packetCount
+    packetCount,
   };
 }
 
-function parseLlmMessageFromBody(rawBody: string, contentType: string): JsonRecord {
+function parseLlmMessageFromBody(
+  rawBody: string,
+  contentType: string,
+): JsonRecord {
   const body = String(rawBody || "");
   const lowerType = String(contentType || "").toLowerCase();
-  if (lowerType.includes("text/event-stream") || body.trim().startsWith("data:")) {
+  if (
+    lowerType.includes("text/event-stream") ||
+    body.trim().startsWith("data:")
+  ) {
     return parseLlmMessageFromSse(body);
   }
   const parsed = safeJsonParse(body);
@@ -1639,13 +1910,15 @@ function buildSharedTabsContextMessage(sharedTabs: unknown): string {
     const url = String(item.url || "").trim() || "";
     const id = Number(item.id);
     const tabIdPart = Number.isInteger(id) ? ` [id=${id}]` : "";
-    lines.push(`${i + 1}. ${title}${tabIdPart}${url ? `\n   URL: ${url}` : ""}`);
+    lines.push(
+      `${i + 1}. ${title}${tabIdPart}${url ? `\n   URL: ${url}` : ""}`,
+    );
   }
   return [
     "Shared tabs context (user-selected):",
     ...lines,
     "Use this context directly before deciding whether to call get_all_tabs/create_new_tab.",
-    "For browser tasks, do not claim done until browser actions are verified."
+    "For browser tasks, do not claim done until browser actions are verified.",
   ].join("\n");
 }
 
@@ -1659,7 +1932,7 @@ function escapeXmlAttributeForPrompt(input: unknown): string {
 
 function buildAvailableSkillsSystemMessage(skills: SkillMetadata[]): string {
   const visible = (Array.isArray(skills) ? skills : []).filter(
-    (item) => item && item.enabled && item.disableModelInvocation !== true
+    (item) => item && item.enabled && item.disableModelInvocation !== true,
   );
   if (!visible.length) return "";
 
@@ -1671,11 +1944,13 @@ function buildAvailableSkillsSystemMessage(skills: SkillMetadata[]): string {
   const limited = sorted.slice(0, MAX_PROMPT_SKILL_ITEMS);
   const lines = limited.map((skill) => {
     return `  <skill name="${escapeXmlAttributeForPrompt(skill.name)}" description="${escapeXmlAttributeForPrompt(
-      skill.description
+      skill.description,
     )}" location="${escapeXmlAttributeForPrompt(skill.location)}" source="${escapeXmlAttributeForPrompt(skill.source)}" />`;
   });
   if (sorted.length > limited.length) {
-    lines.push(`  <!-- truncated ${sorted.length - limited.length} more skills -->`);
+    lines.push(
+      `  <!-- truncated ${sorted.length - limited.length} more skills -->`,
+    );
   }
 
   return [
@@ -1683,7 +1958,7 @@ function buildAvailableSkillsSystemMessage(skills: SkillMetadata[]): string {
     "When a skill is relevant, use browser_read_file (mem://) or host_read_file (host path) to load SKILL.md.",
     "<available_skills>",
     ...lines,
-    "</available_skills>"
+    "</available_skills>",
   ].join("\n");
 }
 
@@ -1733,18 +2008,22 @@ const EXTENSION_AGENT_PROMPT_TOOL_ORDER = [
   "get_skill_asset",
   "list_skills",
   "get_skill_info",
-  "browser_verify"
+  "browser_verify",
 ] as const;
 
 const EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS: Record<string, string> = {
   host_read_file: "Read file contents from host filesystem.",
   host_write_file: "Create or overwrite files on host filesystem.",
-  host_edit_file: "Patch host files with exact replacements (and unified patch where supported).",
+  host_edit_file:
+    "Patch host files with exact replacements (and unified patch where supported).",
   host_bash: "Execute shell commands on host runtime via bridge bash.exec.",
-  browser_read_file: "Read file contents from browser lifo sandbox FS (mem://).",
+  browser_read_file:
+    "Read file contents from browser lifo sandbox FS (mem://).",
   browser_write_file: "Create or overwrite files on browser virtual FS.",
-  browser_edit_file: "Patch browser virtual files with exact replacements (no unified patch).",
-  browser_bash: "Execute limited virtual-shell commands against browser virtual FS.",
+  browser_edit_file:
+    "Patch browser virtual files with exact replacements (no unified patch).",
+  browser_bash:
+    "Execute limited virtual-shell commands against browser virtual FS.",
   get_all_tabs: "List currently open browser tabs.",
   get_current_tab: "Get the active browser tab context.",
   create_new_tab: "Open a new browser tab when task flow requires it.",
@@ -1754,36 +2033,46 @@ const EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS: Record<string, string> = {
   search_elements:
     "Capture accessibility-first page snapshot to discover actionable targets. Query should describe user-visible semantics (placeholder/aria/name/text).",
   click: "Click a specific page element by uid/ref/backendNodeId.",
-  fill_element_by_uid: "Type/fill a specific page element by uid/ref/backendNodeId.",
-  select_option_by_uid: "Select/set value on a selectable page element by uid/ref/backendNodeId.",
+  fill_element_by_uid:
+    "Type/fill a specific page element by uid/ref/backendNodeId.",
+  select_option_by_uid:
+    "Select/set value on a selectable page element by uid/ref/backendNodeId.",
   hover_element_by_uid: "Hover a target element by uid/ref/backendNodeId.",
-  get_editor_value: "Read full value from input/textarea/contenteditable/editor target.",
-  press_key: "Press a keyboard key on active element (e.g. Enter/Escape/ArrowDown).",
+  get_editor_value:
+    "Read full value from input/textarea/contenteditable/editor target.",
+  press_key:
+    "Press a keyboard key on active element (e.g. Enter/Escape/ArrowDown).",
   scroll_page: "Scroll page by deltaY pixels (positive=down, negative=up).",
   navigate_tab: "Navigate tab to target URL.",
   fill_form: "Fill multiple form fields in one structured call.",
-  computer: "Coordinate-based browser interaction (click/hover/scroll/key/type/wait/drag).",
-  get_page_metadata: "Read page metadata (title/url/description/keywords/author/og).",
-  scroll_to_element: "Scroll target element into view by uid/ref/backendNodeId (selector is metadata fallback only).",
+  computer:
+    "Coordinate-based browser interaction (click/hover/scroll/key/type/wait/drag).",
+  get_page_metadata:
+    "Read page metadata (title/url/description/keywords/author/og).",
+  scroll_to_element:
+    "Scroll target element into view by uid/ref/backendNodeId (selector is metadata fallback only).",
   highlight_element: "Highlight element for visual confirmation.",
   highlight_text_inline: "Highlight matched text under selector scope.",
   capture_screenshot: "Capture screenshot and return base64 data URL.",
   capture_tab_screenshot: "Capture screenshot for a specific tab id.",
-  capture_screenshot_with_highlight: "Capture screenshot with optional highlight selector.",
+  capture_screenshot_with_highlight:
+    "Capture screenshot with optional highlight selector.",
   download_image: "Download data:image URL to local browser downloads.",
   download_chat_images: "Batch-download image parts from message payload.",
   list_interventions: "List available human intervention types.",
   get_intervention_info: "Read intervention schema/details by type.",
   request_intervention: "Request a human intervention task.",
   cancel_intervention: "Cancel a pending intervention request.",
-  create_skill: "Create or update a skill package in mem://skills and register it atomically.",
+  create_skill:
+    "Create or update a skill package in mem://skills and register it atomically.",
   load_skill: "Load skill main content (SKILL.md).",
   execute_skill_script: "Execute script under a skill package.",
   read_skill_reference: "Read skill reference doc under references/.",
   get_skill_asset: "Read skill asset under assets/.",
   list_skills: "List installed skills.",
   get_skill_info: "Get detailed skill metadata.",
-  browser_verify: "Assert URL/title/text/selector to confirm the task actually progressed."
+  browser_verify:
+    "Assert URL/title/text/selector to confirm the task actually progressed.",
 };
 
 const EXTENSION_AGENT_PROMPT_BASE_GUIDELINES = [
@@ -1806,31 +2095,40 @@ const EXTENSION_AGENT_PROMPT_BASE_GUIDELINES = [
   "Do not invent selectors, URLs, tab state, or command output; re-observe when uncertain.",
   "Do not use legacy runtime hints when split tools are available. Choose explicit host_* or browser_* tools.",
   "When tab context is ambiguous, query get_current_tab/get_all_tabs before acting.",
-  "Be concise. Show key file paths, tab context, and blockers clearly."
+  "Be concise. Show key file paths, tab context, and blockers clearly.",
 ];
 
-function buildBrowserAgentSystemPrompt(config: BridgeConfig, toolDefinitions: ToolDefinition[] = []): string {
+function buildBrowserAgentSystemPrompt(
+  config: BridgeConfig,
+  toolDefinitions: ToolDefinition[] = [],
+): string {
   const overridePrompt = String(config.llmSystemPromptCustom || "");
   if (overridePrompt.trim()) {
     return overridePrompt;
   }
 
-  const dynamicToolLines = (Array.isArray(toolDefinitions) ? toolDefinitions : [])
+  const dynamicToolLines = (
+    Array.isArray(toolDefinitions) ? toolDefinitions : []
+  )
     .map((def) => {
       const fn = toRecord(def.function);
       const name = String(fn.name || "").trim();
       if (!name) return "";
-      const description = String(fn.description || "").trim() || "Use when needed.";
+      const description =
+        String(fn.description || "").trim() || "Use when needed.";
       return `- ${name}: ${description}`;
     })
     .filter(Boolean);
   const tools =
     dynamicToolLines.length > 0
       ? dynamicToolLines.join("\n")
-      : EXTENSION_AGENT_PROMPT_TOOL_ORDER
-          .map((name) => `- ${name}: ${EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS[name] || "Use when needed."}`)
-          .join("\n");
-  const guidelines = EXTENSION_AGENT_PROMPT_BASE_GUIDELINES.map((line) => `- ${line}`).join("\n");
+      : EXTENSION_AGENT_PROMPT_TOOL_ORDER.map(
+          (name) =>
+            `- ${name}: ${EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS[name] || "Use when needed."}`,
+        ).join("\n");
+  const guidelines = EXTENSION_AGENT_PROMPT_BASE_GUIDELINES.map(
+    (line) => `- ${line}`,
+  ).join("\n");
   return [
     "You are an expert coding assistant operating inside Browser Brain Loop, a browser-extension agent harness.",
     "You help users by reading files, executing commands, editing code, writing files, and operating browser tabs.",
@@ -1846,7 +2144,7 @@ function buildBrowserAgentSystemPrompt(config: BridgeConfig, toolDefinitions: To
     "Guidelines:",
     guidelines,
     "",
-    "Runtime: Browser extension agent (Chrome MV3)."
+    "Runtime: Browser extension agent (Chrome MV3).",
   ].join("\n");
 }
 
@@ -1867,7 +2165,7 @@ function buildTaskProgressSystemMessage(input: {
     `- loop_step: ${llmStep}/${maxLoopSteps}`,
     `- tool_steps_done: ${toolStep}`,
     `- retry_state: ${retryAttempt}/${retryMaxAttempts}`,
-    "- Keep moving toward the same user goal; avoid repeating already completed steps."
+    "- Keep moving toward the same user goal; avoid repeating already completed steps.",
   ].join("\n");
 }
 
@@ -1877,12 +2175,12 @@ function buildLlmMessagesFromContext(
   contextMessages: SessionContextMessageLike[],
   previousSummary = "",
   availableSkillsPrompt = "",
-  toolDefinitions: ToolDefinition[] = []
+  toolDefinitions: ToolDefinition[] = [],
 ): JsonRecord[] {
   const out: JsonRecord[] = [];
   out.push({
     role: "system",
-    content: buildBrowserAgentSystemPrompt(config, toolDefinitions)
+    content: buildBrowserAgentSystemPrompt(config, toolDefinitions),
   });
   out.push({
     role: "system",
@@ -1895,38 +2193,45 @@ function buildLlmMessagesFromContext(
       "5) For browser tasks, prefer actions grounded in observed page state and tool results.",
       "6) Do not invent site selectors/URLs; re-observe when uncertain.",
       "7) Prefer explicit split tools: host_* for host execution, browser_* for virtual-fs execution.",
-      "8) Temporary policy: do NOT run tests (e.g., bun test/pnpm test/npm test/pytest/go test) unless the user explicitly requests tests."
-    ].join("\n")
+      "8) Temporary policy: do NOT run tests (e.g., bun test/pnpm test/npm test/pytest/go test) unless the user explicitly requests tests.",
+    ].join("\n"),
   });
   const metadata = toRecord(meta?.header?.metadata);
   const sharedTabsContext = buildSharedTabsContextMessage(metadata.sharedTabs);
   if (sharedTabsContext) {
     out.push({
       role: "system",
-      content: sharedTabsContext
+      content: sharedTabsContext,
     });
   }
   if (availableSkillsPrompt) {
     out.push({
       role: "system",
-      content: availableSkillsPrompt
+      content: availableSkillsPrompt,
     });
   }
 
-  const failures = typeof getActionFailures === "function" ? getActionFailures(String(meta?.header?.sessionId || "")) : new Map<string, number>();
+  const failures =
+    typeof getActionFailures === "function"
+      ? getActionFailures(String(meta?.header?.sessionId || ""))
+      : new Map<string, number>();
   if (failures.size > 0) {
     const lines = ["Detected repetitive interaction failures for:"];
     for (const entry of Array.from(failures.entries())) {
       const [uid, count] = entry;
       if (count >= 2) {
-        lines.push(`- element ${uid}: ${count} failures (verification failed).`);
+        lines.push(
+          `- element ${uid}: ${count} failures (verification failed).`,
+        );
       }
     }
     if (lines.length > 1) {
-      lines.push("STRATEGY HINT: The current interaction path for these elements is not progressing the page state. DO NOT repeat the same action on these UIDs. Try a different anchor (child/parent), or use coordinate-based 'computer' tool, or re-search with a different query.");
+      lines.push(
+        "STRATEGY HINT: The current interaction path for these elements is not progressing the page state. DO NOT repeat the same action on these UIDs. Try a different anchor (child/parent), or use coordinate-based 'computer' tool, or re-search with a different query.",
+      );
       out.push({
         role: "system",
-        content: lines.join("\n")
+        content: lines.join("\n"),
       });
     }
   }
@@ -1943,7 +2248,10 @@ function buildLlmMessagesFromContext(
   return out;
 }
 
-function applyLatestUserPromptOverride(messages: JsonRecord[], prompt: string): JsonRecord[] {
+function applyLatestUserPromptOverride(
+  messages: JsonRecord[],
+  prompt: string,
+): JsonRecord[] {
   const promptText = String(prompt || "").trim();
   if (!promptText) return messages;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -1953,7 +2261,7 @@ function applyLatestUserPromptOverride(messages: JsonRecord[], prompt: string): 
     next[i] = {
       ...item,
       role: "user",
-      content: promptText
+      content: promptText,
     };
     return next;
   }
@@ -1961,8 +2269,8 @@ function applyLatestUserPromptOverride(messages: JsonRecord[], prompt: string): 
     ...messages,
     {
       role: "user",
-      content: promptText
-    }
+      content: promptText,
+    },
   ];
 }
 
@@ -1970,15 +2278,40 @@ function shouldVerifyStep(action: string, verifyPolicy: unknown): boolean {
   const policy = String(verifyPolicy || "on_critical");
   if (policy === "off") return false;
   if (policy === "always") return true;
-  const critical = ["click", "type", "fill", "press", "scroll", "select", "navigate", "action"];
-  return critical.includes(String(action || "").trim().toLowerCase());
+  const critical = [
+    "click",
+    "type",
+    "fill",
+    "press",
+    "scroll",
+    "select",
+    "navigate",
+    "action",
+  ];
+  return critical.includes(
+    String(action || "")
+      .trim()
+      .toLowerCase(),
+  );
 }
 
 function actionRequiresLease(kind: string): boolean {
-  return ["click", "type", "fill", "press", "scroll", "select", "navigate", "hover"].includes(kind);
+  return [
+    "click",
+    "type",
+    "fill",
+    "press",
+    "scroll",
+    "select",
+    "navigate",
+    "hover",
+  ].includes(kind);
 }
 
-function shouldAcquireLease(kind: string, policy: CapabilityExecutionPolicy): boolean {
+function shouldAcquireLease(
+  kind: string,
+  policy: CapabilityExecutionPolicy,
+): boolean {
   const leasePolicy = policy.leasePolicy || "auto";
   if (leasePolicy === "none") return false;
   if (leasePolicy === "required") return true;
@@ -2012,11 +2345,18 @@ function parseRetryAfterHeaderValue(raw: string): number | null {
   return Math.ceil(delta);
 }
 
-function extractRetryDelayHintMs(rawBody: string, resp: Response): number | null {
-  const retryAfter = parseRetryAfterHeaderValue(String(resp.headers.get("retry-after") || ""));
+function extractRetryDelayHintMs(
+  rawBody: string,
+  resp: Response,
+): number | null {
+  const retryAfter = parseRetryAfterHeaderValue(
+    String(resp.headers.get("retry-after") || ""),
+  );
   if (retryAfter !== null) return retryAfter;
 
-  const xRateLimitReset = String(resp.headers.get("x-ratelimit-reset") || "").trim();
+  const xRateLimitReset = String(
+    resp.headers.get("x-ratelimit-reset") || "",
+  ).trim();
   if (xRateLimitReset) {
     const sec = Number.parseInt(xRateLimitReset, 10);
     if (Number.isFinite(sec)) {
@@ -2025,7 +2365,9 @@ function extractRetryDelayHintMs(rawBody: string, resp: Response): number | null
     }
   }
 
-  const xRateLimitResetAfter = String(resp.headers.get("x-ratelimit-reset-after") || "").trim();
+  const xRateLimitResetAfter = String(
+    resp.headers.get("x-ratelimit-reset-after") || "",
+  ).trim();
   if (xRateLimitResetAfter) {
     const sec = Number(xRateLimitResetAfter);
     if (Number.isFinite(sec) && sec > 0) return Math.ceil(sec * 1000);
@@ -2038,7 +2380,9 @@ function extractRetryDelayHintMs(rawBody: string, resp: Response): number | null
     if (Number.isFinite(sec) && sec > 0) return Math.ceil(sec * 1000);
   }
 
-  const resetAfter = /reset after (?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s/i.exec(text);
+  const resetAfter = /reset after (?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s/i.exec(
+    text,
+  );
   if (resetAfter) {
     const hours = resetAfter[1] ? Number.parseInt(resetAfter[1], 10) : 0;
     const minutes = resetAfter[2] ? Number.parseInt(resetAfter[2], 10) : 0;
@@ -2052,18 +2396,24 @@ function extractRetryDelayHintMs(rawBody: string, resp: Response): number | null
   if (retryIn) {
     const amount = Number(retryIn[1]);
     if (Number.isFinite(amount) && amount > 0) {
-      return Math.ceil(retryIn[2].toLowerCase() === "ms" ? amount : amount * 1000);
+      return Math.ceil(
+        retryIn[2].toLowerCase() === "ms" ? amount : amount * 1000,
+      );
     }
   }
 
   return null;
 }
 
-function buildToolResponseEnvelope(type: string, data: unknown, extra: JsonRecord = {}): JsonRecord {
+function buildToolResponseEnvelope(
+  type: string,
+  data: unknown,
+  extra: JsonRecord = {},
+): JsonRecord {
   return {
     type,
     response: { ok: true, data },
-    ...extra
+    ...extra,
   };
 }
 
@@ -2074,20 +2424,32 @@ function extractBashExecOutcome(data: unknown): BashExecOutcome | null {
   const rootResponseData = toRecord(rootResponse.data);
   const rootResponseInnerData = toRecord(rootResponseData.data);
   const rootResult = toRecord(root.result);
-  const candidates = [root, rootData, rootResponse, rootResponseData, rootResponseInnerData, rootResult];
+  const candidates = [
+    root,
+    rootData,
+    rootResponse,
+    rootResponseData,
+    rootResponseInnerData,
+    rootResult,
+  ];
   for (const item of candidates) {
     const cmdId = String(item.cmdId || "").trim();
     const hasCmd = cmdId === "bash.exec";
-    const hasFields = item.exitCode !== undefined || typeof item.stdout === "string" || typeof item.stderr === "string";
+    const hasFields =
+      item.exitCode !== undefined ||
+      typeof item.stdout === "string" ||
+      typeof item.stderr === "string";
     if (!hasCmd && !hasFields) continue;
-    const argv = Array.isArray(item.argv) ? item.argv.map((value) => String(value || "")) : [];
+    const argv = Array.isArray(item.argv)
+      ? item.argv.map((value) => String(value || ""))
+      : [];
     const exitCodeRaw = Number(item.exitCode);
     return {
       cmdId: hasCmd ? cmdId : "bash.exec",
       argv,
       stdout: typeof item.stdout === "string" ? item.stdout : "",
       stderr: typeof item.stderr === "string" ? item.stderr : "",
-      exitCode: Number.isFinite(exitCodeRaw) ? exitCodeRaw : null
+      exitCode: Number.isFinite(exitCodeRaw) ? exitCodeRaw : null,
     };
   }
   return null;
@@ -2107,43 +2469,60 @@ function diagnoseBashExitFailure(input: {
   exitCode: number;
   stderr: string;
 }): { tag: string; error: string; retryHint: string } {
-  const normalizedTool = String(input.toolName || "").trim().toLowerCase();
+  const normalizedTool = String(input.toolName || "")
+    .trim()
+    .toLowerCase();
   const stderrLower = String(input.stderr || "").toLowerCase();
-  if (normalizedTool === "browser_bash" && /(?:\bwindow is not defined\b|\bdocument is not defined\b)/i.test(stderrLower)) {
+  if (
+    normalizedTool === "browser_bash" &&
+    /(?:\bwindow is not defined\b|\bdocument is not defined\b)/i.test(
+      stderrLower,
+    )
+  ) {
     return {
       tag: "dom_global_unavailable",
       error: `browser_bash 执行失败：sandbox shell 不是页面 DOM 上下文，window/document 不可用（exitCode=${input.exitCode}）。`,
-      retryHint: "需要页面 DOM 时改用 browser.action/browser_verify/script_action；仅执行命令时请移除 window/document 后重试。"
+      retryHint:
+        "需要页面 DOM 时改用 browser.action/browser_verify/script_action；仅执行命令时请移除 window/document 后重试。",
     };
   }
-  if (normalizedTool === "browser_bash" && /expected word but got lparen/i.test(stderrLower)) {
+  if (
+    normalizedTool === "browser_bash" &&
+    /expected word but got lparen/i.test(stderrLower)
+  ) {
     return {
       tag: "unsupported_shell_syntax",
       error: `browser_bash 执行失败：sandbox shell 不支持 C-style for ((...)) 语法（exitCode=${input.exitCode}）。`,
-      retryHint: "改用 POSIX 写法（for i in ...; do ...; done），或切换 host_bash 使用宿主 bash。"
+      retryHint:
+        "改用 POSIX 写法（for i in ...; do ...; done），或切换 host_bash 使用宿主 bash。",
     };
   }
   const stderrLine = clipText(
     String(input.stderr || "")
       .split(/\r?\n/)
       .find((line) => String(line || "").trim().length > 0) || "",
-    240
+    240,
   );
   return {
     tag: "non_zero_exit",
     error: stderrLine
       ? `${input.toolName} 执行失败：bash.exec exitCode=${input.exitCode}，stderr=${stderrLine}`
       : `${input.toolName} 执行失败：bash.exec exitCode=${input.exitCode}`,
-    retryHint: "检查命令与运行时兼容性后重试；browser_bash 使用 sandbox shell，语法与宿主 bash 可能不同。"
+    retryHint:
+      "检查命令与运行时兼容性后重试；browser_bash 使用 sandbox shell，语法与宿主 bash 可能不同。",
   };
 }
 
-function buildBashExitFailureEnvelope(toolName: string, invoke: ExecuteStepResult, outcome: BashExecOutcome): JsonRecord {
+function buildBashExitFailureEnvelope(
+  toolName: string,
+  invoke: ExecuteStepResult,
+  outcome: BashExecOutcome,
+): JsonRecord {
   const exitCode = Number(outcome.exitCode);
   const diagnosed = diagnoseBashExitFailure({
     toolName,
     exitCode: Number.isFinite(exitCode) ? exitCode : 1,
-    stderr: outcome.stderr
+    stderr: outcome.stderr,
   });
   return {
     ...attachFailureProtocol(
@@ -2160,17 +2539,17 @@ function buildBashExitFailureEnvelope(toolName: string, invoke: ExecuteStepResul
           command: clipText(extractBashCommandFromArgv(outcome.argv), 1_200),
           stdout: clipText(outcome.stdout, 1_200),
           stderr: clipText(outcome.stderr, 1_200),
-          diagnosis: diagnosed.tag
-        }
+          diagnosis: diagnosed.tag,
+        },
       },
       {
         phase: "execute",
-        resumeStrategy: "replan"
-      }
+        resumeStrategy: "replan",
+      },
     ),
     modeUsed: invoke.modeUsed,
     providerId: invoke.providerId || undefined,
-    fallbackFrom: invoke.fallbackFrom || undefined
+    fallbackFrom: invoke.fallbackFrom || undefined,
   };
 }
 
@@ -2187,40 +2566,69 @@ function buildStepFailureEnvelope(
     modeEscalation?: JsonRecord | null;
     resumeStrategy?: ResumeStrategy;
     stepRef?: JsonRecord | null;
-  } = {}
+  } = {},
 ): JsonRecord {
-  const base = attachFailureProtocol(toolName, {
-    error: out.error || fallbackError,
-    errorCode: normalizeErrorCode(out.errorCode) || undefined,
-    errorReason: options.errorReason || "failed_execute",
-    retryable: out.retryable === true,
-    retryHint,
-    details: out.errorDetails || null
-  }, options);
+  const base = attachFailureProtocol(
+    toolName,
+    {
+      error: out.error || fallbackError,
+      errorCode: normalizeErrorCode(out.errorCode) || undefined,
+      errorReason: options.errorReason || "failed_execute",
+      retryable: out.retryable === true,
+      retryHint,
+      details: out.errorDetails || null,
+    },
+    options,
+  );
   return {
     ...base,
     modeUsed: out.modeUsed,
     providerId: out.providerId || undefined,
-    fallbackFrom: out.fallbackFrom || undefined
+    fallbackFrom: out.fallbackFrom || undefined,
   };
 }
 
-function mapToolErrorReasonToTerminalStatus(rawReason: unknown): "failed_execute" | "failed_verify" | "progress_uncertain" {
-  const reason = String(rawReason || "").trim().toLowerCase();
+function mapToolErrorReasonToTerminalStatus(
+  rawReason: unknown,
+): "failed_execute" | "failed_verify" | "progress_uncertain" {
+  const reason = String(rawReason || "")
+    .trim()
+    .toLowerCase();
   if (reason === "failed_verify") return "failed_verify";
   if (reason === "progress_uncertain") return "progress_uncertain";
   return "failed_execute";
 }
 
-function mapVerifyReasonToFailureReason(rawVerifyReason: unknown): "failed_verify" | "progress_uncertain" {
-  const verifyReason = String(rawVerifyReason || "").trim().toLowerCase();
-  if (["verify_skipped", "verify_policy_off", "verify_not_supported_for_bridge", "verify_missing_tab_id"].includes(verifyReason)) {
+function mapVerifyReasonToFailureReason(
+  rawVerifyReason: unknown,
+): "failed_verify" | "progress_uncertain" {
+  const verifyReason = String(rawVerifyReason || "")
+    .trim()
+    .toLowerCase();
+  if (
+    [
+      "verify_skipped",
+      "verify_policy_off",
+      "verify_not_supported_for_bridge",
+      "verify_missing_tab_id",
+    ].includes(verifyReason)
+  ) {
     return "progress_uncertain";
   }
   return "failed_verify";
 }
 
-async function queryAllTabsForRuntime(): Promise<Array<{ id: number; windowId: number; index: number; active: boolean; pinned: boolean; title: string; url: string }>> {
+async function queryAllTabsForRuntime(): Promise<
+  Array<{
+    id: number;
+    windowId: number;
+    index: number;
+    active: boolean;
+    pinned: boolean;
+    title: string;
+    url: string;
+  }>
+> {
   const tabs = await chrome.tabs.query({});
   return (tabs || [])
     .filter((tab) => Number.isInteger(tab?.id))
@@ -2231,7 +2639,7 @@ async function queryAllTabsForRuntime(): Promise<Array<{ id: number; windowId: n
       active: tab.active === true,
       pinned: tab.pinned === true,
       title: String(tab.title || ""),
-      url: String(tab.url || tab.pendingUrl || "")
+      url: String(tab.url || tab.pendingUrl || ""),
     }));
 }
 
@@ -2247,12 +2655,18 @@ async function getActiveTabIdForRuntime(): Promise<number | null> {
     );
   };
 
-  const focused = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const focused = await chrome.tabs.query({
+    active: true,
+    lastFocusedWindow: true,
+  });
   const active = focused.find((tab) => Number.isInteger(tab?.id));
-  if (active?.id && active.url && !isRestricted(active.url)) return Number(active.id);
+  if (active?.id && active.url && !isRestricted(active.url))
+    return Number(active.id);
 
   const all = await chrome.tabs.query({}).catch(() => []);
-  const valid = all.find((tab) => Number.isInteger(tab.id) && tab.url && !isRestricted(tab.url));
+  const valid = all.find(
+    (tab) => Number.isInteger(tab.id) && tab.url && !isRestricted(tab.url),
+  );
   if (valid?.id) return Number(valid.id);
 
   return active?.id ? Number(active.id) : all[0]?.id ? Number(all[0].id) : null;
@@ -2271,15 +2685,22 @@ function readSharedTabIds(sharedTabs: unknown): number[] {
   return out;
 }
 
-async function callInfra(infra: RuntimeInfraHandler, message: JsonRecord): Promise<JsonRecord> {
+async function callInfra(
+  infra: RuntimeInfraHandler,
+  message: JsonRecord,
+): Promise<JsonRecord> {
   const result = await infra.handleMessage(message);
   if (!result) {
-    const error = new Error(`unsupported infra message: ${String(message.type || "")}`) as RuntimeErrorWithMeta;
+    const error = new Error(
+      `unsupported infra message: ${String(message.type || "")}`,
+    ) as RuntimeErrorWithMeta;
     error.code = "E_INFRA_UNSUPPORTED";
     throw error;
   }
   if (!result.ok) {
-    const error = new Error(String(result.error || "infra call failed")) as RuntimeErrorWithMeta;
+    const error = new Error(
+      String(result.error || "infra call failed"),
+    ) as RuntimeErrorWithMeta;
     const resultWithMeta = result as {
       code?: unknown;
       details?: unknown;
@@ -2307,26 +2728,71 @@ function extractLlmConfig(raw: JsonRecord): BridgeConfig {
   return {
     bridgeUrl: String(raw.bridgeUrl || ""),
     bridgeToken: String(raw.bridgeToken || ""),
-    browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(raw.browserRuntimeStrategy, "host-first"),
+    browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
+      raw.browserRuntimeStrategy,
+      "host-first",
+    ),
     llmDefaultProfile: String(raw.llmDefaultProfile || "default"),
+    llmAuxProfile: String(raw.llmAuxProfile || ""),
+    llmFallbackProfile: String(raw.llmFallbackProfile || ""),
     llmProfiles: raw.llmProfiles,
-    llmProfileChains: raw.llmProfileChains,
-    llmEscalationPolicy: String(raw.llmEscalationPolicy || "upgrade_only"),
     llmSystemPromptCustom: String(raw.llmSystemPromptCustom || ""),
     maxSteps: normalizeIntInRange(raw.maxSteps, 100, 1, 500),
     autoTitleInterval: normalizeIntInRange(raw.autoTitleInterval, 10, 0, 100),
-    bridgeInvokeTimeoutMs: normalizeIntInRange(raw.bridgeInvokeTimeoutMs, DEFAULT_BASH_TIMEOUT_MS, 1_000, MAX_BASH_TIMEOUT_MS),
-    llmTimeoutMs: normalizeIntInRange(raw.llmTimeoutMs, DEFAULT_LLM_TIMEOUT_MS, MIN_LLM_TIMEOUT_MS, MAX_LLM_TIMEOUT_MS),
-    llmRetryMaxAttempts: normalizeIntInRange(raw.llmRetryMaxAttempts, MAX_LLM_RETRIES, 0, 6),
+    bridgeInvokeTimeoutMs: normalizeIntInRange(
+      raw.bridgeInvokeTimeoutMs,
+      DEFAULT_BASH_TIMEOUT_MS,
+      1_000,
+      MAX_BASH_TIMEOUT_MS,
+    ),
+    llmTimeoutMs: normalizeIntInRange(
+      raw.llmTimeoutMs,
+      DEFAULT_LLM_TIMEOUT_MS,
+      MIN_LLM_TIMEOUT_MS,
+      MAX_LLM_TIMEOUT_MS,
+    ),
+    llmRetryMaxAttempts: normalizeIntInRange(
+      raw.llmRetryMaxAttempts,
+      MAX_LLM_RETRIES,
+      0,
+      6,
+    ),
     llmMaxRetryDelayMs: normalizeIntInRange(
       raw.llmMaxRetryDelayMs,
       DEFAULT_LLM_MAX_RETRY_DELAY_MS,
       MIN_LLM_MAX_RETRY_DELAY_MS,
-      MAX_LLM_MAX_RETRY_DELAY_MS
+      MAX_LLM_MAX_RETRY_DELAY_MS,
     ),
     devAutoReload: raw.devAutoReload !== false,
-    devReloadIntervalMs: Number(raw.devReloadIntervalMs || 1500)
+    devReloadIntervalMs: Number(raw.devReloadIntervalMs || 1500),
   };
+}
+
+function resolveAuxiliaryLlmRoute(config: BridgeConfig) {
+  const auxProfile = String(config.llmAuxProfile || "").trim();
+  const profile =
+    auxProfile ||
+    String(config.llmDefaultProfile || "default").trim() ||
+    "default";
+  return resolveLlmRoute({
+    config,
+    profile,
+    role: DEFAULT_LLM_ROLE,
+    escalationPolicy: "disabled",
+  });
+}
+
+function resolvePrimaryLlmRoute(
+  config: BridgeConfig,
+  routePrefs: SessionLlmRoutePrefs,
+) {
+  const hasExplicitProfile = Boolean(String(routePrefs.profile || "").trim());
+  return resolveLlmRoute({
+    config,
+    profile: routePrefs.profile,
+    role: routePrefs.role,
+    escalationPolicy: hasExplicitProfile ? "disabled" : undefined,
+  });
 }
 
 async function requestSessionTitleFromLlm(input: {
@@ -2339,15 +2805,22 @@ async function requestSessionTitleFromLlm(input: {
   const provider = providerRegistry.get(String(route.provider || "").trim());
   if (!provider) return "";
 
-  const systemPrompt = "你是一个专业助手。请根据提供的对话内容，生成一个非常简短、精准的标题（不超过 10 个字）。直接返回标题文本，不要包含引号、序号或任何解释。";
+  const systemPrompt =
+    "你是一个专业助手。请根据提供的对话内容，生成一个非常简短、精准的标题（不超过 10 个字）。直接返回标题文本，不要包含引号、序号或任何解释。";
   const userContent = messages
     .slice(0, 5) // 取前 5 条消息以节省 token 并加速响应
-    .map((m) => `${m.role === "user" ? "用户" : "助手"}: ${clipText(m.content, 200)}`)
+    .map(
+      (m) =>
+        `${m.role === "user" ? "用户" : "助手"}: ${clipText(m.content, 200)}`,
+    )
     .join("\n");
 
   try {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort("title-timeout"), Math.min(30_000, route.llmTimeoutMs));
+    const timer = setTimeout(
+      () => ctrl.abort("title-timeout"),
+      Math.min(30_000, route.llmTimeoutMs),
+    );
     try {
       const response = await provider.send({
         sessionId: "title-generator",
@@ -2358,12 +2831,15 @@ async function requestSessionTitleFromLlm(input: {
           model: route.llmModel,
           messages: [
             { role: "system", content: systemPrompt },
-            { role: "user", content: `请总结以下对话的标题：\n\n${userContent}` }
+            {
+              role: "user",
+              content: `请总结以下对话的标题：\n\n${userContent}`,
+            },
           ],
           max_tokens: 30,
           temperature: 0.3,
-          stream: false
-        }
+          stream: false,
+        },
       });
       if (!response.ok) return "";
       const contentType = String(response.headers.get("content-type") || "");
@@ -2394,68 +2870,83 @@ async function requestCompactionSummaryFromLlm(input: {
 }): Promise<string> {
   const cfgRaw = await callInfra(input.infra, { type: "config.get" });
   const config = extractLlmConfig(cfgRaw);
-  const meta = await input.orchestrator.sessions.getMeta(input.sessionId);
-  const prefs = readSessionLlmRoutePrefs(meta);
-  const resolvedRoute = resolveLlmRoute({
-    config,
-    profile: prefs.profile,
-    role: prefs.role,
-    escalationPolicy: prefs.escalationPolicy
-  });
+  const resolvedRoute = resolveAuxiliaryLlmRoute(config);
   if (!resolvedRoute.ok) {
     throw new Error(resolvedRoute.message);
   }
   const route = resolvedRoute.route;
-  const provider = input.providerRegistry.get(String(route.provider || "").trim());
+  const provider = input.providerRegistry.get(
+    String(route.provider || "").trim(),
+  );
   if (!provider) {
     throw new Error(`未找到 LLM provider: ${route.provider}`);
   }
 
-  const llmModel = String(route.llmModel || "gpt-5.3-codex").trim() || "gpt-5.3-codex";
-  const llmTimeoutMs = normalizeIntInRange(route.llmTimeoutMs, DEFAULT_LLM_TIMEOUT_MS, MIN_LLM_TIMEOUT_MS, MAX_LLM_TIMEOUT_MS);
-  const llmRetryMaxAttempts = normalizeIntInRange(route.llmRetryMaxAttempts, MAX_LLM_RETRIES, 0, 6);
+  const llmModel =
+    String(route.llmModel || "gpt-5.3-codex").trim() || "gpt-5.3-codex";
+  const llmTimeoutMs = normalizeIntInRange(
+    route.llmTimeoutMs,
+    DEFAULT_LLM_TIMEOUT_MS,
+    MIN_LLM_TIMEOUT_MS,
+    MAX_LLM_TIMEOUT_MS,
+  );
+  const llmRetryMaxAttempts = normalizeIntInRange(
+    route.llmRetryMaxAttempts,
+    MAX_LLM_RETRIES,
+    0,
+    6,
+  );
   const llmMaxRetryDelayMs = normalizeIntInRange(
     route.llmMaxRetryDelayMs,
     DEFAULT_LLM_MAX_RETRY_DELAY_MS,
     MIN_LLM_MAX_RETRY_DELAY_MS,
-    MAX_LLM_MAX_RETRY_DELAY_MS
+    MAX_LLM_MAX_RETRY_DELAY_MS,
   );
   const baseUrl = provider.resolveRequestUrl(route);
   const basePayload: JsonRecord = {
     model: llmModel,
     messages: [
       { role: "system", content: SUMMARIZATION_SYSTEM_PROMPT },
-      { role: "user", content: String(input.promptText || "") }
+      { role: "user", content: String(input.promptText || "") },
     ],
     max_tokens: normalizeIntInRange(input.maxTokens, 2048, 128, 32768),
     temperature: 0.2,
     stream: false,
-    reasoning: "high"
+    reasoning: "high",
   };
   const totalAttempts = Math.max(1, llmRetryMaxAttempts + 1);
 
   for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
     try {
-      const beforeRequest = await input.orchestrator.runHook("llm.before_request", {
-        request: {
-          sessionId: input.sessionId,
-          step: 0,
-          attempt,
-          mode: input.mode,
-          source: "compaction",
-          url: baseUrl,
-          payload: basePayload
-        }
-      });
+      const beforeRequest = await input.orchestrator.runHook(
+        "llm.before_request",
+        {
+          request: {
+            sessionId: input.sessionId,
+            step: 0,
+            attempt,
+            mode: input.mode,
+            source: "compaction",
+            url: baseUrl,
+            payload: basePayload,
+          },
+        },
+      );
       if (beforeRequest.blocked) {
-        throw new Error(`llm.before_request blocked: ${beforeRequest.reason || "blocked"}`);
+        throw new Error(
+          `llm.before_request blocked: ${beforeRequest.reason || "blocked"}`,
+        );
       }
       const patchedRequest = toRecord(beforeRequest.value.request);
-      const requestUrl = String(patchedRequest.url || baseUrl).trim() || baseUrl;
+      const requestUrl =
+        String(patchedRequest.url || baseUrl).trim() || baseUrl;
       const requestPayload = toRecord(patchedRequest.payload);
-      if (!Array.isArray(requestPayload.messages)) requestPayload.messages = basePayload.messages;
-      if (!String(requestPayload.model || "").trim()) requestPayload.model = llmModel;
-      if (typeof requestPayload.stream !== "boolean") requestPayload.stream = false;
+      if (!Array.isArray(requestPayload.messages))
+        requestPayload.messages = basePayload.messages;
+      if (!String(requestPayload.model || "").trim())
+        requestPayload.model = llmModel;
+      if (typeof requestPayload.stream !== "boolean")
+        requestPayload.stream = false;
 
       input.orchestrator.events.emit("llm.request", input.sessionId, {
         step: 0,
@@ -2466,11 +2957,14 @@ async function requestCompactionSummaryFromLlm(input: {
         model: llmModel,
         profile: route.profile,
         provider: route.provider,
-        ...summarizeLlmRequestPayload(requestPayload)
+        ...summarizeLlmRequestPayload(requestPayload),
       });
 
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort("compaction-summary-timeout"), llmTimeoutMs);
+      const timer = setTimeout(
+        () => ctrl.abort("compaction-summary-timeout"),
+        llmTimeoutMs,
+      );
       let response: Response;
       try {
         response = await provider.send({
@@ -2479,7 +2973,7 @@ async function requestCompactionSummaryFromLlm(input: {
           route,
           requestUrl,
           signal: ctrl.signal,
-          payload: requestPayload
+          payload: requestPayload,
         });
       } finally {
         clearTimeout(timer);
@@ -2489,7 +2983,9 @@ async function requestCompactionSummaryFromLlm(input: {
       const ok = response.ok;
       const contentType = String(response.headers.get("content-type") || "");
       const rawBody = await response.text();
-      const retryDelayHintMs = ok ? null : extractRetryDelayHintMs(rawBody, response);
+      const retryDelayHintMs = ok
+        ? null
+        : extractRetryDelayHintMs(rawBody, response);
       input.orchestrator.events.emit(
         "llm.response.raw",
         input.sessionId,
@@ -2499,8 +2995,8 @@ async function requestCompactionSummaryFromLlm(input: {
           status,
           ok,
           retryDelayHintMs,
-          body: rawBody
-        })
+          body: rawBody,
+        }),
       );
 
       if (!ok) {
@@ -2508,35 +3004,44 @@ async function requestCompactionSummaryFromLlm(input: {
           const delayMs = Math.max(
             0,
             Math.min(
-              llmMaxRetryDelayMs > 0 ? llmMaxRetryDelayMs : Number.MAX_SAFE_INTEGER,
-              retryDelayHintMs ?? computeRetryDelayMs(attempt)
-            )
+              llmMaxRetryDelayMs > 0
+                ? llmMaxRetryDelayMs
+                : Number.MAX_SAFE_INTEGER,
+              retryDelayHintMs ?? computeRetryDelayMs(attempt),
+            ),
           );
           if (delayMs > 0) await delay(delayMs);
           continue;
         }
-        const err = new Error(`Compaction summary HTTP ${status}`) as RuntimeErrorWithMeta;
+        const err = new Error(
+          `Compaction summary HTTP ${status}`,
+        ) as RuntimeErrorWithMeta;
         err.status = status;
         throw err;
       }
 
       const message = parseLlmMessageFromBody(rawBody, contentType);
-      const afterResponse = await input.orchestrator.runHook("llm.after_response", {
-        request: {
-          sessionId: input.sessionId,
-          step: 0,
-          attempt,
-          mode: input.mode,
-          source: "compaction",
-          url: requestUrl,
-          payload: requestPayload,
-          status,
-          ok
+      const afterResponse = await input.orchestrator.runHook(
+        "llm.after_response",
+        {
+          request: {
+            sessionId: input.sessionId,
+            step: 0,
+            attempt,
+            mode: input.mode,
+            source: "compaction",
+            url: requestUrl,
+            payload: requestPayload,
+            status,
+            ok,
+          },
+          response: message,
         },
-        response: message
-      });
+      );
       if (afterResponse.blocked) {
-        throw new Error(`llm.after_response blocked: ${afterResponse.reason || "blocked"}`);
+        throw new Error(
+          `llm.after_response blocked: ${afterResponse.reason || "blocked"}`,
+        );
       }
       const patchedResponse = toRecord(afterResponse.value.response);
       const summary = parseLlmContent(patchedResponse).trim();
@@ -2548,16 +3053,25 @@ async function requestCompactionSummaryFromLlm(input: {
       if (attempt >= totalAttempts) throw error;
       const err = asRuntimeErrorWithMeta(error);
       const reason = String(err.message || "");
-      if (reason.includes("llm.before_request blocked") || reason.includes("llm.after_response blocked")) {
+      if (
+        reason.includes("llm.before_request blocked") ||
+        reason.includes("llm.after_response blocked")
+      ) {
         throw error;
       }
       if (reason.includes("Compaction summary 为空")) {
         throw error;
       }
       const status = Number(err.status || 0);
-      const retryableStatus = Number.isInteger(status) && status > 0 ? isRetryableLlmStatus(status) : true;
+      const retryableStatus =
+        Number.isInteger(status) && status > 0
+          ? isRetryableLlmStatus(status)
+          : true;
       if (!retryableStatus) throw error;
-      const fallbackDelayMs = Math.max(0, Math.min(llmMaxRetryDelayMs, computeRetryDelayMs(attempt)));
+      const fallbackDelayMs = Math.max(
+        0,
+        Math.min(llmMaxRetryDelayMs, computeRetryDelayMs(attempt)),
+      );
       if (fallbackDelayMs > 0) await delay(fallbackDelayMs);
     }
   }
@@ -2570,7 +3084,7 @@ async function refreshSessionTitleAuto(
   sessionId: string,
   infra: RuntimeInfraHandler,
   providerRegistry: LlmProviderRegistry,
-  options: { force?: boolean } = {}
+  options: { force?: boolean } = {},
 ): Promise<void> {
   const meta = await orchestrator.sessions.getMeta(sessionId);
   if (!meta) return;
@@ -2579,7 +3093,7 @@ async function refreshSessionTitleAuto(
   if (titleSource === SESSION_TITLE_SOURCE_MANUAL && !options.force) {
     return;
   }
-  
+
   const entries = await orchestrator.sessions.getEntries(sessionId);
   const contextMessages = entries
     .filter((entry) => entry.type === "message")
@@ -2591,13 +3105,7 @@ async function refreshSessionTitleAuto(
 
   const cfgRaw = await callInfra(infra, { type: "config.get" });
   const config = extractLlmConfig(cfgRaw);
-  const prefs = readSessionLlmRoutePrefs(meta);
-  const resolvedRoute = resolveLlmRoute({
-    config,
-    profile: prefs.profile,
-    role: prefs.role,
-    escalationPolicy: prefs.escalationPolicy
-  });
+  const resolvedRoute = resolveAuxiliaryLlmRoute(config);
   if (!resolvedRoute.ok) return;
   const route = resolvedRoute.route;
   const interval = config.autoTitleInterval;
@@ -2608,9 +3116,9 @@ async function refreshSessionTitleAuto(
   // 3. 消息数量是配置阈值 (interval) 的倍数，进行周期性重命名。如果 interval 为 0 则不自动重命名。
   const isDefaultTitle =
     !currentTitle || currentTitle === "新会话" || currentTitle === "新对话";
-  const shouldRefresh = 
-    options.force || 
-    isDefaultTitle || 
+  const shouldRefresh =
+    options.force ||
+    isDefaultTitle ||
     (interval > 0 && messageCount > 0 && messageCount % interval === 0);
 
   if (!shouldRefresh) return;
@@ -2618,17 +3126,26 @@ async function refreshSessionTitleAuto(
   const derived = await requestSessionTitleFromLlm({
     providerRegistry,
     route,
-    messages: contextMessages
+    messages: contextMessages,
   });
 
   if (!derived) return;
 
-  const nextMeta: SessionMeta = withSessionTitleMeta(meta, derived, SESSION_TITLE_SOURCE_AI);
+  const nextMeta: SessionMeta = withSessionTitleMeta(
+    meta,
+    derived,
+    SESSION_TITLE_SOURCE_AI,
+  );
   await writeSessionMeta(sessionId, nextMeta);
-  orchestrator.events.emit("session_title_auto_updated", sessionId, { title: derived });
+  orchestrator.events.emit("session_title_auto_updated", sessionId, {
+    title: derived,
+  });
 }
 
-export function createRuntimeLoopController(orchestrator: BrainOrchestrator, infra: RuntimeInfraHandler): RuntimeLoopController {
+export function createRuntimeLoopController(
+  orchestrator: BrainOrchestrator,
+  infra: RuntimeInfraHandler,
+): RuntimeLoopController {
   const llmProviders = orchestrator.getLlmProviderRegistry();
 
   orchestrator.onHook(
@@ -2646,22 +3163,22 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           sessionId: String(payload.sessionId || ""),
           mode: payload.mode === "turn_prefix" ? "turn_prefix" : "history",
           promptText,
-          maxTokens: Number(payload.maxTokens || 0)
+          maxTokens: Number(payload.maxTokens || 0),
         });
         return {
           action: "patch",
           patch: {
-            summary
-          }
+            summary,
+          },
         };
       } catch (error) {
         return {
           action: "block",
-          reason: error instanceof Error ? error.message : String(error)
+          reason: error instanceof Error ? error.message : String(error),
         };
       }
     },
-    { id: "runtime-loop.compaction.summary", priority: 100 }
+    { id: "runtime-loop.compaction.summary", priority: 100 },
   );
 
   const bridgeCapabilityInvoker = async (input: {
@@ -2672,21 +3189,25 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const frame = (() => {
       const rawFrame = toRecord(input.args.frame);
       if (Object.keys(rawFrame).length === 0) {
-        throw new Error(`bridge capability provider 需要 args.frame: ${input.capability}`);
+        throw new Error(
+          `bridge capability provider 需要 args.frame: ${input.capability}`,
+        );
       }
       return { ...rawFrame };
     })();
     if (!String(frame.tool || "").trim()) {
-      throw new Error(`bridge capability provider 缺少 frame.tool: ${input.capability}`);
+      throw new Error(
+        `bridge capability provider 缺少 frame.tool: ${input.capability}`,
+      );
     }
     if (!frame.sessionId) frame.sessionId = input.sessionId;
     const response = await callInfra(infra, {
       type: "bridge.invoke",
-      payload: frame
+      payload: frame,
     });
     return {
       type: "invoke",
-      response
+      response,
     };
   };
 
@@ -2698,12 +3219,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const frame = (() => {
       const rawFrame = toRecord(input.args.frame);
       if (Object.keys(rawFrame).length === 0) {
-        throw new Error(`virtual fs capability provider 需要 args.frame: ${input.capability}`);
+        throw new Error(
+          `virtual fs capability provider 需要 args.frame: ${input.capability}`,
+        );
       }
       return { ...rawFrame };
     })();
     if (!String(frame.tool || "").trim()) {
-      throw new Error(`virtual fs capability provider 缺少 frame.tool: ${input.capability}`);
+      throw new Error(
+        `virtual fs capability provider 缺少 frame.tool: ${input.capability}`,
+      );
     }
     if (!frame.sessionId) frame.sessionId = input.sessionId;
     const data = await invokeVirtualFrame(frame);
@@ -2711,14 +3236,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       type: "invoke",
       response: {
         ok: true,
-        data
-      }
+        data,
+      },
     };
   };
 
   const ensureBuiltinBridgeCapabilityProviders = (): void => {
     for (const item of BUILTIN_BRIDGE_CAPABILITY_PROVIDERS) {
-      const existed = orchestrator.getCapabilityProviders(item.capability).some((provider) => provider.id === item.providerId);
+      const existed = orchestrator
+        .getCapabilityProviders(item.capability)
+        .some((provider) => provider.id === item.providerId);
       if (existed) continue;
       orchestrator.registerCapabilityProvider(item.capability, {
         id: item.providerId,
@@ -2733,15 +3260,17 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           bridgeCapabilityInvoker({
             sessionId: stepInput.sessionId,
             capability: item.capability,
-            args: toRecord(stepInput.args)
-          })
+            args: toRecord(stepInput.args),
+          }),
       });
     }
   };
 
   const ensureBuiltinSandboxCapabilityProviders = (): void => {
     for (const item of BUILTIN_SANDBOX_CAPABILITY_PROVIDERS) {
-      const existed = orchestrator.getCapabilityProviders(item.capability).some((provider) => provider.id === item.providerId);
+      const existed = orchestrator
+        .getCapabilityProviders(item.capability)
+        .some((provider) => provider.id === item.providerId);
       if (existed) continue;
       orchestrator.registerCapabilityProvider(item.capability, {
         id: item.providerId,
@@ -2751,27 +3280,36 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           const frame = toRecord(stepInput.args?.frame);
           if (String(frame.tool || "").trim().length === 0) return false;
           if (!shouldRouteFrameToBrowserVfs(frame)) return false;
-          return frameMatchesVirtualCapability(frame, String(item.capability || ""));
+          return frameMatchesVirtualCapability(
+            frame,
+            String(item.capability || ""),
+          );
         },
         invoke: async (stepInput) =>
           virtualFsCapabilityInvoker({
             sessionId: stepInput.sessionId,
             capability: item.capability,
-            args: toRecord(stepInput.args)
-          })
+            args: toRecord(stepInput.args),
+          }),
       });
     }
   };
 
-  async function withTabLease<T>(tabId: number, sessionId: string, run: () => Promise<T>): Promise<T> {
+  async function withTabLease<T>(
+    tabId: number,
+    sessionId: string,
+    run: () => Promise<T>,
+  ): Promise<T> {
     const acquired = await callInfra(infra, {
       type: "lease.acquire",
       tabId,
       sessionId,
-      ttlMs: 30_000
+      ttlMs: 30_000,
     });
     if (acquired.ok !== true) {
-      throw new Error(`lease.acquire 失败: ${String(acquired.reason || "unknown")}`);
+      throw new Error(
+        `lease.acquire 失败: ${String(acquired.reason || "unknown")}`,
+      );
     }
 
     try {
@@ -2780,12 +3318,15 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       await infra.handleMessage({
         type: "lease.release",
         tabId,
-        sessionId
+        sessionId,
       });
     }
   }
 
-  async function resolveRunScopeTabId(sessionId: string, explicitTabIdRaw: unknown): Promise<number | null> {
+  async function resolveRunScopeTabId(
+    sessionId: string,
+    explicitTabIdRaw: unknown,
+  ): Promise<number | null> {
     const explicitTabId = parsePositiveInt(explicitTabIdRaw);
     const meta = await orchestrator.sessions.getMeta(sessionId);
     const metadata = toRecord(toRecord(meta?.header).metadata);
@@ -2807,15 +3348,18 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           ...meta.header,
           metadata: {
             ...metadata,
-            primaryTabId: resolved
-          }
-        }
+            primaryTabId: resolved,
+          },
+        },
       });
     }
     return resolved;
   }
 
-  function createRuntimeError(message: string, meta: { code?: string; retryable?: boolean; details?: unknown } = {}): RuntimeErrorWithMeta {
+  function createRuntimeError(
+    message: string,
+    meta: { code?: string; retryable?: boolean; details?: unknown } = {},
+  ): RuntimeErrorWithMeta {
     const error = new Error(message) as RuntimeErrorWithMeta;
     if (meta.code) error.code = meta.code;
     if (typeof meta.retryable === "boolean") error.retryable = meta.retryable;
@@ -2834,13 +3378,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     if (!tabId) {
       throw createRuntimeError("snapshot 需要有效 tabId", {
         code: "E_NO_TAB",
-        retryable: true
+        retryable: true,
       });
     }
     const snapshotResult = (await callInfra(infra, {
       type: "cdp.snapshot",
       tabId,
-      options: Object.keys(options).length > 0 ? options : payload
+      options: Object.keys(options).length > 0 ? options : payload,
     })) as JsonRecord;
 
     const failures = getActionFailures(stepInput.sessionId);
@@ -2851,7 +3395,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           node.failureCount = failures.get(uid);
         }
       }
-      if (snapshotResult.compact && typeof snapshotResult.compact === "string") {
+      if (
+        snapshotResult.compact &&
+        typeof snapshotResult.compact === "string"
+      ) {
         // regenerate compact to include [failed] markers if needed
         // but we rely on formatNodeCompact being called by infra
       }
@@ -2867,35 +3414,51 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     capability?: ExecuteCapability;
   }): Promise<unknown> => {
     const payload = toRecord(stepInput.args);
-    const actionPayload = toRecord(payload.action) && Object.keys(toRecord(payload.action)).length > 0 ? toRecord(payload.action) : payload;
+    const actionPayload =
+      toRecord(payload.action) &&
+      Object.keys(toRecord(payload.action)).length > 0
+        ? toRecord(payload.action)
+        : payload;
     const tabId = parsePositiveInt(payload.tabId || actionPayload.tabId);
     if (!tabId) {
       throw createRuntimeError("cdp 执行需要有效 tabId", {
         code: "E_NO_TAB",
-        retryable: true
+        retryable: true,
       });
     }
 
-    const cdpAction = Object.keys(toRecord(payload.action)).length > 0 ? { ...toRecord(payload.action) } : { ...payload };
-    if (!cdpAction.kind && stepInput.action && !stepInput.action.startsWith("cdp.")) {
+    const cdpAction =
+      Object.keys(toRecord(payload.action)).length > 0
+        ? { ...toRecord(payload.action) }
+        : { ...payload };
+    if (
+      !cdpAction.kind &&
+      stepInput.action &&
+      !stepInput.action.startsWith("cdp.")
+    ) {
       cdpAction.kind = stepInput.action;
     }
     const kind = String(cdpAction.kind || "").trim();
     if (!kind) {
       throw createRuntimeError("cdp.action 缺少 kind", {
         code: "E_ARGS",
-        retryable: false
+        retryable: false,
       });
     }
 
-    const capabilityPolicy = orchestrator.resolveCapabilityPolicy(stepInput.capability);
-    const verifyPolicy = stepInput.verifyPolicy || capabilityPolicy.defaultVerifyPolicy || "on_critical";
+    const capabilityPolicy = orchestrator.resolveCapabilityPolicy(
+      stepInput.capability,
+    );
+    const verifyPolicy =
+      stepInput.verifyPolicy ||
+      capabilityPolicy.defaultVerifyPolicy ||
+      "on_critical";
     const verifyEnabled = shouldVerifyStep(kind, verifyPolicy);
     let preObserve: unknown = null;
     if (verifyEnabled) {
       preObserve = await callInfra(infra, {
         type: "cdp.observe",
-        tabId
+        tabId,
       }).catch(() => null);
     }
 
@@ -2905,14 +3468,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             type: "cdp.action",
             tabId,
             sessionId: stepInput.sessionId,
-            action: cdpAction
+            action: cdpAction,
           });
         })
       : await callInfra(infra, {
           type: "cdp.action",
           tabId,
           sessionId: stepInput.sessionId,
-          action: cdpAction
+          action: cdpAction,
         });
 
     let verified = false;
@@ -2920,37 +3483,52 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     let verifyData: unknown = null;
     if (verifyEnabled) {
       try {
-        const explicitExpect = normalizeVerifyExpect(payload.expect || actionPayload.expect || null);
+        const explicitExpect = normalizeVerifyExpect(
+          payload.expect || actionPayload.expect || null,
+        );
         if (explicitExpect) {
-          if (explicitExpect.urlChanged === true && toRecord(toRecord(preObserve).page).url) {
-            explicitExpect.previousUrl = String(toRecord(toRecord(preObserve).page).url || "");
+          if (
+            explicitExpect.urlChanged === true &&
+            toRecord(toRecord(preObserve).page).url
+          ) {
+            explicitExpect.previousUrl = String(
+              toRecord(toRecord(preObserve).page).url || "",
+            );
           }
           verifyData = await callInfra(infra, {
             type: "cdp.verify",
             tabId,
             action: { expect: explicitExpect },
-            result: toRecord(actionResult).result || actionResult
+            result: toRecord(actionResult).result || actionResult,
           });
         } else if (preObserve) {
           const afterObserve = await callInfra(infra, {
             type: "cdp.observe",
-            tabId
+            tabId,
           });
           verifyData = buildObserveProgressVerify(preObserve, afterObserve);
         }
       } catch (verifyError) {
         const runtimeVerifyError = asRuntimeErrorWithMeta(verifyError);
         throw createRuntimeError(runtimeVerifyError.message, {
-          code: normalizeErrorCode(runtimeVerifyError.code) || "E_VERIFY_EXECUTE",
+          code:
+            normalizeErrorCode(runtimeVerifyError.code) || "E_VERIFY_EXECUTE",
           retryable: true,
-          details: runtimeVerifyError.details
+          details: runtimeVerifyError.details,
         });
       }
 
       verified = toRecord(verifyData).ok === true;
-      verifyReason = verifyData ? (verified ? "verified" : "verify_failed") : "verify_skipped";
+      verifyReason = verifyData
+        ? verified
+          ? "verified"
+          : "verify_failed"
+        : "verify_skipped";
 
-      if (!verified && (kind === "click" || kind === "fill" || kind === "press")) {
+      if (
+        !verified &&
+        (kind === "click" || kind === "fill" || kind === "press")
+      ) {
         const targetUid = String(cdpAction.uid || cdpAction.ref || "");
         if (targetUid) {
           trackActionFailure(stepInput.sessionId, targetUid);
@@ -2959,17 +3537,22 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
 
     let data: unknown = actionResult;
-    if (verifyData && data && typeof data === "object" && !Array.isArray(data)) {
+    if (
+      verifyData &&
+      data &&
+      typeof data === "object" &&
+      !Array.isArray(data)
+    ) {
       data = {
         ...(data as JsonRecord),
-        verify: verifyData
+        verify: verifyData,
       };
     }
 
     return {
       data,
       verified,
-      verifyReason
+      verifyReason,
     };
   };
 
@@ -2979,29 +3562,33 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     args: JsonRecord;
   }): Promise<unknown> => {
     const payload = toRecord(stepInput.args);
-    const tabId = parsePositiveInt(payload.tabId || toRecord(payload.action).tabId);
+    const tabId = parsePositiveInt(
+      payload.tabId || toRecord(payload.action).tabId,
+    );
     if (!tabId) {
       throw createRuntimeError("browser_verify 需要有效 tabId", {
         code: "E_NO_TAB",
-        retryable: true
+        retryable: true,
       });
     }
     const verifyAction = Object.keys(toRecord(payload.action)).length
       ? toRecord(payload.action)
       : {
-          expect: Object.keys(toRecord(payload.expect)).length ? toRecord(payload.expect) : payload
+          expect: Object.keys(toRecord(payload.expect)).length
+            ? toRecord(payload.expect)
+            : payload,
         };
     const verifyData = await callInfra(infra, {
       type: "cdp.verify",
       tabId,
       action: verifyAction,
-      result: payload.result || null
+      result: payload.result || null,
     });
     const verified = toRecord(verifyData).ok === true;
     return {
       data: verifyData,
       verified,
-      verifyReason: verified ? "verified" : "verify_failed"
+      verifyReason: verified ? "verified" : "verify_failed",
     };
   };
 
@@ -3026,7 +3613,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
   const ensureBuiltinBrowserCapabilityProviders = (): void => {
     for (const item of BUILTIN_BROWSER_CAPABILITY_PROVIDERS) {
-      const existed = orchestrator.getCapabilityProviders(item.capability).some((provider) => provider.id === item.providerId);
+      const existed = orchestrator
+        .getCapabilityProviders(item.capability)
+        .some((provider) => provider.id === item.providerId);
       if (existed) continue;
       orchestrator.registerCapabilityProvider(item.capability, {
         id: item.providerId,
@@ -3038,7 +3627,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             action: String(stepInput.action || "").trim(),
             args: toRecord(stepInput.args),
             verifyPolicy: stepInput.verifyPolicy,
-            capability: stepInput.capability
+            capability: stepInput.capability,
           };
           if (item.capability === CAPABILITIES.browserSnapshot) {
             return await invokeBrowserSnapshotCapability(input);
@@ -3047,7 +3636,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             return await invokeBrowserActionCapability(input);
           }
           return await invokeBrowserVerifyCapability(input);
-        }
+        },
       });
     }
   };
@@ -3065,7 +3654,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       return toRecord(input) as ExamplePluginPackage;
     };
 
-    const normalizeManifest = (input: unknown): {
+    const normalizeManifest = (
+      input: unknown,
+    ): {
       id: string;
       name: string;
       version: string;
@@ -3080,14 +3671,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       const name = String(row.name || "").trim() || id;
       const version = String(row.version || "").trim() || "1.0.0";
       const timeoutRaw = Number(row.timeoutMs);
-      const timeoutMs = Number.isFinite(timeoutRaw) ? Math.max(50, Math.min(10_000, Math.floor(timeoutRaw))) : undefined;
+      const timeoutMs = Number.isFinite(timeoutRaw)
+        ? Math.max(50, Math.min(10_000, Math.floor(timeoutRaw)))
+        : undefined;
       const permissions = toRecord(row.permissions);
       return {
         id,
         name,
         version,
         ...(timeoutMs ? { timeoutMs } : {}),
-        ...(Object.keys(permissions).length > 0 ? { permissions } : {})
+        ...(Object.keys(permissions).length > 0 ? { permissions } : {}),
       };
     };
 
@@ -3095,15 +3688,18 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       const raw = String(rawInput || "").trim();
       if (!raw) throw new Error("example plugin modulePath 不能为空");
       if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(raw)) return raw;
-      if (raw.startsWith("//")) throw new Error(`example plugin modulePath 非法: ${raw}`);
+      if (raw.startsWith("//"))
+        throw new Error(`example plugin modulePath 非法: ${raw}`);
       const normalized = raw.startsWith("/") ? raw.slice(1) : raw;
-      const runtime = (globalThis as typeof globalThis & {
-        chrome?: {
-          runtime?: {
-            getURL?: (path: string) => string;
+      const runtime = (
+        globalThis as typeof globalThis & {
+          chrome?: {
+            runtime?: {
+              getURL?: (path: string) => string;
+            };
           };
-        };
-      }).chrome?.runtime;
+        }
+      ).chrome?.runtime;
       if (runtime?.getURL) {
         return runtime.getURL(normalized);
       }
@@ -3112,31 +3708,42 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
     const registerPackage = (
       pkgInput: unknown,
-      setup: (api: Record<string, unknown>) => unknown
+      setup: (api: Record<string, unknown>) => unknown,
     ): void => {
       const pkg = toPackage(pkgInput);
       const manifest = normalizeManifest(pkg.manifest);
       const pluginId = String(manifest.id || "").trim();
       if (!pluginId) return;
-      const existed = orchestrator.listPlugins().some((item) => String(item.id || "").trim() === pluginId);
+      const existed = orchestrator
+        .listPlugins()
+        .some((item) => String(item.id || "").trim() === pluginId);
       if (existed) return;
 
-      const moduleInput = String(pkg.moduleUrl || pkg.modulePath || pkg.module || "").trim();
+      const moduleInput = String(
+        pkg.moduleUrl || pkg.modulePath || pkg.module || "",
+      ).trim();
       const moduleUrl = resolveModuleUrl(moduleInput);
-      const exportName = String(pkg.exportName || "default").trim() || "default";
+      const exportName =
+        String(pkg.exportName || "default").trim() || "default";
       registerExtension(orchestrator, manifest, setup as never, {
         replace: false,
-        enable: true
+        enable: true,
       });
       orchestrator.events.emit("plugin.example.bootstrap", "global", {
         pluginId,
         moduleUrl,
-        exportName
+        exportName,
       });
     };
 
-    registerPackage(exampleSendSuccessPluginPackage, registerExampleSendSuccessPlugin as never);
-    registerPackage(exampleMissionHudDogPluginPackage, registerExampleMissionHudDogPlugin as never);
+    registerPackage(
+      exampleSendSuccessPluginPackage,
+      registerExampleSendSuccessPlugin as never,
+    );
+    registerPackage(
+      exampleMissionHudDogPluginPackage,
+      registerExampleMissionHudDogPlugin as never,
+    );
   };
 
   const ensureBuiltinCapabilityPlugins = (): void => {
@@ -3160,9 +3767,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
 
     const hasPlugin = (pluginId: string): boolean =>
-      orchestrator.listPlugins().some((item) => String(item.id || "").trim() === pluginId);
+      orchestrator
+        .listPlugins()
+        .some((item) => String(item.id || "").trim() === pluginId);
 
-    const registerBuiltinCapabilityPlugin = (spec: BuiltinCapabilityPluginInput): void => {
+    const registerBuiltinCapabilityPlugin = (
+      spec: BuiltinCapabilityPluginInput,
+    ): void => {
       if (hasPlugin(spec.pluginId)) return;
       orchestrator.registerPlugin(
         {
@@ -3171,8 +3782,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             name: spec.pluginName,
             version: "1.0.0",
             permissions: {
-              capabilities: [spec.capability]
-            }
+              capabilities: [spec.capability],
+            },
           },
           providers: {
             capabilities: {
@@ -3181,16 +3792,19 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 mode: spec.mode,
                 priority: spec.priority,
                 ...(spec.canHandle ? { canHandle: spec.canHandle } : {}),
-                invoke: spec.invoke
-              }
-            }
-          }
+                invoke: spec.invoke,
+              },
+            },
+          },
         },
-        { enable: true }
+        { enable: true },
       );
     };
 
-    const createFrameCanHandle = (capability: ExecuteCapability, runtime: "bridge" | "sandbox") => {
+    const createFrameCanHandle = (
+      capability: ExecuteCapability,
+      runtime: "bridge" | "sandbox",
+    ) => {
       return (stepInput: CapabilityStepInput): boolean => {
         const frame = toRecord(toRecord(stepInput.args).frame);
         if (!String(frame.tool || "").trim()) return false;
@@ -3213,53 +3827,57 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         bridge: {
           pluginId: "runtime.builtin.plugin.capability.process.exec.bridge",
           pluginName: "builtin-process-exec-bridge",
-          providerId: "runtime.builtin.capability.process.exec.bridge"
+          providerId: "runtime.builtin.capability.process.exec.bridge",
         },
         sandbox: {
           pluginId: "runtime.builtin.plugin.capability.process.exec.sandbox",
           pluginName: "builtin-process-exec-sandbox",
-          providerId: "runtime.builtin.plugin.capability.process.exec.sandbox.provider"
-        }
+          providerId:
+            "runtime.builtin.plugin.capability.process.exec.sandbox.provider",
+        },
       },
       {
         capability: CAPABILITIES.fsRead,
         bridge: {
           pluginId: "runtime.builtin.plugin.capability.fs.read.bridge",
           pluginName: "builtin-fs-read-bridge",
-          providerId: "runtime.builtin.capability.fs.read.bridge"
+          providerId: "runtime.builtin.capability.fs.read.bridge",
         },
         sandbox: {
           pluginId: "runtime.builtin.plugin.capability.fs.read.sandbox",
           pluginName: "builtin-fs-read-sandbox",
-          providerId: "runtime.builtin.plugin.capability.fs.read.sandbox.provider"
-        }
+          providerId:
+            "runtime.builtin.plugin.capability.fs.read.sandbox.provider",
+        },
       },
       {
         capability: CAPABILITIES.fsWrite,
         bridge: {
           pluginId: "runtime.builtin.plugin.capability.fs.write.bridge",
           pluginName: "builtin-fs-write-bridge",
-          providerId: "runtime.builtin.capability.fs.write.bridge"
+          providerId: "runtime.builtin.capability.fs.write.bridge",
         },
         sandbox: {
           pluginId: "runtime.builtin.plugin.capability.fs.write.sandbox",
           pluginName: "builtin-fs-write-sandbox",
-          providerId: "runtime.builtin.plugin.capability.fs.write.sandbox.provider"
-        }
+          providerId:
+            "runtime.builtin.plugin.capability.fs.write.sandbox.provider",
+        },
       },
       {
         capability: CAPABILITIES.fsEdit,
         bridge: {
           pluginId: "runtime.builtin.plugin.capability.fs.edit.bridge",
           pluginName: "builtin-fs-edit-bridge",
-          providerId: "runtime.builtin.capability.fs.edit.bridge"
+          providerId: "runtime.builtin.capability.fs.edit.bridge",
         },
         sandbox: {
           pluginId: "runtime.builtin.plugin.capability.fs.edit.sandbox",
           pluginName: "builtin-fs-edit-sandbox",
-          providerId: "runtime.builtin.plugin.capability.fs.edit.sandbox.provider"
-        }
-      }
+          providerId:
+            "runtime.builtin.plugin.capability.fs.edit.sandbox.provider",
+        },
+      },
     ];
 
     for (const spec of fileCapabilitySpecs) {
@@ -3275,8 +3893,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           bridgeCapabilityInvoker({
             sessionId: stepInput.sessionId,
             capability: spec.capability,
-            args: toRecord(stepInput.args)
-          })
+            args: toRecord(stepInput.args),
+          }),
       });
       registerBuiltinCapabilityPlugin({
         pluginId: spec.sandbox.pluginId,
@@ -3290,8 +3908,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           virtualFsCapabilityInvoker({
             sessionId: stepInput.sessionId,
             capability: spec.capability,
-            args: toRecord(stepInput.args)
-          })
+            args: toRecord(stepInput.args),
+          }),
       });
     }
 
@@ -3300,7 +3918,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       action: String(stepInput.action || "").trim(),
       args: toRecord(stepInput.args),
       verifyPolicy: stepInput.verifyPolicy,
-      capability: stepInput.capability
+      capability: stepInput.capability,
     });
 
     const browserCapabilitySpecs: Array<{
@@ -3321,22 +3939,23 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         pluginName: "builtin-browser-snapshot-cdp",
         capability: CAPABILITIES.browserSnapshot,
         providerId: "runtime.builtin.capability.browser.snapshot.cdp",
-        invoke: invokeBrowserSnapshotCapability
+        invoke: invokeBrowserSnapshotCapability,
       },
       {
         pluginId: "runtime.builtin.plugin.capability.browser.action.cdp",
         pluginName: "builtin-browser-action-cdp",
         capability: CAPABILITIES.browserAction,
-        providerId: "runtime.builtin.plugin.capability.browser.action.cdp.provider",
-        invoke: invokeBrowserActionCapability
+        providerId:
+          "runtime.builtin.plugin.capability.browser.action.cdp.provider",
+        invoke: invokeBrowserActionCapability,
       },
       {
         pluginId: "runtime.builtin.plugin.capability.browser.verify.cdp",
         pluginName: "builtin-browser-verify-cdp",
         capability: CAPABILITIES.browserVerify,
         providerId: "runtime.builtin.capability.browser.verify.cdp",
-        invoke: invokeBrowserVerifyCapability
-      }
+        invoke: invokeBrowserVerifyCapability,
+      },
     ];
 
     for (const spec of browserCapabilitySpecs) {
@@ -3347,7 +3966,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         providerId: spec.providerId,
         mode: "cdp",
         priority: -100,
-        invoke: async (stepInput) => spec.invoke(createBrowserCapabilityInput(stepInput))
+        invoke: async (stepInput) =>
+          spec.invoke(createBrowserCapabilityInput(stepInput)),
       });
     }
   };
@@ -3367,29 +3987,57 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     verifyPolicy?: StepVerifyPolicy;
   }): Promise<ExecuteStepResult> {
     const sessionId = String(input.sessionId || "").trim();
-    const normalizedMode = ["script", "cdp", "bridge"].includes(String(input.mode || "").trim())
+    const normalizedMode = ["script", "cdp", "bridge"].includes(
+      String(input.mode || "").trim(),
+    )
       ? (String(input.mode || "").trim() as ExecuteMode)
       : undefined;
-    const normalizedCapability = String(input.capability || "").trim() || undefined;
-    const capabilityPolicy = orchestrator.resolveCapabilityPolicy(normalizedCapability);
-    const effectiveVerifyPolicy: StepVerifyPolicy = input.verifyPolicy || capabilityPolicy.defaultVerifyPolicy || "on_critical";
+    const normalizedCapability =
+      String(input.capability || "").trim() || undefined;
+    const capabilityPolicy =
+      orchestrator.resolveCapabilityPolicy(normalizedCapability);
+    const effectiveVerifyPolicy: StepVerifyPolicy =
+      input.verifyPolicy ||
+      capabilityPolicy.defaultVerifyPolicy ||
+      "on_critical";
     const normalizedAction = String(input.action || "").trim();
     const payload = toRecord(input.args);
-    const actionPayload = toRecord(payload.action) && Object.keys(toRecord(payload.action)).length > 0 ? toRecord(payload.action) : payload;
+    const actionPayload =
+      toRecord(payload.action) &&
+      Object.keys(toRecord(payload.action)).length > 0
+        ? toRecord(payload.action)
+        : payload;
     const tabId = parsePositiveInt(payload.tabId || actionPayload.tabId);
     const capabilityProviderId = normalizedCapability
-      ? String(orchestrator.getCapabilityProvider(normalizedCapability)?.id || "")
+      ? String(
+          orchestrator.getCapabilityProvider(normalizedCapability)?.id || "",
+        )
       : "";
 
     if (!normalizedMode && !normalizedCapability) {
-      return { ok: false, modeUsed: "bridge", verified: false, error: "mode 或 capability 至少需要一个" };
+      return {
+        ok: false,
+        modeUsed: "bridge",
+        verified: false,
+        error: "mode 或 capability 至少需要一个",
+      };
     }
     if (!normalizedAction) {
-      return { ok: false, modeUsed: normalizedMode || "bridge", verified: false, error: "action 不能为空" };
+      return {
+        ok: false,
+        modeUsed: normalizedMode || "bridge",
+        verified: false,
+        error: "action 不能为空",
+      };
     }
 
-    if (normalizedCapability && orchestrator.hasCapabilityProvider(normalizedCapability)) {
-      const capabilityMode = normalizedMode || orchestrator.resolveModeForCapability(normalizedCapability);
+    if (
+      normalizedCapability &&
+      orchestrator.hasCapabilityProvider(normalizedCapability)
+    ) {
+      const capabilityMode =
+        normalizedMode ||
+        orchestrator.resolveModeForCapability(normalizedCapability);
       if (!capabilityMode) {
         const result: ExecuteStepResult = {
           ok: false,
@@ -3399,13 +4047,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           verified: false,
           error: `capability provider 已注册但缺少 mode: ${normalizedCapability}`,
           errorCode: "E_RUNTIME_NOT_READY",
-          retryable: true
+          retryable: true,
         };
         orchestrator.events.emit("step_execute", sessionId, {
           mode: "bridge",
           capability: normalizedCapability,
           action: normalizedAction,
-          providerId: capabilityProviderId
+          providerId: capabilityProviderId,
         });
         orchestrator.events.emit("step_execute_result", sessionId, {
           ok: result.ok,
@@ -3416,7 +4064,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           verified: result.verified,
           error: result.error || "",
           errorCode: result.errorCode || "",
-          retryable: result.retryable === true
+          retryable: result.retryable === true,
         });
         return result;
       }
@@ -3424,7 +4072,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         mode: capabilityMode,
         capability: normalizedCapability,
         action: normalizedAction,
-        providerId: capabilityProviderId
+        providerId: capabilityProviderId,
       });
       const result = await orchestrator.executeStep({
         sessionId,
@@ -3432,7 +4080,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         capability: normalizedCapability,
         action: normalizedAction,
         args: payload,
-        verifyPolicy: effectiveVerifyPolicy
+        verifyPolicy: effectiveVerifyPolicy,
       });
       orchestrator.events.emit("step_execute_result", sessionId, {
         ok: result.ok,
@@ -3442,12 +4090,12 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         fallbackFrom: result.fallbackFrom,
         verified: result.verified,
         verifyReason: result.verifyReason,
-        error: result.error
+        error: result.error,
       });
       return {
         ...result,
         capabilityUsed: result.capabilityUsed || normalizedCapability,
-        providerId: result.providerId || capabilityProviderId || undefined
+        providerId: result.providerId || capabilityProviderId || undefined,
       };
     }
 
@@ -3460,13 +4108,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         verified: false,
         error: `capability provider 未就绪: ${normalizedCapability}`,
         errorCode: "E_RUNTIME_NOT_READY",
-        retryable: true
+        retryable: true,
       };
       orchestrator.events.emit("step_execute", sessionId, {
         mode: "bridge",
         capability: normalizedCapability,
         action: normalizedAction,
-        providerId: capabilityProviderId
+        providerId: capabilityProviderId,
       });
       orchestrator.events.emit("step_execute_result", sessionId, {
         ok: result.ok,
@@ -3477,7 +4125,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         verified: result.verified,
         error: result.error || "",
         errorCode: result.errorCode || "",
-        retryable: result.retryable === true
+        retryable: result.retryable === true,
       });
       return result;
     }
@@ -3490,7 +4138,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         verified: false,
         error: normalizedCapability
           ? `capability provider 未注册或未就绪: ${normalizedCapability}`
-          : "mode 必须是 script/cdp/bridge"
+          : "mode 必须是 script/cdp/bridge",
       };
     }
 
@@ -3500,7 +4148,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       mode: executionMode,
       capability: normalizedCapability,
       action: normalizedAction,
-      providerId: modeProviderId
+      providerId: modeProviderId,
     });
 
     // mode provider 已注册时，统一走 orchestrator 执行链，确保 plugin hooks/provider override 生效。
@@ -3511,7 +4159,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         capability: normalizedCapability,
         action: normalizedAction,
         args: payload,
-        verifyPolicy: effectiveVerifyPolicy
+        verifyPolicy: effectiveVerifyPolicy,
       });
       orchestrator.events.emit("step_execute_result", sessionId, {
         ok: result.ok,
@@ -3523,12 +4171,12 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         verifyReason: result.verifyReason,
         error: result.error,
         errorCode: result.errorCode || "",
-        retryable: result.retryable === true
+        retryable: result.retryable === true,
       });
       return {
         ...result,
         capabilityUsed: result.capabilityUsed || normalizedCapability,
-        providerId: result.providerId || modeProviderId || undefined
+        providerId: result.providerId || modeProviderId || undefined,
       };
     }
 
@@ -3539,52 +4187,70 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           if (Object.keys(rawFrame).length > 0) return { ...rawFrame };
           return {
             tool: String(payload.tool || normalizedAction || "").trim(),
-            args: Object.keys(toRecord(payload.invokeArgs)).length > 0 ? toRecord(payload.invokeArgs) : toRecord(payload.args)
+            args:
+              Object.keys(toRecord(payload.invokeArgs)).length > 0
+                ? toRecord(payload.invokeArgs)
+                : toRecord(payload.args),
           };
         })();
-        if (!String(frame.tool || "").trim()) throw new Error("bridge 执行缺少 tool");
+        if (!String(frame.tool || "").trim())
+          throw new Error("bridge 执行缺少 tool");
         if (!frame.sessionId) frame.sessionId = sessionId;
         const response = await callInfra(infra, {
           type: "bridge.invoke",
-          payload: frame
+          payload: frame,
         });
         return {
           type: "invoke",
-          response
+          response,
         };
       }
 
       if (!tabId) throw new Error(`${targetMode} 执行需要有效 tabId`);
 
-      if (normalizedAction === "snapshot" || normalizedAction === "cdp.snapshot") {
+      if (
+        normalizedAction === "snapshot" ||
+        normalizedAction === "cdp.snapshot"
+      ) {
         return await callInfra(infra, {
           type: "cdp.snapshot",
           tabId,
-          options: toRecord(payload.options) && Object.keys(toRecord(payload.options)).length > 0 ? toRecord(payload.options) : payload
+          options:
+            toRecord(payload.options) &&
+            Object.keys(toRecord(payload.options)).length > 0
+              ? toRecord(payload.options)
+              : payload,
         });
       }
-      if (normalizedAction === "observe" || normalizedAction === "cdp.observe") {
+      if (
+        normalizedAction === "observe" ||
+        normalizedAction === "cdp.observe"
+      ) {
         return await callInfra(infra, {
           type: "cdp.observe",
-          tabId
+          tabId,
         });
       }
       if (normalizedAction === "verify" || normalizedAction === "cdp.verify") {
         const verifyAction = Object.keys(toRecord(payload.action)).length
           ? toRecord(payload.action)
           : {
-              expect: Object.keys(toRecord(payload.expect)).length ? toRecord(payload.expect) : payload
+              expect: Object.keys(toRecord(payload.expect)).length
+                ? toRecord(payload.expect)
+                : payload,
             };
         return await callInfra(infra, {
           type: "cdp.verify",
           tabId,
           action: verifyAction,
-          result: payload.result || null
+          result: payload.result || null,
         });
       }
 
       if (targetMode === "script") {
-        const expression = String(payload.expression || payload.script || "").trim();
+        const expression = String(
+          payload.expression || payload.script || "",
+        ).trim();
         if (!expression) throw new Error("script 模式缺少 expression");
         return await callInfra(infra, {
           type: "cdp.execute",
@@ -3592,13 +4258,20 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           action: {
             type: "runtime.evaluate",
             expression,
-            returnByValue: payload.returnByValue !== false
-          }
+            returnByValue: payload.returnByValue !== false,
+          },
         });
       }
 
-      const cdpAction = Object.keys(toRecord(payload.action)).length > 0 ? { ...toRecord(payload.action) } : { ...payload };
-      if (!cdpAction.kind && normalizedAction && !normalizedAction.startsWith("cdp.")) {
+      const cdpAction =
+        Object.keys(toRecord(payload.action)).length > 0
+          ? { ...toRecord(payload.action) }
+          : { ...payload };
+      if (
+        !cdpAction.kind &&
+        normalizedAction &&
+        !normalizedAction.startsWith("cdp.")
+      ) {
         cdpAction.kind = normalizedAction;
       }
       const kind = String(cdpAction.kind || "").trim();
@@ -3610,7 +4283,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             type: "cdp.action",
             tabId,
             sessionId,
-            action: cdpAction
+            action: cdpAction,
           });
         });
       }
@@ -3619,7 +4292,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         type: "cdp.action",
         tabId,
         sessionId,
-        action: cdpAction
+        action: cdpAction,
       });
     };
 
@@ -3628,12 +4301,21 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const fallbackFrom: ExecuteMode | undefined = undefined;
     let data: unknown;
     let preObserve: unknown = null;
-    const verifyEnabled = shouldVerifyStep(String(actionPayload.kind || normalizedAction), effectiveVerifyPolicy);
+    const verifyEnabled = shouldVerifyStep(
+      String(actionPayload.kind || normalizedAction),
+      effectiveVerifyPolicy,
+    );
 
-    if (verifyEnabled && tabId && executionMode !== "bridge" && normalizedAction !== "verify" && normalizedAction !== "cdp.verify") {
+    if (
+      verifyEnabled &&
+      tabId &&
+      executionMode !== "bridge" &&
+      normalizedAction !== "verify" &&
+      normalizedAction !== "cdp.verify"
+    ) {
       preObserve = await callInfra(infra, {
         type: "cdp.observe",
-        tabId
+        tabId,
       }).catch(() => null);
     }
 
@@ -3650,7 +4332,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         error: runtimeError.message,
         errorCode: normalizeErrorCode(runtimeError.code),
         errorDetails: runtimeError.details,
-        retryable: runtimeError.retryable
+        retryable: runtimeError.retryable,
       };
       orchestrator.events.emit("step_execute_result", sessionId, {
         ok: result.ok,
@@ -3661,7 +4343,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         verified: result.verified,
         error: result.error || "",
         errorCode: result.errorCode || "",
-        retryable: result.retryable === true
+        retryable: result.retryable === true,
       });
       return result;
     }
@@ -3674,36 +4356,55 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           verifyReason = "verify_not_supported_for_bridge";
         } else if (!tabId) {
           verifyReason = "verify_missing_tab_id";
-        } else if (normalizedAction === "verify" || normalizedAction === "cdp.verify") {
+        } else if (
+          normalizedAction === "verify" ||
+          normalizedAction === "cdp.verify"
+        ) {
           verified = toRecord(data).ok === true;
           verifyReason = verified ? "verified" : "verify_failed";
         } else {
-          const explicitExpect = normalizeVerifyExpect(payload.expect || actionPayload.expect || null);
+          const explicitExpect = normalizeVerifyExpect(
+            payload.expect || actionPayload.expect || null,
+          );
           let verifyData: unknown = null;
           if (explicitExpect) {
-            if (explicitExpect.urlChanged === true && toRecord(toRecord(preObserve).page).url) {
-              explicitExpect.previousUrl = String(toRecord(toRecord(preObserve).page).url || "");
+            if (
+              explicitExpect.urlChanged === true &&
+              toRecord(toRecord(preObserve).page).url
+            ) {
+              explicitExpect.previousUrl = String(
+                toRecord(toRecord(preObserve).page).url || "",
+              );
             }
             verifyData = await callInfra(infra, {
               type: "cdp.verify",
               tabId,
               action: { expect: explicitExpect },
-              result: toRecord(data).result || data
+              result: toRecord(data).result || data,
             });
           } else if (preObserve) {
             const afterObserve = await callInfra(infra, {
               type: "cdp.observe",
-              tabId
+              tabId,
             });
             verifyData = buildObserveProgressVerify(preObserve, afterObserve);
           }
 
           verified = toRecord(verifyData).ok === true;
-          verifyReason = verifyData ? (verified ? "verified" : "verify_failed") : "verify_skipped";
-          if (verifyData && data && typeof data === "object" && !Array.isArray(data)) {
+          verifyReason = verifyData
+            ? verified
+              ? "verified"
+              : "verify_failed"
+            : "verify_skipped";
+          if (
+            verifyData &&
+            data &&
+            typeof data === "object" &&
+            !Array.isArray(data)
+          ) {
             data = {
               ...(data as JsonRecord),
-              verify: verifyData
+              verify: verifyData,
             };
           }
         }
@@ -3717,9 +4418,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         fallbackFrom,
         verified: false,
         error: runtimeVerifyError.message,
-        errorCode: normalizeErrorCode(runtimeVerifyError.code) || "E_VERIFY_EXECUTE",
+        errorCode:
+          normalizeErrorCode(runtimeVerifyError.code) || "E_VERIFY_EXECUTE",
         errorDetails: runtimeVerifyError.details,
-        retryable: true
+        retryable: true,
       };
       orchestrator.events.emit("step_execute_result", sessionId, {
         ok: result.ok,
@@ -3730,7 +4432,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         verified: result.verified,
         error: result.error || "",
         errorCode: result.errorCode || "",
-        retryable: result.retryable === true
+        retryable: result.retryable === true,
       });
       return result;
     }
@@ -3743,7 +4445,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       fallbackFrom,
       verified,
       verifyReason,
-      data
+      data,
     };
     orchestrator.events.emit("step_execute_result", sessionId, {
       ok: result.ok,
@@ -3752,7 +4454,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       providerId: result.providerId || "",
       fallbackFrom: result.fallbackFrom || "",
       verifyReason: result.verifyReason || "",
-      verified: result.verified
+      verified: result.verified,
     });
     return result;
   }
@@ -3777,12 +4479,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       rootResponseInnerData.content,
       rootResponseInnerData.text,
       rootResult.content,
-      rootResult.text
+      rootResult.text,
     ];
     for (const item of candidates) {
       if (typeof item === "string") return item;
     }
-    throw new Error(`文件读取工具未返回 content 文本: ${safeStringify(data, 1200)}`);
+    throw new Error(
+      `文件读取工具未返回 content 文本: ${safeStringify(data, 1200)}`,
+    );
   }
 
   orchestrator.setSkillContentReader(async (input) => {
@@ -3792,7 +4496,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
     const location = String(input.location || "").trim();
     const runtime = isVirtualUri(location) ? "browser" : undefined;
-    const readCapability = String(input.capability || CAPABILITIES.fsRead).trim() || CAPABILITIES.fsRead;
+    const readCapability =
+      String(input.capability || CAPABILITIES.fsRead).trim() ||
+      CAPABILITIES.fsRead;
     const result = await executeStep({
       sessionId,
       capability: readCapability as ExecuteCapability,
@@ -3803,11 +4509,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           tool: "read",
           args: {
             path: location,
-            ...(runtime ? { runtime } : {})
-          }
-        }
+            ...(runtime ? { runtime } : {}),
+          },
+        },
       },
-      verifyPolicy: "off"
+      verifyPolicy: "off",
     });
     if (!result.ok) {
       throw new Error(result.error || `文件读取失败: ${location}`);
@@ -3820,13 +4526,15 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     toolName: string,
     frame: JsonRecord,
     capability: ExecuteCapability | undefined,
-    autoRetryMax = TOOL_AUTO_RETRY_MAX
+    autoRetryMax = TOOL_AUTO_RETRY_MAX,
   ): Promise<JsonRecord> {
-    const normalizedToolName = String(toolName || "").trim().toLowerCase();
+    const normalizedToolName = String(toolName || "")
+      .trim()
+      .toLowerCase();
     const invokeId = String(frame.id || `invoke-${crypto.randomUUID()}`);
     const frameWithInvokeId: JsonRecord = {
       ...frame,
-      id: invokeId
+      id: invokeId,
     };
     const totalAttempts = Math.max(1, autoRetryMax + 1);
     let lastFailure: ExecuteStepResult | null = null;
@@ -3837,8 +4545,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         capability,
         action: "invoke",
         args: {
-          frame: frameWithInvokeId
-        }
+          frame: frameWithInvokeId,
+        },
       });
       if (invoke.ok) {
         if (BASH_RUNTIME_TOOL_NAMES.has(normalizedToolName)) {
@@ -3853,13 +4561,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           providerId: invoke.providerId,
           fallbackFrom: invoke.fallbackFrom,
           attempt,
-          autoRetried: attempt > 1
+          autoRetried: attempt > 1,
         });
       }
 
       lastFailure = invoke;
       const code = normalizeErrorCode(invoke.errorCode);
-      const canAutoRetry = attempt < totalAttempts && shouldAutoReplayToolCall(toolName, code);
+      const canAutoRetry =
+        attempt < totalAttempts && shouldAutoReplayToolCall(toolName, code);
       if (!canAutoRetry) break;
       await delay(computeToolRetryDelayMs(attempt));
     }
@@ -3868,16 +4577,18 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       ok: false,
       modeUsed: "bridge" as ExecuteMode,
       verified: false,
-      error: `${toolName} 执行失败`
+      error: `${toolName} 执行失败`,
     };
     const errorCode = normalizeErrorCode(failure.errorCode);
     return {
       error: failure.error || `${toolName} 执行失败`,
       errorCode: errorCode || undefined,
       errorReason: "failed_execute",
-      retryable: failure.retryable === true || isRetryableToolErrorCode(toolName, errorCode),
+      retryable:
+        failure.retryable === true ||
+        isRetryableToolErrorCode(toolName, errorCode),
       retryHint: buildToolRetryHint(toolName, errorCode),
-      details: failure.errorDetails || null
+      details: failure.errorDetails || null,
     };
   }
 
@@ -4101,37 +4812,46 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     hasContract: boolean;
   }): JsonRecord {
     const unsupported = input.hasContract;
-    return attachFailureProtocol(input.requestedTool || input.resolvedTool || "unknown_tool", {
-      error: unsupported
-        ? `工具已注册但当前 runtime 不支持执行: ${input.requestedTool}`
-        : `未知工具: ${input.requestedTool}`,
-      errorCode: unsupported ? "E_TOOL_UNSUPPORTED" : "E_TOOL",
-      errorReason: "failed_execute",
-      retryable: unsupported,
-      retryHint: unsupported
-        ? "Call a supported canonical tool name from tool list."
-        : "Use list of available tools and retry with valid name.",
-      details: {
-        requestedTool: input.requestedTool,
-        resolvedTool: input.resolvedTool,
-        canonicalTool: input.resolvedTool || null,
-        supportedTools: Array.from(RUNTIME_EXECUTABLE_TOOL_NAMES)
-      }
-    }, {
-      phase: "plan",
-      category: "missing_target",
-      resumeStrategy: unsupported ? "replan" : "replan"
-    });
+    return attachFailureProtocol(
+      input.requestedTool || input.resolvedTool || "unknown_tool",
+      {
+        error: unsupported
+          ? `工具已注册但当前 runtime 不支持执行: ${input.requestedTool}`
+          : `未知工具: ${input.requestedTool}`,
+        errorCode: unsupported ? "E_TOOL_UNSUPPORTED" : "E_TOOL",
+        errorReason: "failed_execute",
+        retryable: unsupported,
+        retryHint: unsupported
+          ? "Call a supported canonical tool name from tool list."
+          : "Use list of available tools and retry with valid name.",
+        details: {
+          requestedTool: input.requestedTool,
+          resolvedTool: input.resolvedTool,
+          canonicalTool: input.resolvedTool || null,
+          supportedTools: Array.from(RUNTIME_EXECUTABLE_TOOL_NAMES),
+        },
+      },
+      {
+        phase: "plan",
+        category: "missing_target",
+        resumeStrategy: unsupported ? "replan" : "replan",
+      },
+    );
   }
 
   function isElementRefOnlyConstraint(requiredSets: string[][]): boolean {
     if (requiredSets.length === 0) return false;
     return requiredSets.every(
-      (set) => set.length === 1 && ["uid", "ref", "backendNodeId"].includes(String(set[0] || "").trim())
+      (set) =>
+        set.length === 1 &&
+        ["uid", "ref", "backendNodeId"].includes(String(set[0] || "").trim()),
     );
   }
 
-  function matchesRequiredSet(args: JsonRecord, requiredSet: string[]): boolean {
+  function matchesRequiredSet(
+    args: JsonRecord,
+    requiredSet: string[],
+  ): boolean {
     if (requiredSet.length === 0) return true;
     for (const field of requiredSet) {
       if (!isNonEmptyToolArgValue(args[field])) return false;
@@ -4147,37 +4867,55 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
   }): { ok: true } | { ok: false; error: JsonRecord } {
     const schema = toRecord(input.contract?.parameters);
     if (Object.keys(schema).length === 0) return { ok: true };
-    const normalizedTool = String(input.resolvedTool || input.requestedTool || "").trim().toLowerCase();
+    const normalizedTool = String(
+      input.resolvedTool || input.requestedTool || "",
+    )
+      .trim()
+      .toLowerCase();
 
     const requiredFields = normalizeSchemaRequiredList(schema.required);
-    const missingRequired = requiredFields.filter((field) => !isNonEmptyToolArgValue(input.args[field]));
+    const missingRequired = requiredFields.filter(
+      (field) => !isNonEmptyToolArgValue(input.args[field]),
+    );
     if (missingRequired.length > 0) {
       return {
         ok: false,
-        error: attachFailureProtocol(input.requestedTool || input.resolvedTool || "unknown_tool", {
-          error: `${input.resolvedTool || input.requestedTool} 缺少必填参数: ${missingRequired.join(", ")}`,
-          errorCode: "E_ARGS",
-          errorReason: "failed_execute",
-          retryable: false,
-          retryHint: `补齐必填参数后重试 ${input.resolvedTool || input.requestedTool}。`,
-          details: {
-            missingRequired,
-            providedKeys: Object.keys(input.args),
-            schemaRequired: requiredFields
-          }
-        }, {
-          phase: "plan",
-          category: "missing_target",
-          resumeStrategy: "replan"
-        })
+        error: attachFailureProtocol(
+          input.requestedTool || input.resolvedTool || "unknown_tool",
+          {
+            error: `${input.resolvedTool || input.requestedTool} 缺少必填参数: ${missingRequired.join(", ")}`,
+            errorCode: "E_ARGS",
+            errorReason: "failed_execute",
+            retryable: false,
+            retryHint: `补齐必填参数后重试 ${input.resolvedTool || input.requestedTool}。`,
+            details: {
+              missingRequired,
+              providedKeys: Object.keys(input.args),
+              schemaRequired: requiredFields,
+            },
+          },
+          {
+            phase: "plan",
+            category: "missing_target",
+            resumeStrategy: "replan",
+          },
+        ),
       };
     }
 
-    const combinators: Array<"anyOf" | "oneOf" | "allOf"> = ["anyOf", "oneOf", "allOf"];
+    const combinators: Array<"anyOf" | "oneOf" | "allOf"> = [
+      "anyOf",
+      "oneOf",
+      "allOf",
+    ];
     for (const combinator of combinators) {
-      const requiredSets = readTopLevelConstraintRequiredSets(schema[combinator]);
+      const requiredSets = readTopLevelConstraintRequiredSets(
+        schema[combinator],
+      );
       if (requiredSets.length === 0) continue;
-      const matchedCount = requiredSets.filter((set) => matchesRequiredSet(input.args, set)).length;
+      const matchedCount = requiredSets.filter((set) =>
+        matchesRequiredSet(input.args, set),
+      ).length;
       const satisfied =
         combinator === "anyOf"
           ? matchedCount >= 1
@@ -4186,7 +4924,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             : matchedCount === requiredSets.length;
       if (satisfied) continue;
 
-      const useRefRequiredCode = combinator === "anyOf" && isElementRefOnlyConstraint(requiredSets);
+      const useRefRequiredCode =
+        combinator === "anyOf" && isElementRefOnlyConstraint(requiredSets);
       const errorCode = useRefRequiredCode ? "E_REF_REQUIRED" : "E_ARGS";
       const retryHint = useRefRequiredCode
         ? `Call search_elements first, then retry ${input.resolvedTool || input.requestedTool} using uid/ref.`
@@ -4196,47 +4935,62 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         : `${input.resolvedTool || input.requestedTool} 参数未满足 ${combinator} 约束`;
       return {
         ok: false,
-        error: attachFailureProtocol(input.requestedTool || input.resolvedTool || "unknown_tool", {
-          error: errorText,
-          errorCode,
-          errorReason: "failed_execute",
-          retryable: true,
-          retryHint,
-          details: {
-            combinator,
-            matchedCount,
-            requiredSets,
-            providedKeys: Object.keys(input.args)
-          }
-        }, {
-          phase: "plan",
-          category: "missing_target",
-          resumeStrategy: "retry_with_fresh_snapshot"
-        })
+        error: attachFailureProtocol(
+          input.requestedTool || input.resolvedTool || "unknown_tool",
+          {
+            error: errorText,
+            errorCode,
+            errorReason: "failed_execute",
+            retryable: true,
+            retryHint,
+            details: {
+              combinator,
+              matchedCount,
+              requiredSets,
+              providedKeys: Object.keys(input.args),
+            },
+          },
+          {
+            phase: "plan",
+            category: "missing_target",
+            resumeStrategy: "retry_with_fresh_snapshot",
+          },
+        ),
       };
     }
 
-    if (normalizedTool === "fill_element_by_uid" && !isNonEmptyToolArgValue(input.args.value)) {
+    if (
+      normalizedTool === "fill_element_by_uid" &&
+      !isNonEmptyToolArgValue(input.args.value)
+    ) {
       return {
         ok: false,
-        error: attachFailureProtocol(input.requestedTool || input.resolvedTool || "unknown_tool", {
-          error: "fill_element_by_uid 需要非空 value",
-          errorCode: "E_ARGS",
-          errorReason: "failed_execute",
-          retryable: false,
-          retryHint: "Provide non-empty value and retry fill_element_by_uid."
-        }, {
-          phase: "plan",
-          category: "missing_target",
-          resumeStrategy: "replan"
-        })
+        error: attachFailureProtocol(
+          input.requestedTool || input.resolvedTool || "unknown_tool",
+          {
+            error: "fill_element_by_uid 需要非空 value",
+            errorCode: "E_ARGS",
+            errorReason: "failed_execute",
+            retryable: false,
+            retryHint: "Provide non-empty value and retry fill_element_by_uid.",
+          },
+          {
+            phase: "plan",
+            category: "missing_target",
+            resumeStrategy: "replan",
+          },
+        ),
       };
     }
 
     return { ok: true };
   }
 
-  function resolveToolCallContext(toolCall: ToolCallItem): { ok: true; value: ResolvedToolCallContext } | { ok: false; error: JsonRecord } {
+  function resolveToolCallContext(
+    toolCall: ToolCallItem,
+  ):
+    | { ok: true; value: ResolvedToolCallContext }
+    | { ok: false; error: JsonRecord } {
     const requestedTool = String(toolCall.function.name || "").trim();
     const argsRaw = String(toolCall.function.arguments || "").trim();
     let args: JsonRecord = {};
@@ -4246,34 +5000,42 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
           return {
             ok: false,
-            error: attachFailureProtocol(requestedTool || "unknown_tool", {
-              error: "工具参数必须是 JSON object",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Pass arguments as JSON object and retry."
-            }, {
-              phase: "plan",
-              category: "missing_target",
-              resumeStrategy: "replan"
-            })
+            error: attachFailureProtocol(
+              requestedTool || "unknown_tool",
+              {
+                error: "工具参数必须是 JSON object",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint: "Pass arguments as JSON object and retry.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "replan",
+              },
+            ),
           };
         }
         args = parsed as JsonRecord;
       } catch (error) {
         return {
           ok: false,
-          error: attachFailureProtocol(requestedTool || "unknown_tool", {
-            error: `参数解析失败: ${error instanceof Error ? error.message : String(error)}`,
-            errorCode: "E_ARGS",
-            errorReason: "failed_execute",
-            retryable: false,
-            retryHint: "Fix JSON arguments and retry."
-          }, {
-            phase: "plan",
-            category: "missing_target",
-            resumeStrategy: "replan"
-          })
+          error: attachFailureProtocol(
+            requestedTool || "unknown_tool",
+            {
+              error: `参数解析失败: ${error instanceof Error ? error.message : String(error)}`,
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Fix JSON arguments and retry.",
+            },
+            {
+              phase: "plan",
+              category: "missing_target",
+              resumeStrategy: "replan",
+            },
+          ),
         };
       }
     }
@@ -4282,18 +5044,22 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const resolvedTool = String(contract?.name || requestedTool).trim();
     const customExecutionRaw = readContractExecution(contract);
     const customExecution =
-      customExecutionRaw && orchestrator.hasCapabilityProvider(customExecutionRaw.capability)
+      customExecutionRaw &&
+      orchestrator.hasCapabilityProvider(customExecutionRaw.capability)
         ? customExecutionRaw
         : null;
-    const executionTool = RUNTIME_EXECUTABLE_TOOL_NAMES.has(resolvedTool) || customExecution ? resolvedTool : "";
+    const executionTool =
+      RUNTIME_EXECUTABLE_TOOL_NAMES.has(resolvedTool) || customExecution
+        ? resolvedTool
+        : "";
     if (!executionTool) {
       return {
         ok: false,
         error: buildUnsupportedToolError({
           requestedTool,
           resolvedTool,
-          hasContract: Boolean(contract)
-        })
+          hasContract: Boolean(contract),
+        }),
       };
     }
 
@@ -4301,7 +5067,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       requestedTool,
       resolvedTool,
       args,
-      contract
+      contract,
     });
     if (!schemaValidation.ok) {
       return schemaValidation;
@@ -4319,12 +5085,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               customExecution: {
                 capability: customExecution.capability,
                 ...(customExecution.mode ? { mode: customExecution.mode } : {}),
-                ...(customExecution.action ? { action: customExecution.action } : {}),
-                ...(customExecution.verifyPolicy ? { verifyPolicy: customExecution.verifyPolicy } : {})
-              }
+                ...(customExecution.action
+                  ? { action: customExecution.action }
+                  : {}),
+                ...(customExecution.verifyPolicy
+                  ? { verifyPolicy: customExecution.verifyPolicy }
+                  : {}),
+              },
             }
-          : {})
-      }
+          : {}),
+      },
     };
   }
 
@@ -4341,24 +5111,34 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     "monitor-operation": {
       type: "monitor-operation",
       name: "Monitor Operation",
-      description: "Ask user to watch/confirm a browser operation before continuing.",
+      description:
+        "Ask user to watch/confirm a browser operation before continuing.",
       enabled: true,
-      inputSchema: { type: "object", properties: { instruction: { type: "string" } } }
+      inputSchema: {
+        type: "object",
+        properties: { instruction: { type: "string" } },
+      },
     },
     "voice-input": {
       type: "voice-input",
       name: "Voice Input",
       description: "Ask user to provide missing information via voice/text.",
       enabled: true,
-      inputSchema: { type: "object", properties: { prompt: { type: "string" } } }
+      inputSchema: {
+        type: "object",
+        properties: { prompt: { type: "string" } },
+      },
     },
     "user-selection": {
       type: "user-selection",
       name: "User Selection",
       description: "Ask user to choose one option from AI-provided candidates.",
       enabled: true,
-      inputSchema: { type: "object", properties: { options: { type: "array" } } }
-    }
+      inputSchema: {
+        type: "object",
+        properties: { options: { type: "array" } },
+      },
+    },
   };
 
   const interventionRequests = new Map<
@@ -4376,12 +5156,17 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
   >();
 
   function normalizeInterventionType(raw: unknown): string {
-    const type = String(raw || "").trim().toLowerCase();
+    const type = String(raw || "")
+      .trim()
+      .toLowerCase();
     if (!type) return "";
     return type;
   }
 
-  function buildSkillChildLocation(location: string, relativePath: string): string {
+  function buildSkillChildLocation(
+    location: string,
+    relativePath: string,
+  ): string {
     const normalizedLocation = String(location || "").trim();
     const normalizedRelative = String(relativePath || "")
       .trim()
@@ -4393,11 +5178,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       throw new Error("skill path 不能包含 ..");
     }
     const cut = normalizedLocation.lastIndexOf("/");
-    const base = cut >= 0 ? normalizedLocation.slice(0, cut) : normalizedLocation;
+    const base =
+      cut >= 0 ? normalizedLocation.slice(0, cut) : normalizedLocation;
     return `${base}/${normalizedRelative}`;
   }
 
-  async function resolveSkillByName(skillName: string): Promise<SkillMetadata | null> {
+  async function resolveSkillByName(
+    skillName: string,
+  ): Promise<SkillMetadata | null> {
     const normalized = String(skillName || "").trim();
     if (!normalized) return null;
     const byId = await orchestrator.getSkill(normalized);
@@ -4411,7 +5199,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     );
   }
 
-  async function readTextByLocation(sessionId: string, location: string): Promise<string> {
+  async function readTextByLocation(
+    sessionId: string,
+    location: string,
+  ): Promise<string> {
     const runtimeHint = isVirtualUri(location) ? "browser" : "local";
     const result = await executeStep({
       sessionId,
@@ -4424,11 +5215,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           tool: "read",
           args: {
             path: location,
-            runtime: runtimeHint
-          }
-        }
+            runtime: runtimeHint,
+          },
+        },
       },
-      verifyPolicy: "off"
+      verifyPolicy: "off",
     });
     if (!result.ok) {
       throw new Error(result.error || `文件读取失败: ${location}`);
@@ -4436,7 +5227,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     return extractSkillReadContent(result.data);
   }
 
-  async function writeTextByLocation(sessionId: string, location: string, content: string): Promise<void> {
+  async function writeTextByLocation(
+    sessionId: string,
+    location: string,
+    content: string,
+  ): Promise<void> {
     const runtimeHint = isVirtualUri(location) ? "browser" : "local";
     const result = await executeStep({
       sessionId,
@@ -4453,11 +5248,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             path: location,
             runtime: runtimeHint,
             content,
-            mode: "overwrite"
-          }
-        }
+            mode: "overwrite",
+          },
+        },
       },
-      verifyPolicy: "off"
+      verifyPolicy: "off",
     });
     if (!result.ok) {
       throw new Error(result.error || `文件写入失败: ${location}`);
@@ -4487,7 +5282,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
   async function buildToolPlan(
     sessionId: string,
-    context: ResolvedToolCallContext
+    context: ResolvedToolCallContext,
   ): Promise<{ ok: true; plan: ToolPlan } | { ok: false; error: JsonRecord }> {
     const args = context.args;
     const buildUidActionPlan = async (
@@ -4495,19 +5290,29 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       kindValue: "click" | "fill" | "select" | "hover" | "read",
       options: {
         requireValue?: boolean;
-      } = {}
-    ): Promise<{ ok: true; plan: ToolPlan } | { ok: false; error: JsonRecord }> => {
+      } = {},
+    ): Promise<
+      { ok: true; plan: ToolPlan } | { ok: false; error: JsonRecord }
+    > => {
       const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
       if (!tabId) {
         return {
           ok: false,
-          error: attachFailureProtocol(toolName, {
-            error: `${toolName} 需要 tabId，当前无可用 tab`,
-            errorCode: "E_NO_TAB",
-            errorReason: "failed_execute",
-            retryable: true,
-            retryHint: `Call get_all_tabs and retry ${toolName} with a valid tabId.`
-          }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+          error: attachFailureProtocol(
+            toolName,
+            {
+              error: `${toolName} 需要 tabId，当前无可用 tab`,
+              errorCode: "E_NO_TAB",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint: `Call get_all_tabs and retry ${toolName} with a valid tabId.`,
+            },
+            {
+              phase: "plan",
+              category: "missing_target",
+              resumeStrategy: "retry_with_fresh_snapshot",
+            },
+          ),
         };
       }
       const uid = String(args.uid || "").trim();
@@ -4517,26 +5322,43 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       if (!uid && !ref && !backendNodeId) {
         return {
           ok: false,
-          error: attachFailureProtocol(toolName, {
-            error: "元素交互动作需要 uid/ref/backendNodeId（不支持仅 selector）。请先调用 search_elements，再用返回的 uid 执行。",
-            errorCode: "E_REF_REQUIRED",
-            errorReason: "failed_execute",
-            retryable: true,
-            retryHint: `Call search_elements first, then retry ${toolName} using uid/ref.`
-          }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+          error: attachFailureProtocol(
+            toolName,
+            {
+              error:
+                "元素交互动作需要 uid/ref/backendNodeId（不支持仅 selector）。请先调用 search_elements，再用返回的 uid 执行。",
+              errorCode: "E_REF_REQUIRED",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint: `Call search_elements first, then retry ${toolName} using uid/ref.`,
+            },
+            {
+              phase: "plan",
+              category: "missing_target",
+              resumeStrategy: "retry_with_fresh_snapshot",
+            },
+          ),
         };
       }
       const value = args.value == null ? "" : String(args.value);
       if (options.requireValue === true && !value.trim()) {
         return {
           ok: false,
-          error: attachFailureProtocol(toolName, {
-            error: `${toolName} 需要非空 value`,
-            errorCode: "E_ARGS",
-            errorReason: "failed_execute",
-            retryable: false,
-            retryHint: `Provide value and retry ${toolName}.`
-          }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+          error: attachFailureProtocol(
+            toolName,
+            {
+              error: `${toolName} 需要非空 value`,
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: `Provide value and retry ${toolName}.`,
+            },
+            {
+              phase: "plan",
+              category: "missing_target",
+              resumeStrategy: "retry_with_fresh_snapshot",
+            },
+          ),
         };
       }
       return {
@@ -4562,28 +5384,38 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             value,
             expect: args.expect,
             forceFocus: args.forceFocus === true,
-            requireFocus: args.requireFocus === true
+            requireFocus: args.requireFocus === true,
           },
-          expect: args.expect
-        }
+          expect: args.expect,
+        },
       };
     };
 
     const buildTabActionPlan = async (
       toolName: "press_key" | "scroll_page" | "navigate_tab",
-      kindValue: "press" | "scroll" | "navigate"
-    ): Promise<{ ok: true; plan: ToolPlan } | { ok: false; error: JsonRecord }> => {
+      kindValue: "press" | "scroll" | "navigate",
+    ): Promise<
+      { ok: true; plan: ToolPlan } | { ok: false; error: JsonRecord }
+    > => {
       const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
       if (!tabId) {
         return {
           ok: false,
-          error: attachFailureProtocol(toolName, {
-            error: `${toolName} 需要 tabId，当前无可用 tab`,
-            errorCode: "E_NO_TAB",
-            errorReason: "failed_execute",
-            retryable: true,
-            retryHint: `Call get_all_tabs and retry ${toolName} with a valid tabId.`
-          }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+          error: attachFailureProtocol(
+            toolName,
+            {
+              error: `${toolName} 需要 tabId，当前无可用 tab`,
+              errorCode: "E_NO_TAB",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint: `Call get_all_tabs and retry ${toolName} with a valid tabId.`,
+            },
+            {
+              phase: "plan",
+              category: "missing_target",
+              resumeStrategy: "retry_with_fresh_snapshot",
+            },
+          ),
         };
       }
 
@@ -4591,7 +5423,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         kind: kindValue,
         expect: args.expect,
         forceFocus: args.forceFocus === true,
-        requireFocus: args.requireFocus === true
+        requireFocus: args.requireFocus === true,
       };
 
       if (kindValue === "press") {
@@ -4599,13 +5431,21 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!key) {
           return {
             ok: false,
-            error: attachFailureProtocol(toolName, {
-              error: "press_key 需要 key",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide key (e.g. Enter) and retry press_key."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+            error: attachFailureProtocol(
+              toolName,
+              {
+                error: "press_key 需要 key",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint: "Provide key (e.g. Enter) and retry press_key.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            ),
           };
         }
         action.key = key;
@@ -4618,13 +5458,21 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!url) {
           return {
             ok: false,
-            error: attachFailureProtocol(toolName, {
-              error: "navigate_tab 需要 url",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide url and retry navigate_tab."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+            error: attachFailureProtocol(
+              toolName,
+              {
+                error: "navigate_tab 需要 url",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint: "Provide url and retry navigate_tab.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            ),
           };
         }
         action.url = url;
@@ -4639,15 +5487,22 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           tabId,
           kindValue,
           action,
-          expect: args.expect
-        }
+          expect: args.expect,
+        },
       };
     };
 
-    const resolveBrowserRuntime = async (raw: unknown): Promise<"browser" | "sandbox"> => {
-      const cfgRaw = await callInfra(infra, { type: "config.get" }).catch(() => ({} as JsonRecord));
+    const resolveBrowserRuntime = async (
+      raw: unknown,
+    ): Promise<"browser" | "sandbox"> => {
+      const cfgRaw = await callInfra(infra, { type: "config.get" }).catch(
+        () => ({}) as JsonRecord,
+      );
       const cfg = extractLlmConfig(toRecord(cfgRaw));
-      const strategy = normalizeBrowserRuntimeStrategy(cfg.browserRuntimeStrategy, "host-first");
+      const strategy = normalizeBrowserRuntimeStrategy(
+        cfg.browserRuntimeStrategy,
+        "host-first",
+      );
       const hint = String(raw || "").trim();
       if (hint) {
         return resolveBrowserRuntimeHint(raw, strategy);
@@ -4659,22 +5514,27 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       case "host_bash":
       case "browser_bash": {
         const command = String(args.command || "").trim();
-        if (!command) return { ok: false, error: { error: `${context.executionTool} 需要 command` } };
+        if (!command)
+          return {
+            ok: false,
+            error: { error: `${context.executionTool} 需要 command` },
+          };
         const forcedRuntime =
-          context.executionTool === "host_bash"
-            ? "local"
-            : "sandbox";
+          context.executionTool === "host_bash" ? "local" : "sandbox";
         const timeoutMs =
           args.timeoutMs == null
             ? undefined
-            : normalizeIntInRange(args.timeoutMs, DEFAULT_BASH_TIMEOUT_MS, MIN_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS);
+            : normalizeIntInRange(
+                args.timeoutMs,
+                DEFAULT_BASH_TIMEOUT_MS,
+                MIN_BASH_TIMEOUT_MS,
+                MAX_BASH_TIMEOUT_MS,
+              );
         return {
           ok: true,
           plan: {
             kind: "bridge",
-            toolName: context.executionTool as
-              | "host_bash"
-              | "browser_bash",
+            toolName: context.executionTool as "host_bash" | "browser_bash",
             capability: CAPABILITIES.processExec,
             frame: {
               tool: "bash",
@@ -4682,16 +5542,20 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 cmdId: "bash.exec",
                 args: [command],
                 runtime: forcedRuntime,
-                ...(timeoutMs == null ? {} : { timeoutMs })
-              }
-            }
-          }
+                ...(timeoutMs == null ? {} : { timeoutMs }),
+              },
+            },
+          },
         };
       }
       case "host_read_file":
       case "browser_read_file": {
         const path = String(args.path || "").trim();
-        if (!path) return { ok: false, error: { error: `${context.executionTool} 需要 path` } };
+        if (!path)
+          return {
+            ok: false,
+            error: { error: `${context.executionTool} 需要 path` },
+          };
         const forcedRuntime =
           context.executionTool === "host_read_file"
             ? "local"
@@ -4710,15 +5574,19 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             capability: CAPABILITIES.fsRead,
             frame: {
               tool: "read",
-              args: invokeArgs
-            }
-          }
+              args: invokeArgs,
+            },
+          },
         };
       }
       case "host_write_file":
       case "browser_write_file": {
         const path = String(args.path || "").trim();
-        if (!path) return { ok: false, error: { error: `${context.executionTool} 需要 path` } };
+        if (!path)
+          return {
+            ok: false,
+            error: { error: `${context.executionTool} 需要 path` },
+          };
         const forcedRuntime =
           context.executionTool === "host_write_file"
             ? "local"
@@ -4737,16 +5605,20 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 path,
                 content: String(args.content || ""),
                 mode: String(args.mode || "overwrite"),
-                runtime: forcedRuntime
-              }
-            }
-          }
+                runtime: forcedRuntime,
+              },
+            },
+          },
         };
       }
       case "host_edit_file":
       case "browser_edit_file": {
         const path = String(args.path || "").trim();
-        if (!path) return { ok: false, error: { error: `${context.executionTool} 需要 path` } };
+        if (!path)
+          return {
+            ok: false,
+            error: { error: `${context.executionTool} 需要 path` },
+          };
         const forcedRuntime =
           context.executionTool === "host_edit_file"
             ? "local"
@@ -4764,10 +5636,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               args: {
                 path,
                 edits: Array.isArray(args.edits) ? args.edits : [],
-                runtime: forcedRuntime
-              }
-            }
-          }
+                runtime: forcedRuntime,
+              },
+            },
+          },
         };
       }
       case "get_all_tabs":
@@ -4776,16 +5648,17 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         return { ok: true, plan: { kind: "local.current_tab" } };
       case "create_new_tab": {
         const rawUrl = String(args.url || "").trim();
-        if (!rawUrl) return { ok: false, error: { error: "create_new_tab 需要 url" } };
+        if (!rawUrl)
+          return { ok: false, error: { error: "create_new_tab 需要 url" } };
         return {
           ok: true,
           plan: {
             kind: "local.create_new_tab",
             args: {
               url: rawUrl,
-              active: args.active
-            }
-          }
+              active: args.active,
+            },
+          },
         };
       }
       case "get_tab_info": {
@@ -4793,21 +5666,30 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!tabId) {
           return {
             ok: false,
-            error: attachFailureProtocol("get_tab_info", {
-              error: "get_tab_info 需要 tabId，当前无可用 tab",
-              errorCode: "E_NO_TAB",
-              errorReason: "failed_execute",
-              retryable: true,
-              retryHint: "Call get_all_tabs and retry get_tab_info with a valid tabId."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+            error: attachFailureProtocol(
+              "get_tab_info",
+              {
+                error: "get_tab_info 需要 tabId，当前无可用 tab",
+                errorCode: "E_NO_TAB",
+                errorReason: "failed_execute",
+                retryable: true,
+                retryHint:
+                  "Call get_all_tabs and retry get_tab_info with a valid tabId.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            ),
           };
         }
         return {
           ok: true,
           plan: {
             kind: "local.get_tab_info",
-            tabId
-          }
+            tabId,
+          },
         };
       }
       case "close_tab": {
@@ -4817,16 +5699,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             ok: true,
             plan: {
               kind: "local.close_tab",
-              tabId: explicitTabId
-            }
+              tabId: explicitTabId,
+            },
           };
         }
         return {
           ok: true,
           plan: {
             kind: "local.close_tab",
-            tabId: null
-          }
+            tabId: null,
+          },
         };
       }
       case "ungroup_tabs": {
@@ -4835,8 +5717,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           ok: true,
           plan: {
             kind: "local.ungroup_tabs",
-            windowId: windowId || null
-          }
+            windowId: windowId || null,
+          },
         };
       }
       case "search_elements": {
@@ -4844,17 +5726,28 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!tabId) {
           return {
             ok: false,
-            error: attachFailureProtocol("search_elements", {
-              error: "search_elements 需要 tabId，当前无可用 tab",
-              errorCode: "E_NO_TAB",
-              errorReason: "failed_execute",
-              retryable: true,
-              retryHint: "Call get_all_tabs and retry search_elements with a valid tabId."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+            error: attachFailureProtocol(
+              "search_elements",
+              {
+                error: "search_elements 需要 tabId，当前无可用 tab",
+                errorCode: "E_NO_TAB",
+                errorReason: "failed_execute",
+                retryable: true,
+                retryHint:
+                  "Call get_all_tabs and retry search_elements with a valid tabId.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            ),
           };
         }
         const maxResultsRaw = Number(args.maxResults);
-        const maxResults = Number.isFinite(maxResultsRaw) ? Math.max(1, Math.min(120, Math.floor(maxResultsRaw))) : 20;
+        const maxResults = Number.isFinite(maxResultsRaw)
+          ? Math.max(1, Math.min(120, Math.floor(maxResultsRaw)))
+          : 20;
         return {
           ok: true,
           plan: {
@@ -4871,9 +5764,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               diff: args.diff === true,
               maxTokens: args.maxTokens,
               depth: args.depth,
-              noAnimations: args.noAnimations === true
-            }
-          }
+              noAnimations: args.noAnimations === true,
+            },
+          },
         };
       }
       case "click":
@@ -4881,7 +5774,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       case "fill_element_by_uid":
         return await buildUidActionPlan("fill_element_by_uid", "fill");
       case "select_option_by_uid":
-        return await buildUidActionPlan("select_option_by_uid", "select", { requireValue: true });
+        return await buildUidActionPlan("select_option_by_uid", "select", {
+          requireValue: true,
+        });
       case "hover_element_by_uid":
         return await buildUidActionPlan("hover_element_by_uid", "hover");
       case "get_editor_value":
@@ -4899,13 +5794,22 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!tabId) {
           return {
             ok: false,
-            error: attachFailureProtocol("get_page_metadata", {
-              error: "get_page_metadata 需要 tabId，当前无可用 tab",
-              errorCode: "E_NO_TAB",
-              errorReason: "failed_execute",
-              retryable: true,
-              retryHint: "Call get_all_tabs and retry get_page_metadata with a valid tabId."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+            error: attachFailureProtocol(
+              "get_page_metadata",
+              {
+                error: "get_page_metadata 需要 tabId，当前无可用 tab",
+                errorCode: "E_NO_TAB",
+                errorReason: "failed_execute",
+                retryable: true,
+                retryHint:
+                  "Call get_all_tabs and retry get_page_metadata with a valid tabId.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            ),
           };
         }
         const expression = `(() => {
@@ -4933,8 +5837,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             capability: CAPABILITIES.browserAction,
             tabId,
             expression,
-            expect: null
-          }
+            expect: null,
+          },
         };
       }
       case "highlight_element": {
@@ -4942,31 +5846,50 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!tabId) {
           return {
             ok: false,
-            error: attachFailureProtocol("highlight_element", {
-              error: "highlight_element 需要 tabId，当前无可用 tab",
-              errorCode: "E_NO_TAB",
-              errorReason: "failed_execute",
-              retryable: true,
-              retryHint: "Call get_all_tabs and retry highlight_element with a valid tabId."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+            error: attachFailureProtocol(
+              "highlight_element",
+              {
+                error: "highlight_element 需要 tabId，当前无可用 tab",
+                errorCode: "E_NO_TAB",
+                errorReason: "failed_execute",
+                retryable: true,
+                retryHint:
+                  "Call get_all_tabs and retry highlight_element with a valid tabId.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            ),
           };
         }
         const selector = String(args.selector || "").trim();
         if (!selector) {
           return {
             ok: false,
-            error: attachFailureProtocol("highlight_element", {
-              error: "highlight_element 需要 selector",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide selector and retry highlight_element."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+            error: attachFailureProtocol(
+              "highlight_element",
+              {
+                error: "highlight_element 需要 selector",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint: "Provide selector and retry highlight_element.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            ),
           };
         }
         const color = String(args.color || "#00d4ff");
         const durationMs = Number(args.durationMs ?? 1600);
-        const normalizedDuration = Number.isFinite(durationMs) ? Math.max(0, Math.min(30_000, Math.floor(durationMs))) : 1600;
+        const normalizedDuration = Number.isFinite(durationMs)
+          ? Math.max(0, Math.min(30_000, Math.floor(durationMs)))
+          : 1600;
         const expression = `(() => {
           const selector = ${JSON.stringify(selector)};
           const color = ${JSON.stringify(color)};
@@ -5003,8 +5926,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             capability: CAPABILITIES.browserAction,
             tabId,
             expression,
-            expect: normalizeVerifyExpect(args.expect || null)
-          }
+            expect: normalizeVerifyExpect(args.expect || null),
+          },
         };
       }
       case "highlight_text_inline": {
@@ -5012,13 +5935,22 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!tabId) {
           return {
             ok: false,
-            error: attachFailureProtocol("highlight_text_inline", {
-              error: "highlight_text_inline 需要 tabId，当前无可用 tab",
-              errorCode: "E_NO_TAB",
-              errorReason: "failed_execute",
-              retryable: true,
-              retryHint: "Call get_all_tabs and retry highlight_text_inline with a valid tabId."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+            error: attachFailureProtocol(
+              "highlight_text_inline",
+              {
+                error: "highlight_text_inline 需要 tabId，当前无可用 tab",
+                errorCode: "E_NO_TAB",
+                errorReason: "failed_execute",
+                retryable: true,
+                retryHint:
+                  "Call get_all_tabs and retry highlight_text_inline with a valid tabId.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            ),
           };
         }
         const selector = String(args.selector || "").trim();
@@ -5026,13 +5958,22 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!selector || !searchText) {
           return {
             ok: false,
-            error: attachFailureProtocol("highlight_text_inline", {
-              error: "highlight_text_inline 需要 selector 和 searchText",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide selector + searchText and retry highlight_text_inline."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+            error: attachFailureProtocol(
+              "highlight_text_inline",
+              {
+                error: "highlight_text_inline 需要 selector 和 searchText",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint:
+                  "Provide selector + searchText and retry highlight_text_inline.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            ),
           };
         }
         const caseSensitive = args.caseSensitive === true;
@@ -5093,30 +6034,48 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             capability: CAPABILITIES.browserAction,
             tabId,
             expression,
-            expect: normalizeVerifyExpect(args.expect || null)
-          }
+            expect: normalizeVerifyExpect(args.expect || null),
+          },
         };
       }
       case "capture_screenshot":
       case "capture_tab_screenshot":
       case "capture_screenshot_with_highlight": {
-        const requested = context.executionTool as "capture_screenshot" | "capture_tab_screenshot" | "capture_screenshot_with_highlight";
+        const requested = context.executionTool as
+          | "capture_screenshot"
+          | "capture_tab_screenshot"
+          | "capture_screenshot_with_highlight";
         const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
         if (!tabId) {
           return {
             ok: false,
-            error: attachFailureProtocol(requested, {
-              error: `${requested} 需要 tabId，当前无可用 tab`,
-              errorCode: "E_NO_TAB",
-              errorReason: "failed_execute",
-              retryable: true,
-              retryHint: `Call get_all_tabs and retry ${requested} with a valid tabId.`
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+            error: attachFailureProtocol(
+              requested,
+              {
+                error: `${requested} 需要 tabId，当前无可用 tab`,
+                errorCode: "E_NO_TAB",
+                errorReason: "failed_execute",
+                retryable: true,
+                retryHint: `Call get_all_tabs and retry ${requested} with a valid tabId.`,
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            ),
           };
         }
-        const format = String(args.format || "png").trim().toLowerCase() === "jpeg" ? "jpeg" : "png";
+        const format =
+          String(args.format || "png")
+            .trim()
+            .toLowerCase() === "jpeg"
+            ? "jpeg"
+            : "png";
         const qualityRaw = Number(args.quality);
-        const quality = Number.isFinite(qualityRaw) ? Math.max(0, Math.min(100, Math.floor(qualityRaw))) : null;
+        const quality = Number.isFinite(qualityRaw)
+          ? Math.max(0, Math.min(100, Math.floor(qualityRaw)))
+          : null;
         return {
           ok: true,
           plan: {
@@ -5126,8 +6085,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             format,
             quality,
             selector: String(args.selector || "").trim(),
-            sendToLLM: args.sendToLLM !== false
-          }
+            sendToLLM: args.sendToLLM !== false,
+          },
         };
       }
       case "download_image": {
@@ -5135,90 +6094,141 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!imageData.startsWith("data:image/")) {
           return {
             ok: false,
-            error: attachFailureProtocol("download_image", {
-              error: "download_image 需要 data:image/* 格式 imageData",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide a valid data:image URL and retry download_image."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+            error: attachFailureProtocol(
+              "download_image",
+              {
+                error: "download_image 需要 data:image/* 格式 imageData",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint:
+                  "Provide a valid data:image URL and retry download_image.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "replan",
+              },
+            ),
           };
         }
         const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
         if (!tabId) {
           return {
             ok: false,
-            error: attachFailureProtocol("download_image", {
-              error: "download_image 需要 tabId，当前无可用 tab",
-              errorCode: "E_NO_TAB",
-              errorReason: "failed_execute",
-              retryable: true,
-              retryHint: "Call get_all_tabs and retry download_image with a valid tabId."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+            error: attachFailureProtocol(
+              "download_image",
+              {
+                error: "download_image 需要 tabId，当前无可用 tab",
+                errorCode: "E_NO_TAB",
+                errorReason: "failed_execute",
+                retryable: true,
+                retryHint:
+                  "Call get_all_tabs and retry download_image with a valid tabId.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            ),
           };
         }
         const fallbackName = `image-${Date.now()}.png`;
-        const filename = normalizeDownloadFilename(String(args.filename || ""), fallbackName);
+        const filename = normalizeDownloadFilename(
+          String(args.filename || ""),
+          fallbackName,
+        );
         return {
           ok: true,
           plan: {
             kind: "step.download_image",
             tabId,
             imageData,
-            filename
-          }
+            filename,
+          },
         };
       }
       case "download_chat_images": {
-        const rawMessages = Array.isArray(args.messages) ? (args.messages as unknown[]) : [];
-        const strategy = String(args.filenamingStrategy || "descriptive").trim().toLowerCase();
+        const rawMessages = Array.isArray(args.messages)
+          ? (args.messages as unknown[])
+          : [];
+        const strategy = String(args.filenamingStrategy || "descriptive")
+          .trim()
+          .toLowerCase();
         const files: Array<{ imageData: string; filename: string }> = [];
         let index = 0;
         for (const message of rawMessages) {
           const messageRecord = toRecord(message);
-          const parts = Array.isArray(messageRecord.parts) ? (messageRecord.parts as unknown[]) : [];
+          const parts = Array.isArray(messageRecord.parts)
+            ? (messageRecord.parts as unknown[])
+            : [];
           for (const part of parts) {
             const partRecord = toRecord(part);
-            if (String(partRecord.type || "").trim().toLowerCase() !== "image") continue;
+            if (
+              String(partRecord.type || "")
+                .trim()
+                .toLowerCase() !== "image"
+            )
+              continue;
             const imageData = String(partRecord.imageData || "").trim();
             if (!imageData.startsWith("data:image/")) continue;
             index += 1;
             const imageTitle = String(partRecord.imageTitle || "").trim();
             const messageId = String(messageRecord.id || "").trim();
-            const stem = strategy === "sequential"
-              ? `image-${String(index).padStart(3, "0")}`
-              : strategy === "timestamp"
-                ? `image-${Date.now()}-${index}`
-                : imageTitle || messageId || `image-${index}`;
+            const stem =
+              strategy === "sequential"
+                ? `image-${String(index).padStart(3, "0")}`
+                : strategy === "timestamp"
+                  ? `image-${Date.now()}-${index}`
+                  : imageTitle || messageId || `image-${index}`;
             files.push({
               imageData,
-              filename: normalizeDownloadFilename(stem, `image-${index}`)
+              filename: normalizeDownloadFilename(stem, `image-${index}`),
             });
           }
         }
         if (!files.length) {
           return {
             ok: false,
-            error: attachFailureProtocol("download_chat_images", {
-              error: "download_chat_images 未找到可下载的 imageData",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide messages[].parts[].imageData with data:image URL."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+            error: attachFailureProtocol(
+              "download_chat_images",
+              {
+                error: "download_chat_images 未找到可下载的 imageData",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint:
+                  "Provide messages[].parts[].imageData with data:image URL.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "replan",
+              },
+            ),
           };
         }
         const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
         if (!tabId) {
           return {
             ok: false,
-            error: attachFailureProtocol("download_chat_images", {
-              error: "download_chat_images 需要 tabId，当前无可用 tab",
-              errorCode: "E_NO_TAB",
-              errorReason: "failed_execute",
-              retryable: true,
-              retryHint: "Call get_all_tabs and retry download_chat_images with a valid tabId."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+            error: attachFailureProtocol(
+              "download_chat_images",
+              {
+                error: "download_chat_images 需要 tabId，当前无可用 tab",
+                errorCode: "E_NO_TAB",
+                errorReason: "failed_execute",
+                retryable: true,
+                retryHint:
+                  "Call get_all_tabs and retry download_chat_images with a valid tabId.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            ),
           };
         }
         return {
@@ -5226,8 +6236,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           plan: {
             kind: "step.download_chat_images",
             tabId,
-            files
-          }
+            files,
+          },
         };
       }
       case "computer": {
@@ -5235,26 +6245,45 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!tabId) {
           return {
             ok: false,
-            error: attachFailureProtocol("computer", {
-              error: "computer 需要 tabId，当前无可用 tab",
-              errorCode: "E_NO_TAB",
-              errorReason: "failed_execute",
-              retryable: true,
-              retryHint: "Call get_all_tabs and retry computer with a valid tabId."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+            error: attachFailureProtocol(
+              "computer",
+              {
+                error: "computer 需要 tabId，当前无可用 tab",
+                errorCode: "E_NO_TAB",
+                errorReason: "failed_execute",
+                retryable: true,
+                retryHint:
+                  "Call get_all_tabs and retry computer with a valid tabId.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            ),
           };
         }
-        const action = String(args.action || "").trim().toLowerCase();
+        const action = String(args.action || "")
+          .trim()
+          .toLowerCase();
         if (!action) {
           return {
             ok: false,
-            error: attachFailureProtocol("computer", {
-              error: "computer 需要 action",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide action and retry computer."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+            error: attachFailureProtocol(
+              "computer",
+              {
+                error: "computer 需要 action",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint: "Provide action and retry computer.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "replan",
+              },
+            ),
           };
         }
         return {
@@ -5266,12 +6295,18 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             coordinate: toCoordinatePair(args.coordinate),
             startCoordinate: toCoordinatePair(args.start_coordinate),
             text: String(args.text || "").trim(),
-            scrollDirection: String(args.scroll_direction || "").trim().toLowerCase(),
-            scrollAmount: Number.isFinite(Number(args.scroll_amount)) ? Number(args.scroll_amount) : null,
-            durationSec: Number.isFinite(Number(args.duration)) ? Number(args.duration) : null,
+            scrollDirection: String(args.scroll_direction || "")
+              .trim()
+              .toLowerCase(),
+            scrollAmount: Number.isFinite(Number(args.scroll_amount))
+              ? Number(args.scroll_amount)
+              : null,
+            durationSec: Number.isFinite(Number(args.duration))
+              ? Number(args.duration)
+              : null,
             uid: String(args.uid || "").trim(),
-            selector: String(args.selector || "").trim()
-          }
+            selector: String(args.selector || "").trim(),
+          },
         };
       }
       case "list_interventions":
@@ -5279,29 +6314,38 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           ok: true,
           plan: {
             kind: "local.list_interventions",
-            enabledOnly: args.enabledOnly === true
-          }
+            enabledOnly: args.enabledOnly === true,
+          },
         };
       case "get_intervention_info": {
         const type = normalizeInterventionType(args.type);
         if (!type) {
           return {
             ok: false,
-            error: attachFailureProtocol("get_intervention_info", {
-              error: "get_intervention_info 需要 type",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide intervention type and retry get_intervention_info."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+            error: attachFailureProtocol(
+              "get_intervention_info",
+              {
+                error: "get_intervention_info 需要 type",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint:
+                  "Provide intervention type and retry get_intervention_info.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "replan",
+              },
+            ),
           };
         }
         return {
           ok: true,
           plan: {
             kind: "local.get_intervention_info",
-            interventionType: type
-          }
+            interventionType: type,
+          },
         };
       }
       case "request_intervention": {
@@ -5309,17 +6353,28 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!type) {
           return {
             ok: false,
-            error: attachFailureProtocol("request_intervention", {
-              error: "request_intervention 需要 type",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide intervention type and retry request_intervention."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+            error: attachFailureProtocol(
+              "request_intervention",
+              {
+                error: "request_intervention 需要 type",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint:
+                  "Provide intervention type and retry request_intervention.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "replan",
+              },
+            ),
           };
         }
         const timeoutSecRaw = Number(args.timeout ?? 300);
-        const timeoutSec = Number.isFinite(timeoutSecRaw) ? Math.max(30, Math.min(3600, Math.floor(timeoutSecRaw))) : 300;
+        const timeoutSec = Number.isFinite(timeoutSecRaw)
+          ? Math.max(30, Math.min(3600, Math.floor(timeoutSecRaw)))
+          : 300;
         return {
           ok: true,
           plan: {
@@ -5328,8 +6383,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             interventionType: type,
             params: toRecord(args.params),
             timeoutSec,
-            reason: String(args.reason || "").trim()
-          }
+            reason: String(args.reason || "").trim(),
+          },
         };
       }
       case "cancel_intervention":
@@ -5338,16 +6393,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           plan: {
             kind: "local.cancel_intervention",
             sessionId,
-            requestId: String(args.id || "").trim()
-          }
+            requestId: String(args.id || "").trim(),
+          },
         };
       case "list_skills":
         return {
           ok: true,
           plan: {
             kind: "local.list_skills",
-            enabledOnly: args.enabledOnly === true
-          }
+            enabledOnly: args.enabledOnly === true,
+          },
         };
       case "create_skill": {
         const skillName = String(args.name || args.id || "").trim();
@@ -5355,13 +6410,22 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!skillName || !description) {
           return {
             ok: false,
-            error: attachFailureProtocol("create_skill", {
-              error: "create_skill 需要 name/id 和 description",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide name(id optional) + description and retry create_skill."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+            error: attachFailureProtocol(
+              "create_skill",
+              {
+                error: "create_skill 需要 name/id 和 description",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint:
+                  "Provide name(id optional) + description and retry create_skill.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "replan",
+              },
+            ),
           };
         }
         return {
@@ -5369,8 +6433,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           plan: {
             kind: "local.create_skill",
             sessionId,
-            input: args
-          }
+            input: args,
+          },
         };
       }
       case "get_skill_info": {
@@ -5378,21 +6442,29 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!skillName) {
           return {
             ok: false,
-            error: attachFailureProtocol("get_skill_info", {
-              error: "get_skill_info 需要 skillName",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide skillName and retry get_skill_info."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+            error: attachFailureProtocol(
+              "get_skill_info",
+              {
+                error: "get_skill_info 需要 skillName",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint: "Provide skillName and retry get_skill_info.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "replan",
+              },
+            ),
           };
         }
         return {
           ok: true,
           plan: {
             kind: "local.get_skill_info",
-            skillName
-          }
+            skillName,
+          },
         };
       }
       case "load_skill": {
@@ -5400,13 +6472,21 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!skillName) {
           return {
             ok: false,
-            error: attachFailureProtocol("load_skill", {
-              error: "load_skill 需要 name",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide skill name and retry load_skill."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+            error: attachFailureProtocol(
+              "load_skill",
+              {
+                error: "load_skill 需要 name",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint: "Provide skill name and retry load_skill.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "replan",
+              },
+            ),
           };
         }
         return {
@@ -5414,8 +6494,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           plan: {
             kind: "local.load_skill",
             sessionId,
-            skillName
-          }
+            skillName,
+          },
         };
       }
       case "read_skill_reference": {
@@ -5424,13 +6504,22 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!skillName || !refPath) {
           return {
             ok: false,
-            error: attachFailureProtocol("read_skill_reference", {
-              error: "read_skill_reference 需要 skillName 和 refPath",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide skillName + refPath and retry read_skill_reference."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+            error: attachFailureProtocol(
+              "read_skill_reference",
+              {
+                error: "read_skill_reference 需要 skillName 和 refPath",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint:
+                  "Provide skillName + refPath and retry read_skill_reference.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "replan",
+              },
+            ),
           };
         }
         return {
@@ -5439,8 +6528,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             kind: "local.read_skill_reference",
             sessionId,
             skillName,
-            refPath
-          }
+            refPath,
+          },
         };
       }
       case "get_skill_asset": {
@@ -5449,13 +6538,22 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!skillName || !assetPath) {
           return {
             ok: false,
-            error: attachFailureProtocol("get_skill_asset", {
-              error: "get_skill_asset 需要 skillName 和 assetPath",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide skillName + assetPath and retry get_skill_asset."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+            error: attachFailureProtocol(
+              "get_skill_asset",
+              {
+                error: "get_skill_asset 需要 skillName 和 assetPath",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint:
+                  "Provide skillName + assetPath and retry get_skill_asset.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "replan",
+              },
+            ),
           };
         }
         return {
@@ -5464,8 +6562,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             kind: "local.get_skill_asset",
             sessionId,
             skillName,
-            assetPath
-          }
+            assetPath,
+          },
         };
       }
       case "execute_skill_script": {
@@ -5474,13 +6572,22 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!skillName || !scriptPath) {
           return {
             ok: false,
-            error: attachFailureProtocol("execute_skill_script", {
-              error: "execute_skill_script 需要 skillName 和 scriptPath",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide skillName + scriptPath and retry execute_skill_script."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+            error: attachFailureProtocol(
+              "execute_skill_script",
+              {
+                error: "execute_skill_script 需要 skillName 和 scriptPath",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint:
+                  "Provide skillName + scriptPath and retry execute_skill_script.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "replan",
+              },
+            ),
           };
         }
         return {
@@ -5490,8 +6597,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             sessionId,
             skillName,
             scriptPath,
-            scriptArgs: args.args
-          }
+            scriptArgs: args.args,
+          },
         };
       }
       case "fill_form": {
@@ -5499,16 +6606,27 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!tabId) {
           return {
             ok: false,
-            error: attachFailureProtocol("fill_form", {
-              error: "fill_form 需要 tabId，当前无可用 tab",
-              errorCode: "E_NO_TAB",
-              errorReason: "failed_execute",
-              retryable: true,
-              retryHint: "Call get_all_tabs and retry fill_form with a valid tabId."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+            error: attachFailureProtocol(
+              "fill_form",
+              {
+                error: "fill_form 需要 tabId，当前无可用 tab",
+                errorCode: "E_NO_TAB",
+                errorReason: "failed_execute",
+                retryable: true,
+                retryHint:
+                  "Call get_all_tabs and retry fill_form with a valid tabId.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            ),
           };
         }
-        const rawElements = Array.isArray(args.elements) ? (args.elements as unknown[]) : [];
+        const rawElements = Array.isArray(args.elements)
+          ? (args.elements as unknown[])
+          : [];
         const elements = rawElements
           .map((item) => toRecord(item))
           .map((item) => ({
@@ -5516,7 +6634,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             ref: String(item.ref || "").trim(),
             selector: String(item.selector || "").trim(),
             backendNodeId: parsePositiveInt(item.backendNodeId),
-            value: String(item.value || "")
+            value: String(item.value || ""),
           }))
           .filter((item) => item.value.length > 0);
         if (elements.length === 0) {
@@ -5524,20 +6642,35 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             ok: false,
             error: {
               error: "fill_form 需要 elements 且每项至少包含 value",
-              errorCode: "E_ARGS"
-            }
+              errorCode: "E_ARGS",
+            },
           };
         }
-        if (elements.some((item) => !item.uid && !item.ref && !item.backendNodeId && !item.selector)) {
+        if (
+          elements.some(
+            (item) =>
+              !item.uid && !item.ref && !item.backendNodeId && !item.selector,
+          )
+        ) {
           return {
             ok: false,
-            error: attachFailureProtocol("fill_form", {
-              error: "fill_form 每个字段都需要 uid/ref/backendNodeId（或 selector 兜底）。请先调用 search_elements。",
-              errorCode: "E_REF_REQUIRED",
-              errorReason: "failed_execute",
-              retryable: true,
-              retryHint: "Call search_elements and map each field to uid/ref before fill_form."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+            error: attachFailureProtocol(
+              "fill_form",
+              {
+                error:
+                  "fill_form 每个字段都需要 uid/ref/backendNodeId（或 selector 兜底）。请先调用 search_elements。",
+                errorCode: "E_REF_REQUIRED",
+                errorReason: "failed_execute",
+                retryable: true,
+                retryHint:
+                  "Call search_elements and map each field to uid/ref before fill_form.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            ),
           };
         }
         return {
@@ -5547,9 +6680,12 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             capability: CAPABILITIES.browserAction,
             tabId,
             elements,
-            submit: Object.keys(toRecord(args.submit)).length > 0 ? toRecord(args.submit) : null,
-            expect: normalizeVerifyExpect(args.expect || {}) || {}
-          }
+            submit:
+              Object.keys(toRecord(args.submit)).length > 0
+                ? toRecord(args.submit)
+                : null,
+            expect: normalizeVerifyExpect(args.expect || {}) || {},
+          },
         };
       }
       case "browser_verify": {
@@ -5557,26 +6693,44 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (!tabId) {
           return {
             ok: false,
-            error: attachFailureProtocol("browser_verify", {
-              error: "browser_verify 需要 tabId，当前无可用 tab",
-              errorCode: "E_NO_TAB",
-              errorReason: "failed_execute",
-              retryable: true,
-              retryHint: "Call get_all_tabs and retry browser_verify with a valid tabId."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" })
+            error: attachFailureProtocol(
+              "browser_verify",
+              {
+                error: "browser_verify 需要 tabId，当前无可用 tab",
+                errorCode: "E_NO_TAB",
+                errorReason: "failed_execute",
+                retryable: true,
+                retryHint:
+                  "Call get_all_tabs and retry browser_verify with a valid tabId.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            ),
           };
         }
         const verifyExpect = normalizeVerifyExpect(args.expect || args) || {};
         if (Object.keys(verifyExpect).length === 0) {
           return {
             ok: false,
-            error: attachFailureProtocol("browser_verify", {
-              error: "browser_verify 需要明确 expect（如 url/title/text/selector/urlChanged）",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide explicit expect and retry browser_verify."
-            }, { phase: "plan", category: "missing_target", resumeStrategy: "replan" })
+            error: attachFailureProtocol(
+              "browser_verify",
+              {
+                error:
+                  "browser_verify 需要明确 expect（如 url/title/text/selector/urlChanged）",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint: "Provide explicit expect and retry browser_verify.",
+              },
+              {
+                phase: "plan",
+                category: "missing_target",
+                resumeStrategy: "replan",
+              },
+            ),
           };
         }
         return {
@@ -5585,8 +6739,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             kind: "step.browser_verify",
             capability: CAPABILITIES.browserVerify,
             tabId,
-            verifyExpect
-          }
+            verifyExpect,
+          },
         };
       }
       default:
@@ -5597,11 +6751,19 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               kind: "custom.invoke",
               toolName: context.resolvedTool,
               capability: context.customExecution.capability,
-              ...(context.customExecution.mode ? { mode: context.customExecution.mode } : {}),
-              action: String(context.customExecution.action || context.resolvedTool || context.requestedTool).trim(),
+              ...(context.customExecution.mode
+                ? { mode: context.customExecution.mode }
+                : {}),
+              action: String(
+                context.customExecution.action ||
+                  context.resolvedTool ||
+                  context.requestedTool,
+              ).trim(),
               args,
-              ...(context.customExecution.verifyPolicy ? { verifyPolicy: context.customExecution.verifyPolicy } : {})
-            }
+              ...(context.customExecution.verifyPolicy
+                ? { verifyPolicy: context.customExecution.verifyPolicy }
+                : {}),
+            },
           };
         }
         return {
@@ -5609,16 +6771,24 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           error: buildUnsupportedToolError({
             requestedTool: context.requestedTool,
             resolvedTool: context.resolvedTool,
-            hasContract: true
-          })
+            hasContract: true,
+          }),
         };
     }
   }
 
-  async function dispatchToolPlan(sessionId: string, plan: ToolPlan): Promise<JsonRecord> {
+  async function dispatchToolPlan(
+    sessionId: string,
+    plan: ToolPlan,
+  ): Promise<JsonRecord> {
     switch (plan.kind) {
       case "bridge":
-        return await invokeBridgeFrameWithRetry(sessionId, plan.toolName, plan.frame, plan.capability);
+        return await invokeBridgeFrameWithRetry(
+          sessionId,
+          plan.toolName,
+          plan.frame,
+          plan.capability,
+        );
       case "custom.invoke": {
         const out = await executeStep({
           sessionId,
@@ -5626,7 +6796,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           capability: plan.capability,
           action: plan.action,
           args: plan.args,
-          verifyPolicy: plan.verifyPolicy || "off"
+          verifyPolicy: plan.verifyPolicy || "off",
         });
         if (!out.ok) {
           return buildStepFailureEnvelope(
@@ -5636,15 +6806,15 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             `Retry ${plan.toolName} with valid arguments/capability provider.`,
             {
               phase: "execute",
-              resumeStrategy: "replan"
-            }
+              resumeStrategy: "replan",
+            },
           );
         }
         return buildToolResponseEnvelope("invoke", out.data, {
           capabilityUsed: out.capabilityUsed || plan.capability,
           modeUsed: out.modeUsed,
           providerId: out.providerId,
-          fallbackFrom: out.fallbackFrom
+          fallbackFrom: out.fallbackFrom,
         });
       }
       case "local.get_all_tabs": {
@@ -5653,22 +6823,23 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         return buildToolResponseEnvelope("tabs", {
           count: tabs.length,
           activeTabId,
-          tabs
+          tabs,
         });
       }
       case "local.current_tab": {
         const tabs = await queryAllTabsForRuntime();
         const activeTabId = await getActiveTabIdForRuntime();
-        const tab = tabs.find((item) => Number(item.id) === Number(activeTabId)) || null;
+        const tab =
+          tabs.find((item) => Number(item.id) === Number(activeTabId)) || null;
         return buildToolResponseEnvelope("tabs", {
           activeTabId,
-          tab
+          tab,
         });
       }
       case "local.create_new_tab": {
         const created = await chrome.tabs.create({
           url: String(plan.args.url || ""),
-          active: plan.args.active !== false
+          active: plan.args.active !== false,
         });
         return buildToolResponseEnvelope("tabs", {
           opened: true,
@@ -5677,20 +6848,29 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             windowId: created?.windowId || null,
             active: created?.active === true,
             title: created?.title || "",
-            url: created?.url || created?.pendingUrl || ""
-          }
+            url: created?.url || created?.pendingUrl || "",
+          },
         });
       }
       case "local.get_tab_info": {
         const tab = await chrome.tabs.get(plan.tabId).catch(() => null);
         if (!tab?.id) {
-          return attachFailureProtocol("get_tab_info", {
-            error: `tab 不存在: ${plan.tabId}`,
-            errorCode: "E_NO_TAB",
-            errorReason: "failed_execute",
-            retryable: true,
-            retryHint: "Call get_all_tabs and retry get_tab_info with a valid tabId."
-          }, { phase: "execute", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" });
+          return attachFailureProtocol(
+            "get_tab_info",
+            {
+              error: `tab 不存在: ${plan.tabId}`,
+              errorCode: "E_NO_TAB",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint:
+                "Call get_all_tabs and retry get_tab_info with a valid tabId.",
+            },
+            {
+              phase: "execute",
+              category: "missing_target",
+              resumeStrategy: "retry_with_fresh_snapshot",
+            },
+          );
         }
         return buildToolResponseEnvelope("tab_info", {
           id: Number(tab.id),
@@ -5699,7 +6879,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           active: tab.active === true,
           pinned: tab.pinned === true,
           title: String(tab.title || ""),
-          url: String(tab.url || tab.pendingUrl || "")
+          url: String(tab.url || tab.pendingUrl || ""),
         });
       }
       case "local.close_tab": {
@@ -5708,74 +6888,109 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           tabId = await getActiveTabIdForRuntime();
         }
         if (!tabId) {
-          return attachFailureProtocol("close_tab", {
-            error: "close_tab 未找到可关闭 tab",
-            errorCode: "E_NO_TAB",
-            errorReason: "failed_execute",
-            retryable: true,
-            retryHint: "Call get_all_tabs then retry close_tab with tabId."
-          }, { phase: "execute", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" });
+          return attachFailureProtocol(
+            "close_tab",
+            {
+              error: "close_tab 未找到可关闭 tab",
+              errorCode: "E_NO_TAB",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint: "Call get_all_tabs then retry close_tab with tabId.",
+            },
+            {
+              phase: "execute",
+              category: "missing_target",
+              resumeStrategy: "retry_with_fresh_snapshot",
+            },
+          );
         }
         await chrome.tabs.remove(tabId).catch((error) => {
-          throw createRuntimeError(`close_tab 失败: ${error instanceof Error ? error.message : String(error)}`, {
-            code: "E_TOOL_EXECUTE",
-            retryable: true
-          });
+          throw createRuntimeError(
+            `close_tab 失败: ${error instanceof Error ? error.message : String(error)}`,
+            {
+              code: "E_TOOL_EXECUTE",
+              retryable: true,
+            },
+          );
         });
         return buildToolResponseEnvelope("close_tab", {
           success: true,
-          tabId
+          tabId,
         });
       }
       case "local.ungroup_tabs": {
-        const tabs = await chrome.tabs.query(plan.windowId ? { windowId: plan.windowId } : { currentWindow: true });
+        const tabs = await chrome.tabs.query(
+          plan.windowId ? { windowId: plan.windowId } : { currentWindow: true },
+        );
         let ungroupedCount = 0;
         for (const tab of tabs) {
           if (!tab?.id) continue;
-          if (typeof tab.groupId !== "number" || tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) continue;
+          if (
+            typeof tab.groupId !== "number" ||
+            tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE
+          )
+            continue;
           await chrome.tabs.ungroup(tab.id).catch(() => undefined);
           ungroupedCount += 1;
         }
         return buildToolResponseEnvelope("ungroup_tabs", {
           success: true,
           windowId: plan.windowId || null,
-          ungroupedCount
+          ungroupedCount,
         });
       }
       case "local.list_interventions": {
-        const interventions = Object.values(INTERVENTION_CATALOG).filter((item) => (plan.enabledOnly ? item.enabled : true));
+        const interventions = Object.values(INTERVENTION_CATALOG).filter(
+          (item) => (plan.enabledOnly ? item.enabled : true),
+        );
         return buildToolResponseEnvelope("list_interventions", {
           success: true,
           count: interventions.length,
-          interventions
+          interventions,
         });
       }
       case "local.get_intervention_info": {
         const info = INTERVENTION_CATALOG[plan.interventionType];
         if (!info) {
-          return attachFailureProtocol("get_intervention_info", {
-            error: `未知 intervention type: ${plan.interventionType}`,
-            errorCode: "E_ARGS",
-            errorReason: "failed_execute",
-            retryable: false,
-            retryHint: "Use list_interventions and retry with valid type."
-          }, { phase: "execute", category: "missing_target", resumeStrategy: "replan" });
+          return attachFailureProtocol(
+            "get_intervention_info",
+            {
+              error: `未知 intervention type: ${plan.interventionType}`,
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Use list_interventions and retry with valid type.",
+            },
+            {
+              phase: "execute",
+              category: "missing_target",
+              resumeStrategy: "replan",
+            },
+          );
         }
         return buildToolResponseEnvelope("get_intervention_info", {
           success: true,
-          intervention: info
+          intervention: info,
         });
       }
       case "local.request_intervention": {
         const info = INTERVENTION_CATALOG[plan.interventionType];
         if (!info) {
-          return attachFailureProtocol("request_intervention", {
-            error: `未知 intervention type: ${plan.interventionType}`,
-            errorCode: "E_ARGS",
-            errorReason: "failed_execute",
-            retryable: false,
-            retryHint: "Use list_interventions and retry with valid type."
-          }, { phase: "execute", category: "missing_target", resumeStrategy: "replan" });
+          return attachFailureProtocol(
+            "request_intervention",
+            {
+              error: `未知 intervention type: ${plan.interventionType}`,
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Use list_interventions and retry with valid type.",
+            },
+            {
+              phase: "execute",
+              category: "missing_target",
+              resumeStrategy: "replan",
+            },
+          );
         }
         const requestId = `ivr_${crypto.randomUUID()}`;
         interventionRequests.set(requestId, {
@@ -5786,7 +7001,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           reason: plan.reason,
           timeoutSec: plan.timeoutSec,
           status: "pending",
-          createdAt: nowIso()
+          createdAt: nowIso(),
         });
         return buildToolResponseEnvelope("request_intervention", {
           success: true,
@@ -5796,7 +7011,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           reason: plan.reason,
           params: plan.params,
           timeoutSec: plan.timeoutSec,
-          message: "User intervention requested. Please wait for human feedback."
+          message:
+            "User intervention requested. Please wait for human feedback.",
         });
       }
       case "local.cancel_intervention": {
@@ -5804,13 +7020,22 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (id) {
           const found = interventionRequests.get(id);
           if (!found) {
-            return attachFailureProtocol("cancel_intervention", {
-              error: `intervention 不存在: ${id}`,
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Use request_intervention result id or omit id to cancel pending queue."
-            }, { phase: "execute", category: "missing_target", resumeStrategy: "replan" });
+            return attachFailureProtocol(
+              "cancel_intervention",
+              {
+                error: `intervention 不存在: ${id}`,
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint:
+                  "Use request_intervention result id or omit id to cancel pending queue.",
+              },
+              {
+                phase: "execute",
+                category: "missing_target",
+                resumeStrategy: "replan",
+              },
+            );
           }
           found.status = "cancelled";
           interventionRequests.set(id, found);
@@ -5819,16 +7044,18 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         return buildToolResponseEnvelope("cancel_intervention", {
           success: true,
           id: id || null,
-          cancelled: id ? 1 : "all_pending_queue"
+          cancelled: id ? 1 : "all_pending_queue",
         });
       }
       case "local.list_skills": {
         const skills = await orchestrator.listSkills();
-        const filtered = plan.enabledOnly ? skills.filter((item) => item.enabled) : skills;
+        const filtered = plan.enabledOnly
+          ? skills.filter((item) => item.enabled)
+          : skills;
         return buildToolResponseEnvelope("list_skills", {
           success: true,
           count: filtered.length,
-          skills: filtered
+          skills: filtered,
         });
       }
       case "local.create_skill": {
@@ -5836,7 +7063,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         for (const file of normalized.writes) {
           await writeTextByLocation(plan.sessionId, file.path, file.content);
         }
-        const skill = await orchestrator.installSkill(normalized.skill, { replace: normalized.replace });
+        const skill = await orchestrator.installSkill(normalized.skill, {
+          replace: normalized.replace,
+        });
         return buildToolResponseEnvelope("create_skill", {
           success: true,
           sessionId: plan.sessionId,
@@ -5846,19 +7075,28 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           skillDir: normalized.skillDir,
           location: skill.location,
           fileCount: normalized.writes.length,
-          files: normalized.writes.map((item) => item.path)
+          files: normalized.writes.map((item) => item.path),
         });
       }
       case "local.get_skill_info": {
         const skill = await resolveSkillByName(plan.skillName);
         if (!skill) {
-          return attachFailureProtocol("get_skill_info", {
-            error: `skill 不存在: ${plan.skillName}`,
-            errorCode: "E_ARGS",
-            errorReason: "failed_execute",
-            retryable: false,
-            retryHint: "Use list_skills then retry get_skill_info with valid skillName."
-          }, { phase: "execute", category: "missing_target", resumeStrategy: "replan" });
+          return attachFailureProtocol(
+            "get_skill_info",
+            {
+              error: `skill 不存在: ${plan.skillName}`,
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint:
+                "Use list_skills then retry get_skill_info with valid skillName.",
+            },
+            {
+              phase: "execute",
+              category: "missing_target",
+              resumeStrategy: "replan",
+            },
+          );
         }
         const base = String(skill.location || "").replace(/\/[^/]*$/, "");
         return buildToolResponseEnvelope("get_skill_info", {
@@ -5868,109 +7106,165 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             paths: {
               scripts: `${base}/scripts/`,
               references: `${base}/references/`,
-              assets: `${base}/assets/`
-            }
-          }
+              assets: `${base}/assets/`,
+            },
+          },
         });
       }
       case "local.load_skill": {
         const skill = await resolveSkillByName(plan.skillName);
         if (!skill) {
-          return attachFailureProtocol("load_skill", {
-            error: `skill 不存在: ${plan.skillName}`,
-            errorCode: "E_ARGS",
-            errorReason: "failed_execute",
-            retryable: false,
-            retryHint: "Use list_skills then retry load_skill with valid name."
-          }, { phase: "execute", category: "missing_target", resumeStrategy: "replan" });
+          return attachFailureProtocol(
+            "load_skill",
+            {
+              error: `skill 不存在: ${plan.skillName}`,
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint:
+                "Use list_skills then retry load_skill with valid name.",
+            },
+            {
+              phase: "execute",
+              category: "missing_target",
+              resumeStrategy: "replan",
+            },
+          );
         }
-        const content = await readTextByLocation(plan.sessionId, skill.location);
+        const content = await readTextByLocation(
+          plan.sessionId,
+          skill.location,
+        );
         return buildToolResponseEnvelope("load_skill", {
           success: true,
           skill,
-          content
+          content,
         });
       }
       case "local.read_skill_reference": {
         const skill = await resolveSkillByName(plan.skillName);
         if (!skill) {
-          return attachFailureProtocol("read_skill_reference", {
-            error: `skill 不存在: ${plan.skillName}`,
-            errorCode: "E_ARGS",
-            errorReason: "failed_execute",
-            retryable: false,
-            retryHint: "Use list_skills then retry read_skill_reference with valid skillName."
-          }, { phase: "execute", category: "missing_target", resumeStrategy: "replan" });
+          return attachFailureProtocol(
+            "read_skill_reference",
+            {
+              error: `skill 不存在: ${plan.skillName}`,
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint:
+                "Use list_skills then retry read_skill_reference with valid skillName.",
+            },
+            {
+              phase: "execute",
+              category: "missing_target",
+              resumeStrategy: "replan",
+            },
+          );
         }
-        const normalizedRef = plan.refPath.startsWith("references/") ? plan.refPath : `references/${plan.refPath}`;
+        const normalizedRef = plan.refPath.startsWith("references/")
+          ? plan.refPath
+          : `references/${plan.refPath}`;
         const location = buildSkillChildLocation(skill.location, normalizedRef);
         const content = await readTextByLocation(plan.sessionId, location);
         return buildToolResponseEnvelope("read_skill_reference", {
           success: true,
           skill: {
             id: skill.id,
-            name: skill.name
+            name: skill.name,
           },
           refPath: normalizedRef,
           location,
-          content
+          content,
         });
       }
       case "local.get_skill_asset": {
         const skill = await resolveSkillByName(plan.skillName);
         if (!skill) {
-          return attachFailureProtocol("get_skill_asset", {
-            error: `skill 不存在: ${plan.skillName}`,
-            errorCode: "E_ARGS",
-            errorReason: "failed_execute",
-            retryable: false,
-            retryHint: "Use list_skills then retry get_skill_asset with valid skillName."
-          }, { phase: "execute", category: "missing_target", resumeStrategy: "replan" });
+          return attachFailureProtocol(
+            "get_skill_asset",
+            {
+              error: `skill 不存在: ${plan.skillName}`,
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint:
+                "Use list_skills then retry get_skill_asset with valid skillName.",
+            },
+            {
+              phase: "execute",
+              category: "missing_target",
+              resumeStrategy: "replan",
+            },
+          );
         }
-        const normalizedAsset = plan.assetPath.startsWith("assets/") ? plan.assetPath : `assets/${plan.assetPath}`;
-        const location = buildSkillChildLocation(skill.location, normalizedAsset);
+        const normalizedAsset = plan.assetPath.startsWith("assets/")
+          ? plan.assetPath
+          : `assets/${plan.assetPath}`;
+        const location = buildSkillChildLocation(
+          skill.location,
+          normalizedAsset,
+        );
         const content = await readTextByLocation(plan.sessionId, location);
         return buildToolResponseEnvelope("get_skill_asset", {
           success: true,
           skill: {
             id: skill.id,
-            name: skill.name
+            name: skill.name,
           },
           assetPath: normalizedAsset,
           location,
-          content
+          content,
         });
       }
       case "local.execute_skill_script": {
         const skill = await resolveSkillByName(plan.skillName);
         if (!skill) {
-          return attachFailureProtocol("execute_skill_script", {
-            error: `skill 不存在: ${plan.skillName}`,
-            errorCode: "E_ARGS",
-            errorReason: "failed_execute",
-            retryable: false,
-            retryHint: "Use list_skills then retry execute_skill_script with valid skillName."
-          }, { phase: "execute", category: "missing_target", resumeStrategy: "replan" });
+          return attachFailureProtocol(
+            "execute_skill_script",
+            {
+              error: `skill 不存在: ${plan.skillName}`,
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint:
+                "Use list_skills then retry execute_skill_script with valid skillName.",
+            },
+            {
+              phase: "execute",
+              category: "missing_target",
+              resumeStrategy: "replan",
+            },
+          );
         }
-        const normalizedScript = plan.scriptPath.startsWith("scripts/") ? plan.scriptPath : `scripts/${plan.scriptPath}`;
-        const location = buildSkillChildLocation(skill.location, normalizedScript);
+        const normalizedScript = plan.scriptPath.startsWith("scripts/")
+          ? plan.scriptPath
+          : `scripts/${plan.scriptPath}`;
+        const location = buildSkillChildLocation(
+          skill.location,
+          normalizedScript,
+        );
         if (isVirtualUri(location)) {
           const source = await readTextByLocation(plan.sessionId, location);
-          return attachFailureProtocol("execute_skill_script", {
-            error: "当前脚本位于虚拟文件系统，无法直接在本地 shell 执行",
-            errorCode: "E_TOOL_UNSUPPORTED",
-            errorReason: "failed_execute",
-            retryable: false,
-            retryHint: "Move script to host path or execute equivalent steps via host_bash/host_read_file.",
-            details: {
-              location,
-              sourcePreview: clipText(source, 1200)
-            }
-          }, {
-            phase: "execute",
-            category: "missing_target",
-            resumeStrategy: "replan"
-          });
+          return attachFailureProtocol(
+            "execute_skill_script",
+            {
+              error: "当前脚本位于虚拟文件系统，无法直接在本地 shell 执行",
+              errorCode: "E_TOOL_UNSUPPORTED",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint:
+                "Move script to host path or execute equivalent steps via host_bash/host_read_file.",
+              details: {
+                location,
+                sourcePreview: clipText(source, 1200),
+              },
+            },
+            {
+              phase: "execute",
+              category: "missing_target",
+              resumeStrategy: "replan",
+            },
+          );
         }
 
         const argPayload =
@@ -6001,11 +7295,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               args: {
                 cmdId: "bash.exec",
                 args: [command],
-                runtime: "local"
-              }
-            }
+                runtime: "local",
+              },
+            },
           },
-          verifyPolicy: "off"
+          verifyPolicy: "off",
         });
         if (!out.ok) {
           return buildStepFailureEnvelope(
@@ -6016,8 +7310,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             {
               defaultRetryable: true,
               phase: "execute",
-              resumeStrategy: "replan"
-            }
+              resumeStrategy: "replan",
+            },
           );
         }
         return buildToolResponseEnvelope("execute_skill_script", {
@@ -6025,12 +7319,12 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           executed: true,
           skill: {
             id: skill.id,
-            name: skill.name
+            name: skill.name,
           },
           scriptPath: normalizedScript,
           location,
           command,
-          result: out.data
+          result: out.data,
         });
       }
       case "step.search_elements": {
@@ -6040,8 +7334,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           action: "snapshot",
           args: {
             tabId: plan.tabId,
-            options: plan.options
-          }
+            options: plan.options,
+          },
         });
         if (!out.ok) {
           return buildStepFailureEnvelope(
@@ -6052,20 +7346,27 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             {
               defaultRetryable: true,
               phase: "execute",
-              resumeStrategy: "retry_with_fresh_snapshot"
-            }
+              resumeStrategy: "retry_with_fresh_snapshot",
+            },
           );
         }
         const snapshotData = toRecord(out.data);
-        const rawNodes = Array.isArray(snapshotData.nodes) ? (snapshotData.nodes as JsonRecord[]) : [];
-        const query = String(plan.query || "").trim().toLowerCase();
-        const needles = query.split(/\s+/).map((item) => item.trim()).filter(Boolean);
+        const rawNodes = Array.isArray(snapshotData.nodes)
+          ? (snapshotData.nodes as JsonRecord[])
+          : [];
+        const query = String(plan.query || "")
+          .trim()
+          .toLowerCase();
+        const needles = query
+          .split(/\s+/)
+          .map((item) => item.trim())
+          .filter(Boolean);
         const normalizedNodes = rawNodes.map((node) => {
           const ref = String(node.ref || "");
           return {
             ...node,
             uid: String(node.uid || ref),
-            ref
+            ref,
           };
         });
         const rankedNodes = normalizedNodes.map((node, index) => {
@@ -6074,7 +7375,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             node,
             index,
             score: ranked.score,
-            matchedNeedles: ranked.matchedNeedles
+            matchedNeedles: ranked.matchedNeedles,
           };
         });
         const filteredRanked = needles.length
@@ -6089,22 +7390,28 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               return a.index - b.index;
             })
           : filteredRanked;
-        const nodes = sortedRanked.slice(0, plan.maxResults).map((item) => item.node);
-        return buildToolResponseEnvelope("search_elements", {
-          query: plan.query,
-          tabId: plan.tabId,
-          count: nodes.length,
-          total: sortedRanked.length,
-          nodes,
-          snapshotId: String(snapshotData.snapshotId || ""),
-          url: String(snapshotData.url || ""),
-          title: String(snapshotData.title || "")
-        }, {
-          capabilityUsed: out.capabilityUsed || plan.capability,
-          modeUsed: out.modeUsed,
-          providerId: out.providerId,
-          fallbackFrom: out.fallbackFrom
-        });
+        const nodes = sortedRanked
+          .slice(0, plan.maxResults)
+          .map((item) => item.node);
+        return buildToolResponseEnvelope(
+          "search_elements",
+          {
+            query: plan.query,
+            tabId: plan.tabId,
+            count: nodes.length,
+            total: sortedRanked.length,
+            nodes,
+            snapshotId: String(snapshotData.snapshotId || ""),
+            url: String(snapshotData.url || ""),
+            title: String(snapshotData.title || ""),
+          },
+          {
+            capabilityUsed: out.capabilityUsed || plan.capability,
+            modeUsed: out.modeUsed,
+            providerId: out.providerId,
+            fallbackFrom: out.fallbackFrom,
+          },
+        );
       }
       case "step.element_action": {
         const out = await executeStep({
@@ -6114,8 +7421,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           args: {
             tabId: plan.tabId,
             action: plan.action,
-            expect: plan.expect
-          }
+            expect: plan.expect,
+          },
         });
         if (!out.ok) {
           return buildStepFailureEnvelope(
@@ -6126,32 +7433,43 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             {
               defaultRetryable: true,
               phase: "execute",
-              resumeStrategy: "retry_with_fresh_snapshot"
-            }
+              resumeStrategy: "retry_with_fresh_snapshot",
+            },
           );
         }
         const providerAction = toRecord(out.data);
-        const verified = typeof providerAction.verified === "boolean" ? providerAction.verified : out.verified;
-        const verifyReason = String(providerAction.verifyReason || out.verifyReason || "");
-        const actionData = providerAction.data !== undefined ? providerAction.data : out.data;
+        const verified =
+          typeof providerAction.verified === "boolean"
+            ? providerAction.verified
+            : out.verified;
+        const verifyReason = String(
+          providerAction.verifyReason || out.verifyReason || "",
+        );
+        const actionData =
+          providerAction.data !== undefined ? providerAction.data : out.data;
         const explicitExpect = normalizeVerifyExpect(plan.expect || null);
         const hardFail = !!explicitExpect;
         if (!verified && hardFail) {
           const errorReason = mapVerifyReasonToFailureReason(verifyReason);
-          return attachFailureProtocol(plan.toolName, {
-            error: `${plan.toolName} 执行成功但未通过验证`,
-            errorCode: "E_VERIFY_FAILED",
-            errorReason,
-            retryable: true,
-            retryHint: "Adjust action args/expect and retry the browser action.",
-            details: {
-              verifyReason,
-              data: actionData
-            }
-          }, {
-            phase: "verify",
-            resumeStrategy: "retry_with_fresh_snapshot"
-          });
+          return attachFailureProtocol(
+            plan.toolName,
+            {
+              error: `${plan.toolName} 执行成功但未通过验证`,
+              errorCode: "E_VERIFY_FAILED",
+              errorReason,
+              retryable: true,
+              retryHint:
+                "Adjust action args/expect and retry the browser action.",
+              details: {
+                verifyReason,
+                data: actionData,
+              },
+            },
+            {
+              phase: "verify",
+              resumeStrategy: "retry_with_fresh_snapshot",
+            },
+          );
         }
         return buildToolResponseEnvelope(plan.toolName, actionData, {
           capabilityUsed: out.capabilityUsed || plan.capability,
@@ -6159,7 +7477,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           providerId: out.providerId,
           fallbackFrom: out.fallbackFrom,
           verifyReason,
-          verified
+          verified,
         });
       }
       case "step.script_action": {
@@ -6169,23 +7487,30 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           action: {
             type: "runtime.evaluate",
             expression: plan.expression,
-            returnByValue: true
-          }
+            returnByValue: true,
+          },
         }).catch((error) => {
           const runtimeError = asRuntimeErrorWithMeta(error);
           return {
-            error: attachFailureProtocol(plan.toolName, {
-              error: runtimeError.message,
-              errorCode: normalizeErrorCode(runtimeError.code) || "E_TOOL_EXECUTE",
-              errorReason: "failed_execute",
-              retryable: runtimeError.retryable === true,
-              retryHint: "Re-observe page state and retry with updated selector/target.",
-              details: runtimeError.details
-            }, { phase: "execute", resumeStrategy: "retry_with_fresh_snapshot" })
+            error: attachFailureProtocol(
+              plan.toolName,
+              {
+                error: runtimeError.message,
+                errorCode:
+                  normalizeErrorCode(runtimeError.code) || "E_TOOL_EXECUTE",
+                errorReason: "failed_execute",
+                retryable: runtimeError.retryable === true,
+                retryHint:
+                  "Re-observe page state and retry with updated selector/target.",
+                details: runtimeError.details,
+              },
+              { phase: "execute", resumeStrategy: "retry_with_fresh_snapshot" },
+            ),
           };
         });
         if (toRecord(out).error) return toRecord(out).error as JsonRecord;
-        const resultValue = toRecord(toRecord(out).result).value ?? toRecord(out).result ?? out;
+        const resultValue =
+          toRecord(toRecord(out).result).value ?? toRecord(out).result ?? out;
         const expect = normalizeVerifyExpect(plan.expect || null);
         if (expect) {
           const verifyOut = await executeStep({
@@ -6195,30 +7520,40 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             args: {
               tabId: plan.tabId,
               action: {
-                expect
+                expect,
               },
-              result: resultValue
+              result: resultValue,
             },
-            verifyPolicy: "off"
+            verifyPolicy: "off",
           });
           if (!verifyOut.ok || verifyOut.verified !== true) {
-            return attachFailureProtocol(plan.toolName, {
-              error: `${plan.toolName} 后置验证失败`,
-              errorCode: normalizeErrorCode(verifyOut.errorCode) || "E_VERIFY_FAILED",
-              errorReason: mapVerifyReasonToFailureReason(verifyOut.verifyReason),
-              retryable: true,
-              retryHint: "Refine selector/expect and retry.",
-              details: verifyOut.data || verifyOut.errorDetails || null
-            }, { phase: "verify", resumeStrategy: "retry_with_fresh_snapshot" });
+            return attachFailureProtocol(
+              plan.toolName,
+              {
+                error: `${plan.toolName} 后置验证失败`,
+                errorCode:
+                  normalizeErrorCode(verifyOut.errorCode) || "E_VERIFY_FAILED",
+                errorReason: mapVerifyReasonToFailureReason(
+                  verifyOut.verifyReason,
+                ),
+                retryable: true,
+                retryHint: "Refine selector/expect and retry.",
+                details: verifyOut.data || verifyOut.errorDetails || null,
+              },
+              { phase: "verify", resumeStrategy: "retry_with_fresh_snapshot" },
+            );
           }
         }
         return buildToolResponseEnvelope(plan.toolName, resultValue, {
           capabilityUsed: plan.capability,
-          modeUsed: "cdp"
+          modeUsed: "cdp",
         });
       }
       case "step.capture_screenshot": {
-        if (plan.toolName === "capture_screenshot_with_highlight" && plan.selector) {
+        if (
+          plan.toolName === "capture_screenshot_with_highlight" &&
+          plan.selector
+        ) {
           const highlightExpression = `(() => {
             const selector = ${JSON.stringify(plan.selector)};
             const nodes = Array.from(document.querySelectorAll(selector));
@@ -6237,8 +7572,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             action: {
               type: "runtime.evaluate",
               expression: highlightExpression,
-              returnByValue: true
-            }
+              returnByValue: true,
+            },
           }).catch(() => undefined);
         }
 
@@ -6250,36 +7585,49 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             method: "captureScreenshot",
             params: {
               format: plan.format,
-              ...(plan.quality == null ? {} : { quality: plan.quality })
-            }
-          }
+              ...(plan.quality == null ? {} : { quality: plan.quality }),
+            },
+          },
         }).catch((error) => {
           const runtimeError = asRuntimeErrorWithMeta(error);
           return {
-            error: attachFailureProtocol(plan.toolName, {
-              error: runtimeError.message,
-              errorCode: normalizeErrorCode(runtimeError.code) || "E_TOOL_EXECUTE",
-              errorReason: "failed_execute",
-              retryable: runtimeError.retryable === true,
-              retryHint: "Re-check tab focus/state and retry screenshot.",
-              details: runtimeError.details
-            }, { phase: "execute", resumeStrategy: "retry_with_fresh_snapshot" })
+            error: attachFailureProtocol(
+              plan.toolName,
+              {
+                error: runtimeError.message,
+                errorCode:
+                  normalizeErrorCode(runtimeError.code) || "E_TOOL_EXECUTE",
+                errorReason: "failed_execute",
+                retryable: runtimeError.retryable === true,
+                retryHint: "Re-check tab focus/state and retry screenshot.",
+                details: runtimeError.details,
+              },
+              { phase: "execute", resumeStrategy: "retry_with_fresh_snapshot" },
+            ),
           };
         });
 
-        if (toRecord(screenshot).error) return toRecord(screenshot).error as JsonRecord;
+        if (toRecord(screenshot).error)
+          return toRecord(screenshot).error as JsonRecord;
         const base64 = String(toRecord(screenshot).data || "");
         if (!base64) {
-          return attachFailureProtocol(plan.toolName, {
-            error: "截图结果为空",
-            errorCode: "E_TOOL_EXECUTE",
-            errorReason: "failed_execute",
-            retryable: true,
-            retryHint: "Retry capture_screenshot after page settles."
-          }, { phase: "execute", resumeStrategy: "retry_with_fresh_snapshot" });
+          return attachFailureProtocol(
+            plan.toolName,
+            {
+              error: "截图结果为空",
+              errorCode: "E_TOOL_EXECUTE",
+              errorReason: "failed_execute",
+              retryable: true,
+              retryHint: "Retry capture_screenshot after page settles.",
+            },
+            { phase: "execute", resumeStrategy: "retry_with_fresh_snapshot" },
+          );
         }
 
-        if (plan.toolName === "capture_screenshot_with_highlight" && plan.selector) {
+        if (
+          plan.toolName === "capture_screenshot_with_highlight" &&
+          plan.selector
+        ) {
           const cleanupExpression = `(() => {
             for (const node of document.querySelectorAll('[data-bbl-capture-highlight=\"1\"]')) {
               if (!(node instanceof HTMLElement)) continue;
@@ -6295,8 +7643,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             action: {
               type: "runtime.evaluate",
               expression: cleanupExpression,
-              returnByValue: true
-            }
+              returnByValue: true,
+            },
           }).catch(() => undefined);
         }
 
@@ -6309,7 +7657,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           sendToLLM: plan.sendToLLM,
           selector: plan.selector || undefined,
           url: String(tabInfo?.url || tabInfo?.pendingUrl || ""),
-          title: String(tabInfo?.title || "")
+          title: String(tabInfo?.title || ""),
         });
       }
       case "step.download_image": {
@@ -6334,10 +7682,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           action: {
             type: "runtime.evaluate",
             expression,
-            returnByValue: true
-          }
+            returnByValue: true,
+          },
         });
-        return buildToolResponseEnvelope("download_image", toRecord(toRecord(out).result).value || out);
+        return buildToolResponseEnvelope(
+          "download_image",
+          toRecord(toRecord(out).result).value || out,
+        );
       }
       case "step.download_chat_images": {
         const results: Array<JsonRecord> = [];
@@ -6361,8 +7712,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             action: {
               type: "runtime.evaluate",
               expression,
-              returnByValue: true
-            }
+              returnByValue: true,
+            },
           });
           results.push(toRecord(toRecord(out).result).value || {});
           await delay(60);
@@ -6370,18 +7721,21 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         return buildToolResponseEnvelope("download_chat_images", {
           success: true,
           downloaded: results.length,
-          results
+          results,
         });
       }
       case "step.computer": {
         const action = plan.action;
         if (action === "wait") {
-          const waitMs = Math.max(0, Math.min(60_000, Math.floor((plan.durationSec ?? 1) * 1000)));
+          const waitMs = Math.max(
+            0,
+            Math.min(60_000, Math.floor((plan.durationSec ?? 1) * 1000)),
+          );
           await delay(waitMs);
           return buildToolResponseEnvelope("computer", {
             success: true,
             action,
-            waitedMs: waitMs
+            waitedMs: waitMs,
           });
         }
         if (action === "type") {
@@ -6510,21 +7864,30 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             action: {
               type: "runtime.evaluate",
               expression,
-              returnByValue: true
-            }
+              returnByValue: true,
+            },
           });
           const result = toRecord(toRecord(out).result).value || out;
           const payload = toRecord(result);
           const success = payload.success === true || payload.ok === true;
           if (!success) {
-            return attachFailureProtocol("computer", {
-              error: String(payload.error || "computer(type) 执行失败"),
-              errorCode: "E_TOOL_EXECUTE",
-              errorReason: "failed_execute",
-              retryable: true,
-              retryHint: "Focus an editable target (input/textarea/contenteditable) and retry computer(type).",
-              details: payload
-            }, { phase: "execute", category: "missing_target", resumeStrategy: "retry_with_fresh_snapshot" });
+            return attachFailureProtocol(
+              "computer",
+              {
+                error: String(payload.error || "computer(type) 执行失败"),
+                errorCode: "E_TOOL_EXECUTE",
+                errorReason: "failed_execute",
+                retryable: true,
+                retryHint:
+                  "Focus an editable target (input/textarea/contenteditable) and retry computer(type).",
+                details: payload,
+              },
+              {
+                phase: "execute",
+                category: "missing_target",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            );
           }
           return buildToolResponseEnvelope("computer", result);
         }
@@ -6534,13 +7897,17 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             .map((item) => item.trim())
             .filter(Boolean);
           if (!keys.length) {
-            return attachFailureProtocol("computer", {
-              error: "computer(key) 需要 text",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide text key sequence and retry computer."
-            }, { phase: "execute", resumeStrategy: "replan" });
+            return attachFailureProtocol(
+              "computer",
+              {
+                error: "computer(key) 需要 text",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint: "Provide text key sequence and retry computer.",
+              },
+              { phase: "execute", resumeStrategy: "replan" },
+            );
           }
           for (const key of keys) {
             await executeStep({
@@ -6551,28 +7918,32 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 tabId: plan.tabId,
                 action: {
                   kind: "press",
-                  key
-                }
+                  key,
+                },
               },
-              verifyPolicy: "off"
+              verifyPolicy: "off",
             });
           }
           return buildToolResponseEnvelope("computer", {
             success: true,
             action,
-            keys
+            keys,
           });
         }
         if (action === "scroll_to") {
           const target = plan.uid || plan.selector;
           if (!target) {
-            return attachFailureProtocol("computer", {
-              error: "computer(scroll_to) 需要 uid 或 selector",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide uid/selector and retry computer scroll_to."
-            }, { phase: "execute", resumeStrategy: "replan" });
+            return attachFailureProtocol(
+              "computer",
+              {
+                error: "computer(scroll_to) 需要 uid 或 selector",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint: "Provide uid/selector and retry computer scroll_to.",
+              },
+              { phase: "execute", resumeStrategy: "replan" },
+            );
           }
           const out = await executeStep({
             sessionId,
@@ -6584,37 +7955,48 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 kind: "hover",
                 uid: plan.uid || undefined,
                 ref: plan.uid || undefined,
-                selector: plan.selector || undefined
-              }
+                selector: plan.selector || undefined,
+              },
             },
-            verifyPolicy: "off"
+            verifyPolicy: "off",
           });
           if (!out.ok) {
-            return buildStepFailureEnvelope("computer", out, "computer scroll_to 失败", "Refresh target and retry computer scroll_to.", {
-              defaultRetryable: true,
-              phase: "execute",
-              resumeStrategy: "retry_with_fresh_snapshot"
-            });
+            return buildStepFailureEnvelope(
+              "computer",
+              out,
+              "computer scroll_to 失败",
+              "Refresh target and retry computer scroll_to.",
+              {
+                defaultRetryable: true,
+                phase: "execute",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            );
           }
           return buildToolResponseEnvelope("computer", {
             success: true,
             action,
-            target
+            target,
           });
         }
         const coordinate = plan.coordinate;
         const startCoordinate = plan.startCoordinate;
         if (!coordinate && action !== "scroll") {
-          return attachFailureProtocol("computer", {
-            error: `computer(${action}) 需要 coordinate`,
-            errorCode: "E_ARGS",
-            errorReason: "failed_execute",
-            retryable: false,
-            retryHint: "Provide coordinate and retry computer."
-          }, { phase: "execute", resumeStrategy: "replan" });
+          return attachFailureProtocol(
+            "computer",
+            {
+              error: `computer(${action}) 需要 coordinate`,
+              errorCode: "E_ARGS",
+              errorReason: "failed_execute",
+              retryable: false,
+              retryHint: "Provide coordinate and retry computer.",
+            },
+            { phase: "execute", resumeStrategy: "replan" },
+          );
         }
         const [x, y] = coordinate || [0, 0];
-        const clickCount = action === "double_click" ? 2 : action === "triple_click" ? 3 : 1;
+        const clickCount =
+          action === "double_click" ? 2 : action === "triple_click" ? 3 : 1;
         const button = action === "right_click" ? "right" : "left";
         const dispatchMouse = async (type: string, params: JsonRecord = {}) =>
           await callInfra(infra, {
@@ -6629,11 +8011,17 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 y,
                 button,
                 clickCount,
-                ...params
-              }
-            }
+                ...params,
+              },
+            },
           });
-        if (action === "hover" || action === "left_click" || action === "right_click" || action === "double_click" || action === "triple_click") {
+        if (
+          action === "hover" ||
+          action === "left_click" ||
+          action === "right_click" ||
+          action === "double_click" ||
+          action === "triple_click"
+        ) {
           await dispatchMouse("mouseMoved");
           if (action !== "hover") {
             await dispatchMouse("mousePressed");
@@ -6642,18 +8030,23 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           return buildToolResponseEnvelope("computer", {
             success: true,
             action,
-            coordinate: [x, y]
+            coordinate: [x, y],
           });
         }
         if (action === "left_click_drag") {
           if (!startCoordinate || !coordinate) {
-            return attachFailureProtocol("computer", {
-              error: "computer(left_click_drag) 需要 start_coordinate 和 coordinate",
-              errorCode: "E_ARGS",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint: "Provide both start_coordinate and coordinate."
-            }, { phase: "execute", resumeStrategy: "replan" });
+            return attachFailureProtocol(
+              "computer",
+              {
+                error:
+                  "computer(left_click_drag) 需要 start_coordinate 和 coordinate",
+                errorCode: "E_ARGS",
+                errorReason: "failed_execute",
+                retryable: false,
+                retryHint: "Provide both start_coordinate and coordinate.",
+              },
+              { phase: "execute", resumeStrategy: "replan" },
+            );
           }
           const [sx, sy] = startCoordinate;
           await callInfra(infra, {
@@ -6662,8 +8055,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             action: {
               domain: "Input",
               method: "dispatchMouseEvent",
-              params: { type: "mouseMoved", x: sx, y: sy, button: "left" }
-            }
+              params: { type: "mouseMoved", x: sx, y: sy, button: "left" },
+            },
           });
           await callInfra(infra, {
             type: "cdp.execute",
@@ -6671,8 +8064,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             action: {
               domain: "Input",
               method: "dispatchMouseEvent",
-              params: { type: "mousePressed", x: sx, y: sy, button: "left", clickCount: 1 }
-            }
+              params: {
+                type: "mousePressed",
+                x: sx,
+                y: sy,
+                button: "left",
+                clickCount: 1,
+              },
+            },
           });
           await dispatchMouse("mouseMoved", { buttons: 1 });
           await dispatchMouse("mouseReleased", { clickCount: 1 });
@@ -6680,14 +8079,18 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             success: true,
             action,
             start_coordinate: [sx, sy],
-            coordinate: [x, y]
+            coordinate: [x, y],
           });
         }
         if (action === "scroll") {
-          const amount = Number.isFinite(Number(plan.scrollAmount)) ? Number(plan.scrollAmount) : 1000;
+          const amount = Number.isFinite(Number(plan.scrollAmount))
+            ? Number(plan.scrollAmount)
+            : 1000;
           const direction = plan.scrollDirection || "down";
-          const deltaX = direction === "left" ? -amount : direction === "right" ? amount : 0;
-          const deltaY = direction === "up" ? -amount : direction === "down" ? amount : 0;
+          const deltaX =
+            direction === "left" ? -amount : direction === "right" ? amount : 0;
+          const deltaY =
+            direction === "up" ? -amount : direction === "down" ? amount : 0;
           await callInfra(infra, {
             type: "cdp.execute",
             tabId: plan.tabId,
@@ -6699,24 +8102,28 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 x: x || 0,
                 y: y || 0,
                 deltaX,
-                deltaY
-              }
-            }
+                deltaY,
+              },
+            },
           });
           return buildToolResponseEnvelope("computer", {
             success: true,
             action,
             deltaX,
-            deltaY
+            deltaY,
           });
         }
-        return attachFailureProtocol("computer", {
-          error: `computer 不支持 action: ${action}`,
-          errorCode: "E_ARGS",
-          errorReason: "failed_execute",
-          retryable: false,
-          retryHint: "Use supported computer action and retry."
-        }, { phase: "execute", resumeStrategy: "replan" });
+        return attachFailureProtocol(
+          "computer",
+          {
+            error: `computer 不支持 action: ${action}`,
+            errorCode: "E_ARGS",
+            errorReason: "failed_execute",
+            retryable: false,
+            retryHint: "Use supported computer action and retry.",
+          },
+          { phase: "execute", resumeStrategy: "replan" },
+        );
       }
       case "step.fill_form": {
         const itemResults: JsonRecord[] = [];
@@ -6734,40 +8141,48 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 ref: item.ref || item.uid || undefined,
                 selector: item.selector || undefined,
                 backendNodeId: item.backendNodeId || undefined,
-                value: item.value
-              }
-            }
+                value: item.value,
+              },
+            },
           });
           if (!out.ok) {
-            return attachFailureProtocol("fill_form", {
-              error: `fill_form 第 ${i + 1} 项填写失败`,
-              errorCode: normalizeErrorCode(out.errorCode) || undefined,
-              errorReason: "failed_execute",
-              retryable: out.retryable === true,
-              retryHint: "Refresh elements with search_elements and retry fill_form.",
-              details: {
-                index: i,
-                item,
-                error: out.error || "",
-                errorCode: out.errorCode || "",
-                errorDetails: out.errorDetails || null
-              }
-            }, {
-              phase: "execute",
-              resumeStrategy: "retry_with_fresh_snapshot"
-            });
+            return attachFailureProtocol(
+              "fill_form",
+              {
+                error: `fill_form 第 ${i + 1} 项填写失败`,
+                errorCode: normalizeErrorCode(out.errorCode) || undefined,
+                errorReason: "failed_execute",
+                retryable: out.retryable === true,
+                retryHint:
+                  "Refresh elements with search_elements and retry fill_form.",
+                details: {
+                  index: i,
+                  item,
+                  error: out.error || "",
+                  errorCode: out.errorCode || "",
+                  errorDetails: out.errorDetails || null,
+                },
+              },
+              {
+                phase: "execute",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            );
           }
           const payload = toRecord(out.data);
           itemResults.push({
             index: i,
             uid: item.uid || item.ref || "",
             ok: true,
-            result: payload.data !== undefined ? payload.data : out.data
+            result: payload.data !== undefined ? payload.data : out.data,
           });
         }
 
         if (plan.submit && Object.keys(plan.submit).length > 0) {
-          const submitKind = String(plan.submit.kind || "").trim().toLowerCase() || "click";
+          const submitKind =
+            String(plan.submit.kind || "")
+              .trim()
+              .toLowerCase() || "click";
           const submitOut = await executeStep({
             sessionId,
             capability: plan.capability,
@@ -6778,33 +8193,38 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 kind: submitKind,
                 uid: String(plan.submit.uid || "").trim() || undefined,
                 ref: String(plan.submit.ref || "").trim() || undefined,
-                selector: String(plan.submit.selector || "").trim() || undefined,
-                key: String(plan.submit.key || "").trim() || undefined
-              }
-            }
+                selector:
+                  String(plan.submit.selector || "").trim() || undefined,
+                key: String(plan.submit.key || "").trim() || undefined,
+              },
+            },
           });
           if (!submitOut.ok) {
-            return attachFailureProtocol("fill_form", {
-              error: "fill_form 提交动作失败",
-              errorCode: normalizeErrorCode(submitOut.errorCode) || undefined,
-              errorReason: "failed_execute",
-              retryable: submitOut.retryable === true,
-              retryHint: "Retry submit action after refreshing element refs.",
-              details: {
-                submit: plan.submit,
-                error: submitOut.error || "",
-                errorCode: submitOut.errorCode || ""
-              }
-            }, {
-              phase: "execute",
-              resumeStrategy: "retry_with_fresh_snapshot"
-            });
+            return attachFailureProtocol(
+              "fill_form",
+              {
+                error: "fill_form 提交动作失败",
+                errorCode: normalizeErrorCode(submitOut.errorCode) || undefined,
+                errorReason: "failed_execute",
+                retryable: submitOut.retryable === true,
+                retryHint: "Retry submit action after refreshing element refs.",
+                details: {
+                  submit: plan.submit,
+                  error: submitOut.error || "",
+                  errorCode: submitOut.errorCode || "",
+                },
+              },
+              {
+                phase: "execute",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            );
           }
           itemResults.push({
             index: itemResults.length,
             submit: true,
             ok: true,
-            result: submitOut.data
+            result: submitOut.data,
           });
         }
 
@@ -6816,38 +8236,50 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             args: {
               tabId: plan.tabId,
               action: {
-                expect: plan.expect
-              }
+                expect: plan.expect,
+              },
             },
-            verifyPolicy: "off"
+            verifyPolicy: "off",
           });
           if (!verifyOut.ok || verifyOut.verified !== true) {
-            return attachFailureProtocol("fill_form", {
-              error: "fill_form 后置验证失败",
-              errorCode: normalizeErrorCode(verifyOut.errorCode) || "E_VERIFY_FAILED",
-              errorReason: mapVerifyReasonToFailureReason(verifyOut.verifyReason),
-              retryable: true,
-              retryHint: "Refresh page state and retry fill_form with updated refs.",
-              details: {
-                expect: plan.expect,
-                verifyReason: verifyOut.verifyReason || "",
-                verifyError: verifyOut.error || ""
-              }
-            }, {
-              phase: "verify",
-              resumeStrategy: "retry_with_fresh_snapshot"
-            });
+            return attachFailureProtocol(
+              "fill_form",
+              {
+                error: "fill_form 后置验证失败",
+                errorCode:
+                  normalizeErrorCode(verifyOut.errorCode) || "E_VERIFY_FAILED",
+                errorReason: mapVerifyReasonToFailureReason(
+                  verifyOut.verifyReason,
+                ),
+                retryable: true,
+                retryHint:
+                  "Refresh page state and retry fill_form with updated refs.",
+                details: {
+                  expect: plan.expect,
+                  verifyReason: verifyOut.verifyReason || "",
+                  verifyError: verifyOut.error || "",
+                },
+              },
+              {
+                phase: "verify",
+                resumeStrategy: "retry_with_fresh_snapshot",
+              },
+            );
           }
         }
 
-        return buildToolResponseEnvelope("fill_form", {
-          tabId: plan.tabId,
-          filled: plan.elements.length,
-          results: itemResults
-        }, {
-          capabilityUsed: plan.capability,
-          modeUsed: "cdp"
-        });
+        return buildToolResponseEnvelope(
+          "fill_form",
+          {
+            tabId: plan.tabId,
+            filled: plan.elements.length,
+            results: itemResults,
+          },
+          {
+            capabilityUsed: plan.capability,
+            modeUsed: "cdp",
+          },
+        );
       }
       case "step.browser_verify": {
         const out = await executeStep({
@@ -6857,10 +8289,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           args: {
             tabId: plan.tabId,
             action: {
-              expect: plan.verifyExpect
-            }
+              expect: plan.verifyExpect,
+            },
           },
-          verifyPolicy: "off"
+          verifyPolicy: "off",
         });
         if (!out.ok) {
           return buildStepFailureEnvelope(
@@ -6871,31 +8303,39 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             {
               defaultRetryable: true,
               phase: "execute",
-              resumeStrategy: "retry_with_fresh_snapshot"
-            }
+              resumeStrategy: "retry_with_fresh_snapshot",
+            },
           );
         }
         const providerVerify = toRecord(out.data);
-        const verified = typeof providerVerify.verified === "boolean" ? providerVerify.verified : out.verified;
-        const verifyData = providerVerify.data !== undefined ? providerVerify.data : out.data;
+        const verified =
+          typeof providerVerify.verified === "boolean"
+            ? providerVerify.verified
+            : out.verified;
+        const verifyData =
+          providerVerify.data !== undefined ? providerVerify.data : out.data;
         if (!verified) {
-          return attachFailureProtocol("browser_verify", {
-            error: "browser_verify 未通过",
-            errorCode: "E_VERIFY_FAILED",
-            errorReason: mapVerifyReasonToFailureReason(out.verifyReason),
-            retryable: true,
-            retryHint: "Refine expect conditions and re-run browser_verify.",
-            details: verifyData
-          }, {
-            phase: "verify",
-            resumeStrategy: "replan"
-          });
+          return attachFailureProtocol(
+            "browser_verify",
+            {
+              error: "browser_verify 未通过",
+              errorCode: "E_VERIFY_FAILED",
+              errorReason: mapVerifyReasonToFailureReason(out.verifyReason),
+              retryable: true,
+              retryHint: "Refine expect conditions and re-run browser_verify.",
+              details: verifyData,
+            },
+            {
+              phase: "verify",
+              resumeStrategy: "replan",
+            },
+          );
         }
         return buildToolResponseEnvelope("cdp", verifyData, {
           capabilityUsed: out.capabilityUsed || plan.capability,
           modeUsed: out.modeUsed,
           providerId: out.providerId,
-          fallbackFrom: out.fallbackFrom
+          fallbackFrom: out.fallbackFrom,
         });
       }
       default:
@@ -6927,43 +8367,48 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         ...result,
         stepRef: {
           ...stepRef,
-          ...existing
-        }
+          ...existing,
+        },
       };
     }
     return {
       ...result,
-      stepRef
+      stepRef,
     };
   }
 
-  async function executeToolCall(sessionId: string, toolCall: ToolCallItem): Promise<JsonRecord> {
+  async function executeToolCall(
+    sessionId: string,
+    toolCall: ToolCallItem,
+  ): Promise<JsonRecord> {
     const requestedTool = String(toolCall.function.name || "").trim();
     const baseStepRef: JsonRecord = {
       toolCallId: String(toolCall.id || ""),
       requestedTool: requestedTool || "unknown",
-      argsSignature: normalizeToolArgsForSignature(toolCall.function.arguments || "")
+      argsSignature: normalizeToolArgsForSignature(
+        toolCall.function.arguments || "",
+      ),
     };
 
     const resolved = resolveToolCallContext(toolCall);
     if (!resolved.ok) {
       return mergeStepRef(resolved.error, {
         ...baseStepRef,
-        stage: "resolve"
+        stage: "resolve",
       });
     }
 
     const resolvedStepRef: JsonRecord = {
       ...baseStepRef,
       resolvedTool: resolved.value.resolvedTool,
-      executionTool: resolved.value.executionTool
+      executionTool: resolved.value.executionTool,
     };
 
     const planResult = await buildToolPlan(sessionId, resolved.value);
     if (!planResult.ok) {
       return mergeStepRef(planResult.error, {
         ...resolvedStepRef,
-        stage: "plan"
+        stage: "plan",
       });
     }
 
@@ -6971,7 +8416,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const planStepRef: JsonRecord = {
       ...resolvedStepRef,
       stage: "dispatch",
-      planKind: planResult.plan.kind
+      planKind: planResult.plan.kind,
     };
     if (tabId) planStepRef.tabId = tabId;
 
@@ -6979,7 +8424,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     return mergeStepRef(dispatched, planStepRef);
   }
 
-  function listRuntimeLlmToolDefinitions(toolScope: "all" | "browser_only" = "all"): ToolDefinition[] {
+  function listRuntimeLlmToolDefinitions(
+    toolScope: "all" | "browser_only" = "all",
+  ): ToolDefinition[] {
     return orchestrator
       .listLlmToolDefinitions()
       .filter((definition) => {
@@ -6997,7 +8444,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const toolName = String(definition.function?.name || "").trim();
         const contract = orchestrator.resolveToolContract(toolName);
         const canonical = String(contract?.name || toolName).trim();
-        if (CANONICAL_BROWSER_TOOL_NAMES.includes(canonical as (typeof CANONICAL_BROWSER_TOOL_NAMES)[number])) {
+        if (
+          CANONICAL_BROWSER_TOOL_NAMES.includes(
+            canonical as (typeof CANONICAL_BROWSER_TOOL_NAMES)[number],
+          )
+        ) {
           return true;
         }
         if (canonical.startsWith("browser_")) return true;
@@ -7008,27 +8459,42 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       });
   }
 
-  async function requestLlmWithRetry(input: LlmRequestInput): Promise<JsonRecord> {
+  async function requestLlmWithRetry(
+    input: LlmRequestInput,
+  ): Promise<JsonRecord> {
     const { sessionId, route, providerRegistry, step, messages } = input;
     const toolChoice = input.toolChoice === "required" ? "required" : "auto";
-    const toolScope = input.toolScope === "browser_only" ? "browser_only" : "all";
-    const llmModel = String(route.llmModel || "gpt-5.3-codex").trim() || "gpt-5.3-codex";
-    const llmTimeoutMs = normalizeIntInRange(route.llmTimeoutMs, DEFAULT_LLM_TIMEOUT_MS, MIN_LLM_TIMEOUT_MS, MAX_LLM_TIMEOUT_MS);
+    const toolScope =
+      input.toolScope === "browser_only" ? "browser_only" : "all";
+    const llmModel =
+      String(route.llmModel || "gpt-5.3-codex").trim() || "gpt-5.3-codex";
+    const llmTimeoutMs = normalizeIntInRange(
+      route.llmTimeoutMs,
+      DEFAULT_LLM_TIMEOUT_MS,
+      MIN_LLM_TIMEOUT_MS,
+      MAX_LLM_TIMEOUT_MS,
+    );
     const llmMaxRetryDelayMs = normalizeIntInRange(
       route.llmMaxRetryDelayMs,
       DEFAULT_LLM_MAX_RETRY_DELAY_MS,
       MIN_LLM_MAX_RETRY_DELAY_MS,
-      MAX_LLM_MAX_RETRY_DELAY_MS
+      MAX_LLM_MAX_RETRY_DELAY_MS,
     );
     const provider = providerRegistry.get(String(route.provider || "").trim());
     if (!provider) {
-      throw createNonRetryableRuntimeError("E_LLM_PROVIDER_NOT_FOUND", `未找到 LLM provider: ${route.provider}`, {
-        provider: route.provider,
-        profile: route.profile
-      });
+      throw createNonRetryableRuntimeError(
+        "E_LLM_PROVIDER_NOT_FOUND",
+        `未找到 LLM provider: ${route.provider}`,
+        {
+          provider: route.provider,
+          profile: route.profile,
+        },
+      );
     }
     let lastError: unknown = null;
-    const configuredMaxAttempts = Number(orchestrator.getRunState(sessionId).retry.maxAttempts ?? MAX_LLM_RETRIES);
+    const configuredMaxAttempts = Number(
+      orchestrator.getRunState(sessionId).retry.maxAttempts ?? MAX_LLM_RETRIES,
+    );
     const maxAttempts = Number.isFinite(configuredMaxAttempts)
       ? Math.max(0, configuredMaxAttempts)
       : MAX_LLM_RETRIES;
@@ -7042,8 +8508,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       let rawBody = "";
       let contentType = "";
       try {
-        const llmToolDefs = listRuntimeLlmToolDefinitions(toolScope).map((definition) =>
-          sanitizeLlmToolDefinitionForProvider(definition, route.provider)
+        const llmToolDefs = listRuntimeLlmToolDefinitions(toolScope).map(
+          (definition) =>
+            sanitizeLlmToolDefinitionForProvider(definition, route.provider),
         );
         const basePayload: JsonRecord = {
           model: llmModel,
@@ -7051,7 +8518,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           tools: llmToolDefs,
           tool_choice: toolChoice,
           temperature: 0.2,
-          stream: true
+          stream: true,
         };
         const baseUrl = provider.resolveRequestUrl(route);
         const beforeRequest = await orchestrator.runHook("llm.before_request", {
@@ -7062,36 +8529,56 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             profile: route.profile,
             provider: route.provider,
             url: baseUrl,
-            payload: basePayload
-          }
+            payload: basePayload,
+          },
         });
         if (beforeRequest.blocked) {
-          throw createNonRetryableRuntimeError("E_LLM_HOOK_BLOCKED", `llm.before_request blocked: ${beforeRequest.reason || "blocked"}`);
+          throw createNonRetryableRuntimeError(
+            "E_LLM_HOOK_BLOCKED",
+            `llm.before_request blocked: ${beforeRequest.reason || "blocked"}`,
+          );
         }
         const patchedRequest = toRecord(beforeRequest.value.request);
         const requestUrlRaw = patchedRequest.url;
         if (requestUrlRaw !== undefined && typeof requestUrlRaw !== "string") {
-          throw createNonRetryableRuntimeError("E_LLM_HOOK_INVALID_PATCH", "llm.before_request patch request.url must be a string");
+          throw createNonRetryableRuntimeError(
+            "E_LLM_HOOK_INVALID_PATCH",
+            "llm.before_request patch request.url must be a string",
+          );
         }
         const requestPayloadRaw = patchedRequest.payload;
-        if (requestPayloadRaw !== undefined && !isPlainJsonRecord(requestPayloadRaw)) {
-          throw createNonRetryableRuntimeError("E_LLM_HOOK_INVALID_PATCH", "llm.before_request patch request.payload must be an object");
+        if (
+          requestPayloadRaw !== undefined &&
+          !isPlainJsonRecord(requestPayloadRaw)
+        ) {
+          throw createNonRetryableRuntimeError(
+            "E_LLM_HOOK_INVALID_PATCH",
+            "llm.before_request patch request.payload must be an object",
+          );
         }
         const requestUrl = String(requestUrlRaw || baseUrl).trim() || baseUrl;
         const requestPayload: JsonRecord = {
           ...basePayload,
-          ...(requestPayloadRaw || {})
+          ...(requestPayloadRaw || {}),
         };
-        if (!Array.isArray(requestPayload.messages)) requestPayload.messages = messages;
-        if (!Array.isArray(requestPayload.tools)) requestPayload.tools = llmToolDefs;
-        if (!String(requestPayload.model || "").trim()) requestPayload.model = llmModel;
-        if (!requestPayload.tool_choice) requestPayload.tool_choice = toolChoice;
-        if (typeof requestPayload.temperature !== "number" || !Number.isFinite(requestPayload.temperature)) {
+        if (!Array.isArray(requestPayload.messages))
+          requestPayload.messages = messages;
+        if (!Array.isArray(requestPayload.tools))
+          requestPayload.tools = llmToolDefs;
+        if (!String(requestPayload.model || "").trim())
+          requestPayload.model = llmModel;
+        if (!requestPayload.tool_choice)
+          requestPayload.tool_choice = toolChoice;
+        if (
+          typeof requestPayload.temperature !== "number" ||
+          !Number.isFinite(requestPayload.temperature)
+        ) {
           requestPayload.temperature = 0.2;
         }
-        if (typeof requestPayload.stream !== "boolean") requestPayload.stream = true;
+        if (typeof requestPayload.stream !== "boolean")
+          requestPayload.stream = true;
         requestPayload.messages = transformMessagesForLlm(
-          Array.isArray(requestPayload.messages) ? requestPayload.messages : []
+          Array.isArray(requestPayload.messages) ? requestPayload.messages : [],
         );
 
         orchestrator.events.emit("llm.request", sessionId, {
@@ -7100,7 +8587,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           model: String(requestPayload.model || llmModel),
           profile: route.profile,
           provider: route.provider,
-          ...summarizeLlmRequestPayload(requestPayload)
+          ...summarizeLlmRequestPayload(requestPayload),
         });
 
         const resp = await provider.send({
@@ -7109,7 +8596,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           route,
           requestUrl,
           payload: requestPayload,
-          signal: ctrl.signal
+          signal: ctrl.signal,
         });
         status = resp.status;
         ok = resp.ok;
@@ -7127,23 +8614,29 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               status,
               ok,
               retryDelayHintMs,
-              body: rawBody
-            })
+              body: rawBody,
+            }),
           );
-          if (retryDelayHintMs != null && llmMaxRetryDelayMs > 0 && retryDelayHintMs > llmMaxRetryDelayMs) {
+          if (
+            retryDelayHintMs != null &&
+            llmMaxRetryDelayMs > 0 &&
+            retryDelayHintMs > llmMaxRetryDelayMs
+          ) {
             const exceeded = new Error(
-              `LLM retry delay ${Math.ceil(retryDelayHintMs / 1000)}s exceeds cap ${Math.ceil(llmMaxRetryDelayMs / 1000)}s`
+              `LLM retry delay ${Math.ceil(retryDelayHintMs / 1000)}s exceeds cap ${Math.ceil(llmMaxRetryDelayMs / 1000)}s`,
             ) as RuntimeErrorWithMeta;
             exceeded.code = "E_LLM_RETRY_DELAY_EXCEEDED";
             exceeded.status = status;
             exceeded.details = {
               retryDelayHintMs,
-              llmMaxRetryDelayMs
+              llmMaxRetryDelayMs,
             };
             exceeded.retryable = false;
             throw exceeded;
           }
-          const err = new Error(`LLM HTTP ${status}`) as Error & { status?: number };
+          const err = new Error(`LLM HTTP ${status}`) as Error & {
+            status?: number;
+          };
           err.status = status;
           throw err;
         }
@@ -7153,16 +8646,19 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         if (resp.body && lowerType.includes("text/event-stream")) {
           orchestrator.events.emit("llm.stream.start", sessionId, {
             step,
-            attempt
+            attempt,
           });
-          const streamed = await readLlmMessageFromSseStream(resp.body, (chunk) => {
-            if (!chunk) return;
-            orchestrator.events.emit("llm.stream.delta", sessionId, {
-              step,
-              attempt,
-              text: chunk
-            });
-          });
+          const streamed = await readLlmMessageFromSseStream(
+            resp.body,
+            (chunk) => {
+              if (!chunk) return;
+              orchestrator.events.emit("llm.stream.delta", sessionId, {
+                step,
+                attempt,
+                text: chunk,
+              });
+            },
+          );
           rawBody = streamed.rawBody;
           message = streamed.message;
           orchestrator.events.emit("llm.stream.end", sessionId, {
@@ -7170,7 +8666,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             attempt,
             packetCount: streamed.packetCount,
             contentLength: parseLlmContent(message).length,
-            toolCalls: normalizeToolCalls(message.tool_calls).length
+            toolCalls: normalizeToolCalls(message.tool_calls).length,
           });
         } else {
           rawBody = await resp.text();
@@ -7185,8 +8681,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             attempt,
             status,
             ok,
-            body: rawBody
-          })
+            body: rawBody,
+          }),
         );
         const afterResponse = await orchestrator.runHook("llm.after_response", {
           request: {
@@ -7198,15 +8694,21 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             url: requestUrl,
             payload: requestPayload,
             status,
-            ok
+            ok,
           },
-          response: message
+          response: message,
         });
         if (afterResponse.blocked) {
-          throw createNonRetryableRuntimeError("E_LLM_HOOK_BLOCKED", `llm.after_response blocked: ${afterResponse.reason || "blocked"}`);
+          throw createNonRetryableRuntimeError(
+            "E_LLM_HOOK_BLOCKED",
+            `llm.after_response blocked: ${afterResponse.reason || "blocked"}`,
+          );
         }
         if (!isPlainJsonRecord(afterResponse.value.response)) {
-          throw createNonRetryableRuntimeError("E_LLM_HOOK_INVALID_PATCH", "llm.after_response patch response must be an object");
+          throw createNonRetryableRuntimeError(
+            "E_LLM_HOOK_INVALID_PATCH",
+            "llm.after_response patch response must be an object",
+          );
         }
         message = afterResponse.value.response;
 
@@ -7216,7 +8718,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           orchestrator.events.emit("auto_retry_end", sessionId, {
             success: true,
             attempt: attempt - 1,
-            maxAttempts: state.retry.maxAttempts
+            maxAttempts: state.retry.maxAttempts,
           });
         }
 
@@ -7230,7 +8732,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const retryable =
           typeof err.retryable === "boolean"
             ? err.retryable
-            : isRetryableLlmStatus(statusCode) || /timeout|network|temporar|unavailable|rate limit/i.test(`${errText} ${signalReason}`);
+            : isRetryableLlmStatus(statusCode) ||
+              /timeout|network|temporar|unavailable|rate limit/i.test(
+                `${errText} ${signalReason}`,
+              );
         const canRetry = retryable && attempt <= maxAttempts;
         if (!canRetry) {
           err.details = {
@@ -7239,7 +8744,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             totalAttempts,
             status: statusCode || null,
             profile: route.profile,
-            provider: route.provider
+            provider: route.provider,
           };
           const state = orchestrator.getRunState(sessionId);
           if (state.retry.active) {
@@ -7247,7 +8752,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               success: false,
               attempt: state.retry.attempt,
               maxAttempts: state.retry.maxAttempts,
-              finalError: errText
+              finalError: errText,
             });
           }
           orchestrator.resetRetryState(sessionId);
@@ -7258,14 +8763,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         const next = orchestrator.updateRetryState(sessionId, {
           active: true,
           attempt,
-          delayMs
+          delayMs,
         });
         orchestrator.events.emit("auto_retry_start", sessionId, {
           attempt,
           maxAttempts: next.retry.maxAttempts,
           delayMs,
           status: statusCode || null,
-          reason: errText
+          reason: errText,
         });
         await delay(delayMs);
       } finally {
@@ -7273,23 +8778,28 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       }
     }
 
-    const finalError = asRuntimeErrorWithMeta(lastError || new Error("LLM request failed"));
+    const finalError = asRuntimeErrorWithMeta(
+      lastError || new Error("LLM request failed"),
+    );
     finalError.details = {
       ...toRecord(finalError.details),
       retryAttempts: totalAttempts,
       totalAttempts,
       profile: route.profile,
-      provider: route.provider
+      provider: route.provider,
     };
     throw finalError;
   }
 
-  async function runAgentLoop(sessionId: string, prompt: string): Promise<void> {
+  async function runAgentLoop(
+    sessionId: string,
+    prompt: string,
+  ): Promise<void> {
     const stateAtStart = orchestrator.getRunState(sessionId);
     if (stateAtStart.stopped) {
       orchestrator.setRunning(sessionId, false);
       orchestrator.events.emit("loop_skip_stopped", sessionId, {
-        reason: "stopped_before_run"
+        reason: "stopped_before_run",
       });
       return;
     }
@@ -7299,34 +8809,29 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const maxLoopSteps = normalizeIntInRange(config.maxSteps, 100, 1, 500);
     const sessionMeta = await orchestrator.sessions.getMeta(sessionId);
     const routePrefs = readSessionLlmRoutePrefs(sessionMeta);
-    const routeResolved = resolveLlmRoute({
-      config,
-      profile: routePrefs.profile,
-      role: routePrefs.role,
-      escalationPolicy: routePrefs.escalationPolicy
-    });
+    const routeResolved = resolvePrimaryLlmRoute(config, routePrefs);
     if (!routeResolved.ok) {
       const text = routeResolved.message;
       orchestrator.events.emit("llm.route.blocked", sessionId, {
         reason: routeResolved.reason,
         profile: routeResolved.profile,
-        role: routeResolved.role
+        role: routeResolved.role,
       });
       orchestrator.events.emit("llm.skipped", sessionId, {
         reason: routeResolved.reason,
         profile: routeResolved.profile,
-        role: routeResolved.role
+        role: routeResolved.role,
       });
       await orchestrator.sessions.appendMessage({
         sessionId,
         role: "assistant",
-        text
+        text,
       });
       orchestrator.setRunning(sessionId, false);
       orchestrator.events.emit("loop_done", sessionId, {
         status: "failed_execute",
         llmSteps: 0,
-        toolSteps: 0
+        toolSteps: 0,
       });
       return;
     }
@@ -7335,36 +8840,43 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       const text = `执行失败：未找到 LLM provider（${activeRoute.provider}）。`;
       orchestrator.events.emit("llm.route.blocked", sessionId, {
         reason: "provider_not_found",
-        ...buildLlmRoutePayload(activeRoute)
+        ...buildLlmRoutePayload(activeRoute),
       });
       orchestrator.events.emit("llm.skipped", sessionId, {
         reason: "provider_not_found",
-        ...buildLlmRoutePayload(activeRoute)
+        ...buildLlmRoutePayload(activeRoute),
       });
       await orchestrator.sessions.appendMessage({
         sessionId,
         role: "assistant",
-        text
+        text,
       });
       orchestrator.setRunning(sessionId, false);
       orchestrator.events.emit("loop_done", sessionId, {
         status: "failed_execute",
         llmSteps: 0,
-        toolSteps: 0
+        toolSteps: 0,
       });
       return;
     }
     orchestrator.updateRetryState(sessionId, {
-      maxAttempts: activeRoute.llmRetryMaxAttempts
+      maxAttempts: activeRoute.llmRetryMaxAttempts,
     });
 
     orchestrator.events.emit("loop_start", sessionId, {
-      prompt: clipText(sanitizePromptForTrace(prompt), 3000)
+      prompt: clipText(sanitizePromptForTrace(prompt), 3000),
     });
-    orchestrator.events.emit("llm.route.selected", sessionId, buildLlmRoutePayload(activeRoute, { source: "run_start" }));
+    orchestrator.events.emit(
+      "llm.route.selected",
+      sessionId,
+      buildLlmRoutePayload(activeRoute, { source: "run_start" }),
+    );
     if (sessionMeta) {
       try {
-        await writeSessionMeta(sessionId, withSessionLlmRouteMeta(sessionMeta, activeRoute));
+        await writeSessionMeta(
+          sessionId,
+          withSessionLlmRouteMeta(sessionMeta, activeRoute),
+        );
       } catch {
         // ignore metadata write failures
       }
@@ -7384,7 +8896,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     const buildToolCallSignature = (toolCalls: ToolCallItem[]): string => {
       return toolCalls
         .map((tc) => {
-          const canonical = String(orchestrator.resolveToolContract(tc.function.name)?.name || tc.function.name)
+          const canonical = String(
+            orchestrator.resolveToolContract(tc.function.name)?.name ||
+              tc.function.name,
+          )
             .trim()
             .toLowerCase();
           return `${canonical}:${normalizeToolArgsForSignature(tc.function.arguments || "")}`;
@@ -7392,9 +8907,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         .join("||");
     };
 
-    const didToolProvideBrowserProof = (toolName: string, responsePayload: JsonRecord): boolean => {
-      const normalized = String(toolName || "").trim().toLowerCase();
-      const directVerified = responsePayload.verified === true || String(responsePayload.verifyReason || "") === "verified";
+    const didToolProvideBrowserProof = (
+      toolName: string,
+      responsePayload: JsonRecord,
+    ): boolean => {
+      const normalized = String(toolName || "")
+        .trim()
+        .toLowerCase();
+      const directVerified =
+        responsePayload.verified === true ||
+        String(responsePayload.verifyReason || "") === "verified";
       if (directVerified) return true;
       if (normalized === "browser_verify") {
         return toRecord(responsePayload.data).ok === true;
@@ -7403,7 +8925,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       return nestedVerify.ok === true;
     };
 
-    const resolveNoProgressDecision = (reason: NoProgressReason): {
+    const resolveNoProgressDecision = (
+      reason: NoProgressReason,
+    ): {
       hit: number;
       continueBudget: number;
       remainingContinueBudget: number;
@@ -7413,19 +8937,20 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       noProgressHits.set(reason, hit);
       const continueBudget = NO_PROGRESS_CONTINUE_BUDGET[reason] ?? 0;
       const remainingContinueBudget = Math.max(0, continueBudget - hit);
-      const decision: "continue" | "stop" = hit <= continueBudget ? "continue" : "stop";
+      const decision: "continue" | "stop" =
+        hit <= continueBudget ? "continue" : "stop";
       return {
         hit,
         continueBudget,
         remainingContinueBudget,
-        decision
+        decision,
       };
     };
 
     const onNoProgressSignal = async (
       reason: NoProgressReason,
       details: JsonRecord,
-      options: { emitBrowserGuard?: boolean } = {}
+      options: { emitBrowserGuard?: boolean } = {},
     ): Promise<boolean> => {
       const decision = resolveNoProgressDecision(reason);
       const payload: JsonRecord = {
@@ -7436,13 +8961,17 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           retry: decision.continueBudget,
           continue: decision.continueBudget,
           remainingRetry: decision.remainingContinueBudget,
-          remainingContinue: decision.remainingContinueBudget
+          remainingContinue: decision.remainingContinueBudget,
         },
-        ...details
+        ...details,
       };
       orchestrator.events.emit("loop_no_progress", sessionId, payload);
       if (options.emitBrowserGuard === true) {
-        orchestrator.events.emit("loop_guard_browser_progress_missing", sessionId, payload);
+        orchestrator.events.emit(
+          "loop_guard_browser_progress_missing",
+          sessionId,
+          payload,
+        );
       }
       if (decision.decision === "stop") {
         finalStatus = "progress_uncertain";
@@ -7451,7 +8980,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           await orchestrator.sessions.appendMessage({
             sessionId,
             role: "assistant",
-            text: "连续多轮缺乏有效推进，已停止当前执行以避免无效循环。"
+            text: "连续多轮缺乏有效推进，已停止当前执行以避免无效循环。",
           });
         }
         return true;
@@ -7461,7 +8990,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
     try {
       await orchestrator.preSendCompactionCheck(sessionId);
-      const context = await orchestrator.sessions.buildSessionContext(sessionId);
+      const context =
+        await orchestrator.sessions.buildSessionContext(sessionId);
       const meta = await orchestrator.sessions.getMeta(sessionId);
       let availableSkillsPrompt = "";
       try {
@@ -7477,9 +9007,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           context.messages,
           context.previousSummary,
           availableSkillsPrompt,
-          listRuntimeLlmToolDefinitions("all")
+          listRuntimeLlmToolDefinitions("all"),
         ),
-        prompt
+        prompt,
       );
 
       while (llmStep < maxLoopSteps) {
@@ -7497,23 +9027,31 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           break;
         }
 
-        const dequeuedSteers = orchestrator.dequeueQueuedPrompts(sessionId, "steer");
+        const dequeuedSteers = orchestrator.dequeueQueuedPrompts(
+          sessionId,
+          "steer",
+        );
         for (const steer of dequeuedSteers) {
           const steerRawText = String(steer.text || "").trim();
           const steerSkillIds = normalizeExplicitSkillIds(steer.skillIds);
           if (!steerRawText && steerSkillIds.length === 0) continue;
-          const steerPromptWithSelectedSkills = await expandExplicitSelectedSkillsPrompt(
+          const steerPromptWithSelectedSkills =
+            await expandExplicitSelectedSkillsPrompt(
+              sessionId,
+              steerRawText,
+              steerSkillIds,
+            );
+          const steerExpandedText = await expandSkillSlashPrompt(
             sessionId,
-            steerRawText,
-            steerSkillIds
+            steerPromptWithSelectedSkills,
           );
-          const steerExpandedText = await expandSkillSlashPrompt(sessionId, steerPromptWithSelectedSkills);
-          const steerStoredText = steerRawText || formatSkillSelectionSummary(steerSkillIds);
+          const steerStoredText =
+            steerRawText || formatSkillSelectionSummary(steerSkillIds);
           await orchestrator.appendUserMessage(sessionId, steerStoredText);
           await orchestrator.preSendCompactionCheck(sessionId);
           messages.push({
             role: "user",
-            content: steerExpandedText
+            content: steerExpandedText,
           });
           const runtimeAfterDequeue = orchestrator.getRunState(sessionId);
           orchestrator.events.emit("message.dequeued", sessionId, {
@@ -7522,11 +9060,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             text: clipText(steerStoredText, 3000),
             total: runtimeAfterDequeue.queue.total,
             steer: runtimeAfterDequeue.queue.steer,
-            followUp: runtimeAfterDequeue.queue.followUp
+            followUp: runtimeAfterDequeue.queue.followUp,
           });
           orchestrator.events.emit("input.steer", sessionId, {
             text: clipText(steerStoredText, 3000),
-            id: steer.id
+            id: steer.id,
           });
         }
 
@@ -7540,9 +9078,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               maxLoopSteps,
               toolStep,
               retryAttempt: Number(state.retry.attempt || 0),
-              retryMaxAttempts: Number(state.retry.maxAttempts || activeRoute.llmRetryMaxAttempts)
-            })
-          }
+              retryMaxAttempts: Number(
+                state.retry.maxAttempts || activeRoute.llmRetryMaxAttempts,
+              ),
+            }),
+          },
         ];
         let message: JsonRecord;
         try {
@@ -7553,7 +9093,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             step: llmStep,
             messages: requestMessages,
             toolChoice: "auto",
-            toolScope: "all"
+            toolScope: "all",
           });
           llmFailureBySignature.clear();
         } catch (error) {
@@ -7569,16 +9109,19 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               orderedProfiles: activeRoute.orderedProfiles,
               currentProfile: activeRoute.profile,
               repeatedFailure: true,
-              policy: activeRoute.escalationPolicy
+              policy: activeRoute.escalationPolicy,
             });
             if (decision.type === "escalate") {
               const nextResolved = resolveLlmRoute({
                 config,
                 profile: decision.nextProfile,
                 role: activeRoute.role,
-                escalationPolicy: activeRoute.escalationPolicy
+                escalationPolicy: activeRoute.escalationPolicy,
               });
-              if (nextResolved.ok && llmProviders.has(nextResolved.route.provider)) {
+              if (
+                nextResolved.ok &&
+                llmProviders.has(nextResolved.route.provider)
+              ) {
                 const fromRoute = activeRoute;
                 activeRoute = nextResolved.route;
                 llmFailureBySignature.clear();
@@ -7586,7 +9129,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                   active: false,
                   attempt: 0,
                   delayMs: 0,
-                  maxAttempts: activeRoute.llmRetryMaxAttempts
+                  maxAttempts: activeRoute.llmRetryMaxAttempts,
                 });
                 orchestrator.events.emit("llm.route.escalated", sessionId, {
                   signature,
@@ -7598,17 +9141,25 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                   fromProvider: fromRoute.provider,
                   toProvider: activeRoute.provider,
                   fromModel: fromRoute.llmModel,
-                  toModel: activeRoute.llmModel
+                  toModel: activeRoute.llmModel,
                 });
-                orchestrator.events.emit("llm.route.selected", sessionId, buildLlmRoutePayload(activeRoute, {
-                  source: "escalation",
-                  reason: decision.reason,
-                  signature
-                }));
-                const latestMeta = await orchestrator.sessions.getMeta(sessionId);
+                orchestrator.events.emit(
+                  "llm.route.selected",
+                  sessionId,
+                  buildLlmRoutePayload(activeRoute, {
+                    source: "escalation",
+                    reason: decision.reason,
+                    signature,
+                  }),
+                );
+                const latestMeta =
+                  await orchestrator.sessions.getMeta(sessionId);
                 if (latestMeta) {
                   try {
-                    await writeSessionMeta(sessionId, withSessionLlmRouteMeta(latestMeta, activeRoute));
+                    await writeSessionMeta(
+                      sessionId,
+                      withSessionLlmRouteMeta(latestMeta, activeRoute),
+                    );
                   } catch {
                     // ignore metadata write failures
                   }
@@ -7619,13 +9170,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 reason: "provider_not_found",
                 signature,
                 requestedProfile: decision.nextProfile,
-                ...buildLlmRoutePayload(activeRoute)
+                ...buildLlmRoutePayload(activeRoute),
               });
               const blockedMessage = `执行失败：升级到 profile ${decision.nextProfile} 时未找到可用 provider。`;
               await orchestrator.sessions.appendMessage({
                 sessionId,
                 role: "assistant",
-                text: blockedMessage
+                text: blockedMessage,
               });
               finalStatus = "failed_execute";
               throw new Error(blockedMessage);
@@ -7636,7 +9187,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 signature,
                 signatureHits,
                 retryAttempts,
-                ...buildLlmRoutePayload(activeRoute)
+                ...buildLlmRoutePayload(activeRoute),
               });
               const blockedMessage =
                 decision.reason === "no_higher_profile"
@@ -7645,7 +9196,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               await orchestrator.sessions.appendMessage({
                 sessionId,
                 role: "assistant",
-                text: blockedMessage
+                text: blockedMessage,
               });
               finalStatus = "failed_execute";
               throw new Error(blockedMessage);
@@ -7659,13 +9210,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         orchestrator.events.emit("llm.response.parsed", sessionId, {
           step: llmStep,
           toolCalls: toolCalls.length,
-          hasText: !!assistantText
+          hasText: !!assistantText,
         });
 
         messages.push({
           role: "assistant",
           content: assistantText,
-          tool_calls: toolCalls
+          tool_calls: toolCalls,
         });
 
         if (toolCalls.length === 0) {
@@ -7674,9 +9225,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               "browser_proof_guard",
               {
                 step: llmStep,
-                reasonDetail: "final_answer_without_browser_proof"
+                reasonDetail: "final_answer_without_browser_proof",
               },
-              { emitBrowserGuard: true }
+              { emitBrowserGuard: true },
             );
             if (shouldStop) {
               break;
@@ -7688,13 +9239,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           await orchestrator.sessions.appendMessage({
             sessionId,
             role: "assistant",
-            text: assistantText || "LLM 返回空内容。"
+            text: assistantText || "LLM 返回空内容。",
           });
           orchestrator.events.emit("step_finished", sessionId, {
             step: llmStep,
             ok: true,
             mode: "llm",
-            preview: clipText(assistantText, 1200)
+            preview: clipText(assistantText, 1200),
           });
           break;
         }
@@ -7703,7 +9254,11 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         let stepUsedBrowserProofRequiredTool = false;
         let stepObservedBrowserProof = false;
         let skipRemainingToolCallsBySteer = false;
-        for (let toolCallIndex = 0; toolCallIndex < toolCalls.length; toolCallIndex += 1) {
+        for (
+          let toolCallIndex = 0;
+          toolCallIndex < toolCalls.length;
+          toolCallIndex += 1
+        ) {
           if (orchestrator.getRunState(sessionId).stopped) {
             finalStatus = "stopped";
             break;
@@ -7715,11 +9270,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             orchestrator.events.emit("tool.skipped_due_to_steer", sessionId, {
               beforeTool: tc.function.name,
               beforeToolCallId: tc.id,
-              skippedCount
+              skippedCount,
             });
             break;
           }
-          const canonicalToolName = String(orchestrator.resolveToolContract(tc.function.name)?.name || tc.function.name)
+          const canonicalToolName = String(
+            orchestrator.resolveToolContract(tc.function.name)?.name ||
+              tc.function.name,
+          )
             .trim()
             .toLowerCase();
           if (BROWSER_PROOF_REQUIRED_TOOL_NAMES.has(canonicalToolName)) {
@@ -7731,13 +9289,17 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             step: toolStep,
             mode: "tool_call",
             action: tc.function.name,
-            arguments: clipText(tc.function.arguments, 500)
+            arguments: clipText(tc.function.arguments, 500),
           });
 
           let result = await executeToolCall(sessionId, tc);
           if (result.error) {
             const modeEscalation = toRecord(result.modeEscalation);
-            const focusEscalationKey = `${String(tc.id || "")}|${String(tc.function.name || "").trim().toLowerCase()}`;
+            const focusEscalationKey = `${String(tc.id || "")}|${String(
+              tc.function.name || "",
+            )
+              .trim()
+              .toLowerCase()}`;
             const canAutoEscalateToFocus =
               [
                 "click",
@@ -7750,12 +9312,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 "scroll_to_element",
                 "highlight_element",
                 "highlight_text_inline",
-                "fill_form"
+                "fill_form",
               ].includes(canonicalToolName) &&
               result.retryable === true &&
               normalizeFailureReason(result.errorReason) === "failed_execute" &&
               modeEscalation.suggested === true &&
-              String(modeEscalation.to || "").trim().toLowerCase() === "focus" &&
+              String(modeEscalation.to || "")
+                .trim()
+                .toLowerCase() === "focus" &&
               !focusEscalationReplayKeys.has(focusEscalationKey);
             if (canAutoEscalateToFocus) {
               const escalatedToolCall = buildFocusEscalationToolCall(tc);
@@ -7767,26 +9331,33 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                   toolCallId: tc.id,
                   from: String(modeEscalation.from || "background"),
                   to: "focus",
-                  status: "retrying"
+                  status: "retrying",
                 });
-                const escalatedResult = await executeToolCall(sessionId, escalatedToolCall);
+                const escalatedResult = await executeToolCall(
+                  sessionId,
+                  escalatedToolCall,
+                );
                 if (!escalatedResult.error) {
                   const escalatedResponse = toRecord(escalatedResult.response);
                   const escalatedData = escalatedResponse.data;
-                  if (escalatedData && typeof escalatedData === "object" && !Array.isArray(escalatedData)) {
+                  if (
+                    escalatedData &&
+                    typeof escalatedData === "object" &&
+                    !Array.isArray(escalatedData)
+                  ) {
                     escalatedResponse.data = {
                       ...(escalatedData as JsonRecord),
                       modeEscalated: true,
                       modeEscalation: {
                         from: String(modeEscalation.from || "background"),
                         to: "focus",
-                        auto: true
-                      }
+                        auto: true,
+                      },
                     };
                   }
                   result = {
                     ...escalatedResult,
-                    response: escalatedResponse
+                    response: escalatedResponse,
                   };
                   orchestrator.events.emit("tool.mode_escalation", sessionId, {
                     step: toolStep,
@@ -7794,7 +9365,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                     toolCallId: tc.id,
                     from: String(modeEscalation.from || "background"),
                     to: "focus",
-                    status: "recovered"
+                    status: "recovered",
                   });
                 } else {
                   result = escalatedResult;
@@ -7805,7 +9376,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                     from: String(modeEscalation.from || "background"),
                     to: "focus",
                     status: "failed",
-                    error: String(escalatedResult.error || "unknown")
+                    error: String(escalatedResult.error || "unknown"),
                   });
                 }
               }
@@ -7823,7 +9394,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 step: toolStep,
                 action: tc.function.name,
                 toolCallId: tc.id,
-                skippedCount
+                skippedCount,
               });
               orchestrator.events.emit("step_finished", sessionId, {
                 step: toolStep,
@@ -7833,7 +9404,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
                 error: "interrupted_by_steer",
                 modeUsed: String(result.modeUsed || ""),
                 providerId: String(result.providerId || ""),
-                fallbackFrom: String(result.fallbackFrom || "")
+                fallbackFrom: String(result.fallbackFrom || ""),
               });
               skipRemainingToolCallsBySteer = true;
               break;
@@ -7842,17 +9413,14 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             messages.push({
               role: "tool",
               tool_call_id: tc.id,
-              content: safeStringify(
-                failurePayload,
-                6000
-              )
+              content: safeStringify(failurePayload, 6000),
             });
             await orchestrator.sessions.appendMessage({
               sessionId,
               role: "tool",
               text: safeStringify(failurePayload, 10_000),
               toolName: tc.function.name,
-              toolCallId: tc.id
+              toolCallId: tc.id,
             });
             orchestrator.events.emit("step_finished", sessionId, {
               step: toolStep,
@@ -7862,7 +9430,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
               error: String(result.error),
               modeUsed: String(result.modeUsed || ""),
               providerId: String(result.providerId || ""),
-              fallbackFrom: String(result.fallbackFrom || "")
+              fallbackFrom: String(result.fallbackFrom || ""),
             });
             // PI 对齐：工具失败写入 tool_result 后继续当前 loop，由后续 LLM 结合失败结果重规划。
             continue;
@@ -7878,19 +9446,19 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           const uiToolPayload = buildToolSuccessPayload(tc, rawToolData, {
             modeUsed: result.modeUsed,
             providerId: result.providerId,
-            fallbackFrom: result.fallbackFrom
+            fallbackFrom: result.fallbackFrom,
           });
           messages.push({
             role: "tool",
             tool_call_id: tc.id,
-            content: llmToolContent
+            content: llmToolContent,
           });
           await orchestrator.sessions.appendMessage({
             sessionId,
             role: "tool",
             text: clipText(safeStringify(uiToolPayload, 10_000), 10_000),
             toolName: tc.function.name,
-            toolCallId: tc.id
+            toolCallId: tc.id,
           });
           orchestrator.events.emit("step_finished", sessionId, {
             step: toolStep,
@@ -7900,16 +9468,19 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             preview: clipText(llmToolContent, 800),
             modeUsed: String(result.modeUsed || ""),
             providerId: String(result.providerId || ""),
-            fallbackFrom: String(result.fallbackFrom || "")
+            fallbackFrom: String(result.fallbackFrom || ""),
           });
 
-          if (toolCallIndex < toolCalls.length - 1 && orchestrator.hasQueuedPrompt(sessionId, "steer")) {
+          if (
+            toolCallIndex < toolCalls.length - 1 &&
+            orchestrator.hasQueuedPrompt(sessionId, "steer")
+          ) {
             const skippedCount = toolCalls.length - toolCallIndex - 1;
             skipRemainingToolCallsBySteer = true;
             orchestrator.events.emit("tool.skipped_due_to_steer", sessionId, {
               afterTool: tc.function.name,
               afterToolCallId: tc.id,
-              skippedCount
+              skippedCount,
             });
             break;
           }
@@ -7937,9 +9508,9 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             {
               step: llmStep,
               toolStep,
-              signature: toolCallSignature
+              signature: toolCallSignature,
             },
-            { emitBrowserGuard: true }
+            { emitBrowserGuard: true },
           );
           if (shouldStop) {
             break;
@@ -7948,7 +9519,10 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
 
         if (!browserGuardSignaled && toolCallSignature) {
           toolCallSignatureHistory.push(toolCallSignature);
-          while (toolCallSignatureHistory.length > NO_PROGRESS_SIGNATURE_HISTORY_LIMIT) {
+          while (
+            toolCallSignatureHistory.length >
+            NO_PROGRESS_SIGNATURE_HISTORY_LIMIT
+          ) {
             toolCallSignatureHistory.shift();
           }
 
@@ -7957,7 +9531,7 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           const detail: JsonRecord = {
             step: llmStep,
             toolStep,
-            signature: toolCallSignature
+            signature: toolCallSignature,
           };
 
           if (len >= 4) {
@@ -7994,14 +9568,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         await orchestrator.sessions.appendMessage({
           sessionId,
           role: "assistant",
-          text: `已达到最大步数 ${maxLoopSteps}，结束本轮执行。`
+          text: `已达到最大步数 ${maxLoopSteps}，结束本轮执行。`,
         });
       }
     } catch (error) {
       const runtimeError = asRuntimeErrorWithMeta(error);
       const message = runtimeError.message || String(error);
       const errorCode = normalizeErrorCode(runtimeError.code);
-      const stoppedByUser = orchestrator.getRunState(sessionId).stopped || errorCode === "E_BRIDGE_ABORTED";
+      const stoppedByUser =
+        orchestrator.getRunState(sessionId).stopped ||
+        errorCode === "E_BRIDGE_ABORTED";
       if (stoppedByUser) {
         finalStatus = "stopped";
       } else {
@@ -8009,29 +9585,41 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
           await orchestrator.sessions.appendMessage({
             sessionId,
             role: "assistant",
-            text: `执行失败：${message}`
+            text: `执行失败：${message}`,
           });
           if (finalStatus === "done") {
             finalStatus = "failed_execute";
           }
         }
         orchestrator.events.emit("loop_error", sessionId, {
-          message
+          message,
         });
       }
     } finally {
       try {
-        await refreshSessionTitleAuto(orchestrator, sessionId, infra, llmProviders);
+        await refreshSessionTitleAuto(
+          orchestrator,
+          sessionId,
+          infra,
+          llmProviders,
+        );
       } catch (titleError) {
-        orchestrator.events.emit("session_title_auto_update_failed", sessionId, {
-          error: titleError instanceof Error ? titleError.message : String(titleError)
-        });
+        orchestrator.events.emit(
+          "session_title_auto_update_failed",
+          sessionId,
+          {
+            error:
+              titleError instanceof Error
+                ? titleError.message
+                : String(titleError),
+          },
+        );
       }
       orchestrator.setRunning(sessionId, false);
       orchestrator.events.emit("loop_done", sessionId, {
         status: finalStatus,
         llmSteps: llmStep,
-        toolSteps: toolStep
+        toolSteps: toolStep,
       });
       const runtimeAfterDone = orchestrator.getRunState(sessionId);
       if (!runtimeAfterDone.stopped && runtimeAfterDone.queue.steer > 0) {
@@ -8045,28 +9633,31 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             text: clipText(nextSteer.text, 3000),
             total: runtimeAfterDequeue.queue.total,
             steer: runtimeAfterDequeue.queue.steer,
-            followUp: runtimeAfterDequeue.queue.followUp
+            followUp: runtimeAfterDequeue.queue.followUp,
           });
           orchestrator.events.emit("input.steer", sessionId, {
             text: clipText(nextSteer.text, 3000),
-            id: nextSteer.id
+            id: nextSteer.id,
           });
           void startFromPrompt({
             sessionId,
             prompt: nextSteer.text,
             skillIds: nextSteer.skillIds,
-            autoRun: true
+            autoRun: true,
           }).catch((error) => {
             orchestrator.events.emit("loop_internal_error", sessionId, {
               error: error instanceof Error ? error.message : String(error),
-              reason: "steer_start_failed"
+              reason: "steer_start_failed",
             });
           });
           return;
         }
       }
       if (!runtimeAfterDone.stopped && runtimeAfterDone.queue.followUp > 0) {
-        const followUps = orchestrator.dequeueQueuedPrompts(sessionId, "followUp");
+        const followUps = orchestrator.dequeueQueuedPrompts(
+          sessionId,
+          "followUp",
+        );
         const nextFollowUp = followUps[0];
         if (nextFollowUp) {
           const runtimeAfterDequeue = orchestrator.getRunState(sessionId);
@@ -8076,21 +9667,21 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
             text: clipText(nextFollowUp.text, 3000),
             total: runtimeAfterDequeue.queue.total,
             steer: runtimeAfterDequeue.queue.steer,
-            followUp: runtimeAfterDequeue.queue.followUp
+            followUp: runtimeAfterDequeue.queue.followUp,
           });
           orchestrator.events.emit("loop_follow_up_start", sessionId, {
             id: nextFollowUp.id,
-            text: clipText(nextFollowUp.text, 3000)
+            text: clipText(nextFollowUp.text, 3000),
           });
           void startFromPrompt({
             sessionId,
             prompt: nextFollowUp.text,
             skillIds: nextFollowUp.skillIds,
-            autoRun: true
+            autoRun: true,
           }).catch((error) => {
             orchestrator.events.emit("loop_internal_error", sessionId, {
               error: error instanceof Error ? error.message : String(error),
-              reason: "follow_up_start_failed"
+              reason: "follow_up_start_failed",
             });
           });
         }
@@ -8098,17 +9689,32 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     }
   }
 
-  async function applySharedTabs(sessionId: string, tabIdsInput: unknown[]): Promise<void> {
+  async function applySharedTabs(
+    sessionId: string,
+    tabIdsInput: unknown[],
+  ): Promise<void> {
     const tabIds = normalizeTabIds(tabIdsInput);
     const allTabs = await queryAllTabsForRuntime();
     const byId = new Map(allTabs.map((tab) => [Number(tab.id), tab]));
     const sharedTabs = tabIds
       .map((id) => byId.get(id))
-      .filter((tab): tab is { id: number; windowId: number; index: number; active: boolean; pinned: boolean; title: string; url: string } => Boolean(tab))
+      .filter(
+        (
+          tab,
+        ): tab is {
+          id: number;
+          windowId: number;
+          index: number;
+          active: boolean;
+          pinned: boolean;
+          title: string;
+          url: string;
+        } => Boolean(tab),
+      )
       .map((tab) => ({
         id: Number(tab.id),
         title: String(tab.title || ""),
-        url: String(tab.url || "")
+        url: String(tab.url || ""),
       }));
 
     const meta = await orchestrator.sessions.getMeta(sessionId);
@@ -8118,9 +9724,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
       if (sharedTabs.length > 0) {
         metadata.sharedTabs = sharedTabs;
         const currentPrimary = parsePositiveInt(metadata.primaryTabId);
-        const sharedTabIds = sharedTabs.map((tab) => Number(tab.id)).filter((id) => Number.isInteger(id) && id > 0);
+        const sharedTabIds = sharedTabs
+          .map((tab) => Number(tab.id))
+          .filter((id) => Number.isInteger(id) && id > 0);
         metadata.primaryTabId =
-          currentPrimary && sharedTabIds.includes(currentPrimary) ? currentPrimary : Number(sharedTabs[0].id);
+          currentPrimary && sharedTabIds.includes(currentPrimary)
+            ? currentPrimary
+            : Number(sharedTabs[0].id);
       } else {
         delete metadata.sharedTabs;
         delete metadata.primaryTabId;
@@ -8129,19 +9739,21 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         ...meta,
         header: {
           ...meta.header,
-          metadata
-        }
+          metadata,
+        },
       });
     }
 
     orchestrator.events.emit("input.shared_tabs", sessionId, {
       providedTabIds: tabIds,
       resolvedCount: sharedTabs.length,
-      primaryTabId: sharedTabs.length > 0 ? Number(sharedTabs[0].id) : null
+      primaryTabId: sharedTabs.length > 0 ? Number(sharedTabs[0].id) : null,
     });
   }
 
-  function parseSkillSlashPrompt(prompt: string): { skillId: string; argsText: string } | null {
+  function parseSkillSlashPrompt(
+    prompt: string,
+  ): { skillId: string; argsText: string } | null {
     const text = String(prompt || "").trim();
     if (!text.startsWith("/skill:")) return null;
     const rest = text.slice("/skill:".length).trim();
@@ -8152,12 +9764,12 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     if (firstSpace < 0) {
       return {
         skillId: rest,
-        argsText: ""
+        argsText: "",
       };
     }
     return {
       skillId: rest.slice(0, firstSpace).trim(),
-      argsText: rest.slice(firstSpace + 1).trim()
+      argsText: rest.slice(firstSpace + 1).trim(),
     };
   }
 
@@ -8188,19 +9800,21 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
   }): string {
     const parts = [
       "以下是通过 /skill 显式选择的技能，请先阅读并严格按技能流程执行：",
-      input.promptBlock
+      input.promptBlock,
     ];
     if (input.argsText) {
       parts.push(`<skill_args>\n${input.argsText}\n</skill_args>`);
     }
-    parts.push(`说明：你当前执行的技能是 ${input.skillName}（id=${input.skillId}）。`);
+    parts.push(
+      `说明：你当前执行的技能是 ${input.skillName}（id=${input.skillId}）。`,
+    );
     return parts.join("\n\n");
   }
 
   async function expandExplicitSelectedSkillsPrompt(
     sessionId: string,
     prompt: string,
-    skillIds: string[]
+    skillIds: string[],
   ): Promise<string> {
     const normalizedPrompt = String(prompt || "").trim();
     if (!skillIds.length) return normalizedPrompt;
@@ -8210,13 +9824,16 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     for (const skillId of skillIds) {
       const resolved = await orchestrator.resolveSkillContent(skillId, {
         sessionId,
-        capability: CAPABILITIES.fsRead
+        capability: CAPABILITIES.fsRead,
       });
       promptBlocks.push(resolved.promptBlock);
       selectedLabels.push(`${resolved.skill.name}（id=${resolved.skill.id}）`);
     }
 
-    const parts = ["以下是用户在输入框中显式选择的技能，请先阅读并按技能流程执行：", ...promptBlocks];
+    const parts = [
+      "以下是用户在输入框中显式选择的技能，请先阅读并按技能流程执行：",
+      ...promptBlocks,
+    ];
     if (normalizedPrompt) {
       parts.push(`<skill_args>\n${normalizedPrompt}\n</skill_args>`);
     } else {
@@ -8226,26 +9843,33 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     return parts.join("\n\n");
   }
 
-  async function expandSkillSlashPrompt(sessionId: string, prompt: string): Promise<string> {
+  async function expandSkillSlashPrompt(
+    sessionId: string,
+    prompt: string,
+  ): Promise<string> {
     const parsed = parseSkillSlashPrompt(prompt);
     if (!parsed) return String(prompt || "");
     const resolved = await orchestrator.resolveSkillContent(parsed.skillId, {
       sessionId,
-      capability: CAPABILITIES.fsRead
+      capability: CAPABILITIES.fsRead,
     });
     return buildSkillCommandPrompt({
       promptBlock: resolved.promptBlock,
       argsText: parsed.argsText,
       skillId: resolved.skill.id,
-      skillName: resolved.skill.name
+      skillName: resolved.skill.name,
     });
   }
 
-  async function startLoopIfNeeded(sessionId: string, prompt: string, restartReason: string): Promise<RuntimeView> {
+  async function startLoopIfNeeded(
+    sessionId: string,
+    prompt: string,
+    restartReason: string,
+  ): Promise<RuntimeView> {
     const state = orchestrator.getRunState(sessionId);
     if (state.running) {
       orchestrator.events.emit("loop_enqueue_skipped", sessionId, {
-        reason: state.stopped ? "stop_in_progress" : "already_running"
+        reason: state.stopped ? "stop_in_progress" : "already_running",
       });
       return orchestrator.getRunState(sessionId);
     }
@@ -8253,32 +9877,35 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     if (state.stopped) {
       orchestrator.restart(sessionId);
       orchestrator.events.emit("loop_restart", sessionId, {
-        reason: restartReason
+        reason: restartReason,
       });
     }
 
     orchestrator.setRunning(sessionId, true);
-    void runAgentLoop(sessionId, prompt)
-      .catch((error) => {
-        orchestrator.events.emit("loop_internal_error", sessionId, {
-          error: error instanceof Error ? error.message : String(error)
-        });
+    void runAgentLoop(sessionId, prompt).catch((error) => {
+      orchestrator.events.emit("loop_internal_error", sessionId, {
+        error: error instanceof Error ? error.message : String(error),
       });
+    });
 
     return orchestrator.getRunState(sessionId);
   }
 
-  async function startFromPrompt(input: RunStartInput): Promise<{ sessionId: string; runtime: RuntimeView }> {
+  async function startFromPrompt(
+    input: RunStartInput,
+  ): Promise<{ sessionId: string; runtime: RuntimeView }> {
     let sessionId = typeof input.sessionId === "string" ? input.sessionId : "";
     if (!sessionId) {
-      const created = await orchestrator.createSession(input.sessionOptions || {});
+      const created = await orchestrator.createSession(
+        input.sessionOptions || {},
+      );
       sessionId = created.sessionId;
     } else {
       const existed = await orchestrator.sessions.getMeta(sessionId);
       if (!existed) {
         await orchestrator.sessions.createSession({
           ...input.sessionOptions,
-          id: sessionId
+          id: sessionId,
         });
       }
     }
@@ -8287,11 +9914,13 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     if (hasExplicitTabIds) {
       await applySharedTabs(sessionId, normalizeTabIds(input.tabIds || []));
     } else {
-      const inferredTabIds = extractTabIdsFromPrompt(String(input.prompt || ""));
+      const inferredTabIds = extractTabIdsFromPrompt(
+        String(input.prompt || ""),
+      );
       if (inferredTabIds.length > 0) {
         await applySharedTabs(sessionId, inferredTabIds);
         orchestrator.events.emit("input.tab_ids_inferred", sessionId, {
-          tabIds: inferredTabIds
+          tabIds: inferredTabIds,
         });
       }
     }
@@ -8301,60 +9930,81 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     if (!rawPrompt && explicitSkillIds.length === 0) {
       return {
         sessionId,
-        runtime: orchestrator.getRunState(sessionId)
+        runtime: orchestrator.getRunState(sessionId),
       };
     }
-    const promptWithSelectedSkills = await expandExplicitSelectedSkillsPrompt(sessionId, rawPrompt, explicitSkillIds);
-    const promptForModel = await expandSkillSlashPrompt(sessionId, promptWithSelectedSkills);
-    const storedPrompt = rawPrompt || formatSkillSelectionSummary(explicitSkillIds);
+    const promptWithSelectedSkills = await expandExplicitSelectedSkillsPrompt(
+      sessionId,
+      rawPrompt,
+      explicitSkillIds,
+    );
+    const promptForModel = await expandSkillSlashPrompt(
+      sessionId,
+      promptWithSelectedSkills,
+    );
+    const storedPrompt =
+      rawPrompt || formatSkillSelectionSummary(explicitSkillIds);
 
     const behavior = normalizeStreamingBehavior(input.streamingBehavior);
     const state = orchestrator.getRunState(sessionId);
     if (state.running) {
       if (!behavior) {
-        throw new Error("会话正在运行中；请显式指定 streamingBehavior=steer|followUp");
+        throw new Error(
+          "会话正在运行中；请显式指定 streamingBehavior=steer|followUp",
+        );
       }
-      const queuedRuntime = orchestrator.enqueueQueuedPrompt(sessionId, behavior, rawPrompt, {
-        skillIds: explicitSkillIds
-      });
+      const queuedRuntime = orchestrator.enqueueQueuedPrompt(
+        sessionId,
+        behavior,
+        rawPrompt,
+        {
+          skillIds: explicitSkillIds,
+        },
+      );
       orchestrator.events.emit("message.queued", sessionId, {
         behavior,
         text: clipText(storedPrompt, 3000),
         total: queuedRuntime.queue.total,
         steer: queuedRuntime.queue.steer,
-        followUp: queuedRuntime.queue.followUp
+        followUp: queuedRuntime.queue.followUp,
       });
       if (behavior === "followUp") {
         orchestrator.events.emit("loop_follow_up_queued", sessionId, {
           text: clipText(storedPrompt, 3000),
-          total: queuedRuntime.queue.followUp
+          total: queuedRuntime.queue.followUp,
         });
       }
       return {
         sessionId,
-        runtime: queuedRuntime
+        runtime: queuedRuntime,
       };
     }
 
     await orchestrator.appendUserMessage(sessionId, storedPrompt);
     orchestrator.events.emit("input.user", sessionId, {
-      text: clipText(storedPrompt, 3000)
+      text: clipText(storedPrompt, 3000),
     });
 
     if (input.autoRun === false) {
       return {
         sessionId,
-        runtime: orchestrator.getRunState(sessionId)
+        runtime: orchestrator.getRunState(sessionId),
       };
     }
 
     return {
       sessionId,
-      runtime: await startLoopIfNeeded(sessionId, promptForModel, "restart_after_stop")
+      runtime: await startLoopIfNeeded(
+        sessionId,
+        promptForModel,
+        "restart_after_stop",
+      ),
     };
   }
 
-  async function startFromRegenerate(input: RegenerateRunInput): Promise<{ sessionId: string; runtime: RuntimeView }> {
+  async function startFromRegenerate(
+    input: RegenerateRunInput,
+  ): Promise<{ sessionId: string; runtime: RuntimeView }> {
     const sessionId = String(input.sessionId || "").trim();
     if (!sessionId) throw new Error("sessionId 不能为空");
     await orchestrator.sessions.ensureSession(sessionId);
@@ -8364,13 +10014,17 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     if (input.autoRun === false) {
       return {
         sessionId,
-        runtime: orchestrator.getRunState(sessionId)
+        runtime: orchestrator.getRunState(sessionId),
       };
     }
 
     return {
       sessionId,
-      runtime: await startLoopIfNeeded(sessionId, prompt, "restart_after_regenerate")
+      runtime: await startLoopIfNeeded(
+        sessionId,
+        prompt,
+        "restart_after_regenerate",
+      ),
     };
   }
 
@@ -8378,15 +10032,27 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
     startFromPrompt,
     startFromRegenerate,
     executeStep,
-    async refreshSessionTitle(sessionId: string, options: { force?: boolean } = {}): Promise<string> {
-      await refreshSessionTitleAuto(orchestrator, sessionId, infra, llmProviders, options);
+    async refreshSessionTitle(
+      sessionId: string,
+      options: { force?: boolean } = {},
+    ): Promise<string> {
+      await refreshSessionTitleAuto(
+        orchestrator,
+        sessionId,
+        infra,
+        llmProviders,
+        options,
+      );
       const meta = await orchestrator.sessions.getMeta(sessionId);
       return normalizeSessionTitle(meta?.header.title, "");
     },
     async getSystemPromptPreview(): Promise<string> {
       const cfgRaw = await callInfra(infra, { type: "config.get" });
       const cfg = extractLlmConfig(cfgRaw);
-      return buildBrowserAgentSystemPrompt(cfg, listRuntimeLlmToolDefinitions("all"));
-    }
+      return buildBrowserAgentSystemPrompt(
+        cfg,
+        listRuntimeLlmToolDefinitions("all"),
+      );
+    },
   };
 }

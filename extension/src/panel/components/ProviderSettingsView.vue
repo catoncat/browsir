@@ -6,7 +6,7 @@ import {
   DEFAULT_PANEL_LLM_MODEL,
   DEFAULT_PANEL_LLM_PROVIDER,
   useRuntimeStore,
-  type PanelLlmProfile
+  type PanelLlmProfile,
 } from "../stores/runtime";
 import { ArrowLeft, Eye, EyeOff, Loader2, Plus, Trash2 } from "lucide-vue-next";
 import { normalizeProviderConnectionConfig } from "../../shared/llm-provider-config";
@@ -17,22 +17,29 @@ const { config, savingConfig, error } = storeToRefs(store);
 
 const dialogRef = ref<HTMLElement | null>(null);
 const localError = ref("");
-const chainsText = ref("{}");
 const showApiKeys = ref<Record<string, boolean>>({});
 const bindingLoading = ref<Record<string, boolean>>({});
 
 const defaultProfileId = "provider-default-profile";
-const escalationPolicyId = "provider-escalation-policy";
-const profileChainsId = "provider-profile-chains";
+const auxProfileId = "provider-aux-profile";
+const fallbackProfileId = "provider-fallback-profile";
 const CURSOR_WEB_PROFILE_ID = "cursor-web";
 const CURSOR_HELP_URL = "https://cursor.com/help";
 const CURSOR_TAB_PATTERNS = ["https://cursor.com/help*"] as const;
 const builtinProviderOptions = [
   { value: "openai_compatible", label: "通用 API" },
-  { value: "cursor_help_web", label: "Cursor 网页聊天" }
+  { value: "cursor_help_web", label: "Cursor 网页聊天" },
 ] as const;
 
-const visibleError = computed(() => localError.value || String(error.value || ""));
+const visibleError = computed(
+  () => localError.value || String(error.value || ""),
+);
+const secondaryProfileOptions = computed(() => {
+  const defaultProfile = String(config.value.llmDefaultProfile || "").trim();
+  return config.value.llmProfiles.filter(
+    (profile) => String(profile.id || "").trim() !== defaultProfile,
+  );
+});
 
 function normalizeProfileId(input: string): string {
   return String(input || "")
@@ -40,6 +47,17 @@ function normalizeProfileId(input: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+function createUniqueProfileId(seed: string, taken: Set<string>): string {
+  const base = normalizeProfileId(seed) || "profile";
+  let candidate = base;
+  let suffix = 2;
+  while (taken.has(candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
 }
 
 function providerOptions(profile: PanelLlmProfile): Record<string, unknown> {
@@ -50,28 +68,60 @@ function providerOptions(profile: PanelLlmProfile): Record<string, unknown> {
 }
 
 function isCursorHelpWebProvider(profile: PanelLlmProfile): boolean {
-  return String(profile.provider || "").trim().toLowerCase() === "cursor_help_web";
+  return (
+    String(profile.provider || "")
+      .trim()
+      .toLowerCase() === "cursor_help_web"
+  );
 }
 
 function findCursorWebProfile(): PanelLlmProfile | null {
-  return config.value.llmProfiles.find((profile) => isCursorHelpWebProvider(profile)) || null;
+  return (
+    config.value.llmProfiles.find((profile) =>
+      isCursorHelpWebProvider(profile),
+    ) || null
+  );
 }
 
-function getProviderSelectOptions(profile: PanelLlmProfile): Array<{ value: string; label: string }> {
+function getProviderSelectOptions(
+  profile: PanelLlmProfile,
+): Array<{ value: string; label: string }> {
   const current = String(profile.provider || "").trim();
   if (!current) return [...builtinProviderOptions];
   if (builtinProviderOptions.some((item) => item.value === current)) {
     return [...builtinProviderOptions];
   }
-  return [{ value: current, label: `自定义接入 (${current})` }, ...builtinProviderOptions];
+  return [
+    { value: current, label: `自定义接入 (${current})` },
+    ...builtinProviderOptions,
+  ];
 }
 
 function isDefaultProfile(profile: PanelLlmProfile): boolean {
-  return String(profile.id || "").trim() === String(config.value.llmDefaultProfile || "").trim();
+  return (
+    String(profile.id || "").trim() ===
+    String(config.value.llmDefaultProfile || "").trim()
+  );
+}
+
+function isAuxProfile(profile: PanelLlmProfile): boolean {
+  return (
+    String(profile.id || "").trim() ===
+    String(config.value.llmAuxProfile || "").trim()
+  );
+}
+
+function isFallbackProfile(profile: PanelLlmProfile): boolean {
+  return (
+    String(profile.id || "").trim() ===
+    String(config.value.llmFallbackProfile || "").trim()
+  );
 }
 
 function getProviderLabel(profile: PanelLlmProfile): string {
-  const provider = String(profile.provider || "").trim().toLowerCase();
+  const provider = String(profile.provider || "")
+    .trim()
+    .toLowerCase();
   if (provider === "cursor_help_web") return "Cursor 网页聊天";
   if (provider === "openai_compatible") return "通用 API";
   return String(profile.provider || "").trim() || "未命名接入";
@@ -84,13 +134,18 @@ function getProfileTitle(profile: PanelLlmProfile, index: number): string {
 function getProfileSummary(profile: PanelLlmProfile): string {
   if (isCursorHelpWebProvider(profile)) {
     return getCursorHelpTargetTabId(profile)
-      ? "已连接 Cursor Help，发送时可跟随当前网页模型。"
+      ? "已连接 Cursor Help，会沿用网页中的账号状态。"
       : "保存后会自动连接 Cursor Help。";
   }
-  const role = String(profile.role || "").trim() || "worker";
   const model = String(profile.llmModel || "").trim() || "未设置模型";
   const base = String(profile.llmApiBase || "").trim() || "未设置接口地址";
-  return `${role} 任务默认走 ${model} · ${base}`;
+  return `${model} · ${base}`;
+}
+
+function getProfileOptionLabel(profile: PanelLlmProfile): string {
+  const id = String(profile.id || "").trim() || "未命名方案";
+  const model = String(profile.llmModel || "").trim() || "未设置模型";
+  return `${id} · ${getProviderLabel(profile)} · ${model}`;
 }
 
 function getCursorHelpTargetTabId(profile: PanelLlmProfile): number | "" {
@@ -119,7 +174,10 @@ function getCursorHelpModelOptions(profile: PanelLlmProfile): string[] {
   return Array.from(out);
 }
 
-function setCursorHelpTargetTabId(profile: PanelLlmProfile, value: unknown): void {
+function setCursorHelpTargetTabId(
+  profile: PanelLlmProfile,
+  value: unknown,
+): void {
   const options = providerOptions(profile);
   const raw = Number(value);
   if (Number.isInteger(raw) && raw > 0) {
@@ -130,36 +188,51 @@ function setCursorHelpTargetTabId(profile: PanelLlmProfile, value: unknown): voi
   options.targetSite = "cursor_help";
 }
 
-async function sendTabMessageWithRetry(tabId: number, message: Record<string, unknown>, retries = 12): Promise<unknown> {
+async function sendTabMessageWithRetry(
+  tabId: number,
+  message: Record<string, unknown>,
+  retries = 12,
+): Promise<unknown> {
   let lastError: unknown = null;
   for (let attempt = 0; attempt < retries; attempt += 1) {
     try {
       return await chrome.tabs.sendMessage(tabId, message);
-    } catch (error) {
-      lastError = error;
+    } catch (errorValue) {
+      lastError = errorValue;
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError || "标签页通信失败"));
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(String(lastError || "标签页通信失败"));
 }
 
-async function inspectCursorTab(tabId: number): Promise<{ isReady: boolean; url: string } | null> {
+async function inspectCursorTab(
+  tabId: number,
+): Promise<{ isReady: boolean; url: string } | null> {
   const response = await sendTabMessageWithRetry(tabId, {
-    type: "webchat.inspect"
+    type: "webchat.inspect",
   }).catch(() => null);
-  const row = response && typeof response === "object" ? (response as Record<string, unknown>) : null;
+  const row =
+    response && typeof response === "object"
+      ? (response as Record<string, unknown>)
+      : null;
   if (!row || row.ok !== true) return null;
   return {
     isReady: row.isReady === true,
-    url: String(row.url || "")
+    url: String(row.url || ""),
   };
 }
 
-async function locateCursorChatTab(active: boolean): Promise<chrome.tabs.Tab | null> {
+async function locateCursorChatTab(
+  active: boolean,
+): Promise<chrome.tabs.Tab | null> {
   const tabs = await chrome.tabs.query({ url: [...CURSOR_TAB_PATTERNS] });
   const sorted = [...tabs].sort((left, right) => {
     const leftHelp = String(left.url || "").startsWith(CURSOR_HELP_URL) ? 1 : 0;
-    const rightHelp = String(right.url || "").startsWith(CURSOR_HELP_URL) ? 1 : 0;
+    const rightHelp = String(right.url || "").startsWith(CURSOR_HELP_URL)
+      ? 1
+      : 0;
     return rightHelp - leftHelp;
   });
   for (const tab of sorted) {
@@ -171,9 +244,11 @@ async function locateCursorChatTab(active: boolean): Promise<chrome.tabs.Tab | n
         // noop
       });
       if (typeof tab.windowId === "number") {
-        await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {
-          // noop
-        });
+        await chrome.windows
+          .update(tab.windowId, { focused: true })
+          .catch(() => {
+            // noop
+          });
       }
     }
     return tab;
@@ -181,10 +256,12 @@ async function locateCursorChatTab(active: boolean): Promise<chrome.tabs.Tab | n
   return null;
 }
 
-async function openCursorFallbackTab(active: boolean): Promise<chrome.tabs.Tab> {
+async function openCursorFallbackTab(
+  active: boolean,
+): Promise<chrome.tabs.Tab> {
   return chrome.tabs.create({
     url: CURSOR_HELP_URL,
-    active
+    active,
   });
 }
 
@@ -204,12 +281,15 @@ async function bindCurrentTab(profile: PanelLlmProfile): Promise<void> {
   await ensureCursorHelpTab(profile, true);
 }
 
-async function ensureCursorHelpTab(profile: PanelLlmProfile, active: boolean): Promise<void> {
+async function ensureCursorHelpTab(
+  profile: PanelLlmProfile,
+  active: boolean,
+): Promise<void> {
   const profileId = String(profile.id || "").trim();
   if (!profileId) return;
   bindingLoading.value = {
     ...bindingLoading.value,
-    [profileId]: true
+    [profileId]: true,
   };
   localError.value = "";
   try {
@@ -227,28 +307,37 @@ async function ensureCursorHelpTab(profile: PanelLlmProfile, active: boolean): P
     await inspectCursorHelpTab(profile, boundTab.id);
     const inspected = await inspectCursorTab(boundTab.id);
     if (!inspected?.isReady) {
-      localError.value = "已打开 Cursor Help 页面，但内置 provider 尚未就绪。请确认页面已完成加载后再试。";
+      localError.value =
+        "已打开 Cursor Help 页面，但内置 provider 尚未就绪。请确认页面已完成加载后再试。";
     }
   } catch (err) {
     localError.value = err instanceof Error ? err.message : String(err);
   } finally {
     bindingLoading.value = {
       ...bindingLoading.value,
-      [profileId]: false
+      [profileId]: false,
     };
   }
 }
 
-async function inspectCursorHelpTab(profile: PanelLlmProfile, tabId = Number(getCursorHelpTargetTabId(profile))): Promise<void> {
+async function inspectCursorHelpTab(
+  profile: PanelLlmProfile,
+  tabId = Number(getCursorHelpTargetTabId(profile)),
+): Promise<void> {
   if (!Number.isInteger(tabId) || tabId <= 0) return;
   const response = await sendTabMessageWithRetry(tabId, {
-    type: "webchat.inspect"
+    type: "webchat.inspect",
   }).catch(() => null);
-  const row = response && typeof response === "object" ? (response as Record<string, unknown>) : {};
+  const row =
+    response && typeof response === "object"
+      ? (response as Record<string, unknown>)
+      : {};
   const options = providerOptions(profile);
   const selectedModel = String(row.selectedModel || "").trim();
   const availableModels = Array.isArray(row.availableModels)
-    ? row.availableModels.map((item) => String(item || "").trim()).filter(Boolean)
+    ? row.availableModels
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
     : [];
   if (selectedModel) {
     options.detectedModel = selectedModel;
@@ -269,7 +358,10 @@ async function handleProviderChange(profile: PanelLlmProfile): Promise<void> {
   if (!isCursorHelpWebProvider(profile)) return;
   const options = providerOptions(profile);
   options.targetSite = "cursor_help";
-  if (!String(profile.llmModel || "").trim() || String(profile.llmModel || "").trim() === DEFAULT_PANEL_LLM_MODEL) {
+  if (
+    !String(profile.llmModel || "").trim() ||
+    String(profile.llmModel || "").trim() === DEFAULT_PANEL_LLM_MODEL
+  ) {
     profile.llmModel = "auto";
   }
   await ensureCursorHelpTab(profile, true);
@@ -283,7 +375,7 @@ async function enableCursorWebPreset(): Promise<void> {
     const connection = normalizeProviderConnectionConfig({
       provider: "cursor_help_web",
       llmApiBase: "",
-      llmApiKey: ""
+      llmApiKey: "",
     });
     profile = {
       id: CURSOR_WEB_PROFILE_ID,
@@ -292,27 +384,26 @@ async function enableCursorWebPreset(): Promise<void> {
       llmApiKey: connection.llmApiKey,
       llmModel: "auto",
       providerOptions: {
-        targetSite: "cursor_help"
+        targetSite: "cursor_help",
       },
-      role: "worker",
       llmTimeoutMs: 120000,
       llmRetryMaxAttempts: 1,
-      llmMaxRetryDelayMs: 60000
+      llmMaxRetryDelayMs: 60000,
     };
     config.value.llmProfiles.unshift(profile);
   }
   profile.provider = "cursor_help_web";
-  profile.role = "worker";
   const connection = normalizeProviderConnectionConfig({
     provider: profile.provider,
     llmApiBase: profile.llmApiBase,
-    llmApiKey: profile.llmApiKey
+    llmApiKey: profile.llmApiKey,
   });
   profile.llmApiBase = connection.llmApiBase;
   profile.llmApiKey = connection.llmApiKey;
   profile.llmModel = String(profile.llmModel || "auto").trim() || "auto";
   providerOptions(profile).targetSite = "cursor_help";
   config.value.llmDefaultProfile = profile.id;
+  ensureProfiles();
   await ensureCursorHelpTab(profile, true);
 }
 
@@ -325,15 +416,16 @@ function buildDefaultProfile(idSeed: string): PanelLlmProfile {
     llmApiKey: "",
     llmModel: DEFAULT_PANEL_LLM_MODEL,
     providerOptions: {},
-    role: "worker",
     llmTimeoutMs: Number(config.value.llmTimeoutMs || 120000),
     llmRetryMaxAttempts: Number(config.value.llmRetryMaxAttempts || 2),
-    llmMaxRetryDelayMs: Number(config.value.llmMaxRetryDelayMs || 60000)
+    llmMaxRetryDelayMs: Number(config.value.llmMaxRetryDelayMs || 60000),
   };
 }
 
 function nextProfileId(): string {
-  const existing = new Set(config.value.llmProfiles.map((item) => String(item.id || "").trim()));
+  const existing = new Set(
+    config.value.llmProfiles.map((item) => String(item.id || "").trim()),
+  );
   let index = config.value.llmProfiles.length + 1;
   while (existing.has(`profile-${index}`)) {
     index += 1;
@@ -341,15 +433,42 @@ function nextProfileId(): string {
   return `profile-${index}`;
 }
 
+function sanitizeSelectedProfiles(): void {
+  const validIds = new Set(
+    config.value.llmProfiles
+      .map((item) => String(item.id || "").trim())
+      .filter(Boolean),
+  );
+  const firstId = String(config.value.llmProfiles[0]?.id || "").trim();
+  const currentDefault = String(config.value.llmDefaultProfile || "").trim();
+  const nextDefault = validIds.has(currentDefault)
+    ? currentDefault
+    : firstId || "default";
+  config.value.llmDefaultProfile = nextDefault;
+
+  const auxProfile = String(config.value.llmAuxProfile || "").trim();
+  config.value.llmAuxProfile =
+    auxProfile && auxProfile !== nextDefault && validIds.has(auxProfile)
+      ? auxProfile
+      : "";
+
+  const fallbackProfile = String(config.value.llmFallbackProfile || "").trim();
+  config.value.llmFallbackProfile =
+    fallbackProfile &&
+    fallbackProfile !== nextDefault &&
+    validIds.has(fallbackProfile)
+      ? fallbackProfile
+      : "";
+}
+
 function ensureProfiles(): void {
-  if (!Array.isArray(config.value.llmProfiles) || config.value.llmProfiles.length === 0) {
+  if (
+    !Array.isArray(config.value.llmProfiles) ||
+    config.value.llmProfiles.length === 0
+  ) {
     config.value.llmProfiles = [buildDefaultProfile("default")];
   }
-  const firstId = String(config.value.llmProfiles[0]?.id || "").trim();
-  const hasDefault = config.value.llmProfiles.some((item) => String(item.id || "").trim() === config.value.llmDefaultProfile);
-  if (!hasDefault) {
-    config.value.llmDefaultProfile = firstId || "default";
-  }
+  sanitizeSelectedProfiles();
 }
 
 function toggleApiKey(profileId: string): void {
@@ -357,7 +476,7 @@ function toggleApiKey(profileId: string): void {
   if (!id) return;
   showApiKeys.value = {
     ...showApiKeys.value,
-    [id]: !showApiKeys.value[id]
+    [id]: !showApiKeys.value[id],
   };
 }
 
@@ -369,84 +488,80 @@ function addProfile(): void {
 
 function removeProfile(profileId: string): void {
   if (config.value.llmProfiles.length <= 1) {
-    localError.value = "至少保留一个 LLM Profile";
+    localError.value = "至少保留一个模型方案";
     return;
   }
   const id = String(profileId || "").trim();
-  config.value.llmProfiles = config.value.llmProfiles.filter((item) => String(item.id || "").trim() !== id);
+  config.value.llmProfiles = config.value.llmProfiles.filter(
+    (item) => String(item.id || "").trim() !== id,
+  );
   ensureProfiles();
 }
 
-function formatChains(value: unknown): string {
-  const source = value && typeof value === "object" ? value : {};
-  try {
-    return JSON.stringify(source, null, 2);
-  } catch {
-    return "{}";
-  }
-}
-
-function parseProfileChains(text: string, validIds: Set<string>): Record<string, string[]> {
-  if (!String(text || "").trim()) return {};
-  let parsed: unknown = null;
-  try {
-    parsed = JSON.parse(String(text || "{}"));
-  } catch {
-    throw new Error("Profile Chains 必须是合法 JSON");
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Profile Chains 必须是 role -> profileId[] 的对象");
-  }
-  const out: Record<string, string[]> = {};
-  for (const [roleRaw, listRaw] of Object.entries(parsed as Record<string, unknown>)) {
-    const role = String(roleRaw || "").trim();
-    if (!role || !Array.isArray(listRaw)) continue;
-    const dedup = new Set<string>();
-    const ids: string[] = [];
-    for (const item of listRaw) {
-      const id = String(item || "").trim();
-      if (!id || dedup.has(id) || !validIds.has(id)) continue;
-      dedup.add(id);
-      ids.push(id);
-    }
-    if (ids.length > 0) out[role] = ids;
-  }
-  return out;
-}
-
 function normalizeProfilesBeforeSave(): void {
-  const dedup = new Set<string>();
+  const taken = new Set<string>();
   const normalized: PanelLlmProfile[] = [];
+  const idMap = new Map<string, string>();
 
   for (const raw of config.value.llmProfiles) {
-    const normalizedId = normalizeProfileId(String(raw.id || "")) || nextProfileId();
-    if (dedup.has(normalizedId)) continue;
-    dedup.add(normalizedId);
-    const provider = String(raw.provider || DEFAULT_PANEL_LLM_PROVIDER).trim() || DEFAULT_PANEL_LLM_PROVIDER;
-    const providerOptions = raw.providerOptions && typeof raw.providerOptions === "object" ? { ...raw.providerOptions } : {};
+    const sourceId = String(raw.id || "").trim();
+    const normalizedId = createUniqueProfileId(
+      sourceId || nextProfileId(),
+      taken,
+    );
+    taken.add(normalizedId);
+    if (sourceId) {
+      idMap.set(sourceId, normalizedId);
+    }
+    const provider =
+      String(raw.provider || DEFAULT_PANEL_LLM_PROVIDER).trim() ||
+      DEFAULT_PANEL_LLM_PROVIDER;
+    const nextProviderOptions =
+      raw.providerOptions && typeof raw.providerOptions === "object"
+        ? { ...raw.providerOptions }
+        : {};
     if (provider.toLowerCase() === "cursor_help_web") {
-      providerOptions.targetSite = "cursor_help";
+      nextProviderOptions.targetSite = "cursor_help";
     }
     const connection = normalizeProviderConnectionConfig({
       provider,
       llmApiBase: raw.llmApiBase,
-      llmApiKey: raw.llmApiKey
+      llmApiKey: raw.llmApiKey,
     });
     normalized.push({
       id: normalizedId,
       provider,
       llmApiBase: connection.llmApiBase,
       llmApiKey: connection.llmApiKey,
-      llmModel: String(raw.llmModel || DEFAULT_PANEL_LLM_MODEL).trim() || DEFAULT_PANEL_LLM_MODEL,
-      providerOptions,
-      role: String(raw.role || "worker").trim() || "worker",
+      llmModel:
+        String(raw.llmModel || DEFAULT_PANEL_LLM_MODEL).trim() ||
+        DEFAULT_PANEL_LLM_MODEL,
+      providerOptions: nextProviderOptions,
       llmTimeoutMs: Math.max(1000, Number(raw.llmTimeoutMs || 120000)),
-      llmRetryMaxAttempts: Math.max(0, Math.min(6, Number(raw.llmRetryMaxAttempts || 2))),
-      llmMaxRetryDelayMs: Math.max(0, Number(raw.llmMaxRetryDelayMs || 60000))
+      llmRetryMaxAttempts: Math.max(
+        0,
+        Math.min(6, Number(raw.llmRetryMaxAttempts || 2)),
+      ),
+      llmMaxRetryDelayMs: Math.max(0, Number(raw.llmMaxRetryDelayMs || 60000)),
     });
   }
 
-  config.value.llmProfiles = normalized.length > 0 ? normalized : [buildDefaultProfile("default")];
+  config.value.llmProfiles =
+    normalized.length > 0 ? normalized : [buildDefaultProfile("default")];
+
+  const remapSelection = (value: string): string => {
+    const id = String(value || "").trim();
+    if (!id) return "";
+    return idMap.get(id) || id;
+  };
+
+  config.value.llmDefaultProfile = remapSelection(
+    config.value.llmDefaultProfile,
+  );
+  config.value.llmAuxProfile = remapSelection(config.value.llmAuxProfile);
+  config.value.llmFallbackProfile = remapSelection(
+    config.value.llmFallbackProfile,
+  );
   ensureProfiles();
 }
 
@@ -455,13 +570,13 @@ async function handleSave(): Promise<void> {
   try {
     normalizeProfilesBeforeSave();
     for (const profile of config.value.llmProfiles) {
-      if (isCursorHelpWebProvider(profile) && !getCursorHelpTargetTabId(profile)) {
+      if (
+        isCursorHelpWebProvider(profile) &&
+        !getCursorHelpTargetTabId(profile)
+      ) {
         await ensureCursorHelpTab(profile, false);
       }
     }
-    const validIds = new Set(config.value.llmProfiles.map((item) => item.id));
-    config.value.llmProfileChains = parseProfileChains(chainsText.value, validIds);
-    config.value.llmEscalationPolicy = config.value.llmEscalationPolicy === "disabled" ? "disabled" : "upgrade_only";
     await store.saveConfig();
     emit("close");
   } catch (err) {
@@ -471,7 +586,6 @@ async function handleSave(): Promise<void> {
 
 onMounted(() => {
   ensureProfiles();
-  chainsText.value = formatChains(config.value.llmProfileChains);
   dialogRef.value?.focus();
 });
 </script>
@@ -482,11 +596,13 @@ onMounted(() => {
     tabindex="-1"
     role="dialog"
     aria-modal="true"
-    aria-label="模型路由"
+    aria-label="模型设置"
     class="fixed inset-0 z-[60] bg-ui-bg flex flex-col animate-in fade-in duration-200 focus:outline-none"
     @keydown.esc="$emit('close')"
   >
-    <header class="h-12 flex items-center px-2 border-b border-ui-border bg-ui-bg shrink-0">
+    <header
+      class="h-12 flex items-center px-2 border-b border-ui-border bg-ui-bg shrink-0"
+    >
       <button
         class="p-2.5 hover:bg-ui-surface rounded-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
         aria-label="返回"
@@ -494,22 +610,33 @@ onMounted(() => {
       >
         <ArrowLeft :size="18" aria-hidden="true" />
       </button>
-      <h2 class="ml-2 text-[13px] font-bold tracking-tight">模型路由</h2>
+      <h2 class="ml-2 text-[13px] font-bold tracking-tight">模型设置</h2>
     </header>
 
     <main class="flex-1 overflow-y-auto p-4 space-y-4">
-      <section class="border border-ui-border bg-ui-surface/30 p-4 rounded-sm space-y-3">
+      <section
+        class="border border-ui-border bg-ui-surface/30 p-4 rounded-sm space-y-3"
+      >
         <div class="space-y-1">
-          <p class="text-[11px] font-bold uppercase tracking-[0.14em] text-ui-text-muted/70">Model Routing</p>
-          <h3 class="text-[16px] font-semibold tracking-tight text-ui-text">决定每次任务先用哪个模型，以及失败后怎么切换</h3>
+          <p
+            class="text-[11px] font-bold uppercase tracking-[0.14em] text-ui-text-muted/70"
+          >
+            Model Setup
+          </p>
+          <h3 class="text-[16px] font-semibold tracking-tight text-ui-text">
+            把模型职责收口成三件事
+          </h3>
           <p class="text-[12px] text-ui-text-muted leading-relaxed">
-            先选默认模型，再补充备用方案。大多数场景只需要维护 1 到 3 个模型方案。
+            主对话固定用一套模型闭环执行。标题、摘要这类轻量任务可以单独指定辅助模型；主模型连续失败时，最多切到一个兜底模型。
           </p>
         </div>
 
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div class="grid grid-cols-1 gap-3 lg:grid-cols-3">
           <label class="space-y-1.5">
-            <span class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">默认模型</span>
+            <span
+              class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
+              >主对话模型</span
+            >
             <select
               :id="defaultProfileId"
               v-model="config.llmDefaultProfile"
@@ -520,33 +647,77 @@ onMounted(() => {
                 :key="profile.id"
                 :value="profile.id"
               >
-                {{ `${profile.id} · ${getProviderLabel(profile)}` }}
+                {{ getProfileOptionLabel(profile) }}
               </option>
             </select>
-            <p class="text-[11px] text-ui-text-muted/75">新任务会优先从这里开始。</p>
+            <p class="text-[11px] text-ui-text-muted/75">
+              带工具调用的主流程始终从这里开始。
+            </p>
           </label>
 
           <label class="space-y-1.5">
-            <span class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">失败后切换</span>
+            <span
+              class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
+              >辅助任务模型</span
+            >
             <select
-              :id="escalationPolicyId"
-              v-model="config.llmEscalationPolicy"
+              :id="auxProfileId"
+              v-model="config.llmAuxProfile"
               class="w-full bg-ui-bg border border-ui-border rounded-sm px-3 py-2 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
             >
-              <option value="upgrade_only">自动切到更高档位的模型</option>
-              <option value="disabled">只使用当前模型</option>
+              <option value="">跟随主对话模型</option>
+              <option
+                v-for="profile in secondaryProfileOptions"
+                :key="profile.id"
+                :value="profile.id"
+              >
+                {{ getProfileOptionLabel(profile) }}
+              </option>
             </select>
-            <p class="text-[11px] text-ui-text-muted/75">适合把快模型放前面，把强模型放后面兜底。</p>
+            <p class="text-[11px] text-ui-text-muted/75">
+              用于标题、摘要等旁路任务，不影响主会话上下文。
+            </p>
+          </label>
+
+          <label class="space-y-1.5">
+            <span
+              class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
+              >失败后升级</span
+            >
+            <select
+              :id="fallbackProfileId"
+              v-model="config.llmFallbackProfile"
+              class="w-full bg-ui-bg border border-ui-border rounded-sm px-3 py-2 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+            >
+              <option value="">不自动切换</option>
+              <option
+                v-for="profile in secondaryProfileOptions"
+                :key="profile.id"
+                :value="profile.id"
+              >
+                {{ getProfileOptionLabel(profile) }}
+              </option>
+            </select>
+            <p class="text-[11px] text-ui-text-muted/75">
+              仅在主模型连续失败时切换一次，适合把强模型放在后面兜底。
+            </p>
           </label>
         </div>
       </section>
 
-      <section class="border border-ui-border bg-ui-surface/30 p-3 rounded-sm space-y-3">
+      <section
+        class="border border-ui-border bg-ui-surface/30 p-3 rounded-sm space-y-3"
+      >
         <div class="flex items-start justify-between gap-3">
           <div class="space-y-1">
-            <h3 class="text-[12px] font-bold uppercase tracking-tighter text-ui-text-muted/80">快速接入 Cursor</h3>
+            <h3
+              class="text-[12px] font-bold uppercase tracking-tighter text-ui-text-muted/80"
+            >
+              快速接入 Cursor
+            </h3>
             <p class="text-[12px] text-ui-text-muted leading-relaxed">
-              把 Cursor Help 接成一个可选模型方案，适合临时复用网页里的账号状态和当前模型。
+              把 Cursor Help
+              接成一个可选模型方案，适合临时复用网页里的账号状态和当前模型。
             </p>
             <p class="text-[11px] text-ui-text-muted/80">
               {{
@@ -562,45 +733,32 @@ onMounted(() => {
             :disabled="Boolean(bindingLoading[CURSOR_WEB_PROFILE_ID])"
             @click="enableCursorWebPreset"
           >
-            <Loader2 v-if="bindingLoading[CURSOR_WEB_PROFILE_ID]" class="animate-spin" :size="12" aria-hidden="true" />
-            <span>{{ findCursorWebProfile() ? "重新连接" : "接入 Cursor" }}</span>
+            <Loader2
+              v-if="bindingLoading[CURSOR_WEB_PROFILE_ID]"
+              class="animate-spin"
+              :size="12"
+              aria-hidden="true"
+            />
+            <span>{{
+              findCursorWebProfile() ? "重新连接" : "接入 Cursor"
+            }}</span>
           </button>
         </div>
       </section>
 
-      <section class="border border-ui-border bg-ui-surface/30 p-3 rounded-sm space-y-3">
-        <details class="group rounded-sm">
-          <summary class="cursor-pointer list-none flex items-center justify-between gap-3 px-0.5 py-0.5">
-            <div class="space-y-1">
-              <h3 class="text-[12px] font-bold uppercase tracking-tighter text-ui-text-muted/80">按角色分配模型</h3>
-              <p class="text-[12px] text-ui-text-muted">让 `worker`、`reviewer` 这类角色走不同模型。默认不用配。</p>
-            </div>
-            <span class="text-[11px] text-ui-text-muted group-open:hidden">展开</span>
-            <span class="text-[11px] text-ui-text-muted hidden group-open:inline">收起</span>
-          </summary>
-
-          <div class="pt-3 space-y-1.5">
-            <label :for="profileChainsId" class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">
-              角色路由规则（JSON）
-            </label>
-            <textarea
-              :id="profileChainsId"
-              v-model="chainsText"
-              rows="4"
-              spellcheck="false"
-              class="w-full bg-ui-bg border border-ui-border rounded-sm px-3 py-2 text-[12px] font-mono leading-relaxed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-              placeholder='{"worker":["default","worker-pro"],"reviewer":["reviewer-basic"]}'
-            />
-            <p class="text-[11px] text-ui-text-muted/75">例如把 `reviewer` 固定到更稳的模型，把 `worker` 先走更快的模型。</p>
-          </div>
-        </details>
-      </section>
-
-      <section class="border border-ui-border bg-ui-surface/30 p-3 rounded-sm space-y-3">
+      <section
+        class="border border-ui-border bg-ui-surface/30 p-3 rounded-sm space-y-3"
+      >
         <div class="flex items-center justify-between gap-2">
           <div class="space-y-1">
-            <h3 class="text-[12px] font-bold uppercase tracking-tighter text-ui-text-muted/80">模型方案</h3>
-            <p class="text-[12px] text-ui-text-muted">每个方案定义一个模型入口。默认模型和失败切换都从这里挑选。</p>
+            <h3
+              class="text-[12px] font-bold uppercase tracking-tighter text-ui-text-muted/80"
+            >
+              模型方案
+            </h3>
+            <p class="text-[12px] text-ui-text-muted">
+              每个方案定义一个模型入口。主对话、辅助任务和失败升级都从这里挑选。
+            </p>
           </div>
           <button
             type="button"
@@ -621,18 +779,36 @@ onMounted(() => {
           <div class="flex items-start justify-between gap-3">
             <div class="space-y-1">
               <div class="flex flex-wrap items-center gap-1.5">
-                <h4 class="text-[13px] font-semibold text-ui-text">{{ getProfileTitle(profile, index) }}</h4>
-                <span v-if="isDefaultProfile(profile)" class="inline-flex items-center rounded-full border border-ui-accent/30 bg-ui-accent/10 px-2 py-0.5 text-[10px] font-semibold text-ui-accent">
-                  默认
+                <h4 class="text-[13px] font-semibold text-ui-text">
+                  {{ getProfileTitle(profile, index) }}
+                </h4>
+                <span
+                  v-if="isDefaultProfile(profile)"
+                  class="inline-flex items-center rounded-full border border-ui-accent/30 bg-ui-accent/10 px-2 py-0.5 text-[10px] font-semibold text-ui-accent"
+                >
+                  主对话
                 </span>
-                <span class="inline-flex items-center rounded-full border border-ui-border bg-ui-surface px-2 py-0.5 text-[10px] text-ui-text-muted">
+                <span
+                  v-if="isAuxProfile(profile)"
+                  class="inline-flex items-center rounded-full border border-sky-400/30 bg-sky-400/10 px-2 py-0.5 text-[10px] font-semibold text-sky-500"
+                >
+                  辅助任务
+                </span>
+                <span
+                  v-if="isFallbackProfile(profile)"
+                  class="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 text-[10px] font-semibold text-amber-600"
+                >
+                  失败升级
+                </span>
+                <span
+                  class="inline-flex items-center rounded-full border border-ui-border bg-ui-surface px-2 py-0.5 text-[10px] text-ui-text-muted"
+                >
                   {{ getProviderLabel(profile) }}
                 </span>
-                <span v-if="!isCursorHelpWebProvider(profile)" class="inline-flex items-center rounded-full border border-ui-border bg-ui-surface px-2 py-0.5 text-[10px] text-ui-text-muted">
-                  {{ String(profile.role || "worker").trim() || "worker" }}
-                </span>
               </div>
-              <p class="text-[11px] text-ui-text-muted leading-relaxed">{{ getProfileSummary(profile) }}</p>
+              <p class="text-[11px] text-ui-text-muted leading-relaxed">
+                {{ getProfileSummary(profile) }}
+              </p>
             </div>
             <button
               type="button"
@@ -647,18 +823,24 @@ onMounted(() => {
 
           <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
             <label class="space-y-1 block">
-              <span class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">方案 ID</span>
+              <span
+                class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
+                >方案 ID</span
+              >
               <input
                 v-model="profile.id"
                 type="text"
                 :readonly="isCursorHelpWebProvider(profile)"
                 class="w-full bg-ui-surface border border-ui-border rounded-sm px-2.5 py-2 text-[12px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-                placeholder="worker.basic"
+                placeholder="fast-main"
               />
             </label>
 
             <label class="space-y-1 block">
-              <span class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">接入方式</span>
+              <span
+                class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
+                >接入方式</span
+              >
               <select
                 v-model="profile.provider"
                 :disabled="isCursorHelpWebProvider(profile)"
@@ -677,9 +859,14 @@ onMounted(() => {
 
             <template v-if="isCursorHelpWebProvider(profile)">
               <label class="space-y-1 block sm:col-span-2">
-                <span class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">连接页面</span>
+                <span
+                  class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
+                  >连接页面</span
+                >
                 <div class="flex items-center gap-2">
-                  <div class="w-full bg-ui-surface border border-ui-border rounded-sm px-2.5 py-2 text-[12px] text-ui-text-muted">
+                  <div
+                    class="w-full bg-ui-surface border border-ui-border rounded-sm px-2.5 py-2 text-[12px] text-ui-text-muted"
+                  >
                     {{
                       getCursorHelpTargetTabId(profile)
                         ? `已绑定 Cursor Help 页面 #${getCursorHelpTargetTabId(profile)}`
@@ -692,28 +879,26 @@ onMounted(() => {
                     :disabled="bindingLoading[profile.id]"
                     @click="bindCurrentTab(profile)"
                   >
-                    <Loader2 v-if="bindingLoading[profile.id]" class="animate-spin" :size="12" aria-hidden="true" />
+                    <Loader2
+                      v-if="bindingLoading[profile.id]"
+                      class="animate-spin"
+                      :size="12"
+                      aria-hidden="true"
+                    />
                     <span>重新连接</span>
                   </button>
                 </div>
               </label>
-            </template>
 
-            <label class="space-y-1 block" v-if="!isCursorHelpWebProvider(profile)">
-              <span class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">用途标签</span>
-              <input
-                v-model="profile.role"
-                type="text"
-                class="w-full bg-ui-surface border border-ui-border rounded-sm px-2.5 py-2 text-[12px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-                placeholder="worker / reviewer"
-              />
-            </label>
-
-            <template v-if="isCursorHelpWebProvider(profile)">
               <label class="space-y-1 block sm:col-span-2">
-                <span class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">页面中的模型</span>
+                <span
+                  class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
+                  >页面中的模型</span
+                >
                 <div class="flex items-center gap-2">
-                  <div class="w-full bg-ui-surface border border-ui-border rounded-sm px-2.5 py-2 text-[12px] text-ui-text-muted">
+                  <div
+                    class="w-full bg-ui-surface border border-ui-border rounded-sm px-2.5 py-2 text-[12px] text-ui-text-muted"
+                  >
                     {{
                       getCursorHelpDetectedModel(profile)
                         ? `当前检测到：${getCursorHelpDetectedModel(profile)}`
@@ -726,21 +911,34 @@ onMounted(() => {
                     :disabled="bindingLoading[profile.id]"
                     @click="bindCurrentTab(profile)"
                   >
-                    <Loader2 v-if="bindingLoading[profile.id]" class="animate-spin" :size="12" aria-hidden="true" />
+                    <Loader2
+                      v-if="bindingLoading[profile.id]"
+                      class="animate-spin"
+                      :size="12"
+                      aria-hidden="true"
+                    />
                     <span>刷新页面状态</span>
                   </button>
                 </div>
               </label>
 
-              <label v-if="getCursorHelpModelOptions(profile).length > 1" class="space-y-1 block sm:col-span-2">
-                <span class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">发送时使用</span>
+              <label
+                v-if="getCursorHelpModelOptions(profile).length > 1"
+                class="space-y-1 block sm:col-span-2"
+              >
+                <span
+                  class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
+                  >发送时使用</span
+                >
                 <select
                   v-model="profile.llmModel"
                   class="w-full bg-ui-surface border border-ui-border rounded-sm px-2.5 py-2 text-[12px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
                 >
                   <option value="auto">跟随页面当前模型</option>
                   <option
-                    v-for="model in getCursorHelpModelOptions(profile).filter((item) => item !== 'auto')"
+                    v-for="model in getCursorHelpModelOptions(profile).filter(
+                      (item) => item !== 'auto',
+                    )"
                     :key="model"
                     :value="model"
                   >
@@ -750,7 +948,10 @@ onMounted(() => {
               </label>
 
               <label v-else class="space-y-1 block sm:col-span-2">
-                <span class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">发送时使用</span>
+                <span
+                  class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
+                  >发送时使用</span
+                >
                 <input
                   v-model="profile.llmModel"
                   type="text"
@@ -760,8 +961,14 @@ onMounted(() => {
               </label>
             </template>
 
-            <label v-if="!isCursorHelpWebProvider(profile)" class="space-y-1 block sm:col-span-2">
-              <span class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">接口地址</span>
+            <label
+              v-if="!isCursorHelpWebProvider(profile)"
+              class="space-y-1 block sm:col-span-2"
+            >
+              <span
+                class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
+                >接口地址</span
+              >
               <input
                 v-model="profile.llmApiBase"
                 type="text"
@@ -770,8 +977,14 @@ onMounted(() => {
               />
             </label>
 
-            <label v-if="!isCursorHelpWebProvider(profile)" class="space-y-1 block sm:col-span-2">
-              <span class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">访问密钥</span>
+            <label
+              v-if="!isCursorHelpWebProvider(profile)"
+              class="space-y-1 block sm:col-span-2"
+            >
+              <span
+                class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
+                >访问密钥</span
+              >
               <div class="relative">
                 <input
                   v-model="profile.llmApiKey"
@@ -782,18 +995,30 @@ onMounted(() => {
                 <button
                   type="button"
                   class="absolute inset-y-0 right-0 px-2 text-ui-text-muted hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-                  :aria-label="showApiKeys[profile.id] ? '隐藏 API Key' : '显示 API Key'"
+                  :aria-label="
+                    showApiKeys[profile.id] ? '隐藏 API Key' : '显示 API Key'
+                  "
                   :aria-pressed="Boolean(showApiKeys[profile.id])"
                   @click="toggleApiKey(profile.id)"
                 >
-                  <EyeOff v-if="showApiKeys[profile.id]" :size="14" aria-hidden="true" />
+                  <EyeOff
+                    v-if="showApiKeys[profile.id]"
+                    :size="14"
+                    aria-hidden="true"
+                  />
                   <Eye v-else :size="14" aria-hidden="true" />
                 </button>
               </div>
             </label>
 
-            <label v-if="!isCursorHelpWebProvider(profile)" class="space-y-1 block sm:col-span-2">
-              <span class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">模型</span>
+            <label
+              v-if="!isCursorHelpWebProvider(profile)"
+              class="space-y-1 block sm:col-span-2"
+            >
+              <span
+                class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
+                >模型</span
+              >
               <input
                 v-model="profile.llmModel"
                 type="text"
@@ -802,15 +1027,31 @@ onMounted(() => {
               />
             </label>
 
-            <details v-if="!isCursorHelpWebProvider(profile)" class="sm:col-span-2 rounded-sm border border-ui-border bg-ui-surface/40 px-3 py-2 group">
-              <summary class="cursor-pointer list-none flex items-center justify-between gap-2">
-                <span class="text-[11px] font-bold uppercase tracking-tighter text-ui-text-muted/80">高级设置</span>
-                <span class="text-[11px] text-ui-text-muted group-open:hidden">展开</span>
-                <span class="text-[11px] text-ui-text-muted hidden group-open:inline">收起</span>
+            <details
+              v-if="!isCursorHelpWebProvider(profile)"
+              class="sm:col-span-2 rounded-sm border border-ui-border bg-ui-surface/40 px-3 py-2 group"
+            >
+              <summary
+                class="cursor-pointer list-none flex items-center justify-between gap-2"
+              >
+                <span
+                  class="text-[11px] font-bold uppercase tracking-tighter text-ui-text-muted/80"
+                  >高级设置</span
+                >
+                <span class="text-[11px] text-ui-text-muted group-open:hidden"
+                  >展开</span
+                >
+                <span
+                  class="text-[11px] text-ui-text-muted hidden group-open:inline"
+                  >收起</span
+                >
               </summary>
               <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 pt-3">
                 <label class="space-y-1 block">
-                  <span class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">请求超时 (ms)</span>
+                  <span
+                    class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
+                    >请求超时 (ms)</span
+                  >
                   <input
                     v-model.number="profile.llmTimeoutMs"
                     type="number"
@@ -821,7 +1062,10 @@ onMounted(() => {
                 </label>
 
                 <label class="space-y-1 block">
-                  <span class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">失败重试次数</span>
+                  <span
+                    class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
+                    >失败重试次数</span
+                  >
                   <input
                     v-model.number="profile.llmRetryMaxAttempts"
                     type="number"
@@ -832,7 +1076,10 @@ onMounted(() => {
                 </label>
 
                 <label class="space-y-1 block sm:col-span-2">
-                  <span class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">最大重试等待 (ms)</span>
+                  <span
+                    class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
+                    >最大重试等待 (ms)</span
+                  >
                   <input
                     v-model.number="profile.llmMaxRetryDelayMs"
                     type="number"
@@ -849,14 +1096,16 @@ onMounted(() => {
     </main>
 
     <footer class="p-4 border-t border-ui-border bg-ui-surface/20">
-      <p v-if="visibleError" class="text-[11px] text-red-500 mb-3 px-1">{{ visibleError }}</p>
+      <p v-if="visibleError" class="text-[11px] text-red-500 mb-3 px-1">
+        {{ visibleError }}
+      </p>
       <button
         class="w-full bg-ui-text text-ui-bg py-2.5 rounded-sm font-bold flex items-center justify-center gap-2 hover:opacity-90 transition-opacity disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
         :disabled="savingConfig"
         @click="handleSave"
       >
         <Loader2 v-if="savingConfig" class="animate-spin" :size="16" />
-        {{ savingConfig ? '保存中...' : '保存并生效' }}
+        {{ savingConfig ? "保存中..." : "保存并生效" }}
       </button>
     </footer>
   </div>

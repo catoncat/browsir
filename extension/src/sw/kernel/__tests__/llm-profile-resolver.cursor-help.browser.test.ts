@@ -5,15 +5,13 @@ import { resolveLlmRoute } from "../llm-profile-resolver";
 import type { BridgeConfig } from "../runtime-infra.browser";
 import { CURSOR_HELP_WEB_API_KEY, CURSOR_HELP_WEB_BASE_URL } from "../../../shared/llm-provider-config";
 
-function baseConfig(): BridgeConfig & { llmProfiles?: unknown; llmProfileChains?: unknown } {
+function baseConfig(): BridgeConfig {
   return {
     bridgeUrl: "ws://127.0.0.1:8787/ws",
     bridgeToken: "dev-token",
     browserRuntimeStrategy: "host-first",
     llmDefaultProfile: "cursor-help",
     llmProfiles: [],
-    llmProfileChains: {},
-    llmEscalationPolicy: "upgrade_only",
     maxSteps: 10,
     autoTitleInterval: 10,
     bridgeInvokeTimeoutMs: 120000,

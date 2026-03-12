@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { ref } from "vue";
 import {
   normalizeBrowserRuntimeStrategy,
-  type BrowserRuntimeStrategy
+  type BrowserRuntimeStrategy,
 } from "../../sw/kernel/browser-runtime-strategy";
 import { normalizeProviderConnectionConfig } from "../../shared/llm-provider-config";
 
@@ -62,16 +62,20 @@ interface RuntimeStateView {
   };
 }
 
-function normalizeRuntimeState(raw: RuntimeStateView | null | undefined): RuntimeStateView | null {
+function normalizeRuntimeState(
+  raw: RuntimeStateView | null | undefined,
+): RuntimeStateView | null {
   if (!raw) return null;
   const running = raw.running === true;
   const stopped = raw.stopped === true;
   const lifecycle: "idle" | "running" | "stopping" = running
-    ? (stopped ? "stopping" : "running")
+    ? stopped
+      ? "stopping"
+      : "running"
     : "idle";
   return {
     ...raw,
-    lifecycle
+    lifecycle,
   };
 }
 
@@ -82,14 +86,9 @@ export interface PanelLlmProfile {
   llmApiKey: string;
   llmModel: string;
   providerOptions?: Record<string, unknown>;
-  role: string;
   llmTimeoutMs: number;
   llmRetryMaxAttempts: number;
   llmMaxRetryDelayMs: number;
-}
-
-export interface PanelLlmProfileChains {
-  [role: string]: string[];
 }
 
 interface PanelConfig {
@@ -97,9 +96,9 @@ interface PanelConfig {
   bridgeToken: string;
   browserRuntimeStrategy: BrowserRuntimeStrategy;
   llmDefaultProfile: string;
+  llmAuxProfile: string;
+  llmFallbackProfile: string;
   llmProfiles: PanelLlmProfile[];
-  llmProfileChains: PanelLlmProfileChains;
-  llmEscalationPolicy: "upgrade_only" | "disabled";
   llmSystemPromptCustom: string;
   maxSteps: number;
   autoTitleInterval: number;
@@ -114,6 +113,8 @@ interface PanelConfig {
 interface RuntimeHealth {
   bridgeUrl: string;
   llmDefaultProfile: string;
+  llmAuxProfile: string;
+  llmFallbackProfile: string;
   llmProvider: string;
   llmModel: string;
   hasLlmApiKey: boolean;
@@ -278,8 +279,14 @@ export interface PluginValidateResult {
   sourceLocation?: string;
 }
 
-async function sendMessage<T = any>(type: string, payload: Record<string, unknown> = {}): Promise<T> {
-  const response = (await chrome.runtime.sendMessage({ type, ...payload })) as RuntimeResponse<T>;
+async function sendMessage<T = any>(
+  type: string,
+  payload: Record<string, unknown> = {},
+): Promise<T> {
+  const response = (await chrome.runtime.sendMessage({
+    type,
+    ...payload,
+  })) as RuntimeResponse<T>;
   if (!response?.ok) {
     throw new Error(response?.error || `${type} failed`);
   }
@@ -287,10 +294,17 @@ async function sendMessage<T = any>(type: string, payload: Record<string, unknow
 }
 
 function toRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
-function toIntInRange(raw: unknown, fallback: number, min: number, max: number): number {
+function toIntInRange(
+  raw: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
   const n = Number(raw);
   if (!Number.isFinite(n)) return fallback;
   const rounded = Math.floor(n);
@@ -343,15 +357,32 @@ function normalizePluginMetadata(input: unknown): PluginMetadata {
     llmProviders: toStringArray(row.llmProviders),
     runtimeMessages: toStringArray(row.runtimeMessages),
     brainEvents: toStringArray(row.brainEvents),
-    usageTotalCalls: toIntInRange(row.usageTotalCalls, 0, 0, Number.MAX_SAFE_INTEGER),
-    usageTotalErrors: toIntInRange(row.usageTotalErrors, 0, 0, Number.MAX_SAFE_INTEGER),
-    usageTotalTimeouts: toIntInRange(row.usageTotalTimeouts, 0, 0, Number.MAX_SAFE_INTEGER),
+    usageTotalCalls: toIntInRange(
+      row.usageTotalCalls,
+      0,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    usageTotalErrors: toIntInRange(
+      row.usageTotalErrors,
+      0,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    usageTotalTimeouts: toIntInRange(
+      row.usageTotalTimeouts,
+      0,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
     usageLastUsedAt: String(row.usageLastUsedAt || "").trim() || undefined,
-    usageHookCalls: toNumberRecord(row.usageHookCalls)
+    usageHookCalls: toNumberRecord(row.usageHookCalls),
   };
 }
 
-function normalizePluginUiExtensionMetadata(input: unknown): PluginUiExtensionMetadata | null {
+function normalizePluginUiExtensionMetadata(
+  input: unknown,
+): PluginUiExtensionMetadata | null {
   const row = toRecord(input);
   const pluginId = String(row.pluginId || "").trim();
   const moduleUrl = String(row.moduleUrl || "").trim();
@@ -362,7 +393,7 @@ function normalizePluginUiExtensionMetadata(input: unknown): PluginUiExtensionMe
     exportName: String(row.exportName || "default").trim() || "default",
     enabled: row.enabled !== false,
     updatedAt: String(row.updatedAt || "").trim() || new Date().toISOString(),
-    sessionId: String(row.sessionId || "").trim() || undefined
+    sessionId: String(row.sessionId || "").trim() || undefined,
   };
 }
 
@@ -370,17 +401,29 @@ function normalizePluginListResult(input: unknown): PluginListResult {
   const row = toRecord(input);
   const uiExtensions = Array.isArray(row.uiExtensions)
     ? row.uiExtensions
-      .map((item) => normalizePluginUiExtensionMetadata(item))
-      .filter((item): item is PluginUiExtensionMetadata => Boolean(item))
+        .map((item) => normalizePluginUiExtensionMetadata(item))
+        .filter((item): item is PluginUiExtensionMetadata => Boolean(item))
     : [];
   return {
-    plugins: Array.isArray(row.plugins) ? row.plugins.map((item) => normalizePluginMetadata(item)) : [],
-    modeProviders: Array.isArray(row.modeProviders) ? row.modeProviders.map((item) => toRecord(item)) : [],
-    toolContracts: Array.isArray(row.toolContracts) ? row.toolContracts.map((item) => toRecord(item)) : [],
-    llmProviders: Array.isArray(row.llmProviders) ? row.llmProviders.map((item) => toRecord(item)) : [],
-    capabilityProviders: Array.isArray(row.capabilityProviders) ? row.capabilityProviders.map((item) => toRecord(item)) : [],
-    capabilityPolicies: Array.isArray(row.capabilityPolicies) ? row.capabilityPolicies.map((item) => toRecord(item)) : [],
-    uiExtensions
+    plugins: Array.isArray(row.plugins)
+      ? row.plugins.map((item) => normalizePluginMetadata(item))
+      : [],
+    modeProviders: Array.isArray(row.modeProviders)
+      ? row.modeProviders.map((item) => toRecord(item))
+      : [],
+    toolContracts: Array.isArray(row.toolContracts)
+      ? row.toolContracts.map((item) => toRecord(item))
+      : [],
+    llmProviders: Array.isArray(row.llmProviders)
+      ? row.llmProviders.map((item) => toRecord(item))
+      : [],
+    capabilityProviders: Array.isArray(row.capabilityProviders)
+      ? row.capabilityProviders.map((item) => toRecord(item))
+      : [],
+    capabilityPolicies: Array.isArray(row.capabilityPolicies)
+      ? row.capabilityPolicies.map((item) => toRecord(item))
+      : [],
+    uiExtensions,
   };
 }
 
@@ -390,46 +433,56 @@ function normalizePluginRegisterResult(input: unknown): PluginRegisterResult {
   return {
     pluginId: String(row.pluginId || "").trim(),
     enabled: row.enabled === true,
-    plugin: Object.keys(pluginRaw).length > 0 ? normalizePluginMetadata(pluginRaw) : null,
-    llmProviders: Array.isArray(row.llmProviders) ? row.llmProviders.map((item) => toRecord(item)) : [],
+    plugin:
+      Object.keys(pluginRaw).length > 0
+        ? normalizePluginMetadata(pluginRaw)
+        : null,
+    llmProviders: Array.isArray(row.llmProviders)
+      ? row.llmProviders.map((item) => toRecord(item))
+      : [],
     moduleUrl: String(row.moduleUrl || "").trim() || undefined,
-    exportName: String(row.exportName || "").trim() || undefined
+    exportName: String(row.exportName || "").trim() || undefined,
   };
 }
 
 function normalizePluginValidateResult(input: unknown): PluginValidateResult {
   const row = toRecord(input);
   const checks = Array.isArray(row.checks)
-    ? row.checks.map((item) => {
-      const check = toRecord(item);
-      return {
-        name: String(check.name || "").trim(),
-        ok: check.ok === true,
-        error: String(check.error || "").trim() || undefined,
-        details: Object.keys(toRecord(check.details)).length > 0 ? toRecord(check.details) : undefined
-      } as PluginValidateCheck;
-    }).filter((item) => item.name)
+    ? row.checks
+        .map((item) => {
+          const check = toRecord(item);
+          return {
+            name: String(check.name || "").trim(),
+            ok: check.ok === true,
+            error: String(check.error || "").trim() || undefined,
+            details:
+              Object.keys(toRecord(check.details)).length > 0
+                ? toRecord(check.details)
+                : undefined,
+          } as PluginValidateCheck;
+        })
+        .filter((item) => item.name)
     : [];
   return {
     pluginId: String(row.pluginId || "").trim(),
     valid: row.valid === true,
     warnings: toStringArray(row.warnings),
     checks,
-    sourceLocation: String(row.sourceLocation || "").trim() || undefined
+    sourceLocation: String(row.sourceLocation || "").trim() || undefined,
   };
 }
 
-function normalizePluginUnregisterResult(input: unknown): PluginUnregisterResult {
+function normalizePluginUnregisterResult(
+  input: unknown,
+): PluginUnregisterResult {
   const row = toRecord(input);
   return {
     pluginId: String(row.pluginId || "").trim(),
     removed: row.removed === true,
-    llmProviders: Array.isArray(row.llmProviders) ? row.llmProviders.map((item) => toRecord(item)) : []
+    llmProviders: Array.isArray(row.llmProviders)
+      ? row.llmProviders.map((item) => toRecord(item))
+      : [],
   };
-}
-
-function normalizeEscalationPolicy(raw: unknown): "upgrade_only" | "disabled" {
-  return String(raw || "").trim().toLowerCase() === "disabled" ? "disabled" : "upgrade_only";
 }
 
 export const DEFAULT_PANEL_LLM_PROVIDER = "openai_compatible";
@@ -443,7 +496,9 @@ interface LlmProfileDefaults {
   llmMaxRetryDelayMs: number;
 }
 
-function createDefaultLlmProfile(defaults: LlmProfileDefaults): PanelLlmProfile {
+function createDefaultLlmProfile(
+  defaults: LlmProfileDefaults,
+): PanelLlmProfile {
   const id = String(defaults.id || "default").trim() || "default";
   return {
     id,
@@ -452,20 +507,22 @@ function createDefaultLlmProfile(defaults: LlmProfileDefaults): PanelLlmProfile 
     llmApiKey: "",
     llmModel: DEFAULT_PANEL_LLM_MODEL,
     providerOptions: {},
-    role: "worker",
     llmTimeoutMs: defaults.llmTimeoutMs,
     llmRetryMaxAttempts: defaults.llmRetryMaxAttempts,
-    llmMaxRetryDelayMs: defaults.llmMaxRetryDelayMs
+    llmMaxRetryDelayMs: defaults.llmMaxRetryDelayMs,
   };
 }
 
-function normalizeSingleLlmProfile(raw: Record<string, unknown>, defaults: LlmProfileDefaults): PanelLlmProfile {
+function normalizeSingleLlmProfile(
+  raw: Record<string, unknown>,
+  defaults: LlmProfileDefaults,
+): PanelLlmProfile {
   const base = createDefaultLlmProfile(defaults);
   const id = String(raw.id || base.id).trim() || base.id;
   const connection = normalizeProviderConnectionConfig({
     provider: raw.provider || base.provider,
     llmApiBase: raw.llmApiBase ?? base.llmApiBase,
-    llmApiKey: raw.llmApiKey ?? base.llmApiKey
+    llmApiKey: raw.llmApiKey ?? base.llmApiKey,
   });
   return {
     id,
@@ -474,14 +531,31 @@ function normalizeSingleLlmProfile(raw: Record<string, unknown>, defaults: LlmPr
     llmApiKey: connection.llmApiKey,
     llmModel: String(raw.llmModel || base.llmModel).trim() || base.llmModel,
     providerOptions: toRecord(raw.providerOptions),
-    role: String(raw.role || base.role).trim() || base.role,
-    llmTimeoutMs: toIntInRange(raw.llmTimeoutMs, defaults.llmTimeoutMs, 1_000, 300_000),
-    llmRetryMaxAttempts: toIntInRange(raw.llmRetryMaxAttempts, defaults.llmRetryMaxAttempts, 0, 6),
-    llmMaxRetryDelayMs: toIntInRange(raw.llmMaxRetryDelayMs, defaults.llmMaxRetryDelayMs, 0, 300_000)
+    llmTimeoutMs: toIntInRange(
+      raw.llmTimeoutMs,
+      defaults.llmTimeoutMs,
+      1_000,
+      300_000,
+    ),
+    llmRetryMaxAttempts: toIntInRange(
+      raw.llmRetryMaxAttempts,
+      defaults.llmRetryMaxAttempts,
+      0,
+      6,
+    ),
+    llmMaxRetryDelayMs: toIntInRange(
+      raw.llmMaxRetryDelayMs,
+      defaults.llmMaxRetryDelayMs,
+      0,
+      300_000,
+    ),
   };
 }
 
-function normalizeLlmProfiles(raw: unknown, defaults: LlmProfileDefaults): PanelLlmProfile[] {
+function normalizeLlmProfiles(
+  raw: unknown,
+  defaults: LlmProfileDefaults,
+): PanelLlmProfile[] {
   const out: PanelLlmProfile[] = [];
   const dedup = new Set<string>();
 
@@ -489,7 +563,7 @@ function normalizeLlmProfiles(raw: unknown, defaults: LlmProfileDefaults): Panel
     const row = toRecord(value);
     const profile = normalizeSingleLlmProfile(row, {
       ...defaults,
-      id: String(idOverride || defaults.id || "default").trim() || "default"
+      id: String(idOverride || defaults.id || "default").trim() || "default",
     });
     if (dedup.has(profile.id)) return;
     dedup.add(profile.id);
@@ -504,26 +578,6 @@ function normalizeLlmProfiles(raw: unknown, defaults: LlmProfileDefaults): Panel
     out.push(createDefaultLlmProfile(defaults));
   }
 
-  return out;
-}
-
-function normalizeLlmProfileChains(raw: unknown, validProfileIds: Set<string>): PanelLlmProfileChains {
-  const input = toRecord(raw);
-  const out: PanelLlmProfileChains = {};
-  for (const [roleRaw, listRaw] of Object.entries(input)) {
-    const role = String(roleRaw || "").trim();
-    if (!role || !Array.isArray(listRaw)) continue;
-    const dedup = new Set<string>();
-    const ids: string[] = [];
-    for (const item of listRaw) {
-      const id = String(item || "").trim();
-      if (!id || dedup.has(id)) continue;
-      if (validProfileIds.size > 0 && !validProfileIds.has(id)) continue;
-      dedup.add(id);
-      ids.push(id);
-    }
-    if (ids.length > 0) out[role] = ids;
-  }
   return out;
 }
 
@@ -555,7 +609,7 @@ function extractContentFromStepExecuteResult(value: unknown): string {
     rootResponseInnerData.content,
     rootResponseInnerData.text,
     rootResult.content,
-    rootResult.text
+    rootResult.text,
   ];
   for (const item of candidates) {
     if (typeof item === "string") return item;
@@ -563,51 +617,90 @@ function extractContentFromStepExecuteResult(value: unknown): string {
   throw new Error("文件读取工具未返回 content 文本");
 }
 
-function normalizeConfig(raw: Record<string, unknown> | null | undefined): PanelConfig {
+function normalizeConfig(
+  raw: Record<string, unknown> | null | undefined,
+): PanelConfig {
   const bridgeUrl = String(raw?.bridgeUrl || "ws://127.0.0.1:8787/ws");
   const bridgeToken = String(raw?.bridgeToken || "");
   const llmTimeoutMs = toIntInRange(raw?.llmTimeoutMs, 120000, 1_000, 300_000);
   const llmRetryMaxAttempts = toIntInRange(raw?.llmRetryMaxAttempts, 2, 0, 6);
-  const llmMaxRetryDelayMs = toIntInRange(raw?.llmMaxRetryDelayMs, 60000, 0, 300_000);
-  const defaultProfile = String(raw?.llmDefaultProfile || "default").trim() || "default";
+  const llmMaxRetryDelayMs = toIntInRange(
+    raw?.llmMaxRetryDelayMs,
+    60000,
+    0,
+    300_000,
+  );
+  const defaultProfile =
+    String(raw?.llmDefaultProfile || "default").trim() || "default";
 
   const llmProfiles = normalizeLlmProfiles(raw?.llmProfiles, {
     id: defaultProfile,
     llmTimeoutMs,
     llmRetryMaxAttempts,
-    llmMaxRetryDelayMs
+    llmMaxRetryDelayMs,
   });
   const validProfileIds = new Set(llmProfiles.map((item) => item.id));
-  const llmDefaultProfile = validProfileIds.has(defaultProfile) ? defaultProfile : llmProfiles[0]?.id || "default";
+  const llmDefaultProfile = validProfileIds.has(defaultProfile)
+    ? defaultProfile
+    : llmProfiles[0]?.id || "default";
+  const auxProfile = String(raw?.llmAuxProfile || "").trim();
+  const fallbackProfile = String(raw?.llmFallbackProfile || "").trim();
 
   return {
     bridgeUrl,
     bridgeToken,
-    browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(raw?.browserRuntimeStrategy, "host-first"),
+    browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
+      raw?.browserRuntimeStrategy,
+      "host-first",
+    ),
     llmDefaultProfile,
+    llmAuxProfile:
+      auxProfile &&
+      auxProfile !== llmDefaultProfile &&
+      validProfileIds.has(auxProfile)
+        ? auxProfile
+        : "",
+    llmFallbackProfile:
+      fallbackProfile &&
+      fallbackProfile !== llmDefaultProfile &&
+      validProfileIds.has(fallbackProfile)
+        ? fallbackProfile
+        : "",
     llmProfiles,
-    llmProfileChains: normalizeLlmProfileChains(raw?.llmProfileChains, validProfileIds),
-    llmEscalationPolicy: normalizeEscalationPolicy(raw?.llmEscalationPolicy),
     llmSystemPromptCustom: String(raw?.llmSystemPromptCustom || ""),
     maxSteps: toIntInRange(raw?.maxSteps, 100, 1, 500),
     autoTitleInterval: toIntInRange(raw?.autoTitleInterval, 10, 0, 100),
-    bridgeInvokeTimeoutMs: toIntInRange(raw?.bridgeInvokeTimeoutMs, 120000, 1_000, 300_000),
+    bridgeInvokeTimeoutMs: toIntInRange(
+      raw?.bridgeInvokeTimeoutMs,
+      120000,
+      1_000,
+      300_000,
+    ),
     llmTimeoutMs,
     llmRetryMaxAttempts,
     llmMaxRetryDelayMs,
     devAutoReload: raw?.devAutoReload !== false,
-    devReloadIntervalMs: toIntInRange(raw?.devReloadIntervalMs, 1500, 500, 30000)
+    devReloadIntervalMs: toIntInRange(
+      raw?.devReloadIntervalMs,
+      1500,
+      500,
+      30000,
+    ),
   };
 }
 
-function normalizeHealth(raw: Record<string, unknown> | null | undefined): RuntimeHealth {
+function normalizeHealth(
+  raw: Record<string, unknown> | null | undefined,
+): RuntimeHealth {
   return {
     bridgeUrl: String(raw?.bridgeUrl || "ws://127.0.0.1:8787/ws"),
     llmDefaultProfile: String(raw?.llmDefaultProfile || "default"),
+    llmAuxProfile: String(raw?.llmAuxProfile || ""),
+    llmFallbackProfile: String(raw?.llmFallbackProfile || ""),
     llmProvider: String(raw?.llmProvider || DEFAULT_PANEL_LLM_PROVIDER),
     llmModel: String(raw?.llmModel || DEFAULT_PANEL_LLM_MODEL),
     hasLlmApiKey: Boolean(raw?.hasLlmApiKey),
-    systemPromptPreview: String(raw?.systemPromptPreview || "")
+    systemPromptPreview: String(raw?.systemPromptPreview || ""),
   };
 }
 
@@ -625,34 +718,45 @@ export const useRuntimeStore = defineStore("runtime", () => {
     normalizeHealth({
       bridgeUrl: "ws://127.0.0.1:8787/ws",
       llmDefaultProfile: "default",
+      llmAuxProfile: "",
+      llmFallbackProfile: "",
       llmProvider: DEFAULT_PANEL_LLM_PROVIDER,
       llmModel: DEFAULT_PANEL_LLM_MODEL,
-      hasLlmApiKey: false
-    })
+      hasLlmApiKey: false,
+    }),
   );
   const config = ref<PanelConfig>(
     normalizeConfig({
       bridgeUrl: "ws://127.0.0.1:8787/ws",
       llmDefaultProfile: "default",
+      llmAuxProfile: "",
+      llmFallbackProfile: "",
       llmSystemPromptCustom: "",
       autoTitleInterval: 10,
       bridgeInvokeTimeoutMs: 120000,
       llmTimeoutMs: 120000,
       llmRetryMaxAttempts: 2,
-      llmMaxRetryDelayMs: 60000
-    })
+      llmMaxRetryDelayMs: 60000,
+    }),
   );
 
   async function refreshSessions() {
-    const index = await sendMessage<{ sessions: SessionIndexEntry[] }>("brain.session.list");
+    const index = await sendMessage<{ sessions: SessionIndexEntry[] }>(
+      "brain.session.list",
+    );
     sessions.value = Array.isArray(index.sessions) ? index.sessions : [];
-    const activeExists = sessions.value.some((item) => item.id === activeSessionId.value);
+    const activeExists = sessions.value.some(
+      (item) => item.id === activeSessionId.value,
+    );
     if (!activeExists) {
       activeSessionId.value = sessions.value[0]?.id || "";
     }
   }
 
-  async function loadConversation(sessionId: string, options: LoadConversationOptions = {}) {
+  async function loadConversation(
+    sessionId: string,
+    options: LoadConversationOptions = {},
+  ) {
     const normalizedSessionId = String(sessionId || "").trim();
     if (!normalizedSessionId) return;
 
@@ -665,10 +769,12 @@ export const useRuntimeStore = defineStore("runtime", () => {
     const requestSeq = ++conversationRequestSeq.value;
 
     try {
-      const view = await sendMessage<{ conversationView: { messages: ConversationMessage[]; lastStatus: RuntimeStateView } }>(
-        "brain.session.view",
-        { sessionId: normalizedSessionId }
-      );
+      const view = await sendMessage<{
+        conversationView: {
+          messages: ConversationMessage[];
+          lastStatus: RuntimeStateView;
+        };
+      }>("brain.session.view", { sessionId: normalizedSessionId });
 
       if (requestSeq !== conversationRequestSeq.value) {
         return;
@@ -678,7 +784,9 @@ export const useRuntimeStore = defineStore("runtime", () => {
       }
 
       messages.value = view.conversationView?.messages ?? [];
-      runtime.value = normalizeRuntimeState(view.conversationView?.lastStatus ?? null);
+      runtime.value = normalizeRuntimeState(
+        view.conversationView?.lastStatus ?? null,
+      );
     } catch (err) {
       if (requestSeq === conversationRequestSeq.value && shouldSetActive) {
         activeSessionId.value = previousActiveSessionId;
@@ -688,8 +796,11 @@ export const useRuntimeStore = defineStore("runtime", () => {
   }
 
   async function createSession() {
-    const result = await sendMessage<{ sessionId: string; runtime: RuntimeStateView }>("brain.run.start", {
-      autoRun: false
+    const result = await sendMessage<{
+      sessionId: string;
+      runtime: RuntimeStateView;
+    }>("brain.run.start", {
+      autoRun: false,
     });
     runtime.value = normalizeRuntimeState(result.runtime);
     activeSessionId.value = result.sessionId;
@@ -699,23 +810,39 @@ export const useRuntimeStore = defineStore("runtime", () => {
 
   async function sendPrompt(
     prompt: string,
-    options: { newSession?: boolean; tabIds?: number[]; skillIds?: string[]; streamingBehavior?: "steer" | "followUp" } = {}
+    options: {
+      newSession?: boolean;
+      tabIds?: number[];
+      skillIds?: string[];
+      streamingBehavior?: "steer" | "followUp";
+    } = {},
   ) {
     const text = prompt.trim();
     const skillIds = Array.isArray(options.skillIds)
-      ? Array.from(new Set(options.skillIds.map((id) => String(id || "").trim()).filter((id) => id.length > 0)))
+      ? Array.from(
+          new Set(
+            options.skillIds
+              .map((id) => String(id || "").trim())
+              .filter((id) => id.length > 0),
+          ),
+        )
       : [];
     if (!text && skillIds.length === 0) return;
     const useCurrentSession = !options.newSession && !!activeSessionId.value;
     const tabIds = Array.isArray(options.tabIds)
-      ? options.tabIds.filter((id) => Number.isInteger(id)).map((id) => Number(id))
+      ? options.tabIds
+          .filter((id) => Number.isInteger(id))
+          .map((id) => Number(id))
       : [];
-    const result = await sendMessage<{ sessionId: string; runtime: RuntimeStateView }>("brain.run.start", {
+    const result = await sendMessage<{
+      sessionId: string;
+      runtime: RuntimeStateView;
+    }>("brain.run.start", {
       sessionId: useCurrentSession ? activeSessionId.value : undefined,
       prompt: text,
       tabIds,
       ...(skillIds.length > 0 ? { skillIds } : {}),
-      streamingBehavior: options.streamingBehavior
+      streamingBehavior: options.streamingBehavior,
     });
     runtime.value = normalizeRuntimeState(result.runtime);
     activeSessionId.value = result.sessionId;
@@ -723,13 +850,18 @@ export const useRuntimeStore = defineStore("runtime", () => {
     await loadConversation(result.sessionId, { setActive: true });
   }
 
-  async function ensureSkillSessionId(inputSessionId?: string): Promise<string> {
+  async function ensureSkillSessionId(
+    inputSessionId?: string,
+  ): Promise<string> {
     const provided = String(inputSessionId || "").trim();
     if (provided) return provided;
     const current = String(activeSessionId.value || "").trim();
     if (current) return current;
-    const created = await sendMessage<{ sessionId: string; runtime: RuntimeStateView }>("brain.run.start", {
-      autoRun: false
+    const created = await sendMessage<{
+      sessionId: string;
+      runtime: RuntimeStateView;
+    }>("brain.run.start", {
+      autoRun: false,
     });
     runtime.value = normalizeRuntimeState(created.runtime);
     activeSessionId.value = created.sessionId;
@@ -739,29 +871,37 @@ export const useRuntimeStore = defineStore("runtime", () => {
   }
 
   async function listSkills(): Promise<SkillMetadata[]> {
-    const out = await sendMessage<{ skills: SkillMetadata[] }>("brain.skill.list");
+    const out = await sendMessage<{ skills: SkillMetadata[] }>(
+      "brain.skill.list",
+    );
     return Array.isArray(out.skills) ? out.skills : [];
   }
 
-  async function readVirtualFile(path: string, options: { offset?: number; limit?: number } = {}): Promise<string> {
+  async function readVirtualFile(
+    path: string,
+    options: { offset?: number; limit?: number } = {},
+  ): Promise<string> {
     const sessionId = await ensureSkillSessionId();
-    const step = await sendMessage<Record<string, unknown>>("brain.step.execute", {
-      sessionId,
-      capability: "fs.read",
-      action: "invoke",
-      args: {
-        frame: {
-          tool: "read",
-          args: {
-            path: String(path || "").trim(),
-            runtime: "sandbox",
-            ...(options.offset == null ? {} : { offset: options.offset }),
-            ...(options.limit == null ? {} : { limit: options.limit })
-          }
-        }
+    const step = await sendMessage<Record<string, unknown>>(
+      "brain.step.execute",
+      {
+        sessionId,
+        capability: "fs.read",
+        action: "invoke",
+        args: {
+          frame: {
+            tool: "read",
+            args: {
+              path: String(path || "").trim(),
+              runtime: "sandbox",
+              ...(options.offset == null ? {} : { offset: options.offset }),
+              ...(options.limit == null ? {} : { limit: options.limit }),
+            },
+          },
+        },
+        verifyPolicy: "off",
       },
-      verifyPolicy: "off"
-    });
+    );
     const result = toRecord(step);
     if (result.ok !== true) {
       throw new Error(String(result.error || "文件读取失败"));
@@ -772,67 +912,91 @@ export const useRuntimeStore = defineStore("runtime", () => {
   async function writeVirtualFile(
     path: string,
     content: string,
-    mode: "overwrite" | "append" | "create" = "overwrite"
+    mode: "overwrite" | "append" | "create" = "overwrite",
   ): Promise<void> {
     const sessionId = await ensureSkillSessionId();
-    const step = await sendMessage<Record<string, unknown>>("brain.step.execute", {
-      sessionId,
-      capability: "fs.write",
-      action: "invoke",
-      args: {
-        frame: {
-          tool: "write",
-          args: {
-            path: String(path || "").trim(),
-            runtime: "sandbox",
-            content: String(content || ""),
-            mode
-          }
-        }
+    const step = await sendMessage<Record<string, unknown>>(
+      "brain.step.execute",
+      {
+        sessionId,
+        capability: "fs.write",
+        action: "invoke",
+        args: {
+          frame: {
+            tool: "write",
+            args: {
+              path: String(path || "").trim(),
+              runtime: "sandbox",
+              content: String(content || ""),
+              mode,
+            },
+          },
+        },
+        verifyPolicy: "off",
       },
-      verifyPolicy: "off"
-    });
+    );
     const result = toRecord(step);
     if (result.ok !== true) {
       throw new Error(String(result.error || "文件写入失败"));
     }
   }
 
-  async function installSkill(input: SkillInstallInput, options: { replace?: boolean } = {}): Promise<SkillMetadata> {
+  async function installSkill(
+    input: SkillInstallInput,
+    options: { replace?: boolean } = {},
+  ): Promise<SkillMetadata> {
     const payload: Record<string, unknown> = {
       skill: {
-        ...input
-      }
+        ...input,
+      },
     };
     if (options.replace === true) payload.replace = true;
-    const out = await sendMessage<{ skill: SkillMetadata }>("brain.skill.install", payload);
+    const out = await sendMessage<{ skill: SkillMetadata }>(
+      "brain.skill.install",
+      payload,
+    );
     return out.skill;
   }
 
   async function enableSkill(skillId: string): Promise<SkillMetadata> {
-    const out = await sendMessage<{ skill: SkillMetadata }>("brain.skill.enable", { skillId });
+    const out = await sendMessage<{ skill: SkillMetadata }>(
+      "brain.skill.enable",
+      { skillId },
+    );
     return out.skill;
   }
 
   async function disableSkill(skillId: string): Promise<SkillMetadata> {
-    const out = await sendMessage<{ skill: SkillMetadata }>("brain.skill.disable", { skillId });
+    const out = await sendMessage<{ skill: SkillMetadata }>(
+      "brain.skill.disable",
+      { skillId },
+    );
     return out.skill;
   }
 
   async function uninstallSkill(skillId: string): Promise<boolean> {
-    const out = await sendMessage<{ removed: boolean }>("brain.skill.uninstall", { skillId });
+    const out = await sendMessage<{ removed: boolean }>(
+      "brain.skill.uninstall",
+      { skillId },
+    );
     return out.removed === true;
   }
 
-  async function discoverSkills(options: SkillDiscoverOptions = {}): Promise<SkillDiscoverResult> {
+  async function discoverSkills(
+    options: SkillDiscoverOptions = {},
+  ): Promise<SkillDiscoverResult> {
     const sessionId = await ensureSkillSessionId(options.sessionId);
     const out = await sendMessage<SkillDiscoverResult>("brain.skill.discover", {
       sessionId,
-      ...(Array.isArray(options.roots) && options.roots.length > 0 ? { roots: options.roots } : {}),
-      ...(options.autoInstall === undefined ? {} : { autoInstall: options.autoInstall }),
+      ...(Array.isArray(options.roots) && options.roots.length > 0
+        ? { roots: options.roots }
+        : {}),
+      ...(options.autoInstall === undefined
+        ? {}
+        : { autoInstall: options.autoInstall }),
       ...(options.replace === undefined ? {} : { replace: options.replace }),
       ...(options.maxFiles == null ? {} : { maxFiles: options.maxFiles }),
-      ...(options.timeoutMs == null ? {} : { timeoutMs: options.timeoutMs })
+      ...(options.timeoutMs == null ? {} : { timeoutMs: options.timeoutMs }),
     });
     return out;
   }
@@ -854,14 +1018,17 @@ export const useRuntimeStore = defineStore("runtime", () => {
 
   async function registerPlugin(
     plugin: Record<string, unknown>,
-    options: { replace?: boolean; enable?: boolean } = {}
+    options: { replace?: boolean; enable?: boolean } = {},
   ): Promise<PluginRegisterResult> {
     const payload: Record<string, unknown> = {
-      plugin
+      plugin,
     };
     if (options.replace === true) payload.replace = true;
     if (options.enable === false) payload.enable = false;
-    const out = await sendMessage<Record<string, unknown>>("brain.plugin.register", payload);
+    const out = await sendMessage<Record<string, unknown>>(
+      "brain.plugin.register",
+      payload,
+    );
     return normalizePluginRegisterResult(out);
   }
 
@@ -874,74 +1041,107 @@ export const useRuntimeStore = defineStore("runtime", () => {
       exportName?: string;
       plugin?: Record<string, unknown>;
     },
-    options: { replace?: boolean; enable?: boolean } = {}
+    options: { replace?: boolean; enable?: boolean } = {},
   ): Promise<PluginRegisterResult> {
     const payload: Record<string, unknown> = {
       manifest: {
-        ...toRecord(input.manifest)
-      }
+        ...toRecord(input.manifest),
+      },
     };
-    if (typeof input.moduleUrl === "string" && input.moduleUrl.trim()) payload.moduleUrl = input.moduleUrl.trim();
-    if (typeof input.modulePath === "string" && input.modulePath.trim()) payload.modulePath = input.modulePath.trim();
-    if (typeof input.module === "string" && input.module.trim()) payload.module = input.module.trim();
-    if (typeof input.exportName === "string" && input.exportName.trim()) payload.exportName = input.exportName.trim();
-    if (input.plugin && typeof input.plugin === "object") payload.plugin = toRecord(input.plugin);
+    if (typeof input.moduleUrl === "string" && input.moduleUrl.trim())
+      payload.moduleUrl = input.moduleUrl.trim();
+    if (typeof input.modulePath === "string" && input.modulePath.trim())
+      payload.modulePath = input.modulePath.trim();
+    if (typeof input.module === "string" && input.module.trim())
+      payload.module = input.module.trim();
+    if (typeof input.exportName === "string" && input.exportName.trim())
+      payload.exportName = input.exportName.trim();
+    if (input.plugin && typeof input.plugin === "object")
+      payload.plugin = toRecord(input.plugin);
     if (options.replace === true) payload.replace = true;
     if (options.enable === false) payload.enable = false;
-    const out = await sendMessage<Record<string, unknown>>("brain.plugin.register_extension", payload);
+    const out = await sendMessage<Record<string, unknown>>(
+      "brain.plugin.register_extension",
+      payload,
+    );
     return normalizePluginRegisterResult(out);
   }
 
   async function enablePlugin(pluginId: string): Promise<PluginRegisterResult> {
-    const out = await sendMessage<Record<string, unknown>>("brain.plugin.enable", {
-      pluginId: String(pluginId || "").trim()
-    });
+    const out = await sendMessage<Record<string, unknown>>(
+      "brain.plugin.enable",
+      {
+        pluginId: String(pluginId || "").trim(),
+      },
+    );
     return normalizePluginRegisterResult(out);
   }
 
-  async function disablePlugin(pluginId: string): Promise<PluginRegisterResult> {
-    const out = await sendMessage<Record<string, unknown>>("brain.plugin.disable", {
-      pluginId: String(pluginId || "").trim()
-    });
+  async function disablePlugin(
+    pluginId: string,
+  ): Promise<PluginRegisterResult> {
+    const out = await sendMessage<Record<string, unknown>>(
+      "brain.plugin.disable",
+      {
+        pluginId: String(pluginId || "").trim(),
+      },
+    );
     return normalizePluginRegisterResult(out);
   }
 
-  async function unregisterPlugin(pluginId: string): Promise<PluginUnregisterResult> {
-    const out = await sendMessage<Record<string, unknown>>("brain.plugin.unregister", {
-      pluginId: String(pluginId || "").trim()
-    });
+  async function unregisterPlugin(
+    pluginId: string,
+  ): Promise<PluginUnregisterResult> {
+    const out = await sendMessage<Record<string, unknown>>(
+      "brain.plugin.unregister",
+      {
+        pluginId: String(pluginId || "").trim(),
+      },
+    );
     return normalizePluginUnregisterResult(out);
   }
 
   async function installPlugin(
     input: PluginInstallInput,
-    options: { replace?: boolean; enable?: boolean } = {}
+    options: { replace?: boolean; enable?: boolean } = {},
   ): Promise<PluginRegisterResult> {
     const payload: Record<string, unknown> = {};
     const location = String(input.location || input.path || "").trim();
     if (location) payload.location = location;
-    if (input.package && typeof input.package === "object") payload.package = toRecord(input.package);
+    if (input.package && typeof input.package === "object")
+      payload.package = toRecord(input.package);
     const sessionId = String(input.sessionId || "").trim();
     if (sessionId) payload.sessionId = sessionId;
     if (options.replace === true) payload.replace = true;
     if (options.enable === false) payload.enable = false;
-    const out = await sendMessage<Record<string, unknown>>("brain.plugin.install", payload);
+    const out = await sendMessage<Record<string, unknown>>(
+      "brain.plugin.install",
+      payload,
+    );
     return normalizePluginRegisterResult(out);
   }
 
-  async function validatePluginPackage(input: PluginInstallInput): Promise<PluginValidateResult> {
+  async function validatePluginPackage(
+    input: PluginInstallInput,
+  ): Promise<PluginValidateResult> {
     const payload: Record<string, unknown> = {};
     const location = String(input.location || input.path || "").trim();
     if (location) payload.location = location;
-    if (input.package && typeof input.package === "object") payload.package = toRecord(input.package);
+    if (input.package && typeof input.package === "object")
+      payload.package = toRecord(input.package);
     const sessionId = String(input.sessionId || "").trim();
     if (sessionId) payload.sessionId = sessionId;
-    const out = await sendMessage<Record<string, unknown>>("brain.plugin.validate", payload);
+    const out = await sendMessage<Record<string, unknown>>(
+      "brain.plugin.validate",
+      payload,
+    );
     return normalizePluginValidateResult(out);
   }
 
   function findAssistantMessageIndex(entryId: string) {
-    return messages.value.findIndex((msg) => msg.entryId === entryId && msg.role === "assistant");
+    return messages.value.findIndex(
+      (msg) => msg.entryId === entryId && msg.role === "assistant",
+    );
   }
 
   function findLatestAssistantEntryId() {
@@ -966,7 +1166,10 @@ export const useRuntimeStore = defineStore("runtime", () => {
     return "";
   }
 
-  async function forkFromAssistantEntry(entryId: string, options: { autoRun?: boolean; setActive?: boolean } = {}) {
+  async function forkFromAssistantEntry(
+    entryId: string,
+    options: { autoRun?: boolean; setActive?: boolean } = {},
+  ) {
     if (!activeSessionId.value) {
       throw new Error("无活跃会话，无法分叉");
     }
@@ -979,11 +1182,14 @@ export const useRuntimeStore = defineStore("runtime", () => {
     if (!previousUserEntryId) {
       throw new Error("未找到前序 user 消息，无法分叉");
     }
-    const forked = await sendMessage<{ sessionId: string; leafId?: string | null }>("brain.session.fork", {
+    const forked = await sendMessage<{
+      sessionId: string;
+      leafId?: string | null;
+    }>("brain.session.fork", {
       sessionId: currentSessionId,
       leafId: entryId,
       sourceEntryId: entryId,
-      reason: "branch_from_assistant"
+      reason: "branch_from_assistant",
     });
     const forkedSessionId = String(forked.sessionId || "").trim();
     if (!forkedSessionId) {
@@ -995,11 +1201,14 @@ export const useRuntimeStore = defineStore("runtime", () => {
       if (!forkedSourceEntryId) {
         throw new Error("分叉后未找到可重生成的 sourceEntry");
       }
-      const result = await sendMessage<{ sessionId: string; runtime: RuntimeStateView }>("brain.run.regenerate", {
+      const result = await sendMessage<{
+        sessionId: string;
+        runtime: RuntimeStateView;
+      }>("brain.run.regenerate", {
         sessionId: forkedSessionId,
         sourceEntryId: forkedSourceEntryId,
         requireSourceIsLeaf: true,
-        rebaseLeafToPreviousUser: true
+        rebaseLeafToPreviousUser: true,
       });
       runtime.value = normalizeRuntimeState(result.runtime);
     }
@@ -1013,11 +1222,14 @@ export const useRuntimeStore = defineStore("runtime", () => {
     return {
       sessionId: forkedSessionId,
       sourceEntryId: forkedSourceEntryId || entryId,
-      mode: "fork" as const
+      mode: "fork" as const,
     };
   }
 
-  async function retryLastAssistantEntry(entryId: string, options: { setActive?: boolean } = {}) {
+  async function retryLastAssistantEntry(
+    entryId: string,
+    options: { setActive?: boolean } = {},
+  ) {
     if (!activeSessionId.value) {
       throw new Error("无活跃会话，无法重试");
     }
@@ -1035,27 +1247,35 @@ export const useRuntimeStore = defineStore("runtime", () => {
     }
 
     const currentSessionId = activeSessionId.value;
-    const result = await sendMessage<{ sessionId: string; runtime: RuntimeStateView }>("brain.run.regenerate", {
+    const result = await sendMessage<{
+      sessionId: string;
+      runtime: RuntimeStateView;
+    }>("brain.run.regenerate", {
       sessionId: currentSessionId,
       sourceEntryId: entryId,
       requireSourceIsLeaf: true,
-      rebaseLeafToPreviousUser: true
+      rebaseLeafToPreviousUser: true,
     });
     runtime.value = normalizeRuntimeState(result.runtime);
     await refreshSessions();
-    await loadConversation(currentSessionId, { setActive: options.setActive === true });
+    await loadConversation(currentSessionId, {
+      setActive: options.setActive === true,
+    });
     return {
       sessionId: currentSessionId,
-      mode: "retry" as const
+      mode: "retry" as const,
     };
   }
 
   async function regenerateFromAssistantEntry(
     entryId: string,
-    options: RegenerateFromAssistantOptions = {}
+    options: RegenerateFromAssistantOptions = {},
   ): Promise<RegenerateFromAssistantResult> {
     if (options.mode === "fork") {
-      return forkFromAssistantEntry(entryId, { autoRun: true, setActive: options.setActive });
+      return forkFromAssistantEntry(entryId, {
+        autoRun: true,
+        setActive: options.setActive,
+      });
     }
     if (options.mode === "retry") {
       return retryLastAssistantEntry(entryId, { setActive: options.setActive });
@@ -1064,10 +1284,17 @@ export const useRuntimeStore = defineStore("runtime", () => {
     if (latestAssistantEntryId && latestAssistantEntryId === entryId) {
       return retryLastAssistantEntry(entryId, { setActive: options.setActive });
     }
-    return forkFromAssistantEntry(entryId, { autoRun: true, setActive: options.setActive });
+    return forkFromAssistantEntry(entryId, {
+      autoRun: true,
+      setActive: options.setActive,
+    });
   }
 
-  async function editUserMessageAndRerun(entryId: string, prompt: string, options: EditUserRerunOptions = {}) {
+  async function editUserMessageAndRerun(
+    entryId: string,
+    prompt: string,
+    options: EditUserRerunOptions = {},
+  ) {
     if (!activeSessionId.value) {
       throw new Error("无活跃会话，无法编辑并重跑");
     }
@@ -1081,11 +1308,14 @@ export const useRuntimeStore = defineStore("runtime", () => {
     }
 
     const sourceSessionId = activeSessionId.value;
-    const result = await sendMessage<EditUserRerunResult>("brain.run.edit_rerun", {
-      sessionId: sourceSessionId,
-      sourceEntryId,
-      prompt: editedText
-    });
+    const result = await sendMessage<EditUserRerunResult>(
+      "brain.run.edit_rerun",
+      {
+        sessionId: sourceSessionId,
+        sourceEntryId,
+        prompt: editedText,
+      },
+    );
 
     runtime.value = normalizeRuntimeState(result.runtime);
     await refreshSessions();
@@ -1101,13 +1331,19 @@ export const useRuntimeStore = defineStore("runtime", () => {
       mode: result.mode,
       sourceSessionId: result.sourceSessionId,
       sourceEntryId: result.sourceEntryId,
-      activeSourceEntryId: result.activeSourceEntryId
+      activeSourceEntryId: result.activeSourceEntryId,
     };
   }
 
-  async function runAction(type: "brain.run.pause" | "brain.run.resume" | "brain.run.stop") {
+  async function runAction(
+    type: "brain.run.pause" | "brain.run.resume" | "brain.run.stop",
+  ) {
     if (!activeSessionId.value) return;
-    runtime.value = normalizeRuntimeState(await sendMessage<RuntimeStateView>(type, { sessionId: activeSessionId.value }));
+    runtime.value = normalizeRuntimeState(
+      await sendMessage<RuntimeStateView>(type, {
+        sessionId: activeSessionId.value,
+      }),
+    );
   }
 
   async function promoteQueuedPromptToSteer(queuedPromptId: string) {
@@ -1116,14 +1352,19 @@ export const useRuntimeStore = defineStore("runtime", () => {
     if (!sessionId) throw new Error("当前无活动会话");
     if (!id) throw new Error("queuedPromptId 不能为空");
 
-    runtime.value = normalizeRuntimeState(await sendMessage<RuntimeStateView>("brain.run.queue.promote", {
-      sessionId,
-      queuedPromptId: id,
-      targetBehavior: "steer"
-    }));
+    runtime.value = normalizeRuntimeState(
+      await sendMessage<RuntimeStateView>("brain.run.queue.promote", {
+        sessionId,
+        queuedPromptId: id,
+        targetBehavior: "steer",
+      }),
+    );
   }
 
-  async function refreshSessionTitle(sessionId = activeSessionId.value, force = true) {
+  async function refreshSessionTitle(
+    sessionId = activeSessionId.value,
+    force = true,
+  ) {
     if (!sessionId) return;
     isRegeneratingTitle.value = true;
     try {
@@ -1182,7 +1423,8 @@ export const useRuntimeStore = defineStore("runtime", () => {
   }
 
   async function refreshHealth() {
-    const raw = await sendMessage<Record<string, unknown>>("brain.debug.config");
+    const raw =
+      await sendMessage<Record<string, unknown>>("brain.debug.config");
     health.value = normalizeHealth(raw);
   }
 
@@ -1190,29 +1432,59 @@ export const useRuntimeStore = defineStore("runtime", () => {
     savingConfig.value = true;
     error.value = "";
     try {
-      const llmTimeoutMs = Math.max(1000, Number(config.value.llmTimeoutMs || 120000));
-      const llmRetryMaxAttempts = Math.max(0, Math.min(6, Number(config.value.llmRetryMaxAttempts || 2)));
-      const llmMaxRetryDelayMs = Math.max(0, Number(config.value.llmMaxRetryDelayMs || 60000));
+      const llmTimeoutMs = Math.max(
+        1000,
+        Number(config.value.llmTimeoutMs || 120000),
+      );
+      const llmRetryMaxAttempts = Math.max(
+        0,
+        Math.min(6, Number(config.value.llmRetryMaxAttempts || 2)),
+      );
+      const llmMaxRetryDelayMs = Math.max(
+        0,
+        Number(config.value.llmMaxRetryDelayMs || 60000),
+      );
 
       const llmProfiles = normalizeLlmProfiles(config.value.llmProfiles, {
-        id: String(config.value.llmDefaultProfile || "default").trim() || "default",
+        id:
+          String(config.value.llmDefaultProfile || "default").trim() ||
+          "default",
         llmTimeoutMs,
         llmRetryMaxAttempts,
-        llmMaxRetryDelayMs
+        llmMaxRetryDelayMs,
       });
       const profileIds = new Set(llmProfiles.map((item) => item.id));
-      const llmDefaultProfileRaw = String(config.value.llmDefaultProfile || "").trim();
+      const llmDefaultProfileRaw = String(
+        config.value.llmDefaultProfile || "",
+      ).trim();
       const llmDefaultProfile = profileIds.has(llmDefaultProfileRaw)
         ? llmDefaultProfileRaw
-        : (llmProfiles[0]?.id || "default");
-      const llmProfileChains = normalizeLlmProfileChains(config.value.llmProfileChains, profileIds);
-      const llmEscalationPolicy = normalizeEscalationPolicy(config.value.llmEscalationPolicy);
-      const browserRuntimeStrategy = normalizeBrowserRuntimeStrategy(config.value.browserRuntimeStrategy, "host-first");
+        : llmProfiles[0]?.id || "default";
+      const llmAuxProfileRaw = String(config.value.llmAuxProfile || "").trim();
+      const llmFallbackProfileRaw = String(
+        config.value.llmFallbackProfile || "",
+      ).trim();
+      const llmAuxProfile =
+        llmAuxProfileRaw &&
+        llmAuxProfileRaw !== llmDefaultProfile &&
+        profileIds.has(llmAuxProfileRaw)
+          ? llmAuxProfileRaw
+          : "";
+      const llmFallbackProfile =
+        llmFallbackProfileRaw &&
+        llmFallbackProfileRaw !== llmDefaultProfile &&
+        profileIds.has(llmFallbackProfileRaw)
+          ? llmFallbackProfileRaw
+          : "";
+      const browserRuntimeStrategy = normalizeBrowserRuntimeStrategy(
+        config.value.browserRuntimeStrategy,
+        "host-first",
+      );
 
       config.value.llmProfiles = llmProfiles;
       config.value.llmDefaultProfile = llmDefaultProfile;
-      config.value.llmProfileChains = llmProfileChains;
-      config.value.llmEscalationPolicy = llmEscalationPolicy;
+      config.value.llmAuxProfile = llmAuxProfile;
+      config.value.llmFallbackProfile = llmFallbackProfile;
       config.value.browserRuntimeStrategy = browserRuntimeStrategy;
 
       await sendMessage("config.save", {
@@ -1221,19 +1493,28 @@ export const useRuntimeStore = defineStore("runtime", () => {
           bridgeToken: config.value.bridgeToken,
           browserRuntimeStrategy,
           llmDefaultProfile,
+          llmAuxProfile,
+          llmFallbackProfile,
           llmProfiles,
-          llmProfileChains,
-          llmEscalationPolicy,
           llmSystemPromptCustom: config.value.llmSystemPromptCustom,
           maxSteps: Math.max(1, Number(config.value.maxSteps || 100)),
-          autoTitleInterval: Math.max(0, Number(config.value.autoTitleInterval ?? 10)),
-          bridgeInvokeTimeoutMs: Math.max(1000, Number(config.value.bridgeInvokeTimeoutMs || 120000)),
+          autoTitleInterval: Math.max(
+            0,
+            Number(config.value.autoTitleInterval ?? 10),
+          ),
+          bridgeInvokeTimeoutMs: Math.max(
+            1000,
+            Number(config.value.bridgeInvokeTimeoutMs || 120000),
+          ),
           llmTimeoutMs,
           llmRetryMaxAttempts,
           llmMaxRetryDelayMs,
           devAutoReload: config.value.devAutoReload,
-          devReloadIntervalMs: Math.max(500, Number(config.value.devReloadIntervalMs || 1500))
-        }
+          devReloadIntervalMs: Math.max(
+            500,
+            Number(config.value.devReloadIntervalMs || 1500),
+          ),
+        },
       });
       await sendMessage("bridge.connect");
       await refreshHealth();
@@ -1288,6 +1569,6 @@ export const useRuntimeStore = defineStore("runtime", () => {
     refreshSessionTitle,
     updateSessionTitle,
     deleteSession,
-    saveConfig
+    saveConfig,
   };
 });

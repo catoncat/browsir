@@ -66,10 +66,7 @@ function buildWorkerLlmConfig(options?: { id?: string; model?: string; apiKey?: 
         llmModel: options?.model || "gpt-test",
         role: "worker"
       }
-    ],
-    llmProfileChains: {
-      worker: [id]
-    }
+    ]
   };
 }
 
@@ -559,5 +556,108 @@ describe("runtime-router interruption boundary", () => {
       (item) => String(item.role || "") === "user" && String(item.content || "").includes("second-round")
     );
     expect(hasFollowUpUser).toBe(true);
+  });
+
+  it("steer 会在当前 loop_done 后自动启动下一轮", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    let fetchCount = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      fetchCount += 1;
+      if (fetchCount === 1) {
+        await new Promise((resolve) => setTimeout(resolve, 70));
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: `assistant-${fetchCount}`
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          }
+        }
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        ...buildWorkerLlmConfig({ model: "gpt-test" })
+      }
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "first-round"
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(((started.data as Record<string, unknown>) || {}).sessionId || "");
+    expect(sessionId).not.toBe("");
+
+    const requestDeadline = Date.now() + 2000;
+    let hasLlmRequest = false;
+    while (Date.now() < requestDeadline) {
+      const out = await invokeRuntime({
+        type: "brain.step.stream",
+        sessionId
+      });
+      const stream = Array.isArray((out.data as Record<string, unknown>)?.stream)
+        ? (((out.data as Record<string, unknown>).stream as unknown[]) as Array<Record<string, unknown>>)
+        : [];
+      hasLlmRequest = stream.some((event) => String(event.type || "") === "llm.request");
+      if (hasLlmRequest) break;
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+    expect(hasLlmRequest).toBe(true);
+
+    const queued = await invokeRuntime({
+      type: "brain.run.start",
+      sessionId,
+      prompt: "second-round-steer",
+      streamingBehavior: "steer"
+    });
+    expect(queued.ok).toBe(true);
+    const queuedRuntime = ((queued.data as Record<string, unknown>)?.runtime || {}) as Record<string, unknown>;
+    const queuedQueue = (queuedRuntime.queue || {}) as Record<string, unknown>;
+    expect(Number(queuedQueue.steer || 0)).toBeGreaterThanOrEqual(1);
+
+    const deadline = Date.now() + 5000;
+    let loopDoneCount = 0;
+    while (Date.now() < deadline) {
+      const out = await invokeRuntime({
+        type: "brain.step.stream",
+        sessionId
+      });
+      const stream = Array.isArray((out.data as Record<string, unknown>)?.stream)
+        ? (((out.data as Record<string, unknown>).stream as unknown[]) as Array<Record<string, unknown>>)
+        : [];
+      loopDoneCount = stream.filter((event) => String(event.type || "") === "loop_done").length;
+      if (loopDoneCount >= 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    expect(loopDoneCount).toBeGreaterThanOrEqual(2);
+    expect(fetchCount).toBeGreaterThanOrEqual(2);
+
+    const conversation = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId
+    });
+    expect(conversation.ok).toBe(true);
+    const messages = ((((conversation.data as Record<string, unknown>) || {}).conversationView as Record<string, unknown>)
+      ?.messages || []) as Array<Record<string, unknown>>;
+    const hasSteerUser = messages.some(
+      (item) => String(item.role || "") === "user" && String(item.content || "").includes("second-round-steer")
+    );
+    expect(hasSteerUser).toBe(true);
   });
 });

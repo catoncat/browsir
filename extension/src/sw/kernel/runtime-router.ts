@@ -1,19 +1,36 @@
 import { initSessionIndex, resetSessionStore } from "./storage-reset.browser";
 import { BrainOrchestrator } from "./orchestrator.browser";
-import { createRuntimeInfraHandler, type RuntimeInfraHandler, type RuntimeInfraResult } from "./runtime-infra.browser";
-import { createRuntimeLoopController, type RuntimeLoopController } from "./runtime-loop.browser";
+import {
+  createRuntimeInfraHandler,
+  type RuntimeInfraHandler,
+  type RuntimeInfraResult,
+} from "./runtime-infra.browser";
+import {
+  createRuntimeLoopController,
+  type RuntimeLoopController,
+} from "./runtime-loop.browser";
 import { invokeVirtualFrame, isVirtualUri } from "./virtual-fs.browser";
 import { registerExtension, type ExtensionFactory } from "./extension-api";
-import type { AgentPluginDefinition, AgentPluginManifest, AgentPluginPermissions } from "./plugin-runtime";
+import type {
+  AgentPluginDefinition,
+  AgentPluginManifest,
+  AgentPluginPermissions,
+} from "./plugin-runtime";
 import type { LlmProviderAdapter, LlmProviderSendInput } from "./llm-provider";
 import { normalizeSkillCreateRequest } from "./skill-create";
 import { handleWebChatRuntimeMessage } from "./web-chat-executor.browser";
 import {
   removeSessionIndexEntry,
   removeSessionMeta,
-  writeSessionMeta
+  writeSessionMeta,
 } from "./session-store.browser";
-import { nowIso, randomId, type MessageEntry, type SessionEntry, type SessionMeta } from "./types";
+import {
+  nowIso,
+  randomId,
+  type MessageEntry,
+  type SessionEntry,
+  type SessionMeta,
+} from "./types";
 
 interface RuntimeOk<T = unknown> {
   ok: true;
@@ -50,7 +67,7 @@ const PLUGIN_SANDBOX_DEFAULT_SESSION_ID = "plugin-studio";
 const PLUGIN_SANDBOX_RUNNER_PATH = "mem://__bbl/plugin-host-runner.cjs";
 const PLUGIN_SANDBOX_RESULT_PREFIX = "__BBL_PLUGIN_RESULT__";
 const DEFAULT_SKILL_DISCOVER_ROOTS: Array<{ root: string; source: string }> = [
-  { root: "mem://skills", source: "browser" }
+  { root: "mem://skills", source: "browser" },
 ];
 const PLUGIN_SANDBOX_RUNNER_SOURCE = String.raw`const fs = require("fs");
 const { pathToFileURL } = require("url");
@@ -233,7 +250,9 @@ function requireSessionId(message: unknown): string {
 }
 
 function toRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 function toStringList(value: unknown): string[] | undefined {
@@ -249,14 +268,19 @@ function toStringList(value: unknown): string[] | undefined {
   return out.length > 0 ? out : [];
 }
 
-function parseJsonObjectText(value: string, field: string): Record<string, unknown> {
+function parseJsonObjectText(
+  value: string,
+  field: string,
+): Record<string, unknown> {
   const text = String(value || "").trim();
   if (!text) return {};
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch (error) {
-    throw new Error(`${field} 不是合法 JSON: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(
+      `${field} 不是合法 JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error(`${field} 必须是 JSON object`);
@@ -264,7 +288,11 @@ function parseJsonObjectText(value: string, field: string): Record<string, unkno
   return parsed as Record<string, unknown>;
 }
 
-async function readVirtualJsonObject(path: string, field: string, sessionId = "default"): Promise<Record<string, unknown>> {
+async function readVirtualJsonObject(
+  path: string,
+  field: string,
+  sessionId = "default",
+): Promise<Record<string, unknown>> {
   const resolvedPath = String(path || "").trim();
   if (!resolvedPath) throw new Error(`${field} 不能为空`);
   if (!isVirtualUri(resolvedPath)) {
@@ -276,19 +304,25 @@ async function readVirtualJsonObject(path: string, field: string, sessionId = "d
       path: resolvedPath,
       offset: 0,
       limit: MAX_PLUGIN_PACKAGE_READ_BYTES,
-      runtime: "sandbox"
+      runtime: "sandbox",
     },
-    sessionId: String(sessionId || "").trim() || "default"
+    sessionId: String(sessionId || "").trim() || "default",
   });
   const payload = toRecord(result);
   if (payload.truncated === true) {
-    throw new Error(`${field} 超过读取上限 ${MAX_PLUGIN_PACKAGE_READ_BYTES} bytes`);
+    throw new Error(
+      `${field} 超过读取上限 ${MAX_PLUGIN_PACKAGE_READ_BYTES} bytes`,
+    );
   }
   const content = String(payload.content || "");
   return parseJsonObjectText(content, field);
 }
 
-async function readVirtualTextFile(path: string, field: string, sessionId = "default"): Promise<string> {
+async function readVirtualTextFile(
+  path: string,
+  field: string,
+  sessionId = "default",
+): Promise<string> {
   const resolvedPath = String(path || "").trim();
   if (!resolvedPath) throw new Error(`${field} 不能为空`);
   if (!isVirtualUri(resolvedPath)) {
@@ -300,18 +334,24 @@ async function readVirtualTextFile(path: string, field: string, sessionId = "def
       path: resolvedPath,
       offset: 0,
       limit: MAX_PLUGIN_PACKAGE_READ_BYTES,
-      runtime: "sandbox"
+      runtime: "sandbox",
     },
-    sessionId: String(sessionId || "").trim() || "default"
+    sessionId: String(sessionId || "").trim() || "default",
   });
   const payload = toRecord(result);
   if (payload.truncated === true) {
-    throw new Error(`${field} 超过读取上限 ${MAX_PLUGIN_PACKAGE_READ_BYTES} bytes`);
+    throw new Error(
+      `${field} 超过读取上限 ${MAX_PLUGIN_PACKAGE_READ_BYTES} bytes`,
+    );
   }
   return String(payload.content || "");
 }
 
-async function writeVirtualTextFile(path: string, content: string, sessionId = "default"): Promise<Record<string, unknown>> {
+async function writeVirtualTextFile(
+  path: string,
+  content: string,
+  sessionId = "default",
+): Promise<Record<string, unknown>> {
   const resolvedPath = String(path || "").trim();
   if (!resolvedPath) throw new Error("write path 不能为空");
   if (!isVirtualUri(resolvedPath)) {
@@ -323,14 +363,16 @@ async function writeVirtualTextFile(path: string, content: string, sessionId = "
       path: resolvedPath,
       content: String(content || ""),
       mode: "overwrite",
-      runtime: "sandbox"
+      runtime: "sandbox",
     },
-    sessionId: String(sessionId || "").trim() || "default"
+    sessionId: String(sessionId || "").trim() || "default",
   });
 }
 
 function toSafeVirtualSegment(input: unknown): string {
-  const text = String(input || "").trim().replace(/[^a-zA-Z0-9._-]/g, "_");
+  const text = String(input || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]/g, "_");
   return text || "plugin";
 }
 
@@ -346,14 +388,19 @@ function buildPluginVirtualSourcePaths(pluginId: string): {
     root,
     packagePath: `${root}/plugin.json`,
     indexPath: `${root}/index.js`,
-    uiPath: `${root}/ui.js`
+    uiPath: `${root}/ui.js`,
   };
 }
 
 function emitPluginRuntimeMessage(message: unknown): void {
   try {
-    const maybePromise = chrome.runtime.sendMessage(message as Record<string, unknown>);
-    if (maybePromise && typeof (maybePromise as Promise<unknown>).catch === "function") {
+    const maybePromise = chrome.runtime.sendMessage(
+      message as Record<string, unknown>,
+    );
+    if (
+      maybePromise &&
+      typeof (maybePromise as Promise<unknown>).catch === "function"
+    ) {
       void (maybePromise as Promise<unknown>).catch(() => undefined);
     }
   } catch {
@@ -377,9 +424,12 @@ function emitPluginHookTrace(payload: Record<string, unknown>): void {
   try {
     const maybePromise = chrome.runtime.sendMessage({
       type: "bbloop.plugin.trace",
-      payload
+      payload,
     });
-    if (maybePromise && typeof (maybePromise as Promise<unknown>).catch === "function") {
+    if (
+      maybePromise &&
+      typeof (maybePromise as Promise<unknown>).catch === "function"
+    ) {
       void (maybePromise as Promise<unknown>).catch(() => undefined);
     }
   } catch {
@@ -391,7 +441,9 @@ function parsePluginSandboxResult(output: unknown): Record<string, unknown> {
   const row = toRecord(output);
   const stdout = String(row.stdout || "");
   const stderr = String(row.stderr || "");
-  const exitCode = Number.isFinite(Number(row.exitCode)) ? Number(row.exitCode) : -1;
+  const exitCode = Number.isFinite(Number(row.exitCode))
+    ? Number(row.exitCode)
+    : -1;
   const lines = stdout.split(/\r?\n/);
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     const line = String(lines[i] || "").trim();
@@ -402,14 +454,17 @@ function parsePluginSandboxResult(output: unknown): Record<string, unknown> {
   const stderrPreview = stderr.replace(/\s+/g, " ").trim().slice(0, 260);
   const stdoutPreview = stdout.replace(/\s+/g, " ").trim().slice(0, 260);
   throw new Error(
-    `plugin sandbox 缺少可解析结果 (exit=${exitCode}, stderr=${stderrPreview || "<empty>"}, stdout=${stdoutPreview || "<empty>"})`
+    `plugin sandbox 缺少可解析结果 (exit=${exitCode}, stderr=${stderrPreview || "<empty>"}, stdout=${stdoutPreview || "<empty>"})`,
   );
 }
 
 function isPluginSandboxCspEvalError(error: unknown): boolean {
   const text = error instanceof Error ? error.message : String(error);
   const lowered = text.toLowerCase();
-  return lowered.includes("unsafe-eval") || lowered.includes("evaluating a string as javascript violates");
+  return (
+    lowered.includes("unsafe-eval") ||
+    lowered.includes("evaluating a string as javascript violates")
+  );
 }
 
 function encodeBase64Utf8(text: string): string {
@@ -442,10 +497,10 @@ function buildHostPluginSandboxCommand(input: {
       ...(input.op === "runHook"
         ? {
             hook: String(input.hook || "").trim(),
-            payload: input.payload
+            payload: input.payload,
           }
-        : {})
-    })
+        : {}),
+    }),
   );
   return `BBL_PLUGIN_SOURCE_BASE64=${quoteForShellSingle(sourceBase64)} BBL_PLUGIN_INPUT_BASE64=${quoteForShellSingle(runnerInputBase64)} node <<'NODE'
 const RESULT_PREFIX = "__BBL_PLUGIN_RESULT__";
@@ -588,13 +643,15 @@ async function loadFactoryFromSource(sourceText, exportName) {
 NODE`;
 }
 
-function extractBridgeInvokeBashResult(result: unknown): Record<string, unknown> {
+function extractBridgeInvokeBashResult(
+  result: unknown,
+): Record<string, unknown> {
   const root = toRecord(result);
   const candidates = [
     root,
     toRecord(root.data),
     toRecord(toRecord(root.data).data),
-    toRecord(root.result)
+    toRecord(root.result),
   ];
   for (const item of candidates) {
     if ("stdout" in item || "stderr" in item || "exitCode" in item) {
@@ -613,14 +670,19 @@ async function invokePluginSandboxRunnerViaBridge(input: {
   payload?: unknown;
   infra: RuntimeInfraHandler;
 }): Promise<Record<string, unknown>> {
-  const sessionId = String(input.sessionId || "").trim() || PLUGIN_SANDBOX_DEFAULT_SESSION_ID;
-  const moduleSource = await readVirtualTextFile(input.modulePath, "plugin sandbox modulePath", sessionId);
+  const sessionId =
+    String(input.sessionId || "").trim() || PLUGIN_SANDBOX_DEFAULT_SESSION_ID;
+  const moduleSource = await readVirtualTextFile(
+    input.modulePath,
+    "plugin sandbox modulePath",
+    sessionId,
+  );
   const command = buildHostPluginSandboxCommand({
     moduleSource,
     exportName: input.exportName,
     op: input.op,
     hook: input.hook,
-    payload: input.payload
+    payload: input.payload,
   });
   const bridgeResponse = await input.infra.handleMessage({
     type: "bridge.invoke",
@@ -630,13 +692,15 @@ async function invokePluginSandboxRunnerViaBridge(input: {
         cmdId: "bash.exec",
         args: [command],
         cwd: ".",
-        timeoutMs: 120_000
+        timeoutMs: 120_000,
       },
-      sessionId
-    }
+      sessionId,
+    },
   });
   if (!bridgeResponse || bridgeResponse.ok !== true) {
-    const errorText = bridgeResponse ? String(bridgeResponse.error || "bridge.invoke failed") : "bridge.invoke unavailable";
+    const errorText = bridgeResponse
+      ? String(bridgeResponse.error || "bridge.invoke failed")
+      : "bridge.invoke unavailable";
     throw new Error(`plugin sandbox bridge 回退失败: ${errorText}`);
   }
   const row = extractBridgeInvokeBashResult(bridgeResponse.data);
@@ -655,13 +719,18 @@ async function invokePluginSandboxRunnerInBrowser(input: {
   hook?: string;
   payload?: unknown;
 }): Promise<Record<string, unknown>> {
-  const sessionId = String(input.sessionId || "").trim() || PLUGIN_SANDBOX_DEFAULT_SESSION_ID;
-  await writeVirtualTextFile(PLUGIN_SANDBOX_RUNNER_PATH, PLUGIN_SANDBOX_RUNNER_SOURCE, sessionId);
+  const sessionId =
+    String(input.sessionId || "").trim() || PLUGIN_SANDBOX_DEFAULT_SESSION_ID;
+  await writeVirtualTextFile(
+    PLUGIN_SANDBOX_RUNNER_PATH,
+    PLUGIN_SANDBOX_RUNNER_SOURCE,
+    sessionId,
+  );
 
   const inputFile = `mem://__bbl/plugin-input-${toSafeVirtualSegment(randomId("runner"))}.json`;
   const payload: Record<string, unknown> = {
     op: input.op,
-    exportName: input.exportName
+    exportName: input.exportName,
   };
   if (input.op === "runHook") {
     payload.hook = String(input.hook || "").trim();
@@ -676,9 +745,9 @@ async function invokePluginSandboxRunnerInBrowser(input: {
       cmdId: "bash.exec",
       args: [command],
       cwd: "mem://",
-      runtime: "sandbox"
+      runtime: "sandbox",
     },
-    sessionId
+    sessionId,
   });
   const row = toRecord(raw);
   const parsed = parsePluginSandboxResult(row);
@@ -709,13 +778,17 @@ async function invokePluginSandboxRunner(input: {
     try {
       return await invokePluginSandboxRunnerViaBridge({
         ...input,
-        infra: input.infra
+        infra: input.infra,
       });
     } catch (bridgeError) {
-      const browserErrorText = error instanceof Error ? error.message : String(error);
-      const bridgeErrorText = bridgeError instanceof Error ? bridgeError.message : String(bridgeError);
+      const browserErrorText =
+        error instanceof Error ? error.message : String(error);
+      const bridgeErrorText =
+        bridgeError instanceof Error
+          ? bridgeError.message
+          : String(bridgeError);
       throw new Error(
-        `plugin sandbox 浏览器执行被 CSP 拦截，bridge 回退也失败；browser=${browserErrorText}; bridge=${bridgeErrorText}`
+        `plugin sandbox 浏览器执行被 CSP 拦截，bridge 回退也失败；browser=${browserErrorText}; bridge=${bridgeErrorText}`,
       );
     }
   }
@@ -733,10 +806,11 @@ async function loadExtensionFactoryFromVirtualModule(input: {
     modulePath: input.modulePath,
     exportName: input.exportName,
     op: "describe",
-    infra: input.infra
+    infra: input.infra,
   });
   const discoveredHooks = toStringList(describe.hooks) || [];
-  const declaredHooks = toStringList(toRecord(input.manifest.permissions).hooks) || [];
+  const declaredHooks =
+    toStringList(toRecord(input.manifest.permissions).hooks) || [];
   const hookSet = new Set<string>([...discoveredHooks, ...declaredHooks]);
   const hooks = [...hookSet].filter(Boolean);
 
@@ -752,10 +826,12 @@ async function loadExtensionFactoryFromVirtualModule(input: {
             op: "runHook",
             hook: hookName,
             payload: eventPayload,
-            infra: input.infra
+            infra: input.infra,
           });
 
-          const runtimeMessages = Array.isArray(executed.runtimeMessages) ? executed.runtimeMessages : [];
+          const runtimeMessages = Array.isArray(executed.runtimeMessages)
+            ? executed.runtimeMessages
+            : [];
           for (const message of runtimeMessages) {
             emitPluginRuntimeMessage(message);
           }
@@ -772,25 +848,25 @@ async function loadExtensionFactoryFromVirtualModule(input: {
             durationMs: Math.max(0, Date.now() - startedAt),
             requestPreview: previewJsonText(eventPayload),
             responsePreview: previewJsonText(hookResult),
-            runtimeMessageCount: runtimeMessages.length
+            runtimeMessageCount: runtimeMessages.length,
           });
 
           const action = String(hookResult.action || "").trim();
           if (action === "patch") {
             return {
               action: "patch",
-              patch: toRecord(hookResult.patch)
+              patch: toRecord(hookResult.patch),
             };
           }
           if (action === "block") {
             const reason = String(hookResult.reason || "").trim();
             return {
               action: "block",
-              ...(reason ? { reason } : {})
+              ...(reason ? { reason } : {}),
             };
           }
           return {
-            action: "continue"
+            action: "continue",
           };
         } catch (error) {
           emitPluginHookTrace({
@@ -803,7 +879,7 @@ async function loadExtensionFactoryFromVirtualModule(input: {
             startedAt: new Date(startedAt).toISOString(),
             durationMs: Math.max(0, Date.now() - startedAt),
             requestPreview: previewJsonText(eventPayload),
-            error: error instanceof Error ? error.message : String(error)
+            error: error instanceof Error ? error.message : String(error),
           });
           throw error;
         }
@@ -814,7 +890,7 @@ async function loadExtensionFactoryFromVirtualModule(input: {
 
 async function materializeInlinePluginSources(
   source: Record<string, unknown>,
-  sessionId: string
+  sessionId: string,
 ): Promise<Record<string, unknown>> {
   const manifest = toRecord(source.manifest);
   const pluginId = String(manifest.id || "").trim();
@@ -826,9 +902,11 @@ async function materializeInlinePluginSources(
 
   const paths = buildPluginVirtualSourcePaths(pluginId);
   const next: Record<string, unknown> = {
-    ...source
+    ...source,
   };
-  const existingModulePath = String(source.modulePath || source.moduleUrl || source.module || "").trim();
+  const existingModulePath = String(
+    source.modulePath || source.moduleUrl || source.module || "",
+  ).trim();
 
   if (indexJs) {
     const modulePath = existingModulePath || paths.indexPath;
@@ -839,18 +917,26 @@ async function materializeInlinePluginSources(
 
   if (uiJs) {
     const uiModulePath =
-      String(source.uiModulePath || source.uiModuleUrl || source.uiModule || "").trim()
-      || paths.uiPath;
+      String(
+        source.uiModulePath || source.uiModuleUrl || source.uiModule || "",
+      ).trim() || paths.uiPath;
     await writeVirtualTextFile(uiModulePath, uiJs, sessionId);
     next.uiModulePath = uiModulePath;
     next.uiModuleSessionId = sessionId;
   }
 
-  await writeVirtualTextFile(paths.packagePath, JSON.stringify(next, null, 2), sessionId);
+  await writeVirtualTextFile(
+    paths.packagePath,
+    JSON.stringify(next, null, 2),
+    sessionId,
+  );
   return next;
 }
 
-function normalizeHeadersRecord(input: unknown, field: string): Record<string, string> {
+function normalizeHeadersRecord(
+  input: unknown,
+  field: string,
+): Record<string, string> {
   if (input === undefined || input === null) return {};
   let source: Record<string, unknown> = {};
   if (typeof input === "string") {
@@ -877,28 +963,44 @@ interface DeclarativeLlmProviderSpec {
   staticApiKey: string;
 }
 
-function normalizeDeclarativeLlmProviderSpec(input: unknown): DeclarativeLlmProviderSpec {
+function normalizeDeclarativeLlmProviderSpec(
+  input: unknown,
+): DeclarativeLlmProviderSpec {
   const row = toRecord(input);
   const id = String(row.id || "").trim();
   if (!id) throw new Error("llm provider id 不能为空");
 
-  const transportRaw = String(row.transport || "openai_compatible").trim().toLowerCase();
+  const transportRaw = String(row.transport || "openai_compatible")
+    .trim()
+    .toLowerCase();
   if (transportRaw !== "openai_compatible") {
     throw new Error(`llm provider ${id} transport 非法: ${transportRaw}`);
   }
 
-  const baseUrl = String(row.baseUrl || "").trim().replace(/\/+$/, "");
+  const baseUrl = String(row.baseUrl || "")
+    .trim()
+    .replace(/\/+$/, "");
   if (!baseUrl) throw new Error(`llm provider ${id} 需要 baseUrl`);
-  if (!/^https?:\/\//i.test(baseUrl)) throw new Error(`llm provider ${id} baseUrl 必须是 http/https URL`);
+  if (!/^https?:\/\//i.test(baseUrl))
+    throw new Error(`llm provider ${id} baseUrl 必须是 http/https URL`);
 
-  const endpointRaw = String(row.endpointPath || row.path || "/chat/completions").trim();
-  const endpointPath = endpointRaw.startsWith("/") ? endpointRaw : `/${endpointRaw}`;
-  const authModeRaw = String(row.authMode || "route_api_key").trim().toLowerCase();
+  const endpointRaw = String(
+    row.endpointPath || row.path || "/chat/completions",
+  ).trim();
+  const endpointPath = endpointRaw.startsWith("/")
+    ? endpointRaw
+    : `/${endpointRaw}`;
+  const authModeRaw = String(row.authMode || "route_api_key")
+    .trim()
+    .toLowerCase();
   const authMode =
-    authModeRaw === "none" || authModeRaw === "static_bearer" || authModeRaw === "route_api_key"
+    authModeRaw === "none" ||
+    authModeRaw === "static_bearer" ||
+    authModeRaw === "route_api_key"
       ? authModeRaw
       : null;
-  if (!authMode) throw new Error(`llm provider ${id} authMode 非法: ${authModeRaw}`);
+  if (!authMode)
+    throw new Error(`llm provider ${id} authMode 非法: ${authModeRaw}`);
 
   const staticApiKey = String(row.apiKey || row.staticApiKey || "").trim();
   if (authMode === "static_bearer" && !staticApiKey) {
@@ -912,35 +1014,40 @@ function normalizeDeclarativeLlmProviderSpec(input: unknown): DeclarativeLlmProv
     endpointPath,
     headers: normalizeHeadersRecord(row.headers, `llm provider ${id} headers`),
     authMode,
-    staticApiKey
+    staticApiKey,
   };
 }
 
-function createDeclarativeOpenAiCompatibleProvider(spec: DeclarativeLlmProviderSpec): LlmProviderAdapter {
+function createDeclarativeOpenAiCompatibleProvider(
+  spec: DeclarativeLlmProviderSpec,
+): LlmProviderAdapter {
   return {
     id: spec.id,
     resolveRequestUrl() {
       return `${spec.baseUrl}${spec.endpointPath}`;
     },
     async send(input: LlmProviderSendInput): Promise<Response> {
-      const requestUrl = String(input.requestUrl || "").trim() || this.resolveRequestUrl(input.route);
+      const requestUrl =
+        String(input.requestUrl || "").trim() ||
+        this.resolveRequestUrl(input.route);
       const authHeader = (() => {
         if (spec.authMode === "none") return "";
-        if (spec.authMode === "static_bearer") return `Bearer ${spec.staticApiKey}`;
+        if (spec.authMode === "static_bearer")
+          return `Bearer ${spec.staticApiKey}`;
         return `Bearer ${String(input.route.llmKey || "")}`;
       })();
       const headers: Record<string, string> = {
         "content-type": "application/json",
-        ...spec.headers
+        ...spec.headers,
       };
       if (authHeader) headers.authorization = authHeader;
       return await fetch(requestUrl, {
         method: "POST",
         headers,
         body: JSON.stringify(input.payload),
-        signal: input.signal
+        signal: input.signal,
       });
-    }
+    },
   };
 }
 
@@ -955,9 +1062,9 @@ function normalizePluginPermissions(input: unknown): AgentPluginPermissions {
   const brainEvents = toStringList(row.brainEvents);
   const modes =
     Array.isArray(modesRaw) && modesRaw.length > 0
-      ? (modesRaw.filter((item) => item === "script" || item === "cdp" || item === "bridge") as Array<
-          "script" | "cdp" | "bridge"
-        >)
+      ? (modesRaw.filter(
+          (item) => item === "script" || item === "cdp" || item === "bridge",
+        ) as Array<"script" | "cdp" | "bridge">)
       : undefined;
   return {
     ...(hooks ? { hooks } : {}),
@@ -968,8 +1075,10 @@ function normalizePluginPermissions(input: unknown): AgentPluginPermissions {
     ...(runtimeMessages ? { runtimeMessages } : {}),
     ...(brainEvents ? { brainEvents } : {}),
     ...(row.replaceProviders === true ? { replaceProviders: true } : {}),
-    ...(row.replaceToolContracts === true ? { replaceToolContracts: true } : {}),
-    ...(row.replaceLlmProviders === true ? { replaceLlmProviders: true } : {})
+    ...(row.replaceToolContracts === true
+      ? { replaceToolContracts: true }
+      : {}),
+    ...(row.replaceLlmProviders === true ? { replaceLlmProviders: true } : {}),
   };
 }
 
@@ -980,18 +1089,22 @@ function normalizePluginManifest(input: unknown): AgentPluginManifest {
   const name = String(row.name || "").trim() || id;
   const version = String(row.version || "").trim() || "0.0.0";
   const timeoutRaw = Number(row.timeoutMs);
-  const timeoutMs = Number.isFinite(timeoutRaw) ? Math.max(50, Math.min(10_000, Math.floor(timeoutRaw))) : undefined;
+  const timeoutMs = Number.isFinite(timeoutRaw)
+    ? Math.max(50, Math.min(10_000, Math.floor(timeoutRaw)))
+    : undefined;
   const permissions = normalizePluginPermissions(row.permissions);
   return {
     id,
     name,
     version,
     ...(timeoutMs ? { timeoutMs } : {}),
-    ...(Object.keys(permissions).length > 0 ? { permissions } : {})
+    ...(Object.keys(permissions).length > 0 ? { permissions } : {}),
   };
 }
 
-function normalizePluginLlmProviders(input: unknown): LlmProviderAdapter[] | undefined {
+function normalizePluginLlmProviders(
+  input: unknown,
+): LlmProviderAdapter[] | undefined {
   if (!Array.isArray(input)) return undefined;
   const out: LlmProviderAdapter[] = [];
   for (const item of input) {
@@ -999,11 +1112,16 @@ function normalizePluginLlmProviders(input: unknown): LlmProviderAdapter[] | und
     const send = row.send;
     const resolveRequestUrl = row.resolveRequestUrl;
     const id = String(row.id || "").trim();
-    if (id && typeof send === "function" && typeof resolveRequestUrl === "function") {
+    if (
+      id &&
+      typeof send === "function" &&
+      typeof resolveRequestUrl === "function"
+    ) {
       out.push({
         id,
         send: send as LlmProviderAdapter["send"],
-        resolveRequestUrl: resolveRequestUrl as LlmProviderAdapter["resolveRequestUrl"]
+        resolveRequestUrl:
+          resolveRequestUrl as LlmProviderAdapter["resolveRequestUrl"],
       });
       continue;
     }
@@ -1017,9 +1135,15 @@ function normalizePluginDefinition(input: unknown): AgentPluginDefinition {
   const row = toRecord(input);
   const manifest = normalizePluginManifest(row.manifest);
   const hooks = row.hooks as AgentPluginDefinition["hooks"] | undefined;
-  const providers = row.providers as AgentPluginDefinition["providers"] | undefined;
-  const policies = row.policies as AgentPluginDefinition["policies"] | undefined;
-  const tools = Array.isArray(row.tools) ? (row.tools as AgentPluginDefinition["tools"]) : undefined;
+  const providers = row.providers as
+    | AgentPluginDefinition["providers"]
+    | undefined;
+  const policies = row.policies as
+    | AgentPluginDefinition["policies"]
+    | undefined;
+  const tools = Array.isArray(row.tools)
+    ? (row.tools as AgentPluginDefinition["tools"])
+    : undefined;
   const llmProviders = normalizePluginLlmProviders(row.llmProviders);
   return {
     manifest,
@@ -1027,7 +1151,7 @@ function normalizePluginDefinition(input: unknown): AgentPluginDefinition {
     ...(providers ? { providers } : {}),
     ...(policies ? { policies } : {}),
     ...(tools ? { tools } : {}),
-    ...(llmProviders ? { llmProviders } : {})
+    ...(llmProviders ? { llmProviders } : {}),
   };
 }
 
@@ -1040,7 +1164,9 @@ interface UiExtensionDescriptor {
   sessionId?: string;
 }
 
-function normalizeUiExtensionDescriptor(input: unknown): UiExtensionDescriptor | null {
+function normalizeUiExtensionDescriptor(
+  input: unknown,
+): UiExtensionDescriptor | null {
   const row = toRecord(input);
   const pluginId = String(row.pluginId || "").trim();
   const moduleUrl = String(row.moduleUrl || "").trim();
@@ -1054,7 +1180,7 @@ function normalizeUiExtensionDescriptor(input: unknown): UiExtensionDescriptor |
     exportName,
     enabled,
     updatedAt,
-    sessionId: String(row.sessionId || "").trim() || undefined
+    sessionId: String(row.sessionId || "").trim() || undefined,
   };
 }
 
@@ -1075,13 +1201,17 @@ async function readUiExtensionDescriptors(): Promise<UiExtensionDescriptor[]> {
   return out;
 }
 
-async function writeUiExtensionDescriptors(list: UiExtensionDescriptor[]): Promise<void> {
+async function writeUiExtensionDescriptors(
+  list: UiExtensionDescriptor[],
+): Promise<void> {
   await chrome.storage.local.set({
-    [UI_EXTENSION_STORAGE_KEY]: list
+    [UI_EXTENSION_STORAGE_KEY]: list,
   });
 }
 
-async function upsertUiExtensionDescriptor(next: UiExtensionDescriptor): Promise<void> {
+async function upsertUiExtensionDescriptor(
+  next: UiExtensionDescriptor,
+): Promise<void> {
   const list = await readUiExtensionDescriptors();
   const index = list.findIndex((item) => item.pluginId === next.pluginId);
   if (index >= 0) {
@@ -1092,21 +1222,26 @@ async function upsertUiExtensionDescriptor(next: UiExtensionDescriptor): Promise
   await writeUiExtensionDescriptors(list);
 }
 
-async function updateUiExtensionDescriptorEnabled(pluginId: string, enabled: boolean): Promise<UiExtensionDescriptor | null> {
+async function updateUiExtensionDescriptorEnabled(
+  pluginId: string,
+  enabled: boolean,
+): Promise<UiExtensionDescriptor | null> {
   const list = await readUiExtensionDescriptors();
   const index = list.findIndex((item) => item.pluginId === pluginId);
   if (index < 0) return null;
   const next = {
     ...list[index],
     enabled,
-    updatedAt: nowIso()
+    updatedAt: nowIso(),
   };
   list[index] = next;
   await writeUiExtensionDescriptors(list);
   return next;
 }
 
-async function removeUiExtensionDescriptor(pluginId: string): Promise<UiExtensionDescriptor | null> {
+async function removeUiExtensionDescriptor(
+  pluginId: string,
+): Promise<UiExtensionDescriptor | null> {
   const list = await readUiExtensionDescriptors();
   const index = list.findIndex((item) => item.pluginId === pluginId);
   if (index < 0) return null;
@@ -1121,14 +1256,17 @@ function notifyUiExtensionLifecycle(
     | "brain.plugin.ui_extension.enabled"
     | "brain.plugin.ui_extension.disabled"
     | "brain.plugin.ui_extension.unregistered",
-  descriptor: UiExtensionDescriptor
+  descriptor: UiExtensionDescriptor,
 ): void {
   try {
     const maybePromise = chrome.runtime.sendMessage({
       type,
-      payload: descriptor
+      payload: descriptor,
     });
-    if (maybePromise && typeof (maybePromise as Promise<unknown>).catch === "function") {
+    if (
+      maybePromise &&
+      typeof (maybePromise as Promise<unknown>).catch === "function"
+    ) {
       void (maybePromise as Promise<unknown>).catch(() => undefined);
     }
   } catch {
@@ -1139,18 +1277,23 @@ function notifyUiExtensionLifecycle(
 function resolveUiExtensionDescriptorFromSource(
   pluginId: string,
   source: Record<string, unknown>,
-  enabled: boolean
+  enabled: boolean,
 ): UiExtensionDescriptor | null {
-  const moduleInput = source.uiModuleUrl ?? source.uiModulePath ?? source.uiModule;
+  const moduleInput =
+    source.uiModuleUrl ?? source.uiModulePath ?? source.uiModule;
   const hasModule =
-    String(source.uiModuleUrl || "").trim().length > 0
-    || String(source.uiModulePath || "").trim().length > 0
-    || String(source.uiModule || "").trim().length > 0;
+    String(source.uiModuleUrl || "").trim().length > 0 ||
+    String(source.uiModulePath || "").trim().length > 0 ||
+    String(source.uiModule || "").trim().length > 0;
   if (!hasModule) return null;
   const moduleUrl = resolvePluginModuleUrl(moduleInput);
-  const exportName = String(source.uiExportName || "default").trim() || "default";
+  const exportName =
+    String(source.uiExportName || "default").trim() || "default";
   const sessionId = String(
-    source.uiModuleSessionId || source.moduleSessionId || source.sessionId || PLUGIN_SANDBOX_DEFAULT_SESSION_ID
+    source.uiModuleSessionId ||
+      source.moduleSessionId ||
+      source.sessionId ||
+      PLUGIN_SANDBOX_DEFAULT_SESSION_ID,
   ).trim();
   return {
     pluginId,
@@ -1158,16 +1301,18 @@ function resolveUiExtensionDescriptorFromSource(
     exportName,
     enabled,
     updatedAt: nowIso(),
-    ...(isVirtualUri(moduleUrl) ? { sessionId: sessionId || PLUGIN_SANDBOX_DEFAULT_SESSION_ID } : {})
+    ...(isVirtualUri(moduleUrl)
+      ? { sessionId: sessionId || PLUGIN_SANDBOX_DEFAULT_SESSION_ID }
+      : {}),
   };
 }
 
 function hasPluginExtensionEntry(source: Record<string, unknown>): boolean {
   return (
-    typeof source.setup === "function"
-    || String(source.moduleUrl || "").trim().length > 0
-    || String(source.modulePath || "").trim().length > 0
-    || String(source.module || "").trim().length > 0
+    typeof source.setup === "function" ||
+    String(source.moduleUrl || "").trim().length > 0 ||
+    String(source.modulePath || "").trim().length > 0 ||
+    String(source.module || "").trim().length > 0
   );
 }
 
@@ -1181,7 +1326,7 @@ interface PluginValidationCheck {
 function buildPluginValidationCheck(
   name: string,
   ok: boolean,
-  options: { error?: unknown; details?: Record<string, unknown> } = {}
+  options: { error?: unknown; details?: Record<string, unknown> } = {},
 ): PluginValidationCheck {
   return {
     name,
@@ -1189,13 +1334,17 @@ function buildPluginValidationCheck(
     ...(ok
       ? {}
       : {
-          error: String(options.error || "").trim() || "校验失败"
+          error: String(options.error || "").trim() || "校验失败",
         }),
-    ...(options.details && Object.keys(options.details).length > 0 ? { details: options.details } : {})
+    ...(options.details && Object.keys(options.details).length > 0
+      ? { details: options.details }
+      : {}),
   };
 }
 
-function readPluginInstallSource(input: Record<string, unknown>): Record<string, unknown> {
+function readPluginInstallSource(
+  input: Record<string, unknown>,
+): Record<string, unknown> {
   const nested = toRecord(input.plugin);
   if (Object.keys(nested).length > 0) return nested;
   if (Object.prototype.hasOwnProperty.call(input, "plugin")) {
@@ -1216,23 +1365,32 @@ function resolvePluginModuleUrl(input: unknown): string {
   const raw = String(input || "").trim();
   if (!raw) throw new Error("plugin extension moduleUrl 不能为空");
   if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(raw)) return raw;
-  if (raw.startsWith("//")) throw new Error(`plugin extension moduleUrl 非法: ${raw}`);
+  if (raw.startsWith("//"))
+    throw new Error(`plugin extension moduleUrl 非法: ${raw}`);
   const normalized = raw.startsWith("/") ? raw.slice(1) : raw;
-  const chromeRuntime = (globalThis as typeof globalThis & {
-    chrome?: {
-      runtime?: {
-        getURL?: (path: string) => string;
+  const chromeRuntime = (
+    globalThis as typeof globalThis & {
+      chrome?: {
+        runtime?: {
+          getURL?: (path: string) => string;
+        };
       };
-    };
-  }).chrome?.runtime;
+    }
+  ).chrome?.runtime;
   if (chromeRuntime?.getURL) {
     return chromeRuntime.getURL(normalized);
   }
   return new URL(raw, import.meta.url).href;
 }
 
-async function loadExtensionFactoryFromModule(moduleUrl: string, exportName = "default"): Promise<ExtensionFactory> {
-  const moduleNs = (await import(/* @vite-ignore */ moduleUrl)) as Record<string, unknown>;
+async function loadExtensionFactoryFromModule(
+  moduleUrl: string,
+  exportName = "default",
+): Promise<ExtensionFactory> {
+  const moduleNs = (await import(/* @vite-ignore */ moduleUrl)) as Record<
+    string,
+    unknown
+  >;
   const target = String(exportName || "default").trim() || "default";
   const setup = target === "default" ? moduleNs.default : moduleNs[target];
   if (typeof setup !== "function") {
@@ -1246,7 +1404,9 @@ function readPluginId(payload: Record<string, unknown>): string {
 }
 
 function isBuiltinPluginId(pluginId: string): boolean {
-  return String(pluginId || "").trim().startsWith(BUILTIN_PLUGIN_ID_PREFIX);
+  return String(pluginId || "")
+    .trim()
+    .startsWith(BUILTIN_PLUGIN_ID_PREFIX);
 }
 
 interface RegisterPluginOptions {
@@ -1254,16 +1414,24 @@ interface RegisterPluginOptions {
   enable: boolean;
 }
 
-function resolvePluginRegisterOptions(source: Record<string, unknown>, payload: Record<string, unknown>): RegisterPluginOptions {
+function resolvePluginRegisterOptions(
+  source: Record<string, unknown>,
+  payload: Record<string, unknown>,
+): RegisterPluginOptions {
   const replaceRaw = source.replace ?? payload.replace;
   const enableRaw = source.enable ?? payload.enable;
   return {
     replace: replaceRaw === true,
-    enable: enableRaw === false ? false : true
+    enable: enableRaw === false ? false : true,
   };
 }
 
-function normalizeIntInRange(raw: unknown, fallback: number, min: number, max: number): number {
+function normalizeIntInRange(
+  raw: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
   const n = Number(raw);
   if (!Number.isFinite(n)) return fallback;
   const floored = Math.floor(n);
@@ -1282,7 +1450,7 @@ function estimateJsonBytes(value: unknown): number {
 
 function clampStepStream(
   source: unknown[],
-  rawOptions: { maxEvents?: unknown; maxBytes?: unknown } = {}
+  rawOptions: { maxEvents?: unknown; maxBytes?: unknown } = {},
 ): {
   stream: unknown[];
   meta: {
@@ -1297,10 +1465,23 @@ function clampStepStream(
   };
 } {
   const stream = Array.isArray(source) ? source : [];
-  const maxEvents = normalizeIntInRange(rawOptions.maxEvents, DEFAULT_STEP_STREAM_MAX_EVENTS, 1, MAX_STEP_STREAM_MAX_EVENTS);
-  const maxBytes = normalizeIntInRange(rawOptions.maxBytes, DEFAULT_STEP_STREAM_MAX_BYTES, 2 * 1024, MAX_STEP_STREAM_MAX_BYTES);
+  const maxEvents = normalizeIntInRange(
+    rawOptions.maxEvents,
+    DEFAULT_STEP_STREAM_MAX_EVENTS,
+    1,
+    MAX_STEP_STREAM_MAX_EVENTS,
+  );
+  const maxBytes = normalizeIntInRange(
+    rawOptions.maxBytes,
+    DEFAULT_STEP_STREAM_MAX_BYTES,
+    2 * 1024,
+    MAX_STEP_STREAM_MAX_BYTES,
+  );
   const totalEvents = stream.length;
-  const totalBytes = stream.reduce((sum, item) => sum + estimateJsonBytes(item), 0);
+  const totalBytes = stream.reduce(
+    (sum, item) => sum + estimateJsonBytes(item),
+    0,
+  );
 
   if (totalEvents <= maxEvents && totalBytes <= maxBytes) {
     return {
@@ -1313,8 +1494,8 @@ function clampStepStream(
         returnedEvents: totalEvents,
         returnedBytes: totalBytes,
         maxEvents,
-        maxBytes
-      }
+        maxBytes,
+      },
     };
   }
 
@@ -1348,8 +1529,8 @@ function clampStepStream(
       returnedEvents: picked.length,
       returnedBytes,
       maxEvents,
-      maxBytes
-    }
+      maxBytes,
+    },
   };
 }
 
@@ -1393,13 +1574,17 @@ function readForkedFrom(meta: SessionMeta | null): {
 
 function findPreviousUserEntryByChain(
   byId: Map<string, SessionEntry>,
-  startEntry: SessionEntry | null | undefined
+  startEntry: SessionEntry | null | undefined,
 ): MessageEntry | null {
   let cursor: SessionEntry | null = startEntry ?? null;
   let guard = byId.size + 2;
   while (cursor && guard > 0) {
     guard -= 1;
-    if (cursor.type === "message" && cursor.role === "user" && String(cursor.id || "").trim()) {
+    if (
+      cursor.type === "message" &&
+      cursor.role === "user" &&
+      String(cursor.id || "").trim()
+    ) {
       return cursor;
     }
     const parentId = String(cursor.parentId || "").trim();
@@ -1408,7 +1593,9 @@ function findPreviousUserEntryByChain(
   return null;
 }
 
-function findLatestUserEntryInBranch(branch: SessionEntry[]): MessageEntry | null {
+function findLatestUserEntryInBranch(
+  branch: SessionEntry[],
+): MessageEntry | null {
   for (let i = branch.length - 1; i >= 0; i -= 1) {
     const candidate = branch[i];
     if (candidate.type !== "message" || candidate.role !== "user") continue;
@@ -1438,7 +1625,7 @@ interface ForkSessionResult {
 
 async function forkSessionFromLeaf(
   orchestrator: BrainOrchestrator,
-  input: ForkSessionInput
+  input: ForkSessionInput,
 ): Promise<ForkSessionResult> {
   const sourceSessionId = String(input.sourceSessionId || "").trim();
   const sourceLeafId = String(input.leafId || "").trim();
@@ -1461,11 +1648,14 @@ async function forkSessionFromLeaf(
   }
 
   const sourceTitle = String(sourceMeta.header.title || "").trim();
-  const forkTitle = String(input.title || "").trim() || (sourceTitle ? `${sourceTitle} · 重答分支` : "重答分支");
+  const forkTitle =
+    String(input.title || "").trim() ||
+    (sourceTitle ? `${sourceTitle} · 重答分支` : "重答分支");
   const sourceMetadata = toRecord(sourceMeta.header.metadata);
   const forkReason = String(input.reason || "manual");
   const sourceEntryId = String(input.sourceEntryId || "");
-  const targetSessionId = String(input.targetSessionId || "").trim() || undefined;
+  const targetSessionId =
+    String(input.targetSessionId || "").trim() || undefined;
 
   const forkMeta = await orchestrator.sessions.createSession({
     id: targetSessionId,
@@ -1478,24 +1668,31 @@ async function forkSessionFromLeaf(
         sessionId: sourceSessionId,
         leafId: sourceLeafId,
         sourceEntryId,
-        reason: forkReason
-      }
-    }
+        reason: forkReason,
+      },
+    },
   });
   const forkSessionId = forkMeta.header.id;
 
-  const branch = await orchestrator.sessions.getBranch(sourceSessionId, sourceLeafId);
+  const branch = await orchestrator.sessions.getBranch(
+    sourceSessionId,
+    sourceLeafId,
+  );
   const oldToNew = new Map<string, string>();
   for (const sourceEntry of branch) {
     const cloned: SessionEntry = {
       ...sourceEntry,
       id: randomId("entry"),
-      parentId: sourceEntry.parentId ? oldToNew.get(sourceEntry.parentId) || null : null,
-      timestamp: nowIso()
+      parentId: sourceEntry.parentId
+        ? oldToNew.get(sourceEntry.parentId) || null
+        : null,
+      timestamp: nowIso(),
     };
     if (cloned.type === "compaction") {
       const oldFirstKept = String(cloned.firstKeptEntryId || "").trim();
-      cloned.firstKeptEntryId = oldFirstKept ? oldToNew.get(oldFirstKept) || null : null;
+      cloned.firstKeptEntryId = oldFirstKept
+        ? oldToNew.get(oldFirstKept) || null
+        : null;
     }
     await orchestrator.sessions.appendEntry(forkSessionId, cloned);
     oldToNew.set(sourceEntry.id, cloned.id);
@@ -1506,14 +1703,14 @@ async function forkSessionFromLeaf(
     sourceSessionId,
     sourceLeafId,
     leafId: oldToNew.get(sourceLeafId) || null,
-    copiedEntryCount: branch.length
+    copiedEntryCount: branch.length,
   };
 }
 
 async function buildConversationView(
   orchestrator: BrainOrchestrator,
   sessionId: string,
-  leafId?: string | null
+  leafId?: string | null,
 ): Promise<{
   sessionId: string;
   messageCount: number;
@@ -1525,11 +1722,19 @@ async function buildConversationView(
     toolCallId?: string;
   }>;
   parentSessionId: string;
-  forkedFrom: { sessionId: string; leafId: string; sourceEntryId: string; reason: string } | null;
+  forkedFrom: {
+    sessionId: string;
+    leafId: string;
+    sourceEntryId: string;
+    reason: string;
+  } | null;
   lastStatus: ReturnType<BrainOrchestrator["getRunState"]>;
   updatedAt: string;
 }> {
-  const context = await orchestrator.sessions.buildSessionContext(sessionId, leafId ?? undefined);
+  const context = await orchestrator.sessions.buildSessionContext(
+    sessionId,
+    leafId ?? undefined,
+  );
   const meta = await orchestrator.sessions.getMeta(sessionId);
   const messages = context.entries
     .filter((entry): entry is MessageEntry => entry.type === "message")
@@ -1538,7 +1743,7 @@ async function buildConversationView(
       content: entry.text,
       entryId: entry.id,
       toolName: entry.toolName,
-      toolCallId: entry.toolCallId
+      toolCallId: entry.toolCallId,
     }));
   return {
     sessionId,
@@ -1547,7 +1752,7 @@ async function buildConversationView(
     parentSessionId: String(meta?.header?.parentSessionId || ""),
     forkedFrom: readForkedFrom(meta),
     lastStatus: orchestrator.getRunState(sessionId),
-    updatedAt: nowIso()
+    updatedAt: nowIso(),
   };
 }
 
@@ -1561,7 +1766,10 @@ interface AgentRunTaskInput {
   autoRun: boolean;
 }
 
-function parseAgentRunTask(raw: unknown, defaultAutoRun: boolean): { ok: true; task: AgentRunTaskInput } | { ok: false; error: string } {
+function parseAgentRunTask(
+  raw: unknown,
+  defaultAutoRun: boolean,
+): { ok: true; task: AgentRunTaskInput } | { ok: false; error: string } {
   const source = toRecord(raw);
   const agent = String(source.agent || "").trim();
   const role = String(source.role || agent).trim();
@@ -1574,7 +1782,9 @@ function parseAgentRunTask(raw: unknown, defaultAutoRun: boolean): { ok: true; t
   }
   const profile = String(source.profile || "").trim();
   const sessionId = String(source.sessionId || "").trim();
-  const sessionOptions = source.sessionOptions ? toRecord(source.sessionOptions) : {};
+  const sessionOptions = source.sessionOptions
+    ? toRecord(source.sessionOptions)
+    : {};
   const autoRun = source.autoRun === false ? false : defaultAutoRun;
   return {
     ok: true,
@@ -1585,8 +1795,8 @@ function parseAgentRunTask(raw: unknown, defaultAutoRun: boolean): { ok: true; t
       profile: profile || undefined,
       sessionId: sessionId || undefined,
       sessionOptions,
-      autoRun
-    }
+      autoRun,
+    },
   };
 }
 
@@ -1594,16 +1804,16 @@ async function startAgentRunTask(
   runtimeLoop: ReturnType<typeof createRuntimeLoopController>,
   task: AgentRunTaskInput,
   resolvedTask: string,
-  parentSessionId?: string
+  parentSessionId?: string,
 ): Promise<Record<string, unknown>> {
   const sessionOptions = {
-    ...toRecord(task.sessionOptions)
+    ...toRecord(task.sessionOptions),
   };
   const metadata = {
     ...toRecord(sessionOptions.metadata),
     agent: task.agent,
     agentRole: task.role,
-    llmRole: task.role
+    llmRole: task.role,
   } as Record<string, unknown>;
   if (task.profile) metadata.llmProfile = task.profile;
   sessionOptions.metadata = metadata;
@@ -1615,7 +1825,7 @@ async function startAgentRunTask(
     sessionId: task.sessionId || "",
     sessionOptions,
     prompt: resolvedTask,
-    autoRun: task.autoRun
+    autoRun: task.autoRun,
   });
   return {
     agent: task.agent,
@@ -1624,7 +1834,7 @@ async function startAgentRunTask(
     task: resolvedTask,
     templateTask: task.task,
     sessionId: started.sessionId,
-    runtime: started.runtime
+    runtime: started.runtime,
   };
 }
 
@@ -1637,7 +1847,7 @@ function injectChainPrevious(taskText: string, previousOutput: string): string {
 async function waitForLoopDoneBySession(
   orchestrator: BrainOrchestrator,
   sessionId: string,
-  timeoutMs: number
+  timeoutMs: number,
 ): Promise<{ status: string; timeout: boolean }> {
   const deadline = Date.now() + Math.max(1_000, timeoutMs);
   let idleSince = 0;
@@ -1649,7 +1859,7 @@ async function waitForLoopDoneBySession(
       const payload = toRecord(item.payload);
       return {
         status: String(payload.status || "").trim() || "done",
-        timeout: false
+        timeout: false,
       };
     }
     const state = orchestrator.getRunState(sessionId);
@@ -1660,7 +1870,7 @@ async function waitForLoopDoneBySession(
         } else if (Date.now() - idleSince >= SUBAGENT_IDLE_GRACE_MS) {
           return {
             status: "done",
-            timeout: false
+            timeout: false,
           };
         }
         await new Promise((resolve) => setTimeout(resolve, 30));
@@ -1668,7 +1878,7 @@ async function waitForLoopDoneBySession(
       }
       return {
         status: state.stopped ? "stopped" : "unknown",
-        timeout: false
+        timeout: false,
       };
     }
     idleSince = 0;
@@ -1676,13 +1886,13 @@ async function waitForLoopDoneBySession(
   }
   return {
     status: "timeout",
-    timeout: true
+    timeout: true,
   };
 }
 
 async function readLatestAssistantMessage(
   orchestrator: BrainOrchestrator,
-  sessionId: string
+  sessionId: string,
 ): Promise<string> {
   const context = await orchestrator.sessions.buildSessionContext(sessionId);
   for (let i = context.messages.length - 1; i >= 0; i -= 1) {
@@ -1694,11 +1904,15 @@ async function readLatestAssistantMessage(
   return "";
 }
 
-function buildChainFanInSummary(results: Array<Record<string, unknown>>): string {
+function buildChainFanInSummary(
+  results: Array<Record<string, unknown>>,
+): string {
   const lines = results.map((item, index) => {
     const agent = String(item.agent || "").trim() || `agent-${index + 1}`;
     const status = String(item.status || "").trim() || "unknown";
-    const output = String(item.output || "").trim().replace(/\s+/g, " ");
+    const output = String(item.output || "")
+      .trim()
+      .replace(/\s+/g, " ");
     const clipped = output.length > 140 ? `${output.slice(0, 140)}…` : output;
     return `${index + 1}. ${agent} [${status}] ${clipped}`;
   });
@@ -1716,7 +1930,10 @@ interface StartedSubagentTask {
   autoRun: boolean;
 }
 
-function resolveSubagentRunSessionId(source: Record<string, unknown>, parentSessionId: string): string {
+function resolveSubagentRunSessionId(
+  source: Record<string, unknown>,
+  parentSessionId: string,
+): string {
   const explicit = String(source.runSessionId || "").trim();
   if (explicit) return explicit;
   if (parentSessionId) return parentSessionId;
@@ -1747,9 +1964,17 @@ function classifySubagentRunStatus(results: Array<Record<string, unknown>>): {
       failCount += 1;
     }
   }
-  if (timeoutCount > 0) return { status: "timeout", failCount, timeoutCount, notStartedCount };
-  if (failCount > 0) return { status: "partial_failed", failCount, timeoutCount, notStartedCount };
-  if (notStartedCount > 0) return { status: "not_started", failCount, timeoutCount, notStartedCount };
+  if (timeoutCount > 0)
+    return { status: "timeout", failCount, timeoutCount, notStartedCount };
+  if (failCount > 0)
+    return {
+      status: "partial_failed",
+      failCount,
+      timeoutCount,
+      notStartedCount,
+    };
+  if (notStartedCount > 0)
+    return { status: "not_started", failCount, timeoutCount, notStartedCount };
   return { status: "done", failCount, timeoutCount, notStartedCount };
 }
 
@@ -1757,25 +1982,29 @@ async function completeStartedSubagentTask(
   orchestrator: BrainOrchestrator,
   runSessionId: string,
   task: StartedSubagentTask,
-  waitTimeoutMs: number
+  waitTimeoutMs: number,
 ): Promise<Record<string, unknown>> {
   if (!task.autoRun) {
     const completed = {
       ...task,
       status: "not_started",
       timeout: false,
-      output: ""
+      output: "",
     };
     orchestrator.events.emit("subagent.task.end", runSessionId, completed);
     return completed;
   }
-  const done = await waitForLoopDoneBySession(orchestrator, task.sessionId, waitTimeoutMs);
+  const done = await waitForLoopDoneBySession(
+    orchestrator,
+    task.sessionId,
+    waitTimeoutMs,
+  );
   const output = await readLatestAssistantMessage(orchestrator, task.sessionId);
   const completed = {
     ...task,
     status: done.status,
     timeout: done.timeout,
-    output
+    output,
   };
   orchestrator.events.emit("subagent.task.end", runSessionId, completed);
   return completed;
@@ -1786,9 +2015,18 @@ function scheduleSubagentRunCompletion(
   runSessionId: string,
   mode: "single" | "parallel",
   tasks: StartedSubagentTask[],
-  waitTimeoutMs: number
+  waitTimeoutMs: number,
 ): void {
-  void Promise.all(tasks.map((task) => completeStartedSubagentTask(orchestrator, runSessionId, task, waitTimeoutMs)))
+  void Promise.all(
+    tasks.map((task) =>
+      completeStartedSubagentTask(
+        orchestrator,
+        runSessionId,
+        task,
+        waitTimeoutMs,
+      ),
+    ),
+  )
     .then((results) => {
       const summary = classifySubagentRunStatus(results);
       orchestrator.events.emit("subagent.run.end", runSessionId, {
@@ -1796,7 +2034,7 @@ function scheduleSubagentRunCompletion(
         ...summary,
         taskCount: tasks.length,
         completedCount: results.length,
-        results
+        results,
       });
     })
     .catch((error) => {
@@ -1808,7 +2046,7 @@ function scheduleSubagentRunCompletion(
         failCount: tasks.length,
         timeoutCount: 0,
         notStartedCount: 0,
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       });
     });
 }
@@ -1816,22 +2054,26 @@ function scheduleSubagentRunCompletion(
 async function handleBrainAgentRun(
   orchestrator: BrainOrchestrator,
   runtimeLoop: ReturnType<typeof createRuntimeLoopController>,
-  message: unknown
+  message: unknown,
 ): Promise<RuntimeResult> {
   const payload = toRecord(message);
   const source = payload.payload ? toRecord(payload.payload) : payload;
-  const modeRaw = String(source.mode || "").trim().toLowerCase();
+  const modeRaw = String(source.mode || "")
+    .trim()
+    .toLowerCase();
   if (modeRaw !== "single" && modeRaw !== "parallel" && modeRaw !== "chain") {
     return fail("brain.agent.run 需要显式 mode（single|parallel|chain）");
   }
   const mode = modeRaw;
-  const parentSessionId = String(source.parentSessionId || source.sessionId || "").trim();
+  const parentSessionId = String(
+    source.parentSessionId || source.sessionId || "",
+  ).trim();
   const defaultAutoRun = source.autoRun === false ? false : true;
   const waitTimeoutMs = normalizeIntInRange(
     source.waitTimeoutMs,
     DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS,
     1_000,
-    MAX_SUBAGENT_WAIT_TIMEOUT_MS
+    MAX_SUBAGENT_WAIT_TIMEOUT_MS,
   );
   const runSessionId = resolveSubagentRunSessionId(source, parentSessionId);
 
@@ -1847,9 +2089,14 @@ async function handleBrainAgentRun(
       mode: "single",
       parentSessionId: parentSessionId || null,
       taskCount: 1,
-      waitTimeoutMs
+      waitTimeoutMs,
     });
-    const started = await startAgentRunTask(runtimeLoop, parsed.task, parsed.task.task, parentSessionId || undefined);
+    const started = await startAgentRunTask(
+      runtimeLoop,
+      parsed.task,
+      parsed.task.task,
+      parentSessionId || undefined,
+    );
     const startedTask: StartedSubagentTask = {
       index: 1,
       agent: String(started.agent || ""),
@@ -1858,14 +2105,20 @@ async function handleBrainAgentRun(
       sessionId: String(started.sessionId || ""),
       task: String(started.task || ""),
       templateTask: String(started.templateTask || ""),
-      autoRun: parsed.task.autoRun
+      autoRun: parsed.task.autoRun,
     };
     orchestrator.events.emit("subagent.task.start", runSessionId, startedTask);
-    scheduleSubagentRunCompletion(orchestrator, runSessionId, "single", [startedTask], waitTimeoutMs);
+    scheduleSubagentRunCompletion(
+      orchestrator,
+      runSessionId,
+      "single",
+      [startedTask],
+      waitTimeoutMs,
+    );
     return ok({
       mode: "single",
       runSessionId,
-      result: started
+      result: started,
     });
   }
 
@@ -1875,13 +2128,15 @@ async function handleBrainAgentRun(
       return fail("brain.agent.run parallel 需要非空 tasks");
     }
     if (rawTasks.length > MAX_SUBAGENT_PARALLEL_TASKS) {
-      return fail(`brain.agent.run parallel tasks 不能超过 ${MAX_SUBAGENT_PARALLEL_TASKS}`);
+      return fail(
+        `brain.agent.run parallel tasks 不能超过 ${MAX_SUBAGENT_PARALLEL_TASKS}`,
+      );
     }
     const concurrency = normalizeIntInRange(
       source.concurrency,
       Math.min(MAX_SUBAGENT_PARALLEL_CONCURRENCY, rawTasks.length),
       1,
-      MAX_SUBAGENT_PARALLEL_CONCURRENCY
+      MAX_SUBAGENT_PARALLEL_CONCURRENCY,
     );
     const parsedTasks: AgentRunTaskInput[] = [];
     for (let i = 0; i < rawTasks.length; i += 1) {
@@ -1897,10 +2152,12 @@ async function handleBrainAgentRun(
       parentSessionId: parentSessionId || null,
       taskCount: parsedTasks.length,
       concurrency,
-      waitTimeoutMs
+      waitTimeoutMs,
     });
 
-    const results: Array<Record<string, unknown>> = new Array(parsedTasks.length);
+    const results: Array<Record<string, unknown>> = new Array(
+      parsedTasks.length,
+    );
     const startedTasks: StartedSubagentTask[] = new Array(parsedTasks.length);
     let cursor = 0;
     const workerCount = Math.min(concurrency, parsedTasks.length);
@@ -1910,7 +2167,12 @@ async function handleBrainAgentRun(
           const index = cursor;
           cursor += 1;
           if (index >= parsedTasks.length) break;
-          const started = await startAgentRunTask(runtimeLoop, parsedTasks[index], parsedTasks[index].task, parentSessionId || undefined);
+          const started = await startAgentRunTask(
+            runtimeLoop,
+            parsedTasks[index],
+            parsedTasks[index].task,
+            parentSessionId || undefined,
+          );
           results[index] = started;
           const startedTask: StartedSubagentTask = {
             index: index + 1,
@@ -1920,20 +2182,30 @@ async function handleBrainAgentRun(
             sessionId: String(started.sessionId || ""),
             task: String(started.task || ""),
             templateTask: String(started.templateTask || ""),
-            autoRun: parsedTasks[index].autoRun
+            autoRun: parsedTasks[index].autoRun,
           };
           startedTasks[index] = startedTask;
-          orchestrator.events.emit("subagent.task.start", runSessionId, startedTask);
+          orchestrator.events.emit(
+            "subagent.task.start",
+            runSessionId,
+            startedTask,
+          );
         }
-      })
+      }),
     );
-    scheduleSubagentRunCompletion(orchestrator, runSessionId, "parallel", startedTasks, waitTimeoutMs);
+    scheduleSubagentRunCompletion(
+      orchestrator,
+      runSessionId,
+      "parallel",
+      startedTasks,
+      waitTimeoutMs,
+    );
 
     return ok({
       mode: "parallel",
       runSessionId,
       concurrency: workerCount,
-      results
+      results,
     });
   }
 
@@ -1946,7 +2218,9 @@ async function handleBrainAgentRun(
       return fail("brain.agent.run chain 需要非空 chain");
     }
     if (rawChain.length > MAX_SUBAGENT_CHAIN_TASKS) {
-      return fail(`brain.agent.run chain tasks 不能超过 ${MAX_SUBAGENT_CHAIN_TASKS}`);
+      return fail(
+        `brain.agent.run chain tasks 不能超过 ${MAX_SUBAGENT_CHAIN_TASKS}`,
+      );
     }
     const failFast = source.failFast !== false;
     const parsedChain: AgentRunTaskInput[] = [];
@@ -1963,7 +2237,7 @@ async function handleBrainAgentRun(
       parentSessionId: parentSessionId || null,
       taskCount: parsedChain.length,
       waitTimeoutMs,
-      failFast
+      failFast,
     });
 
     const results: Array<Record<string, unknown>> = [];
@@ -1975,7 +2249,12 @@ async function handleBrainAgentRun(
     for (let i = 0; i < parsedChain.length; i += 1) {
       const task = parsedChain[i];
       const resolvedTask = injectChainPrevious(task.task, previousOutput);
-      const started = await startAgentRunTask(runtimeLoop, task, resolvedTask, parentSessionId || undefined);
+      const started = await startAgentRunTask(
+        runtimeLoop,
+        task,
+        resolvedTask,
+        parentSessionId || undefined,
+      );
       const startedTask: StartedSubagentTask = {
         index: i + 1,
         agent: String(started.agent || ""),
@@ -1984,10 +2263,19 @@ async function handleBrainAgentRun(
         sessionId: String(started.sessionId || ""),
         task: String(started.task || ""),
         templateTask: String(started.templateTask || ""),
-        autoRun: true
+        autoRun: true,
       };
-      orchestrator.events.emit("subagent.task.start", runSessionId, startedTask);
-      const completed = await completeStartedSubagentTask(orchestrator, runSessionId, startedTask, waitTimeoutMs);
+      orchestrator.events.emit(
+        "subagent.task.start",
+        runSessionId,
+        startedTask,
+      );
+      const completed = await completeStartedSubagentTask(
+        orchestrator,
+        runSessionId,
+        startedTask,
+        waitTimeoutMs,
+      );
       if (String(completed.output || "").trim()) {
         previousOutput = String(completed.output || "").trim();
       }
@@ -2002,7 +2290,7 @@ async function handleBrainAgentRun(
 
     const fanIn = {
       finalOutput: previousOutput,
-      summary: buildChainFanInSummary(results)
+      summary: buildChainFanInSummary(results),
     };
     const summary = classifySubagentRunStatus(results);
     orchestrator.events.emit("subagent.run.end", runSessionId, {
@@ -2015,7 +2303,7 @@ async function handleBrainAgentRun(
       haltedStep: halted ? haltedStep : null,
       haltedStatus: halted ? haltedStatus : "",
       fanIn,
-      results
+      results,
     });
 
     return ok({
@@ -2026,7 +2314,7 @@ async function handleBrainAgentRun(
       halted,
       haltedStep: halted ? haltedStep : null,
       haltedStatus: halted ? haltedStatus : "",
-      fanIn
+      fanIn,
     });
   }
 
@@ -2038,7 +2326,7 @@ async function handleBrainAgentRun(
     failCount: 1,
     timeoutCount: 0,
     notStartedCount: 0,
-    error: "unsupported_mode"
+    error: "unsupported_mode",
   });
   return fail("brain.agent.run 仅支持 mode=single|parallel|chain");
 }
@@ -2047,7 +2335,7 @@ async function handleBrainRun(
   orchestrator: BrainOrchestrator,
   runtimeLoop: ReturnType<typeof createRuntimeLoopController>,
   infra: RuntimeInfraHandler,
-  message: unknown
+  message: unknown,
 ): Promise<RuntimeResult> {
   const payload = toRecord(message);
   const action = String(payload.type || "");
@@ -2061,17 +2349,20 @@ async function handleBrainRun(
     const streamingBehavior =
       rawStreamingBehavior === "follow_up"
         ? "followUp"
-        : rawStreamingBehavior === "steer" || rawStreamingBehavior === "followUp"
+        : rawStreamingBehavior === "steer" ||
+            rawStreamingBehavior === "followUp"
           ? rawStreamingBehavior
           : undefined;
     const out = await runtimeLoop.startFromPrompt({
       sessionId: typeof payload.sessionId === "string" ? payload.sessionId : "",
-      sessionOptions: payload.sessionOptions ? toRecord(payload.sessionOptions) : {},
+      sessionOptions: payload.sessionOptions
+        ? toRecord(payload.sessionOptions)
+        : {},
       prompt: typeof payload.prompt === "string" ? payload.prompt : "",
       tabIds: Array.isArray(payload.tabIds) ? payload.tabIds : undefined,
       skillIds: Array.isArray(payload.skillIds) ? payload.skillIds : undefined,
       autoRun: payload.autoRun === false ? false : true,
-      streamingBehavior
+      streamingBehavior,
     });
     return ok(out);
   }
@@ -2079,7 +2370,9 @@ async function handleBrainRun(
   if (action === "brain.run.steer" || action === "brain.run.follow_up") {
     const sessionId = requireSessionId(payload);
     const prompt = String(payload.prompt || "").trim();
-    const skillIds = Array.isArray(payload.skillIds) ? payload.skillIds : undefined;
+    const skillIds = Array.isArray(payload.skillIds)
+      ? payload.skillIds
+      : undefined;
     if (!prompt && (!skillIds || skillIds.length === 0)) {
       return fail(`${action} 需要非空 prompt 或 skillIds`);
     }
@@ -2088,7 +2381,7 @@ async function handleBrainRun(
       prompt,
       skillIds,
       autoRun: true,
-      streamingBehavior: action === "brain.run.steer" ? "steer" : "followUp"
+      streamingBehavior: action === "brain.run.steer" ? "steer" : "followUp",
     });
     return ok(out);
   }
@@ -2114,7 +2407,8 @@ async function handleBrainRun(
 
     const requireSourceIsLeaf = payload.requireSourceIsLeaf === true;
     const rebaseLeafToPreviousUser = payload.rebaseLeafToPreviousUser === true;
-    const currentLeafId = (await orchestrator.sessions.getLeaf(sessionId)) || "";
+    const currentLeafId =
+      (await orchestrator.sessions.getLeaf(sessionId)) || "";
     if (requireSourceIsLeaf && currentLeafId !== sourceEntryId) {
       return fail("仅最后一条 assistant 支持当前会话重试");
     }
@@ -2133,13 +2427,13 @@ async function handleBrainRun(
     orchestrator.events.emit("input.regenerate", sessionId, {
       sourceEntryId,
       previousUserEntryId: previousUser.id,
-      text: String(previousUser.text || "")
+      text: String(previousUser.text || ""),
     });
 
     const out = await runtimeLoop.startFromRegenerate({
       sessionId,
       prompt: String(previousUser.text || ""),
-      autoRun: payload.autoRun === false ? false : true
+      autoRun: payload.autoRun === false ? false : true,
     });
     return ok(out);
   }
@@ -2148,7 +2442,9 @@ async function handleBrainRun(
     const sourceSessionId = requireSessionId(payload);
     await orchestrator.sessions.ensureSession(sourceSessionId);
 
-    const sourceEntryId = String(payload.sourceEntryId || payload.entryId || "").trim();
+    const sourceEntryId = String(
+      payload.sourceEntryId || payload.entryId || "",
+    ).trim();
     if (!sourceEntryId) {
       return fail("brain.run.edit_rerun 需要 sourceEntryId");
     }
@@ -2157,7 +2453,8 @@ async function handleBrainRun(
       return fail("brain.run.edit_rerun 需要非空 prompt");
     }
 
-    const sourceEntries = await orchestrator.sessions.getEntries(sourceSessionId);
+    const sourceEntries =
+      await orchestrator.sessions.getEntries(sourceSessionId);
     const byId = new Map(sourceEntries.map((entry) => [entry.id, entry]));
     const targetEntry = byId.get(sourceEntryId);
     if (!targetEntry) {
@@ -2167,8 +2464,12 @@ async function handleBrainRun(
       return fail("edit_rerun sourceEntry 必须是 user 消息");
     }
 
-    const activeLeafId = (await orchestrator.sessions.getLeaf(sourceSessionId)) || null;
-    const activeBranch = await orchestrator.sessions.getBranch(sourceSessionId, activeLeafId ?? undefined);
+    const activeLeafId =
+      (await orchestrator.sessions.getLeaf(sourceSessionId)) || null;
+    const activeBranch = await orchestrator.sessions.getBranch(
+      sourceSessionId,
+      activeLeafId ?? undefined,
+    );
     if (!activeBranch.some((entry) => entry.id === sourceEntryId)) {
       return fail("edit_rerun sourceEntry 不在当前分支");
     }
@@ -2176,7 +2477,8 @@ async function handleBrainRun(
     if (!latestUser) {
       return fail("当前分支缺少可编辑 user 消息");
     }
-    const mode: "retry" | "fork" = latestUser.id === sourceEntryId ? "retry" : "fork";
+    const mode: "retry" | "fork" =
+      latestUser.id === sourceEntryId ? "retry" : "fork";
     const autoRun = payload.autoRun === false ? false : true;
 
     let runSessionId = sourceSessionId;
@@ -2187,7 +2489,7 @@ async function handleBrainRun(
         leafId: sourceEntryId,
         sourceEntryId,
         reason: String(payload.reason || "edit_user_rerun"),
-        title: String(payload.title || "").trim() || undefined
+        title: String(payload.title || "").trim() || undefined,
       });
       runSessionId = forked.sessionId;
       runSourceEntryId = String(forked.leafId || "").trim();
@@ -2199,12 +2501,17 @@ async function handleBrainRun(
     const runEntries = await orchestrator.sessions.getEntries(runSessionId);
     const runById = new Map(runEntries.map((entry) => [entry.id, entry]));
     const runSource = runById.get(runSourceEntryId);
-    if (!runSource || runSource.type !== "message" || runSource.role !== "user") {
+    if (
+      !runSource ||
+      runSource.type !== "message" ||
+      runSource.role !== "user"
+    ) {
       return fail("edit_rerun 目标 user 节点异常");
     }
 
     const rebaseLeafId = runSource.parentId || null;
-    const currentLeafId = (await orchestrator.sessions.getLeaf(runSessionId)) || null;
+    const currentLeafId =
+      (await orchestrator.sessions.getLeaf(runSessionId)) || null;
     if (currentLeafId !== rebaseLeafId) {
       await orchestrator.sessions.setLeaf(runSessionId, rebaseLeafId);
     }
@@ -2214,13 +2521,13 @@ async function handleBrainRun(
       previousUserEntryId: runSourceEntryId,
       text: editedPrompt,
       mode,
-      reason: "edit_user_rerun"
+      reason: "edit_user_rerun",
     });
 
     const out = await runtimeLoop.startFromPrompt({
       sessionId: runSessionId,
       prompt: editedPrompt,
-      autoRun
+      autoRun,
     });
 
     return ok({
@@ -2228,7 +2535,7 @@ async function handleBrainRun(
       mode,
       sourceSessionId,
       sourceEntryId,
-      activeSourceEntryId: runSourceEntryId
+      activeSourceEntryId: runSourceEntryId,
     });
   }
 
@@ -2238,14 +2545,26 @@ async function handleBrainRun(
 
   if (action === "brain.run.queue.promote") {
     const sessionId = requireSessionId(payload);
-    const queuedPromptId = String(payload.queuedPromptId || payload.id || "").trim();
+    const queuedPromptId = String(
+      payload.queuedPromptId || payload.id || "",
+    ).trim();
     if (!queuedPromptId) {
       return fail("brain.run.queue.promote 需要 queuedPromptId");
     }
-    const rawTarget = String(payload.targetBehavior || payload.behavior || "steer").trim();
+    const rawTarget = String(
+      payload.targetBehavior || payload.behavior || "steer",
+    ).trim();
     const targetBehavior = rawTarget === "followUp" ? "followUp" : "steer";
-    const runtime = orchestrator.promoteQueuedPrompt(sessionId, queuedPromptId, targetBehavior);
-    if (targetBehavior === "steer" && runtime.running === true && runtime.stopped !== true) {
+    const runtime = orchestrator.promoteQueuedPrompt(
+      sessionId,
+      queuedPromptId,
+      targetBehavior,
+    );
+    if (
+      targetBehavior === "steer" &&
+      runtime.running === true &&
+      runtime.stopped !== true
+    ) {
       infra.abortBridgeInvokesBySession(sessionId, "steer_preempt");
     }
     return ok(runtime);
@@ -2268,7 +2587,7 @@ async function handleBrainRun(
 async function handleSession(
   orchestrator: BrainOrchestrator,
   runtimeLoop: ReturnType<typeof createRuntimeLoopController>,
-  message: unknown
+  message: unknown,
 ): Promise<RuntimeResult> {
   const payload = toRecord(message);
   const action = String(payload.type || "");
@@ -2282,9 +2601,9 @@ async function handleSession(
           ...entry,
           title: normalizeSessionTitle(meta?.header?.title, ""),
           parentSessionId: String(meta?.header?.parentSessionId || ""),
-          forkedFrom: readForkedFrom(meta)
+          forkedFrom: readForkedFrom(meta),
         };
-      })
+      }),
     );
     return ok({ ...index, sessions });
   }
@@ -2298,9 +2617,14 @@ async function handleSession(
 
   if (action === "brain.session.view") {
     const sessionId = requireSessionId(payload);
-    const leafId = typeof payload.leafId === "string" ? payload.leafId : undefined;
+    const leafId =
+      typeof payload.leafId === "string" ? payload.leafId : undefined;
     return ok({
-      conversationView: await buildConversationView(orchestrator, sessionId, leafId)
+      conversationView: await buildConversationView(
+        orchestrator,
+        sessionId,
+        leafId,
+      ),
     });
   }
 
@@ -2316,7 +2640,8 @@ async function handleSession(
       sourceEntryId: String(payload.sourceEntryId || ""),
       reason: String(payload.reason || "manual"),
       title: String(payload.title || "").trim() || undefined,
-      targetSessionId: String(payload.targetSessionId || "").trim() || undefined
+      targetSessionId:
+        String(payload.targetSessionId || "").trim() || undefined,
     });
     return ok(forked);
   }
@@ -2335,50 +2660,53 @@ async function handleSession(
       }
       const metadata = {
         ...toRecord(meta.header.metadata),
-        titleSource: SESSION_TITLE_SOURCE_MANUAL
+        titleSource: SESSION_TITLE_SOURCE_MANUAL,
       };
       await writeSessionMeta(sessionId, {
         ...meta,
         header: {
           ...meta.header,
           title: manualTitle,
-          metadata
+          metadata,
         },
-        updatedAt: nowIso()
+        updatedAt: nowIso(),
       });
       return ok({
         sessionId,
         title: manualTitle,
-        updated: manualTitle !== normalizeSessionTitle(meta.header.title, "")
+        updated: manualTitle !== normalizeSessionTitle(meta.header.title, ""),
       });
     }
     const currentTitle = normalizeSessionTitle(meta.header.title, "");
     const force = payload.force === true;
-    const derivedTitle = await runtimeLoop.refreshSessionTitle(sessionId, { force });
+    const derivedTitle = await runtimeLoop.refreshSessionTitle(sessionId, {
+      force,
+    });
     if (!derivedTitle) {
       const entries = await orchestrator.sessions.getEntries(sessionId);
-      const fallbackTitle = currentTitle || deriveSessionTitleFromEntries(entries);
+      const fallbackTitle =
+        currentTitle || deriveSessionTitleFromEntries(entries);
       const normalizedFallback = normalizeSessionTitle(fallbackTitle, "新对话");
       if (normalizedFallback && normalizedFallback !== currentTitle) {
         await writeSessionMeta(sessionId, {
           ...meta,
           header: {
             ...meta.header,
-            title: normalizedFallback
+            title: normalizedFallback,
           },
-          updatedAt: nowIso()
+          updatedAt: nowIso(),
         });
       }
       return ok({
         sessionId,
         title: normalizedFallback || currentTitle,
-        updated: normalizedFallback !== currentTitle
+        updated: normalizedFallback !== currentTitle,
       });
     }
     return ok({
       sessionId,
       title: derivedTitle,
-      updated: derivedTitle !== currentTitle
+      updated: derivedTitle !== currentTitle,
     });
   }
 
@@ -2393,7 +2721,7 @@ async function handleSession(
       deleted: true,
       removedCount: 1,
       removedKeys: [metaKey],
-      index
+      index,
     });
   }
 
@@ -2403,7 +2731,7 @@ async function handleSession(
 async function handleStep(
   orchestrator: BrainOrchestrator,
   runtimeLoop: ReturnType<typeof createRuntimeLoopController>,
-  message: unknown
+  message: unknown,
 ): Promise<RuntimeResult> {
   const payload = toRecord(message);
   const type = String(payload.type || "");
@@ -2412,7 +2740,7 @@ async function handleStep(
     const stream = await orchestrator.getStepStream(sessionId);
     const limited = clampStepStream(stream, {
       maxEvents: payload.maxEvents,
-      maxBytes: payload.maxBytes
+      maxBytes: payload.maxBytes,
     });
     return ok({ sessionId, stream: limited.stream, streamMeta: limited.meta });
   }
@@ -2420,7 +2748,9 @@ async function handleStep(
   if (type === "brain.step.execute") {
     const sessionId = requireSessionId(payload);
     const modeRaw = String(payload.mode || "").trim();
-    const mode = ["script", "cdp", "bridge"].includes(modeRaw) ? (modeRaw as "script" | "cdp" | "bridge") : undefined;
+    const mode = ["script", "cdp", "bridge"].includes(modeRaw)
+      ? (modeRaw as "script" | "cdp" | "bridge")
+      : undefined;
     const capability = String(payload.capability || "").trim() || undefined;
     const action = String(payload.action || "").trim();
     if (modeRaw && !mode) return fail("mode 必须是 script/cdp/bridge");
@@ -2433,8 +2763,12 @@ async function handleStep(
         capability,
         action,
         args: toRecord(payload.args),
-        verifyPolicy: payload.verifyPolicy as "off" | "on_critical" | "always" | undefined
-      })
+        verifyPolicy: payload.verifyPolicy as
+          | "off"
+          | "on_critical"
+          | "always"
+          | undefined,
+      }),
     );
   }
 
@@ -2481,7 +2815,9 @@ function sanitizeSkillDiscoverCell(input: unknown, field: string): string {
   return text;
 }
 
-function normalizeSkillDiscoverRoots(payload: Record<string, unknown>): SkillDiscoverRootInput[] {
+function normalizeSkillDiscoverRoots(
+  payload: Record<string, unknown>,
+): SkillDiscoverRootInput[] {
   const fallbackSource = String(payload.source || "").trim() || "browser";
   const rawRoots = Array.isArray(payload.roots) ? payload.roots : [];
   const out: SkillDiscoverRootInput[] = [];
@@ -2498,20 +2834,25 @@ function normalizeSkillDiscoverRoots(payload: Record<string, unknown>): SkillDis
         continue;
       }
       const row = toRecord(item);
-      const root = sanitizeSkillDiscoverCell(row.root || row.path || "", "root");
+      const root = sanitizeSkillDiscoverCell(
+        row.root || row.path || "",
+        "root",
+      );
       if (!root) continue;
       if (!isVirtualUri(root)) {
         throw new Error("brain.skill.discover 仅支持 mem:// roots");
       }
-      const source = sanitizeSkillDiscoverCell(row.source || fallbackSource, "source") || fallbackSource;
+      const source =
+        sanitizeSkillDiscoverCell(row.source || fallbackSource, "source") ||
+        fallbackSource;
       out.push({ root: normalizeSkillPath(root), source });
     }
   } else {
     out.push(
       ...DEFAULT_SKILL_DISCOVER_ROOTS.map((item) => ({
         root: normalizeSkillPath(item.root),
-        source: item.source
-      }))
+        source: item.source,
+      })),
     );
   }
 
@@ -2527,11 +2868,17 @@ function normalizeSkillDiscoverRoots(payload: Record<string, unknown>): SkillDis
 }
 
 function normalizeSkillPath(input: unknown): string {
-  const raw = String(input || "").trim().replace(/\\/g, "/");
+  const raw = String(input || "")
+    .trim()
+    .replace(/\\/g, "/");
   const uriMatch = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/(.*)$/.exec(raw);
   if (uriMatch) {
-    const scheme = String(uriMatch[1] || "").trim().toLowerCase();
-    let rest = String(uriMatch[2] || "").replace(/^\/+/, "").replace(/\/+/g, "/");
+    const scheme = String(uriMatch[1] || "")
+      .trim()
+      .toLowerCase();
+    let rest = String(uriMatch[2] || "")
+      .replace(/^\/+/, "")
+      .replace(/\/+/g, "/");
     if (rest.length > 1) {
       rest = rest.replace(/\/+$/g, "");
     }
@@ -2581,7 +2928,8 @@ function shouldAcceptDiscoveredSkillPath(root: string, path: string): boolean {
 
   const parts = relative.split("/").filter(Boolean);
   if (parts.length === 0) return false;
-  if (parts.some((item) => item === "node_modules" || item.startsWith("."))) return false;
+  if (parts.some((item) => item === "node_modules" || item.startsWith(".")))
+    return false;
   const base = parts[parts.length - 1] || "";
   if (parts.length === 1) {
     return /\.md$/i.test(base);
@@ -2592,14 +2940,19 @@ function shouldAcceptDiscoveredSkillPath(root: string, path: string): boolean {
 function trimQuotePair(text: string): string {
   const value = String(text || "").trim();
   if (!value) return value;
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
     return value.slice(1, -1).trim();
   }
   return value;
 }
 
 function parseFrontmatterBoolean(raw: string): boolean | undefined {
-  const value = String(raw || "").trim().toLowerCase();
+  const value = String(raw || "")
+    .trim()
+    .toLowerCase();
   if (!value) return undefined;
   if (["true", "yes", "on", "1"].includes(value)) return true;
   if (["false", "no", "off", "0"].includes(value)) return false;
@@ -2634,7 +2987,10 @@ function parseSkillFrontmatter(content: string): ParsedSkillFrontmatter {
   const name = String(fields.name || "").trim();
   const description = String(fields.description || "").trim();
   const disableRaw = String(
-    fields["disable-model-invocation"] || fields["disable_model_invocation"] || fields["disablemodelinvocation"] || ""
+    fields["disable-model-invocation"] ||
+      fields["disable_model_invocation"] ||
+      fields["disablemodelinvocation"] ||
+      "",
   ).trim();
 
   if (id) out.id = id;
@@ -2653,7 +3009,10 @@ function parseSkillFrontmatter(content: string): ParsedSkillFrontmatter {
 
 function deriveSkillNameFromLocation(location: string): string {
   const base = pathBaseName(location);
-  const seed = base.toUpperCase() === "SKILL.MD" ? pathParentBaseName(location) : base.replace(/\.md$/i, "");
+  const seed =
+    base.toUpperCase() === "SKILL.MD"
+      ? pathParentBaseName(location)
+      : base.replace(/\.md$/i, "");
   const collapsed = String(seed || "")
     .trim()
     .replace(/[._-]+/g, " ")
@@ -2690,7 +3049,7 @@ function extractSkillReadContent(data: unknown): string {
     rootResponseInnerData.content,
     rootResponseInnerData.text,
     rootResult.content,
-    rootResult.text
+    rootResult.text,
   ];
   for (const item of candidates) {
     if (typeof item === "string") return item;
@@ -2698,14 +3057,25 @@ function extractSkillReadContent(data: unknown): string {
   throw new Error("brain.skill.discover: 文件读取工具未返回文本");
 }
 
-function extractBashExecResult(data: unknown): { stdout: string; stderr: string; exitCode: number | null } {
+function extractBashExecResult(data: unknown): {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+} {
   const root = toRecord(data);
   const rootData = toRecord(root.data);
   const rootResponse = toRecord(root.response);
   const rootResponseData = toRecord(rootResponse.data);
   const rootResponseInnerData = toRecord(rootResponseData.data);
   const rootResult = toRecord(root.result);
-  const candidates = [root, rootData, rootResponse, rootResponseData, rootResponseInnerData, rootResult];
+  const candidates = [
+    root,
+    rootData,
+    rootResponse,
+    rootResponseData,
+    rootResponseInnerData,
+    rootResult,
+  ];
   for (const item of candidates) {
     const stdout = item.stdout;
     if (typeof stdout !== "string") continue;
@@ -2714,13 +3084,17 @@ function extractBashExecResult(data: unknown): { stdout: string; stderr: string;
     return {
       stdout,
       stderr,
-      exitCode: Number.isFinite(exitCodeRaw) ? exitCodeRaw : null
+      exitCode: Number.isFinite(exitCodeRaw) ? exitCodeRaw : null,
     };
   }
   throw new Error("brain.skill.discover 未返回 stdout");
 }
 
-function parseSkillDiscoverFindOutput(input: { root: string; source: string; stdout: string }): SkillDiscoverScanHit[] {
+function parseSkillDiscoverFindOutput(input: {
+  root: string;
+  source: string;
+  stdout: string;
+}): SkillDiscoverScanHit[] {
   const rows = String(input.stdout || "")
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -2733,7 +3107,7 @@ function parseSkillDiscoverFindOutput(input: { root: string; source: string; std
     out.push({
       root: input.root,
       source: input.source,
-      path
+      path,
     });
   }
   return out;
@@ -2742,7 +3116,7 @@ function parseSkillDiscoverFindOutput(input: { root: string; source: string; std
 async function handleBrainSkill(
   orchestrator: BrainOrchestrator,
   runtimeLoop: ReturnType<typeof createRuntimeLoopController>,
-  message: unknown
+  message: unknown,
 ): Promise<RuntimeResult> {
   const payload = toRecord(message);
   const action = String(payload.type || "");
@@ -2751,12 +3125,15 @@ async function handleBrainSkill(
     const sessionId = String(payload.sessionId || "").trim();
     if (!sessionId) return fail("brain.skill.create 需要 sessionId");
     const nested = toRecord(payload.skill);
-    const source = Object.keys(nested).length > 0 ? { ...payload, ...nested } : payload;
+    const source =
+      Object.keys(nested).length > 0 ? { ...payload, ...nested } : payload;
     const normalized = normalizeSkillCreateRequest(source);
     for (const file of normalized.writes) {
       await writeVirtualTextFile(file.path, file.content, sessionId);
     }
-    const skill = await orchestrator.installSkill(normalized.skill, { replace: normalized.replace });
+    const skill = await orchestrator.installSkill(normalized.skill, {
+      replace: normalized.replace,
+    });
     return ok({
       sessionId,
       skillId: skill.id,
@@ -2765,18 +3142,21 @@ async function handleBrainSkill(
       skillDir: normalized.skillDir,
       location: skill.location,
       fileCount: normalized.writes.length,
-      files: normalized.writes.map((item) => item.path)
+      files: normalized.writes.map((item) => item.path),
     });
   }
 
   if (action === "brain.skill.list") {
     return ok({
-      skills: await orchestrator.listSkills()
+      skills: await orchestrator.listSkills(),
     });
   }
 
   if (action === "brain.skill.install") {
-    const skillPayload = Object.keys(toRecord(payload.skill)).length > 0 ? toRecord(payload.skill) : payload;
+    const skillPayload =
+      Object.keys(toRecord(payload.skill)).length > 0
+        ? toRecord(payload.skill)
+        : payload;
     const location = normalizeSkillPath(skillPayload.location);
     if (!location) return fail("brain.skill.install 需要 location");
     if (!isVirtualUri(location)) {
@@ -2790,17 +3170,22 @@ async function handleBrainSkill(
         description: String(skillPayload.description || "").trim() || undefined,
         location,
         source: String(skillPayload.source || "").trim() || undefined,
-        enabled: skillPayload.enabled === undefined ? undefined : skillPayload.enabled !== false,
+        enabled:
+          skillPayload.enabled === undefined
+            ? undefined
+            : skillPayload.enabled !== false,
         disableModelInvocation:
-          skillPayload.disableModelInvocation === undefined ? undefined : skillPayload.disableModelInvocation === true
+          skillPayload.disableModelInvocation === undefined
+            ? undefined
+            : skillPayload.disableModelInvocation === true,
       },
       {
-        replace: payload.replace === true || skillPayload.replace === true
-      }
+        replace: payload.replace === true || skillPayload.replace === true,
+      },
     );
     return ok({
       skillId: skill.id,
-      skill
+      skill,
     });
   }
 
@@ -2809,17 +3194,18 @@ async function handleBrainSkill(
     if (!skillId) return fail("brain.skill.resolve 需要 skillId");
     const sessionId = String(payload.sessionId || "").trim();
     if (!sessionId) return fail("brain.skill.resolve 需要 sessionId");
-    const capability = String(payload.capability || "fs.read").trim() || "fs.read";
+    const capability =
+      String(payload.capability || "fs.read").trim() || "fs.read";
     const resolved = await orchestrator.resolveSkillContent(skillId, {
       allowDisabled: payload.allowDisabled === true,
       sessionId,
-      capability
+      capability,
     });
     return ok({
       skillId: resolved.skill.id,
       skill: resolved.skill,
       content: resolved.content,
-      promptBlock: resolved.promptBlock
+      promptBlock: resolved.promptBlock,
     });
   }
 
@@ -2830,15 +3216,23 @@ async function handleBrainSkill(
     const roots = normalizeSkillDiscoverRoots(payload);
     if (!roots.length) return fail("brain.skill.discover 需要 roots");
 
-    const discoverCapability = String(payload.discoverCapability || "process.exec").trim() || "process.exec";
-    const readCapability = String(payload.readCapability || "fs.read").trim() || "fs.read";
+    const discoverCapability =
+      String(payload.discoverCapability || "process.exec").trim() ||
+      "process.exec";
+    const readCapability =
+      String(payload.readCapability || "fs.read").trim() || "fs.read";
     const maxFiles = normalizeIntInRange(
       payload.maxFiles,
       DEFAULT_SKILL_DISCOVER_MAX_FILES,
       1,
-      MAX_SKILL_DISCOVER_MAX_FILES
+      MAX_SKILL_DISCOVER_MAX_FILES,
     );
-    const timeoutMs = normalizeIntInRange(payload.timeoutMs, 60_000, 5_000, 300_000);
+    const timeoutMs = normalizeIntInRange(
+      payload.timeoutMs,
+      60_000,
+      5_000,
+      300_000,
+    );
     const autoInstall = payload.autoInstall !== false;
     const replace = payload.replace !== false;
 
@@ -2865,14 +3259,16 @@ async function handleBrainSkill(
               cmdId: "bash.exec",
               args: [command],
               runtime: "sandbox",
-              timeoutMs
-            }
-          }
+              timeoutMs,
+            },
+          },
         },
-        verifyPolicy: "off"
+        verifyPolicy: "off",
       });
       if (!discoveredStep.ok) {
-        return fail(discoveredStep.error || `brain.skill.discover 扫描失败: ${root}`);
+        return fail(
+          discoveredStep.error || `brain.skill.discover 扫描失败: ${root}`,
+        );
       }
 
       const scanResult = extractBashExecResult(discoveredStep.data);
@@ -2884,7 +3280,7 @@ async function handleBrainSkill(
       const foundInRoot = parseSkillDiscoverFindOutput({
         root,
         source,
-        stdout: scanResult.stdout
+        stdout: scanResult.stdout,
       });
       for (const hit of foundInRoot) {
         hits.push(hit);
@@ -2900,7 +3296,7 @@ async function handleBrainSkill(
       seenPaths.add(normalizedPath);
       uniqueHits.push({
         ...hit,
-        path: normalizedPath
+        path: normalizedPath,
       });
     }
 
@@ -2921,17 +3317,17 @@ async function handleBrainSkill(
               tool: "read",
               args: {
                 path: hit.path,
-                ...(isVirtualUri(hit.path) ? { runtime: "sandbox" } : {})
-              }
-            }
+                ...(isVirtualUri(hit.path) ? { runtime: "sandbox" } : {}),
+              },
+            },
           },
-          verifyPolicy: "off"
+          verifyPolicy: "off",
         });
         if (!readOut.ok) {
           skipped.push({
             location: hit.path,
             source: hit.source,
-            reason: readOut.error || "文件读取失败"
+            reason: readOut.error || "文件读取失败",
           });
           continue;
         }
@@ -2940,7 +3336,7 @@ async function handleBrainSkill(
         skipped.push({
           location: hit.path,
           source: hit.source,
-          reason: error instanceof Error ? error.message : String(error)
+          reason: error instanceof Error ? error.message : String(error),
         });
         continue;
       }
@@ -2948,13 +3344,17 @@ async function handleBrainSkill(
       const frontmatter = parseSkillFrontmatter(content);
       const name = frontmatter.name || deriveSkillNameFromLocation(hit.path);
       const description = String(frontmatter.description || "").trim();
-      const idSeed = String(frontmatter.id || frontmatter.name || deriveSkillIdSeedFromLocation(hit.path)).trim();
+      const idSeed = String(
+        frontmatter.id ||
+          frontmatter.name ||
+          deriveSkillIdSeedFromLocation(hit.path),
+      ).trim();
       if (!description) {
         skipped.push({
           location: hit.path,
           source: hit.source,
           reason: "frontmatter.description 缺失，按 Pi 规则跳过",
-          warnings: frontmatter.warnings
+          warnings: frontmatter.warnings,
         });
         continue;
       }
@@ -2967,7 +3367,7 @@ async function handleBrainSkill(
         source: hit.source,
         enabled: true,
         disableModelInvocation: frontmatter.disableModelInvocation === true,
-        warnings: frontmatter.warnings
+        warnings: frontmatter.warnings,
       };
       discovered.push(candidate);
 
@@ -2981,18 +3381,18 @@ async function handleBrainSkill(
             location: candidate.location,
             source: candidate.source,
             enabled: true,
-            disableModelInvocation: candidate.disableModelInvocation
+            disableModelInvocation: candidate.disableModelInvocation,
           },
           {
-            replace
-          }
+            replace,
+          },
         );
         installed.push(skill);
       } catch (error) {
         skipped.push({
           location: hit.path,
           source: hit.source,
-          reason: error instanceof Error ? error.message : String(error)
+          reason: error instanceof Error ? error.message : String(error),
         });
       }
     }
@@ -3007,18 +3407,18 @@ async function handleBrainSkill(
         readCapability,
         stdoutBytes: scanStdoutBytes,
         stderr: scanStderrChunks.join("\n"),
-        exitCode: scanExitCode
+        exitCode: scanExitCode,
       },
       counts: {
         scanned: uniqueHits.length,
         discovered: discovered.length,
         installed: installed.length,
-        skipped: skipped.length
+        skipped: skipped.length,
       },
       discovered,
       installed,
       skipped,
-      skills: autoInstall ? await orchestrator.listSkills() : undefined
+      skills: autoInstall ? await orchestrator.listSkills() : undefined,
     });
   }
 
@@ -3028,7 +3428,7 @@ async function handleBrainSkill(
     const skill = await orchestrator.enableSkill(skillId);
     return ok({
       skillId: skill.id,
-      skill
+      skill,
     });
   }
 
@@ -3038,7 +3438,7 @@ async function handleBrainSkill(
     const skill = await orchestrator.disableSkill(skillId);
     return ok({
       skillId: skill.id,
-      skill
+      skill,
     });
   }
 
@@ -3049,7 +3449,7 @@ async function handleBrainSkill(
     if (!removed) return fail(`skill 不存在: ${skillId}`);
     return ok({
       skillId,
-      removed
+      removed,
     });
   }
 
@@ -3059,7 +3459,7 @@ async function handleBrainSkill(
 async function handleBrainPlugin(
   orchestrator: BrainOrchestrator,
   infra: RuntimeInfraHandler,
-  message: unknown
+  message: unknown,
 ): Promise<RuntimeResult> {
   const payload = toRecord(message);
   const action = String(payload.type || "");
@@ -3073,13 +3473,13 @@ async function handleBrainPlugin(
       llmProviders: orchestrator.listLlmProviders(),
       capabilityProviders: orchestrator.listCapabilityProviders(),
       capabilityPolicies: orchestrator.listCapabilityPolicies(),
-      uiExtensions
+      uiExtensions,
     });
   }
 
   if (action === "brain.plugin.ui_extension.list") {
     return ok({
-      uiExtensions: await readUiExtensionDescriptors()
+      uiExtensions: await readUiExtensionDescriptors(),
     });
   }
 
@@ -3089,7 +3489,10 @@ async function handleBrainPlugin(
     const hook = String(payload.hook || "").trim();
     if (!hook) return fail("brain.plugin.ui_hook.run 需要 hook");
 
-    const descriptor = (await readUiExtensionDescriptors()).find((item) => item.pluginId === pluginId) || null;
+    const descriptor =
+      (await readUiExtensionDescriptors()).find(
+        (item) => item.pluginId === pluginId,
+      ) || null;
     if (!descriptor) {
       return fail(`ui extension 不存在: ${pluginId}`);
     }
@@ -3098,19 +3501,23 @@ async function handleBrainPlugin(
         pluginId,
         hook,
         hookResult: {
-          action: "continue"
+          action: "continue",
         },
-        skipped: "disabled"
+        skipped: "disabled",
       });
     }
     if (!isVirtualUri(descriptor.moduleUrl)) {
-      return fail(`ui hook sandbox 仅支持 mem:// module: ${descriptor.moduleUrl}`);
+      return fail(
+        `ui hook sandbox 仅支持 mem:// module: ${descriptor.moduleUrl}`,
+      );
     }
 
     const sessionId =
-      String(payload.sessionId || descriptor.sessionId || "").trim()
-      || PLUGIN_SANDBOX_DEFAULT_SESSION_ID;
-    const exportName = String(payload.exportName || descriptor.exportName || "default").trim() || "default";
+      String(payload.sessionId || descriptor.sessionId || "").trim() ||
+      PLUGIN_SANDBOX_DEFAULT_SESSION_ID;
+    const exportName =
+      String(payload.exportName || descriptor.exportName || "default").trim() ||
+      "default";
     const startedAt = Date.now();
     let executed: Record<string, unknown>;
     try {
@@ -3121,7 +3528,7 @@ async function handleBrainPlugin(
         op: "runHook",
         hook,
         payload: payload.payload,
-        infra
+        infra,
       });
     } catch (error) {
       emitPluginHookTrace({
@@ -3134,11 +3541,13 @@ async function handleBrainPlugin(
         startedAt: new Date(startedAt).toISOString(),
         durationMs: Math.max(0, Date.now() - startedAt),
         requestPreview: previewJsonText(payload.payload),
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       });
       throw error;
     }
-    const runtimeMessages = Array.isArray(executed.runtimeMessages) ? executed.runtimeMessages : [];
+    const runtimeMessages = Array.isArray(executed.runtimeMessages)
+      ? executed.runtimeMessages
+      : [];
     for (const message of runtimeMessages) {
       emitPluginRuntimeMessage(message);
     }
@@ -3154,7 +3563,7 @@ async function handleBrainPlugin(
       durationMs: Math.max(0, Date.now() - startedAt),
       requestPreview: previewJsonText(payload.payload),
       responsePreview: previewJsonText(hookResult),
-      runtimeMessageCount: runtimeMessages.length
+      runtimeMessageCount: runtimeMessages.length,
     });
     const actionName = String(hookResult.action || "").trim();
     if (actionName === "patch") {
@@ -3163,8 +3572,8 @@ async function handleBrainPlugin(
         hook,
         hookResult: {
           action: "patch",
-          patch: toRecord(hookResult.patch)
-        }
+          patch: toRecord(hookResult.patch),
+        },
       });
     }
     if (actionName === "block") {
@@ -3173,16 +3582,16 @@ async function handleBrainPlugin(
         hook,
         hookResult: {
           action: "block",
-          reason: String(hookResult.reason || "").trim() || undefined
-        }
+          reason: String(hookResult.reason || "").trim() || undefined,
+        },
       });
     }
     return ok({
       pluginId,
       hook,
       hookResult: {
-        action: "continue"
-      }
+        action: "continue",
+      },
     });
   }
 
@@ -3192,13 +3601,16 @@ async function handleBrainPlugin(
     const manifest = normalizePluginManifest(source.manifest);
     const setupRaw = source.setup;
     const moduleInput = source.moduleUrl ?? source.modulePath ?? source.module;
-    const exportName = String(source.exportName || "default").trim() || "default";
+    const exportName =
+      String(source.exportName || "default").trim() || "default";
     const moduleSessionId =
-      String(source.moduleSessionId || source.sessionId || "").trim()
-      || PLUGIN_SANDBOX_DEFAULT_SESSION_ID;
+      String(source.moduleSessionId || source.sessionId || "").trim() ||
+      PLUGIN_SANDBOX_DEFAULT_SESSION_ID;
     const moduleSource = String(source.moduleSource || "").trim();
     if (moduleSource) {
-      return fail("moduleSource 暂不支持（CSP 禁止 unsafe-eval），请使用 moduleUrl/modulePath");
+      return fail(
+        "moduleSource 暂不支持（CSP 禁止 unsafe-eval），请使用 moduleUrl/modulePath",
+      );
     }
 
     let setup: ExtensionFactory;
@@ -3209,13 +3621,15 @@ async function handleBrainPlugin(
       const rawModulePath = String(moduleInput || "").trim();
       moduleUrl = resolvePluginModuleUrl(moduleInput);
       if (isVirtualUri(rawModulePath) || isVirtualUri(moduleUrl)) {
-        const virtualModulePath = isVirtualUri(rawModulePath) ? rawModulePath : moduleUrl;
+        const virtualModulePath = isVirtualUri(rawModulePath)
+          ? rawModulePath
+          : moduleUrl;
         setup = await loadExtensionFactoryFromVirtualModule({
           manifest,
           modulePath: virtualModulePath,
           exportName,
           sessionId: moduleSessionId,
-          infra
+          infra,
         });
         moduleUrl = virtualModulePath;
       } else {
@@ -3227,11 +3641,19 @@ async function handleBrainPlugin(
 
     registerExtension(orchestrator, manifest, setup, options);
     const pluginId = manifest.id;
-    const current = orchestrator.listPlugins().find((item) => item.id === pluginId) || null;
-    const uiDescriptor = resolveUiExtensionDescriptorFromSource(pluginId, source, current?.enabled === true);
+    const current =
+      orchestrator.listPlugins().find((item) => item.id === pluginId) || null;
+    const uiDescriptor = resolveUiExtensionDescriptorFromSource(
+      pluginId,
+      source,
+      current?.enabled === true,
+    );
     if (uiDescriptor) {
       await upsertUiExtensionDescriptor(uiDescriptor);
-      notifyUiExtensionLifecycle("brain.plugin.ui_extension.registered", uiDescriptor);
+      notifyUiExtensionLifecycle(
+        "brain.plugin.ui_extension.registered",
+        uiDescriptor,
+      );
     }
     return ok({
       pluginId,
@@ -3240,7 +3662,7 @@ async function handleBrainPlugin(
       moduleUrl,
       exportName,
       llmProviders: orchestrator.listLlmProviders(),
-      ...(uiDescriptor ? { uiExtension: uiDescriptor } : {})
+      ...(uiDescriptor ? { uiExtension: uiDescriptor } : {}),
     });
   }
 
@@ -3253,28 +3675,39 @@ async function handleBrainPlugin(
     const options = resolvePluginRegisterOptions(pluginRaw, payload);
     orchestrator.registerPlugin(definition, options);
     const pluginId = definition.manifest.id;
-    const current = orchestrator.listPlugins().find((item) => item.id === pluginId) || null;
+    const current =
+      orchestrator.listPlugins().find((item) => item.id === pluginId) || null;
     const uiSource = {
       ...pluginRaw,
-      ...payload
+      ...payload,
     } as Record<string, unknown>;
-    const uiDescriptor = resolveUiExtensionDescriptorFromSource(pluginId, uiSource, current?.enabled === true);
+    const uiDescriptor = resolveUiExtensionDescriptorFromSource(
+      pluginId,
+      uiSource,
+      current?.enabled === true,
+    );
     if (uiDescriptor) {
       await upsertUiExtensionDescriptor(uiDescriptor);
-      notifyUiExtensionLifecycle("brain.plugin.ui_extension.registered", uiDescriptor);
+      notifyUiExtensionLifecycle(
+        "brain.plugin.ui_extension.registered",
+        uiDescriptor,
+      );
     }
     return ok({
       pluginId,
       enabled: current?.enabled === true,
       plugin: current,
       llmProviders: orchestrator.listLlmProviders(),
-      ...(uiDescriptor ? { uiExtension: uiDescriptor } : {})
+      ...(uiDescriptor ? { uiExtension: uiDescriptor } : {}),
     });
   }
 
   if (action === "brain.plugin.validate") {
     const location = String(payload.location || payload.path || "").trim();
-    const hasInlinePackage = Object.prototype.hasOwnProperty.call(payload, "package");
+    const hasInlinePackage = Object.prototype.hasOwnProperty.call(
+      payload,
+      "package",
+    );
     const packageFromPayload = toRecord(payload.package);
     if (hasInlinePackage && Object.keys(packageFromPayload).length === 0) {
       return fail("brain.plugin.validate 的 package 必须是 object");
@@ -3284,7 +3717,11 @@ async function handleBrainPlugin(
       Object.keys(packageFromPayload).length > 0
         ? packageFromPayload
         : location
-          ? await readVirtualJsonObject(location, "brain.plugin.validate location", sessionId)
+          ? await readVirtualJsonObject(
+              location,
+              "brain.plugin.validate location",
+              sessionId,
+            )
           : {};
     if (Object.keys(packageSource).length === 0) {
       return fail("brain.plugin.validate 需要 package 或 location(mem://...)");
@@ -3293,34 +3730,46 @@ async function handleBrainPlugin(
     try {
       let pluginSource = readPluginInstallSource(packageSource);
       validatePluginInstallSource(pluginSource);
-      pluginSource = await materializeInlinePluginSources(pluginSource, sessionId);
+      pluginSource = await materializeInlinePluginSources(
+        pluginSource,
+        sessionId,
+      );
       const manifest = normalizePluginManifest(pluginSource.manifest);
       const pluginId = manifest.id;
       const checks: PluginValidationCheck[] = [];
       const warnings: string[] = [];
 
       const hasExtensionEntry = hasPluginExtensionEntry(pluginSource);
-      const moduleInput = String(pluginSource.modulePath || pluginSource.moduleUrl || pluginSource.module || "").trim();
-      const exportName = String(pluginSource.exportName || "default").trim() || "default";
+      const moduleInput = String(
+        pluginSource.modulePath ||
+          pluginSource.moduleUrl ||
+          pluginSource.module ||
+          "",
+      ).trim();
+      const exportName =
+        String(pluginSource.exportName || "default").trim() || "default";
       if (hasExtensionEntry && moduleInput) {
         try {
           const moduleUrl = resolvePluginModuleUrl(moduleInput);
           if (isVirtualUri(moduleUrl)) {
             const describe = await invokePluginSandboxRunner({
-              sessionId: String(pluginSource.moduleSessionId || sessionId || "").trim() || sessionId,
+              sessionId:
+                String(
+                  pluginSource.moduleSessionId || sessionId || "",
+                ).trim() || sessionId,
               modulePath: moduleUrl,
               exportName,
               op: "describe",
-              infra
+              infra,
             });
             checks.push(
               buildPluginValidationCheck("index.module", true, {
                 details: {
                   moduleUrl,
                   exportName,
-                  hooks: toStringList(describe.hooks) || []
-                }
-              })
+                  hooks: toStringList(describe.hooks) || [],
+                },
+              }),
             );
           } else {
             await loadExtensionFactoryFromModule(moduleUrl, exportName);
@@ -3328,58 +3777,79 @@ async function handleBrainPlugin(
               buildPluginValidationCheck("index.module", true, {
                 details: {
                   moduleUrl,
-                  exportName
-                }
-              })
+                  exportName,
+                },
+              }),
             );
           }
         } catch (error) {
-          checks.push(buildPluginValidationCheck("index.module", false, { error }));
+          checks.push(
+            buildPluginValidationCheck("index.module", false, { error }),
+          );
         }
       } else {
-        warnings.push("未声明 index.js 扩展入口（modulePath/moduleUrl/module）");
+        warnings.push(
+          "未声明 index.js 扩展入口（modulePath/moduleUrl/module）",
+        );
       }
 
-      const uiDescriptor = resolveUiExtensionDescriptorFromSource(pluginId, pluginSource, true);
+      const uiDescriptor = resolveUiExtensionDescriptorFromSource(
+        pluginId,
+        pluginSource,
+        true,
+      );
       if (uiDescriptor) {
         try {
           if (isVirtualUri(uiDescriptor.moduleUrl)) {
             const describe = await invokePluginSandboxRunner({
-              sessionId: String(uiDescriptor.sessionId || sessionId || "").trim() || sessionId,
+              sessionId:
+                String(uiDescriptor.sessionId || sessionId || "").trim() ||
+                sessionId,
               modulePath: uiDescriptor.moduleUrl,
               exportName: uiDescriptor.exportName,
               op: "describe",
-              infra
+              infra,
             });
             checks.push(
               buildPluginValidationCheck("ui.module", true, {
                 details: {
                   moduleUrl: uiDescriptor.moduleUrl,
                   exportName: uiDescriptor.exportName,
-                  hooks: toStringList(describe.hooks) || []
-                }
-              })
+                  hooks: toStringList(describe.hooks) || [],
+                },
+              }),
             );
           } else {
-            await loadExtensionFactoryFromModule(uiDescriptor.moduleUrl, uiDescriptor.exportName);
+            await loadExtensionFactoryFromModule(
+              uiDescriptor.moduleUrl,
+              uiDescriptor.exportName,
+            );
             checks.push(
               buildPluginValidationCheck("ui.module", true, {
                 details: {
                   moduleUrl: uiDescriptor.moduleUrl,
-                  exportName: uiDescriptor.exportName
-                }
-              })
+                  exportName: uiDescriptor.exportName,
+                },
+              }),
             );
           }
         } catch (error) {
-          checks.push(buildPluginValidationCheck("ui.module", false, { error }));
+          checks.push(
+            buildPluginValidationCheck("ui.module", false, { error }),
+          );
         }
       } else {
-        warnings.push("未声明 ui.js 扩展入口（uiModulePath/uiModuleUrl/uiModule）");
+        warnings.push(
+          "未声明 ui.js 扩展入口（uiModulePath/uiModuleUrl/uiModule）",
+        );
       }
 
       if (!hasExtensionEntry && !uiDescriptor) {
-        checks.push(buildPluginValidationCheck("entry.module", false, { error: "至少需要 index.js 或 ui.js 入口之一" }));
+        checks.push(
+          buildPluginValidationCheck("entry.module", false, {
+            error: "至少需要 index.js 或 ui.js 入口之一",
+          }),
+        );
       }
 
       return ok({
@@ -3387,7 +3857,7 @@ async function handleBrainPlugin(
         valid: checks.every((item) => item.ok),
         checks,
         warnings,
-        sourceLocation: location || undefined
+        sourceLocation: location || undefined,
       });
     } catch (error) {
       return fail(error);
@@ -3396,7 +3866,10 @@ async function handleBrainPlugin(
 
   if (action === "brain.plugin.install") {
     const location = String(payload.location || payload.path || "").trim();
-    const hasInlinePackage = Object.prototype.hasOwnProperty.call(payload, "package");
+    const hasInlinePackage = Object.prototype.hasOwnProperty.call(
+      payload,
+      "package",
+    );
     const packageFromPayload = toRecord(payload.package);
     if (hasInlinePackage && Object.keys(packageFromPayload).length === 0) {
       return fail("brain.plugin.install 的 package 必须是 object");
@@ -3406,7 +3879,11 @@ async function handleBrainPlugin(
       Object.keys(packageFromPayload).length > 0
         ? packageFromPayload
         : location
-          ? await readVirtualJsonObject(location, "brain.plugin.install location", sessionId)
+          ? await readVirtualJsonObject(
+              location,
+              "brain.plugin.install location",
+              sessionId,
+            )
           : {};
     if (Object.keys(packageSource).length === 0) {
       return fail("brain.plugin.install 需要 package 或 location(mem://...)");
@@ -3415,13 +3892,16 @@ async function handleBrainPlugin(
     try {
       pluginSource = readPluginInstallSource(packageSource);
       validatePluginInstallSource(pluginSource);
-      pluginSource = await materializeInlinePluginSources(pluginSource, sessionId);
+      pluginSource = await materializeInlinePluginSources(
+        pluginSource,
+        sessionId,
+      );
     } catch (error) {
       return fail(error);
     }
     const installPayload = {
       ...payload,
-      ...pluginSource
+      ...pluginSource,
     } as Record<string, unknown>;
     const hasExtensionEntry = hasPluginExtensionEntry(installPayload);
     if (hasExtensionEntry) {
@@ -3429,12 +3909,12 @@ async function handleBrainPlugin(
         ...installPayload,
         type: "brain.plugin.register_extension",
         ...(payload.replace === undefined ? {} : { replace: payload.replace }),
-        ...(payload.enable === undefined ? {} : { enable: payload.enable })
+        ...(payload.enable === undefined ? {} : { enable: payload.enable }),
       });
       if (!result.ok) return result;
       return ok({
         ...(toRecord(result.data) as Record<string, unknown>),
-        sourceLocation: location || undefined
+        sourceLocation: location || undefined,
       });
     }
 
@@ -3443,12 +3923,12 @@ async function handleBrainPlugin(
       type: "brain.plugin.register",
       plugin: pluginSource,
       ...(payload.replace === undefined ? {} : { replace: payload.replace }),
-      ...(payload.enable === undefined ? {} : { enable: payload.enable })
+      ...(payload.enable === undefined ? {} : { enable: payload.enable }),
     });
     if (!result.ok) return result;
     return ok({
       ...(toRecord(result.data) as Record<string, unknown>),
-      sourceLocation: location || undefined
+      sourceLocation: location || undefined,
     });
   }
 
@@ -3456,17 +3936,24 @@ async function handleBrainPlugin(
     const pluginId = readPluginId(payload);
     if (!pluginId) return fail("brain.plugin.enable 需要 pluginId");
     orchestrator.enablePlugin(pluginId);
-    const current = orchestrator.listPlugins().find((item) => item.id === pluginId) || null;
-    const uiExtension = await updateUiExtensionDescriptorEnabled(pluginId, true);
+    const current =
+      orchestrator.listPlugins().find((item) => item.id === pluginId) || null;
+    const uiExtension = await updateUiExtensionDescriptorEnabled(
+      pluginId,
+      true,
+    );
     if (uiExtension) {
-      notifyUiExtensionLifecycle("brain.plugin.ui_extension.enabled", uiExtension);
+      notifyUiExtensionLifecycle(
+        "brain.plugin.ui_extension.enabled",
+        uiExtension,
+      );
     }
     return ok({
       pluginId,
       enabled: true,
       plugin: current,
       llmProviders: orchestrator.listLlmProviders(),
-      ...(uiExtension ? { uiExtension } : {})
+      ...(uiExtension ? { uiExtension } : {}),
     });
   }
 
@@ -3474,17 +3961,24 @@ async function handleBrainPlugin(
     const pluginId = readPluginId(payload);
     if (!pluginId) return fail("brain.plugin.disable 需要 pluginId");
     orchestrator.disablePlugin(pluginId);
-    const current = orchestrator.listPlugins().find((item) => item.id === pluginId) || null;
-    const uiExtension = await updateUiExtensionDescriptorEnabled(pluginId, false);
+    const current =
+      orchestrator.listPlugins().find((item) => item.id === pluginId) || null;
+    const uiExtension = await updateUiExtensionDescriptorEnabled(
+      pluginId,
+      false,
+    );
     if (uiExtension) {
-      notifyUiExtensionLifecycle("brain.plugin.ui_extension.disabled", uiExtension);
+      notifyUiExtensionLifecycle(
+        "brain.plugin.ui_extension.disabled",
+        uiExtension,
+      );
     }
     return ok({
       pluginId,
       enabled: false,
       plugin: current,
       llmProviders: orchestrator.listLlmProviders(),
-      ...(uiExtension ? { uiExtension } : {})
+      ...(uiExtension ? { uiExtension } : {}),
     });
   }
 
@@ -3498,13 +3992,16 @@ async function handleBrainPlugin(
     if (!removed) return fail(`plugin 不存在: ${pluginId}`);
     const removedUiExtension = await removeUiExtensionDescriptor(pluginId);
     if (removedUiExtension) {
-      notifyUiExtensionLifecycle("brain.plugin.ui_extension.unregistered", removedUiExtension);
+      notifyUiExtensionLifecycle(
+        "brain.plugin.ui_extension.unregistered",
+        removedUiExtension,
+      );
     }
     return ok({
       pluginId,
       removed: true,
       llmProviders: orchestrator.listLlmProviders(),
-      ...(removedUiExtension ? { uiExtension: removedUiExtension } : {})
+      ...(removedUiExtension ? { uiExtension: removedUiExtension } : {}),
     });
   }
 
@@ -3515,13 +4012,16 @@ async function handleBrainDebug(
   orchestrator: BrainOrchestrator,
   runtimeLoop: RuntimeLoopController,
   infra: RuntimeInfraHandler,
-  message: unknown
+  message: unknown,
 ): Promise<RuntimeResult> {
   const payload = toRecord(message);
   const action = String(payload.type || "");
 
   if (action === "brain.debug.dump") {
-    const sessionId = typeof payload.sessionId === "string" && payload.sessionId.trim() ? payload.sessionId.trim() : "";
+    const sessionId =
+      typeof payload.sessionId === "string" && payload.sessionId.trim()
+        ? payload.sessionId.trim()
+        : "";
     if (sessionId) {
       const meta = await orchestrator.sessions.getMeta(sessionId);
       if (!meta) {
@@ -3531,9 +4031,12 @@ async function handleBrainDebug(
       const stream = await orchestrator.getStepStream(sessionId);
       const limited = clampStepStream(stream, {
         maxEvents: payload.maxEvents,
-        maxBytes: payload.maxBytes
+        maxBytes: payload.maxBytes,
       });
-      const conversationView = await buildConversationView(orchestrator, sessionId);
+      const conversationView = await buildConversationView(
+        orchestrator,
+        sessionId,
+      );
       return ok({
         sessionId,
         runtime: orchestrator.getRunState(sessionId),
@@ -3542,15 +4045,17 @@ async function handleBrainDebug(
         conversationView,
         stepStream: limited.stream,
         stepStreamMeta: limited.meta,
-        globalTail: limited.stream.slice(-80)
+        globalTail: limited.stream.slice(-80),
       });
     }
 
     const index = await orchestrator.sessions.listSessions();
     return ok({
       index,
-      runningSessions: index.sessions.map((entry) => orchestrator.getRunState(entry.id)),
-      globalTail: []
+      runningSessions: index.sessions.map((entry) =>
+        orchestrator.getRunState(entry.id),
+      ),
+      globalTail: [],
     });
   }
 
@@ -3560,20 +4065,30 @@ async function handleBrainDebug(
       return fail(cfgResult?.error || "config.get failed");
     }
     const cfg = toRecord(cfgResult.data);
-    const profiles = Array.isArray(cfg.llmProfiles) ? cfg.llmProfiles.map((item) => toRecord(item)) : [];
+    const profiles = Array.isArray(cfg.llmProfiles)
+      ? cfg.llmProfiles.map((item) => toRecord(item))
+      : [];
     const llmDefaultProfile = String(cfg.llmDefaultProfile || "default");
     const activeProfile =
-      profiles.find((item) => String(item.id || "").trim() === llmDefaultProfile)
-      || profiles[0]
-      || ({} as Record<string, unknown>);
-    const activeProvider = String(activeProfile.provider || "openai_compatible").trim() || "openai_compatible";
+      profiles.find(
+        (item) => String(item.id || "").trim() === llmDefaultProfile,
+      ) ||
+      profiles[0] ||
+      ({} as Record<string, unknown>);
+    const activeProvider =
+      String(activeProfile.provider || "openai_compatible").trim() ||
+      "openai_compatible";
     const activeModel = String(activeProfile.llmModel || "").trim();
     const hasLlmApiKey = !!String(activeProfile.llmApiKey || "").trim();
     const systemPromptPreview = await runtimeLoop.getSystemPromptPreview();
     return ok({
       bridgeUrl: String(cfg.bridgeUrl || ""),
-      browserRuntimeStrategy: String(cfg.browserRuntimeStrategy || "host-first"),
+      browserRuntimeStrategy: String(
+        cfg.browserRuntimeStrategy || "host-first",
+      ),
       llmDefaultProfile,
+      llmAuxProfile: String(cfg.llmAuxProfile || ""),
+      llmFallbackProfile: String(cfg.llmFallbackProfile || ""),
       llmProfilesCount: profiles.length,
       llmProvider: activeProvider,
       llmModel: activeModel,
@@ -3582,7 +4097,7 @@ async function handleBrainDebug(
       llmRetryMaxAttempts: Number(cfg.llmRetryMaxAttempts || 0),
       llmMaxRetryDelayMs: Number(cfg.llmMaxRetryDelayMs || 0),
       hasLlmApiKey,
-      systemPromptPreview
+      systemPromptPreview,
     });
   }
 
@@ -3593,7 +4108,7 @@ async function handleBrainDebug(
       toolContracts: orchestrator.listToolContracts(),
       llmProviders: orchestrator.listLlmProviders(),
       capabilityProviders: orchestrator.listCapabilityProviders(),
-      capabilityPolicies: orchestrator.listCapabilityPolicies()
+      capabilityPolicies: orchestrator.listCapabilityPolicies(),
     });
   }
 
@@ -3607,41 +4122,60 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
     const run = async () => {
       const routeBefore = await orchestrator.runHook("runtime.route.before", {
         type: String(message?.type || ""),
-        message
+        message,
       });
       if (routeBefore.blocked) {
-        return fail(`runtime.route.before blocked: ${routeBefore.reason || "blocked"}`);
+        return fail(
+          `runtime.route.before blocked: ${routeBefore.reason || "blocked"}`,
+        );
       }
       const routeInput = routeBefore.value;
       const type = String(routeInput.type || "");
       const routeMessage = routeInput.message as unknown;
-      const applyAfter = async (result: RuntimeResult): Promise<RuntimeResult> => {
+      const applyAfter = async (
+        result: RuntimeResult,
+      ): Promise<RuntimeResult> => {
         const afterHook = await orchestrator.runHook("runtime.route.after", {
           type,
           message: routeMessage,
-          result
+          result,
         });
-        return afterHook.blocked ? result : (afterHook.value.result as RuntimeResult);
+        return afterHook.blocked
+          ? result
+          : (afterHook.value.result as RuntimeResult);
       };
 
       try {
         if (type === "ping") {
-          return await applyAfter(ok({ source: "service-worker", version: "vnext" }));
+          return await applyAfter(
+            ok({ source: "service-worker", version: "vnext" }),
+          );
         }
 
         const infraResult = await infra.handleMessage(routeMessage);
         if (infraResult) return await applyAfter(fromInfraResult(infraResult));
 
         if (type.startsWith("brain.run.")) {
-          return await applyAfter(await handleBrainRun(orchestrator, runtimeLoop, infra, routeMessage));
+          return await applyAfter(
+            await handleBrainRun(
+              orchestrator,
+              runtimeLoop,
+              infra,
+              routeMessage,
+            ),
+          );
         }
 
         if (type.startsWith("brain.session.")) {
-          return await applyAfter(await handleSession(orchestrator, runtimeLoop, routeMessage));
+          return await applyAfter(
+            await handleSession(orchestrator, runtimeLoop, routeMessage),
+          );
         }
 
         if (type.startsWith("brain.step.")) {
-          return await applyAfter(await handleStep(orchestrator, runtimeLoop, routeMessage));
+          return await applyAfter(
+            await handleStep(orchestrator, runtimeLoop, routeMessage),
+          );
         }
 
         if (type.startsWith("brain.storage.")) {
@@ -3649,25 +4183,47 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
         }
 
         if (type.startsWith("brain.skill.")) {
-          return await applyAfter(await handleBrainSkill(orchestrator, runtimeLoop, routeMessage));
+          return await applyAfter(
+            await handleBrainSkill(orchestrator, runtimeLoop, routeMessage),
+          );
         }
 
         if (type.startsWith("brain.plugin.")) {
-          return await applyAfter(await handleBrainPlugin(orchestrator, infra, routeMessage));
+          return await applyAfter(
+            await handleBrainPlugin(orchestrator, infra, routeMessage),
+          );
         }
 
         if (type.startsWith("brain.debug.")) {
-          return await applyAfter(await handleBrainDebug(orchestrator, runtimeLoop, infra, routeMessage));
+          return await applyAfter(
+            await handleBrainDebug(
+              orchestrator,
+              runtimeLoop,
+              infra,
+              routeMessage,
+            ),
+          );
         }
 
         if (type === "webchat.transport") {
           const senderTabId = Number((_sender?.tab?.id ?? 0) || 0);
-          const handled = await handleWebChatRuntimeMessage(routeMessage, Number.isInteger(senderTabId) && senderTabId > 0 ? senderTabId : undefined);
-          return await applyAfter(handled ? ok({ handled: true }) : fail(`Unknown message type: ${type}`));
+          const handled = await handleWebChatRuntimeMessage(
+            routeMessage,
+            Number.isInteger(senderTabId) && senderTabId > 0
+              ? senderTabId
+              : undefined,
+          );
+          return await applyAfter(
+            handled
+              ? ok({ handled: true })
+              : fail(`Unknown message type: ${type}`),
+          );
         }
 
         if (type === "brain.agent.run") {
-          return await applyAfter(await handleBrainAgentRun(orchestrator, runtimeLoop, routeMessage));
+          return await applyAfter(
+            await handleBrainAgentRun(orchestrator, runtimeLoop, routeMessage),
+          );
         }
 
         if (type === "brain.agent.end") {
@@ -3681,9 +4237,17 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
             Object.keys(rawError).length === 0
               ? null
               : {
-                  message: typeof rawError.message === "string" ? rawError.message : undefined,
-                  code: typeof rawError.code === "string" ? rawError.code : undefined,
-                  status: Number.isFinite(statusNumber) ? statusNumber : undefined
+                  message:
+                    typeof rawError.message === "string"
+                      ? rawError.message
+                      : undefined,
+                  code:
+                    typeof rawError.code === "string"
+                      ? rawError.code
+                      : undefined,
+                  status: Number.isFinite(statusNumber)
+                    ? statusNumber
+                    : undefined,
                 };
 
           return await applyAfter(
@@ -3691,9 +4255,9 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
               await orchestrator.handleAgentEnd({
                 sessionId,
                 error,
-                overflow: payload.overflow === true
-              })
-            )
+                overflow: payload.overflow === true,
+              }),
+            ),
           );
         }
 
@@ -3702,7 +4266,7 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
         await orchestrator.runHook("runtime.route.error", {
           type,
           message: routeMessage,
-          error: error instanceof Error ? error.message : String(error)
+          error: error instanceof Error ? error.message : String(error),
         });
         return await applyAfter(fail(error));
       }

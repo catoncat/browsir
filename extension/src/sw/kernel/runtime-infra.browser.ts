@@ -1,4 +1,7 @@
-import { normalizeBrowserRuntimeStrategy, type BrowserRuntimeStrategy } from "./browser-runtime-strategy";
+import {
+  normalizeBrowserRuntimeStrategy,
+  type BrowserRuntimeStrategy,
+} from "./browser-runtime-strategy";
 import { defaultPipeline as enrichmentPipeline } from "./snapshot-enricher";
 import { normalizeProviderConnectionConfig } from "../../shared/llm-provider-config";
 
@@ -27,9 +30,9 @@ export interface BridgeConfig {
   bridgeToken: string;
   browserRuntimeStrategy: BrowserRuntimeStrategy;
   llmDefaultProfile?: string;
+  llmAuxProfile?: string;
+  llmFallbackProfile?: string;
   llmProfiles?: unknown;
-  llmProfileChains?: unknown;
-  llmEscalationPolicy?: string;
   llmSystemPromptCustom?: string;
   maxSteps: number;
   autoTitleInterval: number;
@@ -62,7 +65,7 @@ export interface RuntimeInfraHandler {
   disconnectBridge(): void;
   abortBridgeInvokesBySession(
     sessionId: string,
-    reason?: "stop" | "steer_preempt"
+    reason?: "stop" | "steer_preempt",
   ): number;
 }
 
@@ -108,17 +111,39 @@ function normalizeStoredLlmProfiles(raw: unknown): unknown {
   if (!Array.isArray(raw)) return raw;
   return raw.map((item) => {
     const row = asRecord(item);
+    const { role: _role, ...rest } = row;
     const connection = normalizeProviderConnectionConfig({
       provider: row.provider,
       llmApiBase: row.llmApiBase,
-      llmApiKey: row.llmApiKey
+      llmApiKey: row.llmApiKey,
     });
     return {
-      ...row,
+      ...rest,
       llmApiBase: connection.llmApiBase,
-      llmApiKey: connection.llmApiKey
+      llmApiKey: connection.llmApiKey,
     };
   });
+}
+
+function collectStoredProfileIds(raw: unknown): Set<string> {
+  const ids = new Set<string>();
+  if (!Array.isArray(raw)) return ids;
+  for (const item of raw) {
+    const id = String(asRecord(item).id || "").trim();
+    if (id) ids.add(id);
+  }
+  return ids;
+}
+
+function normalizeOptionalProfileId(
+  raw: unknown,
+  defaultProfile: string,
+  validIds: Set<string>,
+): string {
+  const id = String(raw || "").trim();
+  if (!id || id === defaultProfile) return "";
+  if (validIds.size > 0 && !validIds.has(id)) return "";
+  return id;
 }
 
 function randomId(prefix = "id"): string {
@@ -144,7 +169,7 @@ function buildStableRef(node: JsonRecord, sourcePrefix: string): string {
     String(node.role || ""),
     String(node.name || ""),
     String(node.placeholder || ""),
-    String(node.ariaLabel || "")
+    String(node.ariaLabel || ""),
   ].join("|");
   const hash = hashText(fingerprint || JSON.stringify(node));
   return `${sourcePrefix}-${hash}`;
@@ -155,7 +180,7 @@ function enrichSnapshotNodes(
   nodes: JsonRecord[],
   key: string,
   snapshotId: string,
-  sourcePrefix: string
+  sourcePrefix: string,
 ): JsonRecord[] {
   const nextRefMap = new Map(state.refMap);
   const seen = new Map<string, number>();
@@ -169,7 +194,7 @@ function enrichSnapshotNodes(
       uid: ref,
       ref,
       key,
-      snapshotId
+      snapshotId,
     };
     nextRefMap.set(ref, enriched);
     return enriched;
@@ -190,7 +215,12 @@ function toPositiveInt(raw: unknown, fallback: number): number {
   return Math.floor(n);
 }
 
-function toIntInRange(raw: unknown, fallback: number, min: number, max: number): number {
+function toIntInRange(
+  raw: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
   const n = Number(raw);
   if (!Number.isFinite(n)) return fallback;
   const floored = Math.floor(n);
@@ -255,12 +285,15 @@ function fail(error: unknown): RuntimeInfraResult {
     };
     const out: RuntimeErr = {
       ok: false,
-      error: error.message
+      error: error.message,
     };
-    if (typeof enriched.code === "string" && enriched.code.trim()) out.code = enriched.code.trim();
+    if (typeof enriched.code === "string" && enriched.code.trim())
+      out.code = enriched.code.trim();
     if (enriched.details !== undefined) out.details = enriched.details;
-    if (typeof enriched.retryable === "boolean") out.retryable = enriched.retryable;
-    if (Number.isFinite(Number(enriched.status))) out.status = Number(enriched.status);
+    if (typeof enriched.retryable === "boolean")
+      out.retryable = enriched.retryable;
+    if (Number.isFinite(Number(enriched.status)))
+      out.status = Number(enriched.status);
     return out;
   }
   return { ok: false, error: String(error) };
@@ -268,8 +301,18 @@ function fail(error: unknown): RuntimeInfraResult {
 
 function toRuntimeError(
   message: string,
-  meta: { code?: string; details?: unknown; retryable?: boolean; status?: number } = {}
-): Error & { code?: string; details?: unknown; retryable?: boolean; status?: number } {
+  meta: {
+    code?: string;
+    details?: unknown;
+    retryable?: boolean;
+    status?: number;
+  } = {},
+): Error & {
+  code?: string;
+  details?: unknown;
+  retryable?: boolean;
+  status?: number;
+} {
   const err = new Error(message) as Error & {
     code?: string;
     details?: unknown;
@@ -284,7 +327,12 @@ function toRuntimeError(
 }
 
 function isRetryableBridgeCode(code: string): boolean {
-  return ["E_BUSY", "E_TIMEOUT", "E_CLIENT_TIMEOUT", "E_BRIDGE_DISCONNECTED"].includes(String(code || "").toUpperCase());
+  return [
+    "E_BUSY",
+    "E_TIMEOUT",
+    "E_CLIENT_TIMEOUT",
+    "E_BRIDGE_DISCONNECTED",
+  ].includes(String(code || "").toUpperCase());
 }
 
 function asBridgeInvokeError(
@@ -294,8 +342,13 @@ function asBridgeInvokeError(
     details?: unknown;
     retryable?: boolean;
     status?: number;
-  } = {}
-): Error & { code?: string; details?: unknown; retryable?: boolean; status?: number } {
+  } = {},
+): Error & {
+  code?: string;
+  details?: unknown;
+  retryable?: boolean;
+  status?: number;
+} {
   const error = new Error(message) as Error & {
     code?: string;
     details?: unknown;
@@ -323,7 +376,7 @@ function snapshotKey(options: JsonRecord): string {
     String(options.selector || "__root__"),
     String(options.depth ?? "-1"),
     String(options.maxTokens ?? "1200"),
-    String(options.maxNodes ?? "120")
+    String(options.maxNodes ?? "120"),
   ].join(":");
 }
 
@@ -347,15 +400,21 @@ const ROLE_SHORTHAND: Record<string, string> = {
   spinbutton: "spin",
   listbox: "list",
   treeitem: "tree",
-  textarea: "area"
+  textarea: "area",
 };
 
 function formatNodeCompact(node: JsonRecord, depth = 0): string {
   const rawRole = String(node.role || "node").toLowerCase();
   const role = ROLE_SHORTHAND[rawRole] || rawRole;
-  const name = String(node.name || "").replace(/\s+/g, " ").trim();
-  const value = String(node.value || "").replace(/\s+/g, " ").trim();
-  const placeholder = String(node.placeholder || "").replace(/\s+/g, " ").trim();
+  const name = String(node.name || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const value = String(node.value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const placeholder = String(node.placeholder || "")
+    .replace(/\s+/g, " ")
+    .trim();
 
   let label = name;
   if (!label || (value && value !== name)) {
@@ -389,9 +448,11 @@ function buildCompactSnapshot(snapshot: JsonRecord): string {
     return `# ${String(snapshot.title || "")} | ${String(snapshot.url || "")}\n${String(snapshot.text || "")}`;
   }
   const lines = [
-    `# ${String(snapshot.title || "")} | ${String(snapshot.url || "")} | ${Number(snapshot.count || 0)} nodes`
+    `# ${String(snapshot.title || "")} | ${String(snapshot.url || "")} | ${Number(snapshot.count || 0)} nodes`,
   ];
-  const nodes = Array.isArray(snapshot.nodes) ? (snapshot.nodes as JsonRecord[]) : [];
+  const nodes = Array.isArray(snapshot.nodes)
+    ? (snapshot.nodes as JsonRecord[])
+    : [];
   for (const node of nodes) {
     lines.push(formatNodeCompact(node, Number(node.depth || 0)));
   }
@@ -402,11 +463,15 @@ function readAxValue(raw: unknown): string {
   if (typeof raw === "string") return raw;
   const rec = asRecord(raw);
   if (typeof rec.value === "string") return rec.value;
-  if (typeof rec.value === "number" || typeof rec.value === "boolean") return String(rec.value);
+  if (typeof rec.value === "number" || typeof rec.value === "boolean")
+    return String(rec.value);
   return "";
 }
 
-function readAxBooleanProperty(rawProperties: unknown, key: string): boolean | null {
+function readAxBooleanProperty(
+  rawProperties: unknown,
+  key: string,
+): boolean | null {
   if (!Array.isArray(rawProperties)) return null;
   for (const item of rawProperties) {
     const entry = asRecord(item);
@@ -420,7 +485,9 @@ function readAxBooleanProperty(rawProperties: unknown, key: string): boolean | n
 }
 
 function isInteractiveRole(roleRaw: unknown): boolean {
-  const role = String(roleRaw || "").trim().toLowerCase();
+  const role = String(roleRaw || "")
+    .trim()
+    .toLowerCase();
   if (!role) return false;
   return [
     "button",
@@ -438,16 +505,21 @@ function isInteractiveRole(roleRaw: unknown): boolean {
     "spinbutton",
     "listbox",
     "treeitem",
-    "textarea"
+    "textarea",
   ].includes(role);
 }
 
-function collectFrameIdsFromTree(frameTree: unknown, out: string[] = []): string[] {
+function collectFrameIdsFromTree(
+  frameTree: unknown,
+  out: string[] = [],
+): string[] {
   const node = asRecord(frameTree);
   const frame = asRecord(node.frame);
   const frameId = String(frame.id || "").trim();
   if (frameId) out.push(frameId);
-  const childFrames = Array.isArray(node.childFrames) ? (node.childFrames as unknown[]) : [];
+  const childFrames = Array.isArray(node.childFrames)
+    ? (node.childFrames as unknown[])
+    : [];
   for (const child of childFrames) {
     collectFrameIdsFromTree(child, out);
   }
@@ -455,7 +527,16 @@ function collectFrameIdsFromTree(frameTree: unknown, out: string[] = []): string
 }
 
 function actionRequiresLease(kind: string): boolean {
-  return ["click", "type", "fill", "press", "scroll", "select", "navigate", "hover"].includes(kind);
+  return [
+    "click",
+    "type",
+    "fill",
+    "press",
+    "scroll",
+    "select",
+    "navigate",
+    "hover",
+  ].includes(kind);
 }
 
 function normalizeActionKind(rawKind: unknown): string {
@@ -466,10 +547,15 @@ function normalizeActionKind(rawKind: unknown): string {
 
 function normalizeSnapshotOptions(raw: JsonRecord = {}): JsonRecord {
   const modeRaw = String(raw.mode || "").trim();
-  const mode = modeRaw === "text" || modeRaw === "full" || modeRaw === "interactive" ? modeRaw : "interactive";
+  const mode =
+    modeRaw === "text" || modeRaw === "full" || modeRaw === "interactive"
+      ? modeRaw
+      : "interactive";
   const filterRaw = String(raw.filter || "").trim();
-  const filter = mode === "text" ? "all" : filterRaw === "all" ? "all" : "interactive";
-  const format = String(raw.format || "json") === "compact" ? "compact" : "json";
+  const filter =
+    mode === "text" ? "all" : filterRaw === "all" ? "all" : "interactive";
+  const format =
+    String(raw.format || "json") === "compact" ? "compact" : "json";
   const selector = typeof raw.selector === "string" ? raw.selector.trim() : "";
   const diff = raw.diff !== false;
   const noAnimations = raw.noAnimations === true;
@@ -485,9 +571,18 @@ function normalizeSnapshotOptions(raw: JsonRecord = {}): JsonRecord {
     diff,
     noAnimations,
     depth,
-    maxTokens: Math.max(120, Math.min(12_000, toPositiveInt(raw.maxTokens, maxTokensFallback))),
-    maxNodes: Math.max(20, Math.min(1000, toPositiveInt(raw.maxNodes, maxNodesFallback))),
-    maxChars: Math.max(200, Math.min(12_000, toPositiveInt(raw.maxChars, 4000)))
+    maxTokens: Math.max(
+      120,
+      Math.min(12_000, toPositiveInt(raw.maxTokens, maxTokensFallback)),
+    ),
+    maxNodes: Math.max(
+      20,
+      Math.min(1000, toPositiveInt(raw.maxNodes, maxNodesFallback)),
+    ),
+    maxChars: Math.max(
+      200,
+      Math.min(12_000, toPositiveInt(raw.maxChars, 4000)),
+    ),
   };
 }
 
@@ -526,7 +621,10 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         currentSocket.onmessage = null;
         currentSocket.onerror = null;
         currentSocket.onclose = null;
-        if (currentSocket.readyState === WebSocket.OPEN || currentSocket.readyState === WebSocket.CONNECTING) {
+        if (
+          currentSocket.readyState === WebSocket.OPEN ||
+          currentSocket.readyState === WebSocket.CONNECTING
+        ) {
           currentSocket.close();
         }
       } catch {
@@ -538,8 +636,8 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       pending.reject(
         asBridgeInvokeError("Bridge disconnected", {
           code: "E_BRIDGE_DISCONNECTED",
-          retryable: true
-        })
+          retryable: true,
+        }),
       );
     }
     pendingInvokes.clear();
@@ -547,12 +645,14 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
 
   function abortBridgeInvokesBySession(
     rawSessionId: unknown,
-    rawReason: unknown = "stop"
+    rawReason: unknown = "stop",
   ): number {
     const sessionId = String(rawSessionId || "").trim();
     if (!sessionId) return 0;
     const reason =
-      String(rawReason || "").trim().toLowerCase() === "steer_preempt"
+      String(rawReason || "")
+        .trim()
+        .toLowerCase() === "steer_preempt"
         ? "steer_preempt"
         : "stop";
     let aborted = 0;
@@ -567,11 +667,13 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
             ? "Bridge invoke interrupted by steer promote request"
             : "Bridge invoke aborted by stop request",
           {
-            code: interruptedBySteer ? "E_BRIDGE_INTERRUPTED" : "E_BRIDGE_ABORTED",
+            code: interruptedBySteer
+              ? "E_BRIDGE_INTERRUPTED"
+              : "E_BRIDGE_ABORTED",
             details: { sessionId, reason },
-            retryable: false
-          }
-        )
+            retryable: false,
+          },
+        ),
       );
       aborted += 1;
     }
@@ -604,12 +706,18 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       return;
     }
     const errorPayload = asRecord(message.error);
-    const code = typeof errorPayload.code === "string" ? errorPayload.code.trim().toUpperCase() : "";
-    const err = asBridgeInvokeError(String(errorPayload.message || "Bridge invoke failed"), {
-      code: code || undefined,
-      details: errorPayload.details,
-      retryable: code ? isRetryableBridgeCode(code) : undefined
-    });
+    const code =
+      typeof errorPayload.code === "string"
+        ? errorPayload.code.trim().toUpperCase()
+        : "";
+    const err = asBridgeInvokeError(
+      String(errorPayload.message || "Bridge invoke failed"),
+      {
+        code: code || undefined,
+        details: errorPayload.details,
+        retryable: code ? isRetryableBridgeCode(code) : undefined,
+      },
+    );
     pending.reject(err);
   }
 
@@ -620,9 +728,9 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       "bridgeToken",
       "browserRuntimeStrategy",
       "llmDefaultProfile",
+      "llmAuxProfile",
+      "llmFallbackProfile",
       "llmProfiles",
-      "llmProfileChains",
-      "llmEscalationPolicy",
       "llmSystemPromptCustom",
       "maxSteps",
       "autoTitleInterval",
@@ -631,43 +739,65 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       "llmRetryMaxAttempts",
       "llmMaxRetryDelayMs",
       "devAutoReload",
-      "devReloadIntervalMs"
+      "devReloadIntervalMs",
     ]);
+    const llmProfiles = normalizeStoredLlmProfiles(data.llmProfiles);
+    const llmDefaultProfile =
+      String(data.llmDefaultProfile || "default").trim() || "default";
+    const validProfileIds = collectStoredProfileIds(llmProfiles);
     bridgeConfigCache = {
       bridgeUrl: String(data.bridgeUrl || DEFAULT_BRIDGE_URL),
       bridgeToken: String(data.bridgeToken || DEFAULT_BRIDGE_TOKEN),
       browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
         data.browserRuntimeStrategy,
-        DEFAULT_BROWSER_RUNTIME_STRATEGY
+        DEFAULT_BROWSER_RUNTIME_STRATEGY,
       ),
-      llmDefaultProfile: String(data.llmDefaultProfile || "default"),
-      llmProfiles: normalizeStoredLlmProfiles(data.llmProfiles),
-      llmProfileChains: data.llmProfileChains,
-      llmEscalationPolicy: String(data.llmEscalationPolicy || "upgrade_only"),
-      llmSystemPromptCustom: normalizeCustomSystemPrompt(data.llmSystemPromptCustom, ""),
+      llmDefaultProfile,
+      llmAuxProfile: normalizeOptionalProfileId(
+        data.llmAuxProfile,
+        llmDefaultProfile,
+        validProfileIds,
+      ),
+      llmFallbackProfile: normalizeOptionalProfileId(
+        data.llmFallbackProfile,
+        llmDefaultProfile,
+        validProfileIds,
+      ),
+      llmProfiles,
+      llmSystemPromptCustom: normalizeCustomSystemPrompt(
+        data.llmSystemPromptCustom,
+        "",
+      ),
       maxSteps: toIntInRange(data.maxSteps, 100, 1, 500),
       autoTitleInterval: toIntInRange(data.autoTitleInterval, 10, 0, 100),
       bridgeInvokeTimeoutMs: toIntInRange(
         data.bridgeInvokeTimeoutMs,
         DEFAULT_BRIDGE_INVOKE_TIMEOUT_MS,
         1_000,
-        MAX_BRIDGE_INVOKE_TIMEOUT_MS
+        MAX_BRIDGE_INVOKE_TIMEOUT_MS,
       ),
-      llmTimeoutMs: toIntInRange(data.llmTimeoutMs, DEFAULT_LLM_TIMEOUT_MS, 1_000, MAX_LLM_TIMEOUT_MS),
+      llmTimeoutMs: toIntInRange(
+        data.llmTimeoutMs,
+        DEFAULT_LLM_TIMEOUT_MS,
+        1_000,
+        MAX_LLM_TIMEOUT_MS,
+      ),
       llmRetryMaxAttempts: toIntInRange(
         data.llmRetryMaxAttempts,
         DEFAULT_LLM_RETRY_MAX_ATTEMPTS,
         0,
-        MAX_LLM_RETRY_MAX_ATTEMPTS
+        MAX_LLM_RETRY_MAX_ATTEMPTS,
       ),
       llmMaxRetryDelayMs: toIntInRange(
         data.llmMaxRetryDelayMs,
         DEFAULT_LLM_MAX_RETRY_DELAY_MS,
         0,
-        MAX_LLM_MAX_RETRY_DELAY_MS
+        MAX_LLM_MAX_RETRY_DELAY_MS,
       ),
       devAutoReload: data.devAutoReload !== false,
-      devReloadIntervalMs: Number.isFinite(Number(data.devReloadIntervalMs)) ? Number(data.devReloadIntervalMs) : 1500
+      devReloadIntervalMs: Number.isFinite(Number(data.devReloadIntervalMs))
+        ? Number(data.devReloadIntervalMs)
+        : 1500,
     };
     return bridgeConfigCache;
   }
@@ -675,49 +805,105 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
   async function saveBridgeConfig(payload: unknown): Promise<BridgeConfig> {
     const source = asRecord(payload);
     const current = await getBridgeConfig();
+    const llmDefaultProfile =
+      String(
+        source.llmDefaultProfile || current.llmDefaultProfile || "default",
+      ).trim() || "default";
+    const llmProfiles = normalizeStoredLlmProfiles(
+      source.llmProfiles !== undefined
+        ? source.llmProfiles
+        : current.llmProfiles,
+    );
+    const validProfileIds = collectStoredProfileIds(llmProfiles);
     const next: BridgeConfig = {
-      bridgeUrl: String(source.bridgeUrl || current.bridgeUrl || DEFAULT_BRIDGE_URL).trim(),
-      bridgeToken: String(source.bridgeToken ?? current.bridgeToken ?? DEFAULT_BRIDGE_TOKEN),
+      bridgeUrl: String(
+        source.bridgeUrl || current.bridgeUrl || DEFAULT_BRIDGE_URL,
+      ).trim(),
+      bridgeToken: String(
+        source.bridgeToken ?? current.bridgeToken ?? DEFAULT_BRIDGE_TOKEN,
+      ),
       browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
         source.browserRuntimeStrategy,
-        current.browserRuntimeStrategy || DEFAULT_BROWSER_RUNTIME_STRATEGY
+        current.browserRuntimeStrategy || DEFAULT_BROWSER_RUNTIME_STRATEGY,
       ),
-      llmDefaultProfile: String(source.llmDefaultProfile || current.llmDefaultProfile || "default").trim() || "default",
-      llmProfiles: normalizeStoredLlmProfiles(source.llmProfiles !== undefined ? source.llmProfiles : current.llmProfiles),
-      llmProfileChains: source.llmProfileChains !== undefined ? source.llmProfileChains : current.llmProfileChains,
-      llmEscalationPolicy: String(source.llmEscalationPolicy || current.llmEscalationPolicy || "upgrade_only").trim() || "upgrade_only",
-      llmSystemPromptCustom: normalizeCustomSystemPrompt(source.llmSystemPromptCustom, current.llmSystemPromptCustom || ""),
+      llmDefaultProfile,
+      llmAuxProfile: normalizeOptionalProfileId(
+        source.llmAuxProfile !== undefined
+          ? source.llmAuxProfile
+          : current.llmAuxProfile,
+        llmDefaultProfile,
+        validProfileIds,
+      ),
+      llmFallbackProfile: normalizeOptionalProfileId(
+        source.llmFallbackProfile !== undefined
+          ? source.llmFallbackProfile
+          : current.llmFallbackProfile,
+        llmDefaultProfile,
+        validProfileIds,
+      ),
+      llmProfiles,
+      llmSystemPromptCustom: normalizeCustomSystemPrompt(
+        source.llmSystemPromptCustom,
+        current.llmSystemPromptCustom || "",
+      ),
       maxSteps: toIntInRange(source.maxSteps, current.maxSteps || 100, 1, 500),
-      autoTitleInterval: toIntInRange(source.autoTitleInterval, current.autoTitleInterval ?? 10, 0, 100),
+      autoTitleInterval: toIntInRange(
+        source.autoTitleInterval,
+        current.autoTitleInterval ?? 10,
+        0,
+        100,
+      ),
       bridgeInvokeTimeoutMs: toIntInRange(
         source.bridgeInvokeTimeoutMs,
         current.bridgeInvokeTimeoutMs || DEFAULT_BRIDGE_INVOKE_TIMEOUT_MS,
         1_000,
-        MAX_BRIDGE_INVOKE_TIMEOUT_MS
+        MAX_BRIDGE_INVOKE_TIMEOUT_MS,
       ),
-      llmTimeoutMs: toIntInRange(source.llmTimeoutMs, current.llmTimeoutMs || DEFAULT_LLM_TIMEOUT_MS, 1_000, MAX_LLM_TIMEOUT_MS),
+      llmTimeoutMs: toIntInRange(
+        source.llmTimeoutMs,
+        current.llmTimeoutMs || DEFAULT_LLM_TIMEOUT_MS,
+        1_000,
+        MAX_LLM_TIMEOUT_MS,
+      ),
       llmRetryMaxAttempts: toIntInRange(
         source.llmRetryMaxAttempts,
         current.llmRetryMaxAttempts || DEFAULT_LLM_RETRY_MAX_ATTEMPTS,
         0,
-        MAX_LLM_RETRY_MAX_ATTEMPTS
+        MAX_LLM_RETRY_MAX_ATTEMPTS,
       ),
       llmMaxRetryDelayMs: toIntInRange(
         source.llmMaxRetryDelayMs,
         current.llmMaxRetryDelayMs || DEFAULT_LLM_MAX_RETRY_DELAY_MS,
         0,
-        MAX_LLM_MAX_RETRY_DELAY_MS
+        MAX_LLM_MAX_RETRY_DELAY_MS,
       ),
-      devAutoReload: source.devAutoReload === undefined ? current.devAutoReload : source.devAutoReload !== false,
-      devReloadIntervalMs: Math.max(500, Number(source.devReloadIntervalMs || current.devReloadIntervalMs || 1500))
+      devAutoReload:
+        source.devAutoReload === undefined
+          ? current.devAutoReload
+          : source.devAutoReload !== false,
+      devReloadIntervalMs: Math.max(
+        500,
+        Number(
+          source.devReloadIntervalMs || current.devReloadIntervalMs || 1500,
+        ),
+      ),
     };
     await chrome.storage.local.set(next);
+    await chrome.storage.local.remove([
+      "llmProfileChains",
+      "llmEscalationPolicy",
+    ]);
     bridgeConfigCache = next;
     return next;
   }
 
   async function connectBridge(force = false): Promise<WebSocket> {
-    if (bridgeConnected && bridgeSocket && bridgeSocket.readyState === WebSocket.OPEN && !force) {
+    if (
+      bridgeConnected &&
+      bridgeSocket &&
+      bridgeSocket.readyState === WebSocket.OPEN &&
+      !force
+    ) {
       return bridgeSocket;
     }
     if (bridgeConnectPromise && !force) return bridgeConnectPromise;
@@ -741,20 +927,36 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           settled = true;
           bridgeSocket = ws;
           bridgeConnected = true;
-          broadcast({ type: "bridge.status", status: "connected", at: nowIso() });
+          broadcast({
+            type: "bridge.status",
+            status: "connected",
+            at: nowIso(),
+          });
           resolve(ws);
         };
         ws.onmessage = onBridgeMessage;
         ws.onerror = (event) => {
           if (!bridgeConnected) {
-            rejectOnce(new Error(`Bridge connection failed: ${event.type}; url=${wsHref}`));
+            rejectOnce(
+              new Error(
+                `Bridge connection failed: ${event.type}; url=${wsHref}`,
+              ),
+            );
           }
         };
         ws.onclose = (event) => {
-          broadcast({ type: "bridge.status", status: "disconnected", at: nowIso() });
+          broadcast({
+            type: "bridge.status",
+            status: "disconnected",
+            at: nowIso(),
+          });
           if (!settled) {
             const reason = event.reason ? ` reason=${event.reason}` : "";
-            rejectOnce(new Error(`Bridge closed before ready: code=${event.code}${reason}; url=${wsHref}`));
+            rejectOnce(
+              new Error(
+                `Bridge closed before ready: code=${event.code}${reason}; url=${wsHref}`,
+              ),
+            );
           }
           resetBridgeSocket({ skipClose: true });
         };
@@ -777,10 +979,13 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     const timeoutMs = toIntInRange(
       hintTimeout == null
         ? config.bridgeInvokeTimeoutMs
-        : Math.max(config.bridgeInvokeTimeoutMs, Math.floor(hintTimeout) + 2_000),
+        : Math.max(
+            config.bridgeInvokeTimeoutMs,
+            Math.floor(hintTimeout) + 2_000,
+          ),
       config.bridgeInvokeTimeoutMs,
       1_000,
-      MAX_BRIDGE_INVOKE_TIMEOUT_MS
+      MAX_BRIDGE_INVOKE_TIMEOUT_MS,
     );
     const payload = {
       id,
@@ -789,7 +994,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       args: asRecord(payloadFrame.args),
       sessionId: payloadFrame.sessionId,
       parentSessionId: payloadFrame.parentSessionId,
-      agentId: payloadFrame.agentId
+      agentId: payloadFrame.agentId,
     };
     return await new Promise((resolve, reject) => {
       const pendingSessionId = String(payload.sessionId || "").trim();
@@ -801,13 +1006,18 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
             details: {
               timeoutMs,
               requestedTimeoutMs: hintTimeout,
-              tool: String(payload.tool || "")
+              tool: String(payload.tool || ""),
             },
-            retryable: true
-          })
+            retryable: true,
+          }),
         );
       }, timeoutMs);
-      pendingInvokes.set(id, { resolve, reject, timeout, sessionId: pendingSessionId });
+      pendingInvokes.set(id, {
+        resolve,
+        reject,
+        timeout,
+        sessionId: pendingSessionId,
+      });
       ws.send(JSON.stringify(payload));
     });
   }
@@ -831,16 +1041,24 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       owner: lease.owner,
       leaseId: lease.leaseId,
       expiresAt: new Date(lease.expiresAt).toISOString(),
-      heartbeatAt: new Date(lease.heartbeatAt).toISOString()
+      heartbeatAt: new Date(lease.heartbeatAt).toISOString(),
     };
   }
 
-  function acquireLease(tabId: number, rawOwner: unknown, rawTtlMs: unknown): JsonRecord {
+  function acquireLease(
+    tabId: number,
+    rawOwner: unknown,
+    rawTtlMs: unknown,
+  ): JsonRecord {
     const owner = normalizeOwner(rawOwner);
     const ttlMs = normalizeLeaseTtl(rawTtlMs);
     const current = getLease(tabId);
     if (current && current.owner !== owner) {
-      return { ok: false, reason: "locked_by_other", lease: leaseStatus(tabId) };
+      return {
+        ok: false,
+        reason: "locked_by_other",
+        lease: leaseStatus(tabId),
+      };
     }
     const next: LeaseState = {
       tabId,
@@ -848,18 +1066,27 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       leaseId: current?.leaseId || randomId("lease"),
       createdAt: current?.createdAt || Date.now(),
       heartbeatAt: Date.now(),
-      expiresAt: Date.now() + ttlMs
+      expiresAt: Date.now() + ttlMs,
     };
     leaseByTab.set(tabId, next);
     return { ok: true, lease: leaseStatus(tabId) };
   }
 
-  function heartbeatLease(tabId: number, rawOwner: unknown, rawTtlMs: unknown): JsonRecord {
+  function heartbeatLease(
+    tabId: number,
+    rawOwner: unknown,
+    rawTtlMs: unknown,
+  ): JsonRecord {
     const owner = normalizeOwner(rawOwner);
     const ttlMs = normalizeLeaseTtl(rawTtlMs);
     const lease = getLease(tabId);
     if (!lease) return { ok: false, reason: "not_locked" };
-    if (lease.owner !== owner) return { ok: false, reason: "locked_by_other", lease: leaseStatus(tabId) };
+    if (lease.owner !== owner)
+      return {
+        ok: false,
+        reason: "locked_by_other",
+        lease: leaseStatus(tabId),
+      };
     lease.heartbeatAt = Date.now();
     lease.expiresAt = Date.now() + ttlMs;
     leaseByTab.set(tabId, lease);
@@ -870,7 +1097,12 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     const owner = normalizeOwner(rawOwner);
     const lease = getLease(tabId);
     if (!lease) return { ok: true, released: false, reason: "not_locked" };
-    if (lease.owner !== owner) return { ok: false, reason: "locked_by_other", lease: leaseStatus(tabId) };
+    if (lease.owner !== owner)
+      return {
+        ok: false,
+        reason: "locked_by_other",
+        lease: leaseStatus(tabId),
+      };
     leaseByTab.delete(tabId);
     return { ok: true, released: true };
   }
@@ -902,7 +1134,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       byKey: new Map(),
       refMap: new Map(),
       lastSnapshotId: null,
-      failureCounts: new Map()
+      failureCounts: new Map(),
     };
     snapshotStateByTab.set(tabId, created);
     return created;
@@ -928,7 +1160,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         detachCDP(tabId).catch(() => {
           // best-effort auto cleanup
         });
-      }, CDP_AUTO_DETACH_MS)
+      }, CDP_AUTO_DETACH_MS),
     );
   }
 
@@ -947,8 +1179,8 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         toRuntimeError(`CDP command '${item.method}' aborted: ${reason}`, {
           code: "E_CDP_ABORTED",
           retryable: true,
-          details: { tabId, method: item.method, reason }
-        })
+          details: { tabId, method: item.method, reason },
+        }),
       );
     }
   }
@@ -957,12 +1189,18 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     tabId: number,
     method: string,
     params: unknown = {},
-    rawOptions: { timeoutMs?: unknown } = {}
+    rawOptions: { timeoutMs?: unknown } = {},
   ): Promise<T> {
-    const timeoutMs = toIntInRange(rawOptions.timeoutMs, DEFAULT_CDP_COMMAND_TIMEOUT_MS, 200, MAX_CDP_COMMAND_TIMEOUT_MS);
+    const timeoutMs = toIntInRange(
+      rawOptions.timeoutMs,
+      DEFAULT_CDP_COMMAND_TIMEOUT_MS,
+      200,
+      MAX_CDP_COMMAND_TIMEOUT_MS,
+    );
     touchCdpSession(tabId);
     return await new Promise<T>((resolve, reject) => {
-      const pendingSet = pendingCdpByTab.get(tabId) || new Set<PendingCdpCommand>();
+      const pendingSet =
+        pendingCdpByTab.get(tabId) || new Set<PendingCdpCommand>();
       if (!pendingCdpByTab.has(tabId)) pendingCdpByTab.set(tabId, pendingSet);
 
       let finished = false;
@@ -976,11 +1214,14 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           reject(
             error instanceof Error
               ? error
-              : toRuntimeError(String(error || `CDP command failed: ${method}`), {
-                  code: "E_CDP_COMMAND",
-                  retryable: true,
-                  details: { tabId, method }
-                })
+              : toRuntimeError(
+                  String(error || `CDP command failed: ${method}`),
+                  {
+                    code: "E_CDP_COMMAND",
+                    retryable: true,
+                    details: { tabId, method },
+                  },
+                ),
           );
           return;
         }
@@ -992,18 +1233,23 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         reject: (error: Error) => finish(error),
         timeout: setTimeout(() => {
           finish(
-            toRuntimeError(`CDP command '${method}' timed out after ${timeoutMs}ms`, {
-              code: "E_CDP_TIMEOUT",
-              retryable: true,
-              details: { tabId, method, timeoutMs }
-            })
+            toRuntimeError(
+              `CDP command '${method}' timed out after ${timeoutMs}ms`,
+              {
+                code: "E_CDP_TIMEOUT",
+                retryable: true,
+                details: { tabId, method, timeoutMs },
+              },
+            ),
           );
-        }, timeoutMs)
+        }, timeoutMs),
       };
       pendingSet.add(entry);
 
       Promise.resolve()
-        .then(() => chrome.debugger.sendCommand({ tabId }, method, params as object))
+        .then(() =>
+          chrome.debugger.sendCommand({ tabId }, method, params as object),
+        )
         .then((value) => {
           finish(null, value as T);
         })
@@ -1011,9 +1257,13 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     });
   }
 
-  async function ensureCdpDomains(tabId: number, domains: string[]): Promise<void> {
+  async function ensureCdpDomains(
+    tabId: number,
+    domains: string[],
+  ): Promise<void> {
     const enabled = enabledDomainsByTab.get(tabId) || new Set<string>();
-    if (!enabledDomainsByTab.has(tabId)) enabledDomainsByTab.set(tabId, enabled);
+    if (!enabledDomainsByTab.has(tabId))
+      enabledDomainsByTab.set(tabId, enabled);
     for (const domain of domains) {
       if (enabled.has(domain)) continue;
       try {
@@ -1036,11 +1286,13 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       const telemetry = getTabTelemetry(tabId);
 
       if (method === "Runtime.consoleAPICalled") {
-        const args = Array.isArray((params as JsonRecord)?.args) ? ((params as JsonRecord).args as JsonRecord[]) : [];
+        const args = Array.isArray((params as JsonRecord)?.args)
+          ? ((params as JsonRecord).args as JsonRecord[])
+          : [];
         telemetry.console.push({
           ts: nowIso(),
           type: String((params as JsonRecord)?.type || ""),
-          args: args.map((item) => item.value ?? item.description ?? "")
+          args: args.map((item) => item.value ?? item.description ?? ""),
         });
         trimTelemetry(telemetry.console);
         return;
@@ -1053,7 +1305,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           requestId: (params as JsonRecord).requestId,
           url: response.url,
           status: response.status,
-          mimeType: response.mimeType
+          mimeType: response.mimeType,
         });
         trimTelemetry(telemetry.network);
       }
@@ -1090,20 +1342,38 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     installDebuggerHooks();
     if (attachedTabs.has(tabId)) {
       touchCdpSession(tabId);
-      await ensureCdpDomains(tabId, ["Network", "Runtime", "DOM", "Page", "Log", "Accessibility"]);
+      await ensureCdpDomains(tabId, [
+        "Network",
+        "Runtime",
+        "DOM",
+        "Page",
+        "Log",
+        "Accessibility",
+      ]);
       return;
     }
     const existing = attachLocksByTab.get(tabId);
     if (existing) {
       await existing;
       touchCdpSession(tabId);
-      await ensureCdpDomains(tabId, ["Network", "Runtime", "DOM", "Page", "Log", "Accessibility"]);
+      await ensureCdpDomains(tabId, [
+        "Network",
+        "Runtime",
+        "DOM",
+        "Page",
+        "Log",
+        "Accessibility",
+      ]);
       return;
     }
 
     const attachTask = (async () => {
       try {
-        if (typeof chrome !== "undefined" && chrome.tabs && typeof chrome.tabs.get === "function") {
+        if (
+          typeof chrome !== "undefined" &&
+          chrome.tabs &&
+          typeof chrome.tabs.get === "function"
+        ) {
           const tab = await chrome.tabs.get(tabId).catch(() => null);
           if (tab?.url) {
             const url = tab.url.toLowerCase();
@@ -1115,7 +1385,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
               url.includes("chrome.google.com/webstore")
             ) {
               throw new Error(
-                `Chrome restricts debugger access to this URL (${tab.url}). Please navigate to a standard website or call 'create_new_tab' first.`
+                `Chrome restricts debugger access to this URL (${tab.url}). Please navigate to a standard website or call 'create_new_tab' first.`,
               );
             }
           }
@@ -1125,11 +1395,14 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         enabledDomainsByTab.delete(tabId);
         touchCdpSession(tabId);
       } catch (error) {
-        throw toRuntimeError(`attach debugger failed for tab ${tabId}: ${error instanceof Error ? error.message : String(error)}`, {
-          code: "E_CDP_ATTACH",
-          retryable: true,
-          details: { tabId }
-        });
+        throw toRuntimeError(
+          `attach debugger failed for tab ${tabId}: ${error instanceof Error ? error.message : String(error)}`,
+          {
+            code: "E_CDP_ATTACH",
+            retryable: true,
+            details: { tabId },
+          },
+        );
       }
     })();
     attachLocksByTab.set(tabId, attachTask);
@@ -1138,7 +1411,14 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     } finally {
       attachLocksByTab.delete(tabId);
     }
-    await ensureCdpDomains(tabId, ["Network", "Runtime", "DOM", "Page", "Log", "Accessibility"]);
+    await ensureCdpDomains(tabId, [
+      "Network",
+      "Runtime",
+      "DOM",
+      "Page",
+      "Log",
+      "Accessibility",
+    ]);
   }
 
   async function observeByCDP(tabId: number): Promise<JsonRecord> {
@@ -1151,7 +1431,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         textLength: document.body?.innerText?.length ?? 0,
         nodeCount: document.querySelectorAll('*').length
       }))()`,
-      returnByValue: true
+      returnByValue: true,
     })) as JsonRecord;
     const page = asRecord(asRecord(evalResult.result).value);
     const telemetry = getTabTelemetry(tabId);
@@ -1160,14 +1440,21 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       tabId,
       page,
       console: telemetry.console.slice(-20),
-      network: telemetry.network.slice(-20)
+      network: telemetry.network.slice(-20),
     };
   }
 
   async function listFrameIdsForSnapshot(tabId: number): Promise<string[]> {
     try {
-      const frameTreeResult = (await sendCdpCommand(tabId, "Page.getFrameTree", {}, { timeoutMs: 4_000 })) as JsonRecord;
-      const frameIds = collectFrameIdsFromTree(frameTreeResult.frameTree).filter(Boolean);
+      const frameTreeResult = (await sendCdpCommand(
+        tabId,
+        "Page.getFrameTree",
+        {},
+        { timeoutMs: 4_000 },
+      )) as JsonRecord;
+      const frameIds = collectFrameIdsFromTree(
+        frameTreeResult.frameTree,
+      ).filter(Boolean);
       return Array.from(new Set(frameIds));
     } catch {
       return [];
@@ -1177,11 +1464,13 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
   async function resolveElementMetaByBackendNode(
     tabId: number,
     backendNodeId: number,
-    scopeSelector: string
+    scopeSelector: string,
   ): Promise<JsonRecord | null> {
     let objectId = "";
     try {
-      const resolved = (await sendCdpCommand(tabId, "DOM.resolveNode", { backendNodeId })) as JsonRecord;
+      const resolved = (await sendCdpCommand(tabId, "DOM.resolveNode", {
+        backendNodeId,
+      })) as JsonRecord;
       objectId = String(asRecord(resolved.object).objectId || "");
       if (!objectId) return null;
       const expression = `function() {
@@ -1307,7 +1596,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         objectId,
         functionDeclaration: expression,
         returnByValue: true,
-        awaitPromise: true
+        awaitPromise: true,
       })) as JsonRecord;
       const value = asRecord(asRecord(result.result).value);
       return value.ok === true ? value : null;
@@ -1315,7 +1604,9 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       return null;
     } finally {
       if (objectId) {
-        await sendCdpCommand(tabId, "Runtime.releaseObject", { objectId }).catch(() => {
+        await sendCdpCommand(tabId, "Runtime.releaseObject", {
+          objectId,
+        }).catch(() => {
           // ignore stale object release
         });
       }
@@ -1328,11 +1619,11 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     base: JsonRecord,
     state: SnapshotState,
     key: string,
-    snapshotId: string
+    snapshotId: string,
   ): Promise<JsonRecord> {
     const pageResult = (await sendCdpCommand(tabId, "Runtime.evaluate", {
       expression: `(() => ({ url: location.href, title: document.title }))()`,
-      returnByValue: true
+      returnByValue: true,
     })) as JsonRecord;
     const page = asRecord(asRecord(pageResult.result).value);
 
@@ -1340,23 +1631,35 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     const treeBuckets: Array<{ frameId: string; nodes: JsonRecord[] }> = [];
     for (const frameId of frameIds) {
       try {
-        const tree = (await sendCdpCommand(tabId, "Accessibility.getFullAXTree", { frameId })) as JsonRecord;
-        const nodes = Array.isArray(tree.nodes) ? (tree.nodes as JsonRecord[]) : [];
+        const tree = (await sendCdpCommand(
+          tabId,
+          "Accessibility.getFullAXTree",
+          { frameId },
+        )) as JsonRecord;
+        const nodes = Array.isArray(tree.nodes)
+          ? (tree.nodes as JsonRecord[])
+          : [];
         if (nodes.length > 0) treeBuckets.push({ frameId, nodes });
       } catch {
         // ignore inaccessible frame tree and keep others
       }
     }
     if (treeBuckets.length === 0) {
-      const fallbackTree = (await sendCdpCommand(tabId, "Accessibility.getFullAXTree", {})) as JsonRecord;
-      const nodes = Array.isArray(fallbackTree.nodes) ? (fallbackTree.nodes as JsonRecord[]) : [];
+      const fallbackTree = (await sendCdpCommand(
+        tabId,
+        "Accessibility.getFullAXTree",
+        {},
+      )) as JsonRecord;
+      const nodes = Array.isArray(fallbackTree.nodes)
+        ? (fallbackTree.nodes as JsonRecord[])
+        : [];
       if (nodes.length > 0) treeBuckets.push({ frameId: "", nodes });
     }
     if (treeBuckets.length === 0) {
       throw toRuntimeError("Accessibility.getFullAXTree returned empty tree", {
         code: "E_CDP_AXTREE_EMPTY",
         retryable: true,
-        details: { tabId, frameIds }
+        details: { tabId, frameIds },
       });
     }
 
@@ -1386,12 +1689,14 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           frameId: bucket.frameId,
           axNodeId: String(node.nodeId || ""),
           parentId: node.parentId ? String(node.parentId) : undefined,
-          childIds: Array.isArray(node.childIds) ? node.childIds.map(String) : [],
+          childIds: Array.isArray(node.childIds)
+            ? node.childIds.map(String)
+            : [],
           role: role || "node",
           name: name.slice(0, 180),
           value: value.slice(0, 180),
           focused: focused === true,
-          disabled: disabled === true
+          disabled: disabled === true,
         });
         if (candidates.length >= Math.max(maxNodes * 3, 240)) break;
       }
@@ -1404,7 +1709,11 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       const backendNodeId = toPositiveInteger(item.backendNodeId);
       if (!backendNodeId) continue;
       if (seenBackendNodeIds.has(backendNodeId)) continue;
-      const meta = await resolveElementMetaByBackendNode(tabId, backendNodeId, scopeSelector);
+      const meta = await resolveElementMetaByBackendNode(
+        tabId,
+        backendNodeId,
+        scopeSelector,
+      );
       if (!meta) continue;
       if (scopeSelector && meta.matchesScope !== true) continue;
 
@@ -1416,14 +1725,19 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         item.name ||
         item.value
       );
-      if (!allowAll && meta.visible === false && !hasMeaningfulLabel && !meta.focused) {
+      if (
+        !allowAll &&
+        meta.visible === false &&
+        !hasMeaningfulLabel &&
+        !meta.focused
+      ) {
         continue;
       }
 
       seenBackendNodeIds.add(backendNodeId);
       enrichedNodes.push({
         ...item,
-        ...meta
+        ...meta,
       });
       if (enrichedNodes.length >= Math.max(maxNodes * 1.5, 180)) break;
     }
@@ -1446,17 +1760,20 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         details: {
           tabId,
           scopeSelector,
-          candidateCount: candidates.length
-        }
+          candidateCount: candidates.length,
+        },
       });
     }
 
-    const nodes = (await enrichmentPipeline.run(enrichSnapshotNodes(state, finalEnriched, key, snapshotId, "ax"), {
-      sessionId: String(base.sessionId || ""),
-      origin: String(page.url || ""),
-      location: String(page.url || ""),
-      failureCounts: state.failureCounts
-    })) as JsonRecord[];
+    const nodes = (await enrichmentPipeline.run(
+      enrichSnapshotNodes(state, finalEnriched, key, snapshotId, "ax"),
+      {
+        sessionId: String(base.sessionId || ""),
+        origin: String(page.url || ""),
+        location: String(page.url || ""),
+        failureCounts: state.failureCounts,
+      },
+    )) as JsonRecord[];
 
     return {
       ...base,
@@ -1466,7 +1783,9 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       nodes,
       truncated: candidates.length > nodes.length,
       source: "ax",
-      hash: hashText(nodes.map((node) => summarizeSnapshotNode(node)).join("\n"))
+      hash: hashText(
+        nodes.map((node) => summarizeSnapshotNode(node)).join("\n"),
+      ),
     };
   }
 
@@ -1476,7 +1795,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     base: JsonRecord,
     state: SnapshotState,
     key: string,
-    snapshotId: string
+    snapshotId: string,
   ): Promise<JsonRecord> {
     const evalResult = (await sendCdpCommand(tabId, "Runtime.evaluate", {
       expression: `(() => {
@@ -1591,28 +1910,38 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         };
       })()`,
       returnByValue: true,
-      awaitPromise: true
+      awaitPromise: true,
     })) as JsonRecord;
     const interactiveEvalException = asRecord(evalResult.exceptionDetails);
     if (Object.keys(interactiveEvalException).length > 0) {
       const exceptionObj = asRecord(interactiveEvalException.exception);
       throw new Error(
         `cdp.snapshot interactive eval exception: ${String(
-          interactiveEvalException.text || exceptionObj.description || exceptionObj.value || "unknown"
-        )}`
+          interactiveEvalException.text ||
+            exceptionObj.description ||
+            exceptionObj.value ||
+            "unknown",
+        )}`,
       );
     }
     const value = asRecord(asRecord(evalResult.result).value);
     if (value.ok !== true) {
-      throw new Error(`cdp.snapshot failed: ${String(value.error || "interactive evaluate failed")}`);
+      throw new Error(
+        `cdp.snapshot failed: ${String(value.error || "interactive evaluate failed")}`,
+      );
     }
-    const rawNodes = Array.isArray(value.nodes) ? (value.nodes as JsonRecord[]) : [];
-    const nodes = (await enrichmentPipeline.run(enrichSnapshotNodes(state, rawNodes, key, snapshotId, "dom"), {
-      sessionId: String(base.sessionId || ""),
-      origin: String(value.url || ""),
-      location: String(value.url || ""),
-      failureCounts: state.failureCounts
-    })) as JsonRecord[];
+    const rawNodes = Array.isArray(value.nodes)
+      ? (value.nodes as JsonRecord[])
+      : [];
+    const nodes = (await enrichmentPipeline.run(
+      enrichSnapshotNodes(state, rawNodes, key, snapshotId, "dom"),
+      {
+        sessionId: String(base.sessionId || ""),
+        origin: String(value.url || ""),
+        location: String(value.url || ""),
+        failureCounts: state.failureCounts,
+      },
+    )) as JsonRecord[];
     return {
       ...base,
       url: String(value.url || ""),
@@ -1621,11 +1950,16 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       nodes,
       truncated: false,
       source: "dom",
-      hash: hashText(nodes.map((node) => summarizeSnapshotNode(node)).join("\n"))
+      hash: hashText(
+        nodes.map((node) => summarizeSnapshotNode(node)).join("\n"),
+      ),
     };
   }
 
-  async function takeSnapshot(tabId: number, rawOptions: JsonRecord = {}): Promise<JsonRecord> {
+  async function takeSnapshot(
+    tabId: number,
+    rawOptions: JsonRecord = {},
+  ): Promise<JsonRecord> {
     await ensureDebugger(tabId);
     const options = normalizeSnapshotOptions(rawOptions);
     const key = snapshotKey(options);
@@ -1645,7 +1979,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           return true;
         })()`,
         returnByValue: true,
-        awaitPromise: true
+        awaitPromise: true,
       });
     }
 
@@ -1661,12 +1995,15 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       maxTokens: options.maxTokens,
       url: "",
       title: "",
-      format: options.format
+      format: options.format,
     };
 
     let snapshot: JsonRecord;
     if (options.mode === "text") {
-      const textChars = Math.max(Number(options.maxChars || 4000), Math.min(48_000, Number(options.maxTokens || 1200) * 4));
+      const textChars = Math.max(
+        Number(options.maxChars || 4000),
+        Math.min(48_000, Number(options.maxTokens || 1200) * 4),
+      );
       const evalResult = (await sendCdpCommand(tabId, "Runtime.evaluate", {
         expression: `(() => {
           const selector = ${JSON.stringify(String(options.selector || ""))};
@@ -1677,20 +2014,25 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           return { ok: true, text: clipped, textLength: text.length, url: location.href, title: document.title };
         })()`,
         returnByValue: true,
-        awaitPromise: true
+        awaitPromise: true,
       })) as JsonRecord;
       const textEvalException = asRecord(evalResult.exceptionDetails);
       if (Object.keys(textEvalException).length > 0) {
         const exceptionObj = asRecord(textEvalException.exception);
         throw new Error(
           `cdp.snapshot text eval exception: ${String(
-            textEvalException.text || exceptionObj.description || exceptionObj.value || "unknown"
-          )}`
+            textEvalException.text ||
+              exceptionObj.description ||
+              exceptionObj.value ||
+              "unknown",
+          )}`,
         );
       }
       const value = asRecord(asRecord(evalResult.result).value);
       if (value.ok !== true) {
-        throw new Error(`cdp.snapshot failed: ${String(value.error || "text evaluate failed")}`);
+        throw new Error(
+          `cdp.snapshot failed: ${String(value.error || "text evaluate failed")}`,
+        );
       }
       const text = String(value.text || "");
       snapshot = {
@@ -1700,17 +2042,31 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         text,
         textLength: Number(value.textLength || text.length),
         hash: hashText(text),
-        truncated: Number(value.textLength || text.length) > text.length
+        truncated: Number(value.textLength || text.length) > text.length,
       };
     } else {
       try {
-        snapshot = await takeInteractiveSnapshotByAX(tabId, options, base, state, key, snapshotId);
+        snapshot = await takeInteractiveSnapshotByAX(
+          tabId,
+          options,
+          base,
+          state,
+          key,
+          snapshotId,
+        );
       } catch (error) {
-        const fallback = await takeInteractiveSnapshotByDomEvaluate(tabId, options, base, state, key, snapshotId);
+        const fallback = await takeInteractiveSnapshotByDomEvaluate(
+          tabId,
+          options,
+          base,
+          state,
+          key,
+          snapshotId,
+        );
         snapshot = {
           ...fallback,
           source: "dom-fallback",
-          axError: error instanceof Error ? error.message : String(error)
+          axError: error instanceof Error ? error.message : String(error),
         };
       }
     }
@@ -1724,8 +2080,8 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       compact: buildCompactSnapshot(snapshot),
       stats: {
         key,
-        hasPrevious: !!previous
-      }
+        hasPrevious: !!previous,
+      },
     };
   }
 
@@ -1740,16 +2096,23 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       if (Number.isInteger(index) && index >= 0) {
         const snapshots = Array.from(state.byKey.values());
         if (state.lastSnapshotId) {
-          const exact = snapshots.find((snapshot) => String(snapshot.snapshotId || "") === state.lastSnapshotId);
+          const exact = snapshots.find(
+            (snapshot) =>
+              String(snapshot.snapshotId || "") === state.lastSnapshotId,
+          );
           if (exact) {
-            const nodes = Array.isArray(exact.nodes) ? (exact.nodes as JsonRecord[]) : [];
+            const nodes = Array.isArray(exact.nodes)
+              ? (exact.nodes as JsonRecord[])
+              : [];
             const picked = nodes[index];
             if (picked && typeof picked === "object") return picked;
           }
         }
         for (let i = snapshots.length - 1; i >= 0; i -= 1) {
           const snapshot = snapshots[i];
-          const nodes = Array.isArray(snapshot.nodes) ? (snapshot.nodes as JsonRecord[]) : [];
+          const nodes = Array.isArray(snapshot.nodes)
+            ? (snapshot.nodes as JsonRecord[])
+            : [];
           const picked = nodes[index];
           if (picked && typeof picked === "object") return picked;
         }
@@ -1763,7 +2126,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         return {
           uid: ref,
           ref,
-          backendNodeId
+          backendNodeId,
         };
       }
     }
@@ -1779,17 +2142,20 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       value: string;
       waitForMs: number;
       brainUid?: string;
-    }
+    },
   ): Promise<JsonRecord> {
     const kind = input.kind;
-    const waitForMs = Math.max(0, Math.min(10_000, Number(input.waitForMs || 0)));
+    const waitForMs = Math.max(
+      0,
+      Math.min(10_000, Number(input.waitForMs || 0)),
+    );
     const started = Date.now();
     let objectId = "";
 
     const resolveObject = async (): Promise<string> => {
       try {
         const resolved = (await sendCdpCommand(tabId, "DOM.resolveNode", {
-          backendNodeId: input.backendNodeId
+          backendNodeId: input.backendNodeId,
         })) as JsonRecord;
         const nextObjectId = String(asRecord(resolved.object).objectId || "");
         if (nextObjectId) return nextObjectId;
@@ -1808,17 +2174,24 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
             }
             return null;
           })()`,
-          includeCommandLineAPI: true
+          includeCommandLineAPI: true,
         })) as JsonRecord;
         const nextObjectId = String(asRecord(uidEval.result).objectId || "");
         if (nextObjectId) return nextObjectId;
       }
 
-      throw toRuntimeError(`backendNodeId ${input.backendNodeId} resolve failed`, {
-        code: "E_CDP_RESOLVE_NODE",
-        retryable: true,
-        details: { tabId, backendNodeId: input.backendNodeId, brainUid: input.brainUid }
-      });
+      throw toRuntimeError(
+        `backendNodeId ${input.backendNodeId} resolve failed`,
+        {
+          code: "E_CDP_RESOLVE_NODE",
+          retryable: true,
+          details: {
+            tabId,
+            backendNodeId: input.backendNodeId,
+            brainUid: input.brainUid,
+          },
+        },
+      );
     };
 
     while (true) {
@@ -2098,14 +2471,14 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         objectId,
         functionDeclaration: expression,
         returnByValue: true,
-        awaitPromise: true
+        awaitPromise: true,
       })) as JsonRecord;
       const value = asRecord(asRecord(out.result).value);
       if (value.ok === false) {
         throw toRuntimeError(String(value.error || "backend action failed"), {
           code: "E_CDP_BACKEND_ACTION",
           retryable: true,
-          details: { tabId, backendNodeId: input.backendNodeId, kind }
+          details: { tabId, backendNodeId: input.backendNodeId, kind },
         });
       }
       if (value.shouldNativeClick === true) {
@@ -2115,24 +2488,50 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           if (!Number.isFinite(x) || !Number.isFinite(y)) {
             throw new Error("native click coordinates are not finite");
           }
-          await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
-          await sendCdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
-          return { ok: true, clicked: true, via: "cdp-native", url: value.url, title: value.title, objectId };
+          await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
+            type: "mousePressed",
+            x,
+            y,
+            button: "left",
+            clickCount: 1,
+          });
+          await sendCdpCommand(tabId, "Input.dispatchMouseEvent", {
+            type: "mouseReleased",
+            x,
+            y,
+            button: "left",
+            clickCount: 1,
+          });
+          return {
+            ok: true,
+            clicked: true,
+            via: "cdp-native",
+            url: value.url,
+            title: value.title,
+            objectId,
+          };
         } catch {
           // fallback to JS click via callFunctionOn
           await sendCdpCommand(tabId, "Runtime.callFunctionOn", {
             objectId,
             functionDeclaration: "function() { this.click?.(); }",
-            awaitPromise: true
+            awaitPromise: true,
           });
-          return { ok: true, clicked: true, via: "cdp-js-fallback", url: value.url, title: value.title, objectId };
+          return {
+            ok: true,
+            clicked: true,
+            via: "cdp-js-fallback",
+            url: value.url,
+            title: value.title,
+            objectId,
+          };
         }
       }
       if (kind === "click" && value.shouldNativeClick === false) {
         await sendCdpCommand(tabId, "Runtime.callFunctionOn", {
           objectId,
           functionDeclaration: "function() { this.click?.(); }",
-          awaitPromise: true
+          awaitPromise: true,
         });
         return {
           ok: true,
@@ -2141,29 +2540,41 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           nativeReason: value.nativeReason,
           url: value.url,
           title: value.title,
-          objectId
+          objectId,
         };
       }
       return { ...value, objectId };
     } finally {
       if (objectId) {
-        await sendCdpCommand(tabId, "Runtime.releaseObject", { objectId }).catch(() => {
+        await sendCdpCommand(tabId, "Runtime.releaseObject", {
+          objectId,
+        }).catch(() => {
           // ignore stale object release
         });
       }
     }
   }
 
-  async function executeRefActionByCDP(tabId: number, rawAction: JsonRecord): Promise<JsonRecord> {
+  async function executeRefActionByCDP(
+    tabId: number,
+    rawAction: JsonRecord,
+  ): Promise<JsonRecord> {
     await ensureDebugger(tabId);
     const kind = normalizeActionKind(rawAction.kind);
-    const key = typeof rawAction.key === "string" ? rawAction.key.trim() : typeof rawAction.value === "string" ? rawAction.value.trim() : "";
+    const key =
+      typeof rawAction.key === "string"
+        ? rawAction.key.trim()
+        : typeof rawAction.value === "string"
+          ? rawAction.value.trim()
+          : "";
     const value = String(rawAction.value ?? rawAction.text ?? "");
 
     if (kind === "navigate") {
       const url = String(rawAction.url || "").trim();
       if (!url) throw new Error("url required for navigate");
-      const nav = (await sendCdpCommand(tabId, "Page.navigate", { url })) as JsonRecord;
+      const nav = (await sendCdpCommand(tabId, "Page.navigate", {
+        url,
+      })) as JsonRecord;
       return {
         tabId,
         kind,
@@ -2171,8 +2582,8 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           ok: true,
           navigated: true,
           to: url,
-          frameId: nav.frameId || null
-        }
+          frameId: nav.frameId || null,
+        },
       };
     }
 
@@ -2187,31 +2598,50 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           return { ok: true, pressed: k, url: location.href, title: document.title };
         })()`,
         returnByValue: true,
-        awaitPromise: true
+        awaitPromise: true,
       })) as JsonRecord;
       return {
         tabId,
         kind,
-        result: asRecord(asRecord(out.result).value)
+        result: asRecord(asRecord(out.result).value),
       };
     }
 
-    const refRaw = typeof rawAction.ref === "string" ? rawAction.ref : typeof rawAction.uid === "string" ? rawAction.uid : "";
+    const refRaw =
+      typeof rawAction.ref === "string"
+        ? rawAction.ref
+        : typeof rawAction.uid === "string"
+          ? rawAction.uid
+          : "";
     const ref = String(refRaw || "").trim();
-    const explicitSelector = typeof rawAction.selector === "string" ? rawAction.selector.trim() : "";
+    const explicitSelector =
+      typeof rawAction.selector === "string" ? rawAction.selector.trim() : "";
     const fromRef = ref ? resolveRefEntry(tabId, ref) : {};
     const selector = String(explicitSelector || fromRef.selector || "").trim();
     const brainUid = String(fromRef.brainUid || "").trim();
     const backendNodeId =
-      toPositiveInteger(rawAction.backendNodeId) || toPositiveInteger(fromRef.backendNodeId) || toPositiveInteger(fromRef.nodeId);
+      toPositiveInteger(rawAction.backendNodeId) ||
+      toPositiveInteger(fromRef.backendNodeId) ||
+      toPositiveInteger(fromRef.nodeId);
     const waitForMsRaw = Number(rawAction.waitForMs);
     const waitForMs = Number.isFinite(waitForMsRaw)
       ? Math.max(0, Math.min(10_000, Math.floor(waitForMsRaw)))
-      : kind === "click" || kind === "type" || kind === "fill" || kind === "select"
+      : kind === "click" ||
+          kind === "type" ||
+          kind === "fill" ||
+          kind === "select"
         ? 1_500
         : 0;
 
-    if (backendNodeId && (kind === "click" || kind === "type" || kind === "fill" || kind === "select" || kind === "hover" || kind === "read")) {
+    if (
+      backendNodeId &&
+      (kind === "click" ||
+        kind === "type" ||
+        kind === "fill" ||
+        kind === "select" ||
+        kind === "hover" ||
+        kind === "read")
+    ) {
       try {
         // For type/fill, we need to focus first to make Input commands work reliably
         if (kind === "type" || kind === "fill") {
@@ -2223,22 +2653,29 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           kind,
           value,
           waitForMs: selector ? 0 : waitForMs,
-          brainUid: brainUid || undefined
+          brainUid: brainUid || undefined,
         });
 
         if (kind === "type" || kind === "fill") {
           // Native Input Injection via CDP
           // This mimics hardware-level typing which React/Lexical/Draft.js cannot ignore
           await sendCdpCommand(tabId, "Input.insertText", { text: value });
-          
+
           // Dispatch a generic 'input' event via JS as a final nudge for state sync
           await sendCdpCommand(tabId, "Runtime.callFunctionOn", {
             objectId: backendResult.objectId, // We'll need to return this from executeActionByBackendNode
-            functionDeclaration: "function() { this.dispatchEvent(new Event('input', { bubbles: true })); }",
-            awaitPromise: true
+            functionDeclaration:
+              "function() { this.dispatchEvent(new Event('input', { bubbles: true })); }",
+            awaitPromise: true,
           }).catch(() => {});
-          
-          return { ok: true, typed: value.length, via: "cdp-native-input", url: backendResult.url, title: backendResult.title };
+
+          return {
+            ok: true,
+            typed: value.length,
+            via: "cdp-native-input",
+            url: backendResult.url,
+            title: backendResult.title,
+          };
         }
         return {
           tabId,
@@ -2247,7 +2684,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           ref: ref || undefined,
           selector: selector || undefined,
           backendNodeId,
-          result: backendResult
+          result: backendResult,
         };
       } catch {
         // fallback to selector flow below
@@ -2264,16 +2701,17 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
           return { ok: true, scrolled: true, top: Number.isFinite(top) ? top : 0, url: location.href, title: document.title };
         })()`,
         returnByValue: true,
-        awaitPromise: true
+        awaitPromise: true,
       })) as JsonRecord;
       return {
         tabId,
         kind,
-        result: asRecord(asRecord(out.result).value)
+        result: asRecord(asRecord(out.result).value),
       };
     }
 
-    if (!selector) throw new Error("action target not found by ref/selector/backendNodeId");
+    if (!selector)
+      throw new Error("action target not found by ref/selector/backendNodeId");
 
     const expression = `(async () => {
       const selector = ${JSON.stringify(selector)};
@@ -2285,7 +2723,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         role: String(fromRef.role || ""),
         name: String(fromRef.name || ""),
         placeholder: String(fromRef.placeholder || ""),
-        ariaLabel: String(fromRef.ariaLabel || "")
+        ariaLabel: String(fromRef.ariaLabel || ""),
       })};
       const TYPABLE_SELECTOR = "input,textarea,[contenteditable='true'],[role='textbox'],[role='searchbox'],[role='combobox']";
       const allTypables = () => Array.from(
@@ -2516,7 +2954,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     const out = (await sendCdpCommand(tabId, "Runtime.evaluate", {
       expression,
       returnByValue: true,
-      awaitPromise: true
+      awaitPromise: true,
     })) as JsonRecord;
 
     const resultValue = asRecord(asRecord(out.result).value);
@@ -2531,32 +2969,50 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       ref: ref || undefined,
       selector,
       backendNodeId: backendNodeId || undefined,
-      result: resultValue
+      result: resultValue,
     };
   }
 
-  async function executeByCDP(tabId: number, action: JsonRecord): Promise<unknown> {
+  async function executeByCDP(
+    tabId: number,
+    action: JsonRecord,
+  ): Promise<unknown> {
     await ensureDebugger(tabId);
 
     if (action.type === "runtime.evaluate") {
       return await sendCdpCommand(tabId, "Runtime.evaluate", {
         expression: action.expression,
-        returnByValue: action.returnByValue !== false
+        returnByValue: action.returnByValue !== false,
       });
     }
     if (action.type === "navigate") {
       return await sendCdpCommand(tabId, "Page.navigate", { url: action.url });
     }
     if (action.domain && action.method) {
-      return await sendCdpCommand(tabId, `${String(action.domain)}.${String(action.method)}`, asRecord(action.params));
+      return await sendCdpCommand(
+        tabId,
+        `${String(action.domain)}.${String(action.method)}`,
+        asRecord(action.params),
+      );
     }
     throw new Error("Unsupported CDP action");
   }
 
-  async function verifyByCDP(tabId: number, action: JsonRecord, result: JsonRecord | null): Promise<JsonRecord> {
-    const expect = action.expect && typeof action.expect === "object" ? asRecord(action.expect) : action;
+  async function verifyByCDP(
+    tabId: number,
+    action: JsonRecord,
+    result: JsonRecord | null,
+  ): Promise<JsonRecord> {
+    const expect =
+      action.expect && typeof action.expect === "object"
+        ? asRecord(action.expect)
+        : action;
     const defaultWaitMs =
-      expect.urlChanged === true || Boolean(expect.selectorExists) || Boolean(expect.textIncludes) ? 1_500 : 0;
+      expect.urlChanged === true ||
+      Boolean(expect.selectorExists) ||
+      Boolean(expect.textIncludes)
+        ? 1_500
+        : 0;
     const waitForMs = toIntInRange(expect.waitForMs, defaultWaitMs, 0, 15_000);
     const pollIntervalMs = toIntInRange(expect.pollIntervalMs, 120, 50, 1_000);
     const started = Date.now();
@@ -2573,19 +3029,29 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       let verified = true;
 
       if (expect.expectUrlContains || expect.urlContains) {
-        const expected = String(expect.expectUrlContains || expect.urlContains || "");
-        const pass = String(asRecord(observation.page).url || "").includes(expected);
+        const expected = String(
+          expect.expectUrlContains || expect.urlContains || "",
+        );
+        const pass = String(asRecord(observation.page).url || "").includes(
+          expected,
+        );
         checks.push({ name: "expectUrlContains", pass, expected });
         if (!pass) verified = false;
       }
       if (expect.expectTitleContains || expect.titleContains) {
-        const expected = String(expect.expectTitleContains || expect.titleContains || "");
-        const pass = String(asRecord(observation.page).title || "").includes(expected);
+        const expected = String(
+          expect.expectTitleContains || expect.titleContains || "",
+        );
+        const pass = String(asRecord(observation.page).title || "").includes(
+          expected,
+        );
         checks.push({ name: "expectTitleContains", pass, expected });
         if (!pass) verified = false;
       }
       if (expect.urlChanged === true) {
-        const previousUrl = String(expect.previousUrl || asRecord(result).url || "");
+        const previousUrl = String(
+          expect.previousUrl || asRecord(result).url || "",
+        );
         const currentUrl = String(asRecord(observation.page).url || "");
         const pass = !!previousUrl && previousUrl !== currentUrl;
         checks.push({ name: "urlChanged", pass, previousUrl, currentUrl });
@@ -2611,7 +3077,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
             };
             return readText(document);
           })()`,
-          returnByValue: true
+          returnByValue: true,
         })) as JsonRecord;
         const text = String(asRecord(out.result).value || "");
         const pass = text.includes(expected);
@@ -2639,7 +3105,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
             };
             return existsIn(document);
           })()`,
-          returnByValue: true
+          returnByValue: true,
         })) as JsonRecord;
         const pass = asRecord(out.result).value === true;
         checks.push({ name: "selectorExists", pass, expected: selector });
@@ -2664,7 +3130,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       checks: finalChecks,
       observation: finalObservation,
       attempts,
-      elapsedMs: Date.now() - started
+      elapsedMs: Date.now() - started,
     };
   }
 
@@ -2683,7 +3149,9 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     try {
       const tab = await chrome.tabs.get(tabId);
       if (Number.isInteger(tab?.windowId) && Number(tab.windowId) > 0) {
-        await chrome.windows.update(Number(tab.windowId), { focused: true }).catch(() => {});
+        await chrome.windows
+          .update(Number(tab.windowId), { focused: true })
+          .catch(() => {});
       }
       await chrome.tabs.update(tabId, { active: true }).catch(() => {});
     } catch {
@@ -2722,7 +3190,9 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       if (type === "lease.heartbeat") {
         const tabId = toValidTabId(msg.tabId);
         if (!tabId) return fail("lease.heartbeat 需要有效 tabId");
-        return ok(heartbeatLease(tabId, resolveOwnerFromMessage(msg), msg.ttlMs));
+        return ok(
+          heartbeatLease(tabId, resolveOwnerFromMessage(msg), msg.ttlMs),
+        );
       }
       if (type === "lease.release") {
         const tabId = toValidTabId(msg.tabId);
@@ -2753,8 +3223,8 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
             toRuntimeError("action requires focused tab", {
               code: "E_CDP_FOCUS_REQUIRED",
               retryable: true,
-              details: { tabId }
-            })
+              details: { tabId },
+            }),
           );
         }
         if (action.forceFocus === true) {
@@ -2774,7 +3244,9 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       if (type === "cdp.verify") {
         const tabId = toValidTabId(msg.tabId);
         if (!tabId) return fail("cdp.verify 需要有效 tabId");
-        return ok(await verifyByCDP(tabId, asRecord(msg.action), asRecord(msg.result)));
+        return ok(
+          await verifyByCDP(tabId, asRecord(msg.action), asRecord(msg.result)),
+        );
       }
       if (type === "cdp.detach") {
         const tabId = toValidTabId(msg.tabId);
@@ -2784,6 +3256,6 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       }
 
       return null;
-    }
+    },
   };
 }

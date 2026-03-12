@@ -213,6 +213,9 @@ onMounted(() => {
             <p class="text-[10px] text-ui-text-muted">
               {{ `${health.llmDefaultProfile || "default"} · ${health.llmModel || "auto"}` }}
             </p>
+            <p class="text-[10px] text-ui-text-muted">
+              {{ `辅助 ${health.llmAuxProfile || "跟随主对话"} · 备用 ${health.llmFallbackProfile || "未启用"}` }}
+            </p>
             <p class="text-[10px] text-ui-text-muted">{{ health.hasLlmApiKey ? "当前默认 Profile 可用" : "当前默认 Profile 缺少凭据" }}</p>
           </div>
           <div class="rounded border border-ui-border bg-ui-bg p-2.5">

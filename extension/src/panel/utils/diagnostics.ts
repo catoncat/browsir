@@ -783,6 +783,8 @@ export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}
     config: {
       bridgeUrl: String(toRecord(config).bridgeUrl || ""),
       llmDefaultProfile: String(toRecord(config).llmDefaultProfile || "default"),
+      llmAuxProfile: String(toRecord(config).llmAuxProfile || ""),
+      llmFallbackProfile: String(toRecord(config).llmFallbackProfile || ""),
       llmProvider: String(toRecord(config).llmProvider || ""),
       llmModel: String(toRecord(config).llmModel || ""),
       hasLlmApiKey: toRecord(config).hasLlmApiKey === true

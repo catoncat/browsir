@@ -6,13 +6,13 @@ import type { BridgeConfig } from "../runtime-infra.browser";
 
 type TestBridgeConfig = BridgeConfig & {
   llmProfiles?: unknown;
-  llmProfileChains?: unknown;
 };
 
 function baseConfig(): TestBridgeConfig {
   return {
     bridgeUrl: "ws://127.0.0.1:8787/ws",
     bridgeToken: "dev-token",
+    browserRuntimeStrategy: "host-first",
     llmDefaultProfile: "default",
     maxSteps: 100,
     autoTitleInterval: 10,
@@ -21,12 +21,12 @@ function baseConfig(): TestBridgeConfig {
     llmRetryMaxAttempts: 2,
     llmMaxRetryDelayMs: 60_000,
     devAutoReload: true,
-    devReloadIntervalMs: 1500
+    devReloadIntervalMs: 1500,
   };
 }
 
 describe("llm-profile-resolver.browser", () => {
-  it("resolves explicit profile and ordered chain", () => {
+  it("resolves explicit profile and fallback route", () => {
     const config = baseConfig();
     config.llmProfiles = [
       {
@@ -35,7 +35,7 @@ describe("llm-profile-resolver.browser", () => {
         llmApiBase: "https://example.ai/v1",
         llmApiKey: "k1",
         llmModel: "gpt-basic",
-        role: "worker"
+        role: "worker",
       },
       {
         id: "worker.pro",
@@ -43,22 +43,20 @@ describe("llm-profile-resolver.browser", () => {
         llmApiBase: "https://example.ai/v1",
         llmApiKey: "k2",
         llmModel: "gpt-pro",
-        role: "worker"
-      }
+        role: "worker",
+      },
     ];
-    config.llmProfileChains = {
-      worker: ["worker.basic", "worker.pro"]
-    };
+    config.llmFallbackProfile = "worker.pro";
 
     const out = resolveLlmRoute({
       config: config as BridgeConfig,
-      profile: "worker.pro",
-      role: "worker"
+      profile: "worker.basic",
+      role: "worker",
     });
     expect(out.ok).toBe(true);
     if (!out.ok) return;
-    expect(out.route.profile).toBe("worker.pro");
-    expect(out.route.llmModel).toBe("gpt-pro");
+    expect(out.route.profile).toBe("worker.basic");
+    expect(out.route.llmModel).toBe("gpt-basic");
     expect(out.route.orderedProfiles).toEqual(["worker.basic", "worker.pro"]);
     expect(out.route.fromLegacy).toBe(false);
   });
@@ -80,13 +78,13 @@ describe("llm-profile-resolver.browser", () => {
         llmApiBase: "",
         llmApiKey: "",
         llmModel: "gpt-basic",
-        role: "worker"
-      }
+        role: "worker",
+      },
     ];
     const out = resolveLlmRoute({
       config: config as BridgeConfig,
       profile: "worker.basic",
-      role: "worker"
+      role: "worker",
     });
     expect(out.ok).toBe(false);
     if (out.ok) return;
@@ -102,7 +100,7 @@ describe("llm-profile-resolver.browser", () => {
         llmApiBase: "https://example.ai/v1",
         llmApiKey: "k-review",
         llmModel: "gpt-review",
-        role: "reviewer"
+        role: "reviewer",
       },
       "reviewer.pro": {
         id: "reviewer.pro",
@@ -110,16 +108,14 @@ describe("llm-profile-resolver.browser", () => {
         llmApiBase: "https://example.ai/v1",
         llmApiKey: "k-review-pro",
         llmModel: "gpt-review-pro",
-        role: "reviewer"
-      }
+        role: "reviewer",
+      },
     };
-    config.llmProfileChains = {
-      reviewer: ["reviewer.basic", "reviewer.pro"]
-    };
+    config.llmFallbackProfile = "reviewer.pro";
 
     const out = resolveLlmRoute({
       config: config as BridgeConfig,
-      profile: "reviewer.basic"
+      profile: "reviewer.basic",
     });
     expect(out.ok).toBe(false);
     if (out.ok) return;
