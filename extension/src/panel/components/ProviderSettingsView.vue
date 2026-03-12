@@ -9,6 +9,7 @@ import {
   type PanelLlmProfile
 } from "../stores/runtime";
 import { ArrowLeft, Eye, EyeOff, Loader2, Plus, Trash2 } from "lucide-vue-next";
+import { normalizeProviderConnectionConfig } from "../../shared/llm-provider-config";
 
 const emit = defineEmits(["close"]);
 const store = useRuntimeStore();
@@ -25,7 +26,7 @@ const escalationPolicyId = "provider-escalation-policy";
 const profileChainsId = "provider-profile-chains";
 const CURSOR_WEB_PROFILE_ID = "cursor-web";
 const CURSOR_HELP_URL = "https://cursor.com/help";
-const CURSOR_TAB_PATTERNS = ["https://cursor.com/help*", "https://cursor.com/*"] as const;
+const CURSOR_TAB_PATTERNS = ["https://cursor.com/help*"] as const;
 const builtinProviderOptions = [
   { value: "openai_compatible", label: "通用 API" },
   { value: "cursor_help_web", label: "Cursor 网页聊天" }
@@ -83,7 +84,7 @@ function getProfileTitle(profile: PanelLlmProfile, index: number): string {
 function getProfileSummary(profile: PanelLlmProfile): string {
   if (isCursorHelpWebProvider(profile)) {
     return getCursorHelpTargetTabId(profile)
-      ? "已连接到 Cursor Help，会优先沿用网页中的当前模型。"
+      ? "已连接 Cursor Help，发送时可跟随当前网页模型。"
       : "保存后会自动连接 Cursor Help。";
   }
   const role = String(profile.role || "").trim() || "worker";
@@ -279,11 +280,16 @@ async function enableCursorWebPreset(): Promise<void> {
   ensureProfiles();
   let profile = findCursorWebProfile();
   if (!profile) {
+    const connection = normalizeProviderConnectionConfig({
+      provider: "cursor_help_web",
+      llmApiBase: "",
+      llmApiKey: ""
+    });
     profile = {
       id: CURSOR_WEB_PROFILE_ID,
       provider: "cursor_help_web",
-      llmApiBase: "",
-      llmApiKey: "",
+      llmApiBase: connection.llmApiBase,
+      llmApiKey: connection.llmApiKey,
       llmModel: "auto",
       providerOptions: {
         targetSite: "cursor_help"
@@ -297,8 +303,13 @@ async function enableCursorWebPreset(): Promise<void> {
   }
   profile.provider = "cursor_help_web";
   profile.role = "worker";
-  profile.llmApiBase = "";
-  profile.llmApiKey = "";
+  const connection = normalizeProviderConnectionConfig({
+    provider: profile.provider,
+    llmApiBase: profile.llmApiBase,
+    llmApiKey: profile.llmApiKey
+  });
+  profile.llmApiBase = connection.llmApiBase;
+  profile.llmApiKey = connection.llmApiKey;
   profile.llmModel = String(profile.llmModel || "auto").trim() || "auto";
   providerOptions(profile).targetSite = "cursor_help";
   config.value.llmDefaultProfile = profile.id;
@@ -416,11 +427,16 @@ function normalizeProfilesBeforeSave(): void {
     if (provider.toLowerCase() === "cursor_help_web") {
       providerOptions.targetSite = "cursor_help";
     }
+    const connection = normalizeProviderConnectionConfig({
+      provider,
+      llmApiBase: raw.llmApiBase,
+      llmApiKey: raw.llmApiKey
+    });
     normalized.push({
       id: normalizedId,
       provider,
-      llmApiBase: String(raw.llmApiBase || "").trim(),
-      llmApiKey: String(raw.llmApiKey || ""),
+      llmApiBase: connection.llmApiBase,
+      llmApiKey: connection.llmApiKey,
       llmModel: String(raw.llmModel || DEFAULT_PANEL_LLM_MODEL).trim() || DEFAULT_PANEL_LLM_MODEL,
       providerOptions,
       role: String(raw.role || "worker").trim() || "worker",
@@ -530,7 +546,7 @@ onMounted(() => {
           <div class="space-y-1">
             <h3 class="text-[12px] font-bold uppercase tracking-tighter text-ui-text-muted/80">快速接入 Cursor</h3>
             <p class="text-[12px] text-ui-text-muted leading-relaxed">
-              把 Cursor Help 页面接成一个可选模型方案。适合临时借用网页里的账号、额度和当前会话模型。
+              把 Cursor Help 接成一个可选模型方案，适合临时复用网页里的账号状态和当前模型。
             </p>
             <p class="text-[11px] text-ui-text-muted/80">
               {{
