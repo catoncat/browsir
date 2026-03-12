@@ -1,4 +1,5 @@
 import { initSessionIndex, resetSessionStore } from "./storage-reset.browser";
+import { kvGet, kvSet } from "./idb-storage";
 import { BrainOrchestrator } from "./orchestrator.browser";
 import {
   createRuntimeInfraHandler,
@@ -33,6 +34,8 @@ import {
   type SessionEntry,
   type SessionMeta,
 } from "./types";
+import exampleSendSuccessPluginPackage from "../../../plugins/example-send-success-global-message/plugin.json";
+import exampleMissionHudDogPluginPackage from "../../../plugins/example-mission-hud-dog/plugin.json";
 
 interface RuntimeOk<T = unknown> {
   ok: true;
@@ -65,14 +68,15 @@ const MAX_SKILL_DISCOVER_MAX_FILES = 4096;
 const MAX_PLUGIN_PACKAGE_READ_BYTES = 512 * 1024;
 const BUILTIN_PLUGIN_ID_PREFIX = "runtime.builtin.plugin.";
 const UI_EXTENSION_STORAGE_KEY = "brain.plugin.ui_extensions";
+const PLUGIN_REGISTRY_STORAGE_KEY = "brain.plugin.registry:v1";
+const PLUGIN_EXAMPLE_SEED_STORAGE_KEY = "brain.plugin.seed.examples:v1";
 const PLUGIN_SANDBOX_DEFAULT_SESSION_ID = "plugin-studio";
-const PLUGIN_SANDBOX_RUNNER_PATH = "mem://__bbl/plugin-host-runner.cjs";
+const PLUGIN_SANDBOX_RUNNER_PATH = "mem://.bbl/plugin-host-runner.cjs";
 const PLUGIN_SANDBOX_RESULT_PREFIX = "__BBL_PLUGIN_RESULT__";
 const DEFAULT_SKILL_DISCOVER_ROOTS: Array<{ root: string; source: string }> = [
   { root: "mem://skills", source: "browser" },
 ];
-const PLUGIN_SANDBOX_RUNNER_SOURCE = String.raw`const fs = require("fs");
-const { pathToFileURL } = require("url");
+const PLUGIN_SANDBOX_RUNNER_SOURCE = String.raw`const { pathToFileURL } = require("url");
 
 const RESULT_PREFIX = "__BBL_PLUGIN_RESULT__";
 
@@ -179,13 +183,13 @@ async function runHook(handlers, payload) {
 
 (async () => {
   try {
-    const inputFilePath = String(process.argv[2] || "").trim();
-    const modulePath = String(process.argv[3] || "").trim();
-    if (!inputFilePath || !modulePath) {
-      throw new Error("runner args missing: <input-file> <module-path>");
+    const modulePath = String(process.argv[2] || "").trim();
+    const inputBase64 = String(process.env.BBL_PLUGIN_INPUT_BASE64 || "").trim();
+    if (!modulePath || !inputBase64) {
+      throw new Error("runner args missing: <module-path> + BBL_PLUGIN_INPUT_BASE64");
     }
-    const rawInput = String(fs.readFileSync(inputFilePath, "utf8") || "{}");
-    const input = JSON.parse(rawInput);
+    const rawInput = Buffer.from(inputBase64, "base64").toString("utf8");
+    const input = JSON.parse(String(rawInput || "{}"));
     const state = {
       runtimeMessages: []
     };
@@ -227,6 +231,20 @@ async function runHook(handlers, payload) {
     process.exitCode = 1;
   }
 })();`;
+
+function encodeBase64Utf8(text: string): string {
+  const bytes = new TextEncoder().encode(String(text || ""));
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function quoteForShellSingle(value: string): string {
+  return `'${String(value || "").replace(/'/g, `'\"'\"'`)}'`;
+}
 
 function ok<T>(data: T): RuntimeResult<T> {
   return { ok: true, data };
@@ -460,259 +478,6 @@ function parsePluginSandboxResult(output: unknown): Record<string, unknown> {
   );
 }
 
-function isPluginSandboxCspEvalError(error: unknown): boolean {
-  const text = error instanceof Error ? error.message : String(error);
-  const lowered = text.toLowerCase();
-  return (
-    lowered.includes("unsafe-eval") ||
-    lowered.includes("evaluating a string as javascript violates")
-  );
-}
-
-function encodeBase64Utf8(text: string): string {
-  const bytes = new TextEncoder().encode(String(text || ""));
-  let binary = "";
-  const CHUNK_SIZE = 0x8000;
-  for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
-    const chunk = bytes.subarray(i, i + CHUNK_SIZE);
-    binary += String.fromCharCode(...chunk);
-  }
-  return btoa(binary);
-}
-
-function quoteForShellSingle(value: string): string {
-  return `'${String(value || "").replace(/'/g, `'\"'\"'`)}'`;
-}
-
-function buildHostPluginSandboxCommand(input: {
-  moduleSource: string;
-  exportName: string;
-  op: "describe" | "runHook";
-  hook?: string;
-  payload?: unknown;
-}): string {
-  const sourceBase64 = encodeBase64Utf8(input.moduleSource);
-  const runnerInputBase64 = encodeBase64Utf8(
-    JSON.stringify({
-      op: input.op,
-      exportName: input.exportName,
-      ...(input.op === "runHook"
-        ? {
-            hook: String(input.hook || "").trim(),
-            payload: input.payload,
-          }
-        : {}),
-    }),
-  );
-  return `BBL_PLUGIN_SOURCE_BASE64=${quoteForShellSingle(sourceBase64)} BBL_PLUGIN_INPUT_BASE64=${quoteForShellSingle(runnerInputBase64)} node <<'NODE'
-const RESULT_PREFIX = "__BBL_PLUGIN_RESULT__";
-
-function toRecord(value) {
-  return value && typeof value === "object" ? value : {};
-}
-
-function emit(payload) {
-  process.stdout.write(RESULT_PREFIX + JSON.stringify(payload) + "\\n");
-}
-
-function installChromeBridge(state) {
-  const baseChrome = globalThis.chrome && typeof globalThis.chrome === "object" ? globalThis.chrome : {};
-  const baseRuntime = baseChrome.runtime && typeof baseChrome.runtime === "object" ? baseChrome.runtime : {};
-  globalThis.chrome = {
-    ...baseChrome,
-    runtime: {
-      ...baseRuntime,
-      sendMessage(message) {
-        state.runtimeMessages.push(message);
-        return Promise.resolve({ ok: true });
-      }
-    }
-  };
-}
-
-function createApi(registry) {
-  return {
-    on(hook, handler, options = {}) {
-      const name = String(hook || "").trim();
-      if (!name || typeof handler !== "function") return;
-      if (!Array.isArray(registry.hooks[name])) registry.hooks[name] = [];
-      registry.hooks[name].push({ handler, options: toRecord(options) });
-    },
-    registerTool() {},
-    registerModeProvider() {},
-    registerCapabilityProvider() {},
-    registerCapabilityPolicy() {},
-    registerProvider() {}
-  };
-}
-
-async function runHook(handlers, payload) {
-  let hasPatch = false;
-  const mergedPatch = {};
-  let current = payload;
-  for (const item of handlers) {
-    const result = await Promise.resolve(item.handler(current));
-    const row = toRecord(result);
-    const action = String(row.action || "").trim();
-    if (action === "block") {
-      return { action: "block", reason: String(row.reason || "").trim() || undefined };
-    }
-    if (action === "patch") {
-      const patch = toRecord(row.patch);
-      Object.assign(mergedPatch, patch);
-      hasPatch = true;
-      if (current && typeof current === "object" && !Array.isArray(current)) {
-        current = { ...current, ...patch };
-      }
-    }
-  }
-  if (hasPatch) {
-    return { action: "patch", patch: mergedPatch };
-  }
-  return { action: "continue" };
-}
-
-async function loadFactoryFromSource(sourceText, exportName) {
-  const sourceBase64 = Buffer.from(String(sourceText || ""), "utf8").toString("base64");
-  const esmUrl = "data:text/javascript;base64," + sourceBase64;
-  try {
-    const moduleNs = await import(esmUrl);
-    const target = String(exportName || "default").trim() || "default";
-    const setup = target === "default" ? (moduleNs?.default ?? moduleNs) : moduleNs?.[target];
-    if (typeof setup !== "function") {
-      throw new Error("plugin module missing export: " + target);
-    }
-    return setup;
-  } catch (esmError) {
-    const cjsWrapped = [
-      "const module = { exports: {} };",
-      "const exports = module.exports;",
-      "const require = (_id) => { throw new Error('require is not supported in plugin sandbox cjs fallback'); };",
-      String(sourceText || ""),
-      "export default module.exports;"
-    ].join("\\n");
-    const cjsBase64 = Buffer.from(cjsWrapped, "utf8").toString("base64");
-    const cjsUrl = "data:text/javascript;base64," + cjsBase64;
-    const moduleNs = await import(cjsUrl);
-    const target = String(exportName || "default").trim() || "default";
-    const setup = target === "default" ? (moduleNs?.default ?? moduleNs) : moduleNs?.[target];
-    if (typeof setup !== "function") {
-      throw esmError;
-    }
-    return setup;
-  }
-}
-
-(async () => {
-  try {
-    const sourceBase64 = String(process.env.BBL_PLUGIN_SOURCE_BASE64 || "").trim();
-    const inputBase64 = String(process.env.BBL_PLUGIN_INPUT_BASE64 || "").trim();
-    if (!sourceBase64 || !inputBase64) {
-      throw new Error("runner env missing: BBL_PLUGIN_SOURCE_BASE64 / BBL_PLUGIN_INPUT_BASE64");
-    }
-    const sourceText = Buffer.from(sourceBase64, "base64").toString("utf8");
-    const input = JSON.parse(Buffer.from(inputBase64, "base64").toString("utf8"));
-    const state = { runtimeMessages: [] };
-    installChromeBridge(state);
-    const registry = { hooks: {} };
-    const setup = await loadFactoryFromSource(sourceText, String(input.exportName || "default"));
-    await Promise.resolve(setup(createApi(registry)));
-    const op = String(input.op || "describe").trim() || "describe";
-    if (op === "describe") {
-      emit({ ok: true, hooks: Object.keys(registry.hooks) });
-      return;
-    }
-    if (op === "runHook") {
-      const hook = String(input.hook || "").trim();
-      const handlers = Array.isArray(registry.hooks[hook]) ? registry.hooks[hook] : [];
-      const hookResult = await runHook(handlers, input.payload);
-      emit({
-        ok: true,
-        hookResult,
-        runtimeMessages: state.runtimeMessages
-      });
-      return;
-    }
-    throw new Error("unsupported op: " + op);
-  } catch (error) {
-    emit({
-      ok: false,
-      error: error instanceof Error ? error.message : String(error)
-    });
-    process.exitCode = 1;
-  }
-})();
-NODE`;
-}
-
-function extractBridgeInvokeBashResult(
-  result: unknown,
-): Record<string, unknown> {
-  const root = toRecord(result);
-  const candidates = [
-    root,
-    toRecord(root.data),
-    toRecord(toRecord(root.data).data),
-    toRecord(root.result),
-  ];
-  for (const item of candidates) {
-    if ("stdout" in item || "stderr" in item || "exitCode" in item) {
-      return item;
-    }
-  }
-  return root;
-}
-
-async function invokePluginSandboxRunnerViaBridge(input: {
-  sessionId: string;
-  modulePath: string;
-  exportName: string;
-  op: "describe" | "runHook";
-  hook?: string;
-  payload?: unknown;
-  infra: RuntimeInfraHandler;
-}): Promise<Record<string, unknown>> {
-  const sessionId =
-    String(input.sessionId || "").trim() || PLUGIN_SANDBOX_DEFAULT_SESSION_ID;
-  const moduleSource = await readVirtualTextFile(
-    input.modulePath,
-    "plugin sandbox modulePath",
-    sessionId,
-  );
-  const command = buildHostPluginSandboxCommand({
-    moduleSource,
-    exportName: input.exportName,
-    op: input.op,
-    hook: input.hook,
-    payload: input.payload,
-  });
-  const bridgeResponse = await input.infra.handleMessage({
-    type: "bridge.invoke",
-    payload: {
-      tool: "bash",
-      args: {
-        cmdId: "bash.exec",
-        args: [command],
-        cwd: ".",
-        timeoutMs: 120_000,
-      },
-      sessionId,
-    },
-  });
-  if (!bridgeResponse || bridgeResponse.ok !== true) {
-    const errorText = bridgeResponse
-      ? String(bridgeResponse.error || "bridge.invoke failed")
-      : "bridge.invoke unavailable";
-    throw new Error(`plugin sandbox bridge 回退失败: ${errorText}`);
-  }
-  const row = extractBridgeInvokeBashResult(bridgeResponse.data);
-  const parsed = parsePluginSandboxResult(row);
-  if (parsed.ok !== true) {
-    throw new Error(String(parsed.error || "plugin sandbox 执行失败"));
-  }
-  return parsed;
-}
-
 async function invokePluginSandboxRunnerInBrowser(input: {
   sessionId: string;
   modulePath: string;
@@ -728,8 +493,6 @@ async function invokePluginSandboxRunnerInBrowser(input: {
     PLUGIN_SANDBOX_RUNNER_SOURCE,
     sessionId,
   );
-
-  const inputFile = `mem://__bbl/plugin-input-${toSafeVirtualSegment(randomId("runner"))}.json`;
   const payload: Record<string, unknown> = {
     op: input.op,
     exportName: input.exportName,
@@ -738,9 +501,8 @@ async function invokePluginSandboxRunnerInBrowser(input: {
     payload.hook = String(input.hook || "").trim();
     payload.payload = input.payload;
   }
-  await writeVirtualTextFile(inputFile, JSON.stringify(payload), sessionId);
-
-  const command = `node ${PLUGIN_SANDBOX_RUNNER_PATH} ${inputFile} ${input.modulePath}`;
+  const payloadBase64 = encodeBase64Utf8(JSON.stringify(payload));
+  const command = `BBL_PLUGIN_INPUT_BASE64=${quoteForShellSingle(payloadBase64)} node ${PLUGIN_SANDBOX_RUNNER_PATH} ${input.modulePath}`;
   const raw = await invokeVirtualFrame({
     tool: "bash",
     args: {
@@ -766,34 +528,8 @@ async function invokePluginSandboxRunner(input: {
   op: "describe" | "runHook";
   hook?: string;
   payload?: unknown;
-  infra?: RuntimeInfraHandler;
 }): Promise<Record<string, unknown>> {
-  try {
-    return await invokePluginSandboxRunnerInBrowser(input);
-  } catch (error) {
-    if (!isPluginSandboxCspEvalError(error)) {
-      throw error;
-    }
-    if (!input.infra || !isVirtualUri(input.modulePath)) {
-      throw error;
-    }
-    try {
-      return await invokePluginSandboxRunnerViaBridge({
-        ...input,
-        infra: input.infra,
-      });
-    } catch (bridgeError) {
-      const browserErrorText =
-        error instanceof Error ? error.message : String(error);
-      const bridgeErrorText =
-        bridgeError instanceof Error
-          ? bridgeError.message
-          : String(bridgeError);
-      throw new Error(
-        `plugin sandbox 浏览器执行被 CSP 拦截，bridge 回退也失败；browser=${browserErrorText}; bridge=${bridgeErrorText}`,
-      );
-    }
-  }
+  return await invokePluginSandboxRunnerInBrowser(input);
 }
 
 async function loadExtensionFactoryFromVirtualModule(input: {
@@ -801,14 +537,12 @@ async function loadExtensionFactoryFromVirtualModule(input: {
   modulePath: string;
   exportName: string;
   sessionId: string;
-  infra?: RuntimeInfraHandler;
 }): Promise<ExtensionFactory> {
   const describe = await invokePluginSandboxRunner({
     sessionId: input.sessionId,
     modulePath: input.modulePath,
     exportName: input.exportName,
     op: "describe",
-    infra: input.infra,
   });
   const discoveredHooks = toStringList(describe.hooks) || [];
   const declaredHooks =
@@ -828,7 +562,6 @@ async function loadExtensionFactoryFromVirtualModule(input: {
             op: "runHook",
             hook: hookName,
             payload: eventPayload,
-            infra: input.infra,
           });
 
           const runtimeMessages = Array.isArray(executed.runtimeMessages)
@@ -1157,6 +890,262 @@ function normalizePluginDefinition(input: unknown): AgentPluginDefinition {
   };
 }
 
+type PersistedPluginKind = "builtin_state" | "definition" | "extension";
+
+interface PersistedPluginRecord {
+  pluginId: string;
+  kind: PersistedPluginKind;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  source?: Record<string, unknown>;
+}
+
+function clonePersistableRecord<T>(value: T): T | null {
+  try {
+    return structuredClone(value);
+  } catch {
+    return null;
+  }
+}
+
+function normalizePersistedPluginRecord(
+  input: unknown,
+): PersistedPluginRecord | null {
+  const row = toRecord(input);
+  const kind = String(row.kind || "").trim() as PersistedPluginKind;
+  if (
+    kind !== "builtin_state" &&
+    kind !== "definition" &&
+    kind !== "extension"
+  ) {
+    return null;
+  }
+  const source = toRecord(row.source);
+  const manifest = toRecord(source.manifest);
+  const pluginId =
+    String(row.pluginId || "").trim() || String(manifest.id || "").trim();
+  if (!pluginId) return null;
+  const createdAt = String(row.createdAt || "").trim() || nowIso();
+  const updatedAt = String(row.updatedAt || "").trim() || createdAt;
+  if (kind === "builtin_state") {
+    return {
+      pluginId,
+      kind,
+      enabled: row.enabled !== false,
+      createdAt,
+      updatedAt,
+    };
+  }
+  if (Object.keys(source).length === 0) return null;
+  const clonedSource = clonePersistableRecord(source);
+  if (!clonedSource || typeof clonedSource !== "object") return null;
+  return {
+    pluginId,
+    kind,
+    enabled: row.enabled !== false,
+    createdAt,
+    updatedAt,
+    source: clonedSource as Record<string, unknown>,
+  };
+}
+
+async function readPersistedPluginRecords(): Promise<PersistedPluginRecord[]> {
+  const raw = await kvGet(PLUGIN_REGISTRY_STORAGE_KEY);
+  const list = Array.isArray(raw) ? raw : [];
+  const out: PersistedPluginRecord[] = [];
+  const seen = new Set<string>();
+  for (const item of list) {
+    const normalized = normalizePersistedPluginRecord(item);
+    if (!normalized) continue;
+    if (seen.has(normalized.pluginId)) continue;
+    seen.add(normalized.pluginId);
+    out.push(normalized);
+  }
+  return out;
+}
+
+async function writePersistedPluginRecords(
+  list: PersistedPluginRecord[],
+): Promise<void> {
+  await kvSet(PLUGIN_REGISTRY_STORAGE_KEY, list);
+}
+
+async function upsertPersistedPluginRecord(
+  next: PersistedPluginRecord,
+): Promise<PersistedPluginRecord> {
+  const list = await readPersistedPluginRecords();
+  const index = list.findIndex((item) => item.pluginId === next.pluginId);
+  const current = index >= 0 ? list[index] : null;
+  const merged: PersistedPluginRecord = {
+    ...next,
+    createdAt: current?.createdAt || next.createdAt,
+    updatedAt: next.updatedAt || nowIso(),
+  };
+  if (index >= 0) {
+    list[index] = merged;
+  } else {
+    list.push(merged);
+  }
+  await writePersistedPluginRecords(list);
+  return merged;
+}
+
+async function removePersistedPluginRecord(pluginId: string): Promise<boolean> {
+  const id = String(pluginId || "").trim();
+  if (!id) return false;
+  const list = await readPersistedPluginRecords();
+  const next = list.filter((item) => item.pluginId !== id);
+  if (next.length === list.length) return false;
+  await writePersistedPluginRecords(next);
+  return true;
+}
+
+async function updatePersistedPluginEnabled(
+  pluginId: string,
+  enabled: boolean,
+): Promise<PersistedPluginRecord | null> {
+  const id = String(pluginId || "").trim();
+  if (!id) return null;
+  const list = await readPersistedPluginRecords();
+  const index = list.findIndex((item) => item.pluginId === id);
+  if (index >= 0) {
+    const next = {
+      ...list[index],
+      enabled,
+      updatedAt: nowIso(),
+    };
+    list[index] = next;
+    await writePersistedPluginRecords(list);
+    return next;
+  }
+  if (!isBuiltinPluginId(id)) return null;
+  const next: PersistedPluginRecord = {
+    pluginId: id,
+    kind: "builtin_state",
+    enabled,
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+  };
+  list.push(next);
+  await writePersistedPluginRecords(list);
+  return next;
+}
+
+function buildPersistedExtensionSource(
+  input: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const source: Record<string, unknown> = {};
+  const manifest = clonePersistableRecord(toRecord(input.manifest));
+  if (!manifest || Object.keys(manifest).length === 0) {
+    return null;
+  }
+  source.manifest = manifest;
+  const copyFields = [
+    "moduleUrl",
+    "modulePath",
+    "module",
+    "exportName",
+    "moduleSessionId",
+    "sessionId",
+    "uiModuleUrl",
+    "uiModulePath",
+    "uiModule",
+    "uiExportName",
+    "uiModuleSessionId",
+  ] as const;
+  for (const key of copyFields) {
+    if (!Object.prototype.hasOwnProperty.call(input, key)) continue;
+    const value = input[key];
+    if (value === undefined) continue;
+    source[key] = value;
+  }
+  return source;
+}
+
+async function persistExtensionPluginRegistration(
+  source: Record<string, unknown>,
+  enabled: boolean,
+): Promise<PersistedPluginRecord | null> {
+  const persistable = buildPersistedExtensionSource(source);
+  const manifest = toRecord(persistable?.manifest);
+  const pluginId = String(manifest.id || "").trim();
+  if (!persistable || !pluginId) return null;
+  return upsertPersistedPluginRecord({
+    pluginId,
+    kind: "extension",
+    enabled,
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    source: persistable,
+  });
+}
+
+async function persistDefinitionPluginRegistration(
+  source: Record<string, unknown>,
+  enabled: boolean,
+): Promise<PersistedPluginRecord | null> {
+  const clonedSource = clonePersistableRecord(source);
+  const manifest = toRecord(toRecord(clonedSource).manifest);
+  const pluginId = String(manifest.id || "").trim();
+  if (!clonedSource || typeof clonedSource !== "object" || !pluginId) {
+    return null;
+  }
+  return upsertPersistedPluginRecord({
+    pluginId,
+    kind: "definition",
+    enabled,
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    source: clonedSource as Record<string, unknown>,
+  });
+}
+
+function defaultExamplePluginSources(): Array<Record<string, unknown>> {
+  const out: Record<string, unknown>[] = [];
+  const candidates = [
+    clonePersistableRecord(exampleSendSuccessPluginPackage),
+    clonePersistableRecord(exampleMissionHudDogPluginPackage),
+  ];
+  for (const item of candidates) {
+    if (!item || typeof item !== "object") continue;
+    out.push(item as Record<string, unknown>);
+  }
+  return out;
+}
+
+async function seedDefaultExamplePluginRecords(): Promise<void> {
+  const seeded = await kvGet(PLUGIN_EXAMPLE_SEED_STORAGE_KEY);
+  if (seeded) return;
+  let list = await readPersistedPluginRecords();
+  const knownIds = new Set(list.map((item) => item.pluginId));
+  let changed = false;
+  for (const source of defaultExamplePluginSources()) {
+    const pluginId = String(toRecord(source.manifest).id || "").trim();
+    if (!pluginId || knownIds.has(pluginId)) continue;
+    list = [
+      ...list,
+      {
+        pluginId,
+        kind: "extension",
+        enabled: true,
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+        source,
+      },
+    ];
+    knownIds.add(pluginId);
+    changed = true;
+  }
+  if (changed) {
+    await writePersistedPluginRecords(list);
+  }
+  await kvSet(PLUGIN_EXAMPLE_SEED_STORAGE_KEY, {
+    version: 1,
+    seededAt: nowIso(),
+  });
+}
+
 interface UiExtensionDescriptor {
   pluginId: string;
   moduleUrl: string;
@@ -1250,6 +1239,21 @@ async function removeUiExtensionDescriptor(
   const [removed] = list.splice(index, 1);
   await writeUiExtensionDescriptors(list);
   return removed || null;
+}
+
+async function pruneUiExtensionDescriptors(
+  pluginIds: Iterable<string>,
+): Promise<void> {
+  const allowed = new Set<string>();
+  for (const pluginId of pluginIds) {
+    const id = String(pluginId || "").trim();
+    if (!id) continue;
+    allowed.add(id);
+  }
+  const list = await readUiExtensionDescriptors();
+  const next = list.filter((item) => allowed.has(item.pluginId));
+  if (next.length === list.length) return;
+  await writeUiExtensionDescriptors(next);
 }
 
 function notifyUiExtensionLifecycle(
@@ -1382,7 +1386,10 @@ function resolvePluginModuleUrl(input: unknown): string {
   if (chromeRuntime?.getURL) {
     return chromeRuntime.getURL(normalized);
   }
-  return new URL(raw, import.meta.url).href;
+  if (normalized.startsWith("./") || normalized.startsWith("../")) {
+    return new URL(raw, import.meta.url).href;
+  }
+  return new URL(`../../../${normalized}`, import.meta.url).href;
 }
 
 async function loadExtensionFactoryFromModule(
@@ -1409,6 +1416,72 @@ function isBuiltinPluginId(pluginId: string): boolean {
   return String(pluginId || "")
     .trim()
     .startsWith(BUILTIN_PLUGIN_ID_PREFIX);
+}
+
+async function rehydratePersistedPluginRecord(
+  orchestrator: BrainOrchestrator,
+  infra: RuntimeInfraHandler,
+  record: PersistedPluginRecord,
+): Promise<void> {
+  if (record.kind === "builtin_state") {
+    if (record.enabled) {
+      orchestrator.enablePlugin(record.pluginId);
+    } else {
+      orchestrator.disablePlugin(record.pluginId);
+    }
+    return;
+  }
+
+  const source = clonePersistableRecord(record.source);
+  if (!source || typeof source !== "object") {
+    throw new Error(`persisted plugin source 非法: ${record.pluginId}`);
+  }
+
+  const message =
+    record.kind === "extension"
+      ? ({
+          ...source,
+          type: "brain.plugin.register_extension",
+          __pluginPersistenceHydrate: true,
+          replace: true,
+          enable: record.enabled,
+        } as Record<string, unknown>)
+      : ({
+          type: "brain.plugin.register",
+          __pluginPersistenceHydrate: true,
+          plugin: source,
+          replace: true,
+          enable: record.enabled,
+        } as Record<string, unknown>);
+  const result = await handleBrainPlugin(orchestrator, infra, message);
+  if (!result.ok) {
+    throw new Error(String(result.error || "plugin rehydrate failed"));
+  }
+}
+
+async function rehydratePersistedPlugins(
+  orchestrator: BrainOrchestrator,
+  infra: RuntimeInfraHandler,
+): Promise<void> {
+  await seedDefaultExamplePluginRecords();
+  const records = await readPersistedPluginRecords();
+  const ordered = [
+    ...records.filter((item) => item.kind !== "builtin_state"),
+    ...records.filter((item) => item.kind === "builtin_state"),
+  ];
+  for (const record of ordered) {
+    try {
+      await rehydratePersistedPluginRecord(orchestrator, infra, record);
+    } catch (error) {
+      console.warn(
+        `[runtime-router] plugin rehydrate failed: ${record.pluginId}`,
+        error,
+      );
+    }
+  }
+  await pruneUiExtensionDescriptors(
+    orchestrator.listPlugins().map((item) => String(item.id || "").trim()),
+  );
 }
 
 interface RegisterPluginOptions {
@@ -3471,6 +3544,8 @@ async function handleBrainPlugin(
 ): Promise<RuntimeResult> {
   const payload = toRecord(message);
   const action = String(payload.type || "");
+  const isPluginPersistenceHydrate =
+    payload.__pluginPersistenceHydrate === true;
 
   if (action === "brain.plugin.list") {
     const uiExtensions = await readUiExtensionDescriptors();
@@ -3536,7 +3611,6 @@ async function handleBrainPlugin(
         op: "runHook",
         hook,
         payload: payload.payload,
-        infra,
       });
     } catch (error) {
       emitPluginHookTrace({
@@ -3637,7 +3711,6 @@ async function handleBrainPlugin(
           modulePath: virtualModulePath,
           exportName,
           sessionId: moduleSessionId,
-          infra,
         });
         moduleUrl = virtualModulePath;
       } else {
@@ -3656,12 +3729,34 @@ async function handleBrainPlugin(
       source,
       current?.enabled === true,
     );
+    if (!isPluginPersistenceHydrate) {
+      await persistExtensionPluginRegistration(
+        {
+          manifest,
+          moduleUrl,
+          exportName,
+          ...(isVirtualUri(moduleUrl) ? { moduleSessionId } : {}),
+          ...(uiDescriptor
+            ? {
+                uiModuleUrl: uiDescriptor.moduleUrl,
+                uiExportName: uiDescriptor.exportName,
+                ...(uiDescriptor.sessionId
+                  ? { uiModuleSessionId: uiDescriptor.sessionId }
+                  : {}),
+              }
+            : {}),
+        },
+        current?.enabled === true,
+      );
+    }
     if (uiDescriptor) {
       await upsertUiExtensionDescriptor(uiDescriptor);
-      notifyUiExtensionLifecycle(
-        "brain.plugin.ui_extension.registered",
-        uiDescriptor,
-      );
+      if (!isPluginPersistenceHydrate) {
+        notifyUiExtensionLifecycle(
+          "brain.plugin.ui_extension.registered",
+          uiDescriptor,
+        );
+      }
     }
     return ok({
       pluginId,
@@ -3696,9 +3791,35 @@ async function handleBrainPlugin(
     );
     if (uiDescriptor) {
       await upsertUiExtensionDescriptor(uiDescriptor);
-      notifyUiExtensionLifecycle(
-        "brain.plugin.ui_extension.registered",
-        uiDescriptor,
+      if (!isPluginPersistenceHydrate) {
+        notifyUiExtensionLifecycle(
+          "brain.plugin.ui_extension.registered",
+          uiDescriptor,
+        );
+      }
+    }
+    const persistedDefinitionSource = {
+      ...pluginRaw,
+      ...("uiModuleUrl" in payload ? { uiModuleUrl: payload.uiModuleUrl } : {}),
+      ...("uiModulePath" in payload
+        ? { uiModulePath: payload.uiModulePath }
+        : {}),
+      ...("uiModule" in payload ? { uiModule: payload.uiModule } : {}),
+      ...("uiExportName" in payload
+        ? { uiExportName: payload.uiExportName }
+        : {}),
+      ...("uiModuleSessionId" in payload
+        ? { uiModuleSessionId: payload.uiModuleSessionId }
+        : {}),
+      ...("moduleSessionId" in payload
+        ? { moduleSessionId: payload.moduleSessionId }
+        : {}),
+      ...("sessionId" in payload ? { sessionId: payload.sessionId } : {}),
+    } as Record<string, unknown>;
+    if (!isPluginPersistenceHydrate) {
+      await persistDefinitionPluginRegistration(
+        persistedDefinitionSource,
+        current?.enabled === true,
       );
     }
     return ok({
@@ -3768,7 +3889,6 @@ async function handleBrainPlugin(
               modulePath: moduleUrl,
               exportName,
               op: "describe",
-              infra,
             });
             checks.push(
               buildPluginValidationCheck("index.module", true, {
@@ -3816,7 +3936,6 @@ async function handleBrainPlugin(
               modulePath: uiDescriptor.moduleUrl,
               exportName: uiDescriptor.exportName,
               op: "describe",
-              infra,
             });
             checks.push(
               buildPluginValidationCheck("ui.module", true, {
@@ -3950,11 +4069,14 @@ async function handleBrainPlugin(
       pluginId,
       true,
     );
+    await updatePersistedPluginEnabled(pluginId, true);
     if (uiExtension) {
-      notifyUiExtensionLifecycle(
-        "brain.plugin.ui_extension.enabled",
-        uiExtension,
-      );
+      if (!isPluginPersistenceHydrate) {
+        notifyUiExtensionLifecycle(
+          "brain.plugin.ui_extension.enabled",
+          uiExtension,
+        );
+      }
     }
     return ok({
       pluginId,
@@ -3975,11 +4097,14 @@ async function handleBrainPlugin(
       pluginId,
       false,
     );
+    await updatePersistedPluginEnabled(pluginId, false);
     if (uiExtension) {
-      notifyUiExtensionLifecycle(
-        "brain.plugin.ui_extension.disabled",
-        uiExtension,
-      );
+      if (!isPluginPersistenceHydrate) {
+        notifyUiExtensionLifecycle(
+          "brain.plugin.ui_extension.disabled",
+          uiExtension,
+        );
+      }
     }
     return ok({
       pluginId,
@@ -3998,12 +4123,15 @@ async function handleBrainPlugin(
     }
     const removed = orchestrator.unregisterPlugin(pluginId);
     if (!removed) return fail(`plugin 不存在: ${pluginId}`);
+    await removePersistedPluginRecord(pluginId);
     const removedUiExtension = await removeUiExtensionDescriptor(pluginId);
     if (removedUiExtension) {
-      notifyUiExtensionLifecycle(
-        "brain.plugin.ui_extension.unregistered",
-        removedUiExtension,
-      );
+      if (!isPluginPersistenceHydrate) {
+        notifyUiExtensionLifecycle(
+          "brain.plugin.ui_extension.unregistered",
+          removedUiExtension,
+        );
+      }
     }
     return ok({
       pluginId,
@@ -4126,8 +4254,20 @@ async function handleBrainDebug(
 export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
   const infra = createRuntimeInfraHandler();
   const runtimeLoop = createRuntimeLoopController(orchestrator, infra);
+  let runtimeReady: Promise<void> | null = null;
+  const ensureRuntimeReady = (): Promise<void> => {
+    if (!runtimeReady) {
+      runtimeReady = rehydratePersistedPlugins(orchestrator, infra).catch(
+        (error) => {
+          console.warn("[runtime-router] runtime rehydrate failed", error);
+        },
+      );
+    }
+    return runtimeReady;
+  };
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const run = async () => {
+      await ensureRuntimeReady();
       const routeBefore = await orchestrator.runHook("runtime.route.before", {
         type: String(message?.type || ""),
         message,

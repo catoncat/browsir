@@ -99,6 +99,12 @@ function buildWorkerLlmConfig(options?: {
   );
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
 function createDummyRoute(
   overrides: Partial<LlmResolvedRoute> = {},
 ): LlmResolvedRoute {
@@ -6066,8 +6072,7 @@ describe("runtime-router.browser", () => {
       );
 
     expect(calls.length).toBeGreaterThan(0);
-    const payload = (calls[calls.length - 1] as Record<string, unknown>)
-      ?.payload as Record<string, unknown>;
+    const payload = asRecord(asRecord(calls[calls.length - 1]).payload);
     expect(String(payload.message || "")).toBe("发送成功");
     expect(String(payload.source || "")).toBe(
       "plugin.send-success-global-message",
@@ -6102,11 +6107,98 @@ describe("runtime-router.browser", () => {
       );
 
     expect(calls.length).toBeGreaterThan(0);
-    const payload = (calls[calls.length - 1] as Record<string, unknown>)
-      ?.payload as Record<string, unknown>;
+    const payload = asRecord(asRecord(calls[calls.length - 1]).payload);
     expect(String(payload.phase || "")).toBe("thinking");
     expect(String(payload.source || "")).toBe("plugin.ui.mission-hud");
     expect(String(payload.message || "").trim().length).toBeGreaterThan(0);
+  });
+
+  it("disabled example plugins should stay disabled after runtime reload", async () => {
+    const sendSpy = vi
+      .spyOn(chrome.runtime, "sendMessage")
+      .mockResolvedValue({ ok: true } as never);
+
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const sendSuccessPluginId =
+      "plugin.example.notice.send-success-global-message";
+    const mascotPluginId = "plugin.example.ui.mission-hud.dog";
+
+    const disableSendSuccess = await invokeRuntime({
+      type: "brain.plugin.disable",
+      pluginId: sendSuccessPluginId,
+    });
+    expect(disableSendSuccess.ok).toBe(true);
+
+    const disableMascot = await invokeRuntime({
+      type: "brain.plugin.disable",
+      pluginId: mascotPluginId,
+    });
+    expect(disableMascot.ok).toBe(true);
+
+    runtimeListeners = [];
+    resetRuntimeOnMessageMock();
+
+    const reloadedOrchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(reloadedOrchestrator);
+
+    const listed = await invokeRuntime({
+      type: "brain.plugin.list",
+    });
+    expect(listed.ok).toBe(true);
+    const plugins = Array.isArray((listed.data as Record<string, unknown>)?.plugins)
+      ? ((listed.data as Record<string, unknown>).plugins as Array<Record<string, unknown>>)
+      : [];
+    const sendSuccessPlugin = plugins.find(
+      (item) => String(item.id || "") === sendSuccessPluginId,
+    );
+    const mascotPlugin = plugins.find(
+      (item) => String(item.id || "") === mascotPluginId,
+    );
+    expect(sendSuccessPlugin).toBeDefined();
+    expect(mascotPlugin).toBeDefined();
+    expect(Boolean(sendSuccessPlugin?.enabled)).toBe(false);
+    expect(Boolean(mascotPlugin?.enabled)).toBe(false);
+
+    const beforeGlobalMessages = sendSpy.mock.calls.filter(
+      (item) =>
+        item[0] &&
+        typeof item[0] === "object" &&
+        String((item[0] as Record<string, unknown>).type || "") ===
+          "bbloop.global.message",
+    ).length;
+    const beforeMascotMessages = sendSpy.mock.calls.filter(
+      (item) =>
+        item[0] &&
+        typeof item[0] === "object" &&
+        String((item[0] as Record<string, unknown>).type || "") ===
+          "bbloop.ui.mascot",
+    ).length;
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "reload should not revive disabled example plugins",
+    });
+    expect(started.ok).toBe(true);
+
+    const afterGlobalMessages = sendSpy.mock.calls.filter(
+      (item) =>
+        item[0] &&
+        typeof item[0] === "object" &&
+        String((item[0] as Record<string, unknown>).type || "") ===
+          "bbloop.global.message",
+    ).length;
+    const afterMascotMessages = sendSpy.mock.calls.filter(
+      (item) =>
+        item[0] &&
+        typeof item[0] === "object" &&
+        String((item[0] as Record<string, unknown>).type || "") ===
+          "bbloop.ui.mascot",
+    ).length;
+
+    expect(afterGlobalMessages).toBe(beforeGlobalMessages);
+    expect(afterMascotMessages).toBe(beforeMascotMessages);
   });
 
   it("builtin fs.read sandbox plugin should fail when disabled and recover when re-enabled", async () => {
@@ -6210,6 +6302,94 @@ describe("runtime-router.browser", () => {
     const responseData = (response.data || {}) as Record<string, unknown>;
     expect(String(responseData.content || "")).toContain(
       "plugin-toggle-content",
+    );
+  });
+
+  it("disabled builtin sandbox plugin should stay disabled after runtime reload", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const disabled = await invokeRuntime({
+      type: "brain.plugin.disable",
+      pluginId: "runtime.builtin.plugin.capability.fs.read.sandbox",
+    });
+    expect(disabled.ok).toBe(true);
+
+    runtimeListeners = [];
+    resetRuntimeOnMessageMock();
+
+    const reloadedOrchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(reloadedOrchestrator);
+
+    const listed = await invokeRuntime({
+      type: "brain.plugin.list",
+    });
+    expect(listed.ok).toBe(true);
+    const plugins = Array.isArray((listed.data as Record<string, unknown>)?.plugins)
+      ? ((listed.data as Record<string, unknown>).plugins as Array<Record<string, unknown>>)
+      : [];
+    const sandboxPlugin = plugins.find(
+      (item) =>
+        String(item.id || "") ===
+        "runtime.builtin.plugin.capability.fs.read.sandbox",
+    );
+    expect(sandboxPlugin).toBeDefined();
+    expect(Boolean(sandboxPlugin?.enabled)).toBe(false);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "builtin sandbox plugin disabled after reload",
+      autoRun: false,
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    const wrote = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.write",
+      action: "invoke",
+      args: {
+        frame: {
+          tool: "write",
+          args: {
+            path: "mem://plugins/reload-disabled/readme.txt",
+            content: "reload-disabled",
+            mode: "overwrite",
+            runtime: "browser",
+          },
+        },
+      },
+      verifyPolicy: "off",
+    });
+    expect(wrote.ok).toBe(true);
+
+    const readWhenDisabled = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.read",
+      action: "invoke",
+      args: {
+        frame: {
+          tool: "read",
+          args: {
+            path: "mem://plugins/reload-disabled/readme.txt",
+          },
+        },
+      },
+      verifyPolicy: "off",
+    });
+    expect(readWhenDisabled.ok).toBe(true);
+    const disabledResult = (readWhenDisabled.data || {}) as Record<
+      string,
+      unknown
+    >;
+    expect(Boolean(disabledResult.ok)).toBe(false);
+    expect(String(disabledResult.error || "")).toContain(
+      "未找到 capability provider: fs.read",
     );
   });
 
@@ -6919,6 +7099,129 @@ describe("runtime-router.browser", () => {
     expect((patchedResult.data || {}) as Record<string, unknown>).toEqual({
       source: "inline-index-js",
     });
+  });
+
+  it("brain.plugin.install should rehydrate inline mem plugin across runtime reload", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    orchestrator.registerToolProvider(
+      "script",
+      {
+        id: "plugin.reload.inline.script",
+        invoke: async () => ({ source: "script" }),
+      },
+      { replace: true },
+    );
+
+    const pluginId = "plugin.route.extension.inline.reload";
+    const installed = await invokeRuntime({
+      type: "brain.plugin.install",
+      sessionId: "plugin-studio",
+      package: {
+        manifest: {
+          id: pluginId,
+          name: "plugin-route-extension-inline-reload",
+          version: "1.0.0",
+          permissions: {
+            hooks: ["tool.after_result"],
+          },
+        },
+        indexJs: `module.exports = function registerPlugin(pi) {
+  pi.on("tool.after_result", (event) => {
+    const current = event && event.result && typeof event.result === "object" ? event.result : {};
+    return {
+      action: "patch",
+      patch: {
+        result: {
+          ...current,
+          source: "inline-reload"
+        }
+      }
+    };
+  });
+};`,
+        uiJs: `module.exports = function registerUiPlugin(ui) {
+  ui.on("ui.notice.before_show", (event) => {
+    return {
+      action: "patch",
+      patch: {
+        message: String(event && event.message || "") + "?"
+      }
+    };
+  });
+};`,
+      },
+    });
+    expect(installed.ok).toBe(true);
+
+    runtimeListeners = [];
+    resetRuntimeOnMessageMock();
+
+    const reloadedOrchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(reloadedOrchestrator);
+    reloadedOrchestrator.registerToolProvider(
+      "script",
+      {
+        id: "plugin.reload.inline.script",
+        invoke: async () => ({ source: "script" }),
+      },
+      { replace: true },
+    );
+
+    const listed = await invokeRuntime({
+      type: "brain.plugin.list",
+    });
+    expect(listed.ok).toBe(true);
+    const plugins = Array.isArray((listed.data as Record<string, unknown>)?.plugins)
+      ? ((listed.data as Record<string, unknown>).plugins as Array<
+          Record<string, unknown>
+        >)
+      : [];
+    expect(
+      plugins.some(
+        (item) => String(item.id || "") === pluginId && item.enabled === true,
+      ),
+    ).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "inline mem plugin reload",
+      autoRun: false,
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    const patched = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      mode: "script",
+      action: "click",
+      verifyPolicy: "off",
+    });
+    expect(patched.ok).toBe(true);
+    const patchedResult = (patched.data || {}) as Record<string, unknown>;
+    expect((patchedResult.data || {}) as Record<string, unknown>).toEqual({
+      source: "inline-reload",
+    });
+
+    const hookRun = await invokeRuntime({
+      type: "brain.plugin.ui_hook.run",
+      pluginId,
+      hook: "ui.notice.before_show",
+      payload: {
+        message: "reload-ok",
+      },
+    });
+    expect(hookRun.ok).toBe(true);
+    const hookData = (hookRun.data || {}) as Record<string, unknown>;
+    const hookResult = (hookData.hookResult || {}) as Record<string, unknown>;
+    expect(String(hookResult.action || "")).toBe("patch");
+    expect(
+      String((hookResult.patch as Record<string, unknown>)?.message || ""),
+    ).toBe("reload-ok?");
   });
 
   it("brain.plugin.disable should restore replaced openai_compatible provider", async () => {

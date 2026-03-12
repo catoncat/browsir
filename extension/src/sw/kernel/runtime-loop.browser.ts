@@ -39,17 +39,12 @@ import {
   isVirtualUri,
   shouldRouteFrameToBrowserVfs,
 } from "./virtual-fs.browser";
-import { registerExtension } from "./extension-api";
 import {
   nowIso,
   type SessionEntry,
   type SessionMeta,
   type StreamingBehavior,
 } from "./types";
-import exampleSendSuccessPluginPackage from "../../../plugins/example-send-success-global-message/plugin.json";
-import exampleMissionHudDogPluginPackage from "../../../plugins/example-mission-hud-dog/plugin.json";
-import registerExampleSendSuccessPlugin from "../../../plugins/example-send-success-global-message/index.js";
-import registerExampleMissionHudDogPlugin from "../../../plugins/example-mission-hud-dog/index.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -3641,111 +3636,6 @@ export function createRuntimeLoopController(
     }
   };
 
-  const ensureDefaultExampleRoutePlugins = (): void => {
-    interface ExamplePluginPackage {
-      manifest?: Record<string, unknown>;
-      modulePath?: string;
-      moduleUrl?: string;
-      module?: string;
-      exportName?: string;
-    }
-
-    const toPackage = (input: unknown): ExamplePluginPackage => {
-      return toRecord(input) as ExamplePluginPackage;
-    };
-
-    const normalizeManifest = (
-      input: unknown,
-    ): {
-      id: string;
-      name: string;
-      version: string;
-      timeoutMs?: number;
-      permissions?: Record<string, unknown>;
-    } => {
-      const row = toRecord(input);
-      const id = String(row.id || "").trim();
-      if (!id) {
-        throw new Error("example plugin manifest.id 不能为空");
-      }
-      const name = String(row.name || "").trim() || id;
-      const version = String(row.version || "").trim() || "1.0.0";
-      const timeoutRaw = Number(row.timeoutMs);
-      const timeoutMs = Number.isFinite(timeoutRaw)
-        ? Math.max(50, Math.min(10_000, Math.floor(timeoutRaw)))
-        : undefined;
-      const permissions = toRecord(row.permissions);
-      return {
-        id,
-        name,
-        version,
-        ...(timeoutMs ? { timeoutMs } : {}),
-        ...(Object.keys(permissions).length > 0 ? { permissions } : {}),
-      };
-    };
-
-    const resolveModuleUrl = (rawInput: unknown): string => {
-      const raw = String(rawInput || "").trim();
-      if (!raw) throw new Error("example plugin modulePath 不能为空");
-      if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(raw)) return raw;
-      if (raw.startsWith("//"))
-        throw new Error(`example plugin modulePath 非法: ${raw}`);
-      const normalized = raw.startsWith("/") ? raw.slice(1) : raw;
-      const runtime = (
-        globalThis as typeof globalThis & {
-          chrome?: {
-            runtime?: {
-              getURL?: (path: string) => string;
-            };
-          };
-        }
-      ).chrome?.runtime;
-      if (runtime?.getURL) {
-        return runtime.getURL(normalized);
-      }
-      return normalized;
-    };
-
-    const registerPackage = (
-      pkgInput: unknown,
-      setup: (api: Record<string, unknown>) => unknown,
-    ): void => {
-      const pkg = toPackage(pkgInput);
-      const manifest = normalizeManifest(pkg.manifest);
-      const pluginId = String(manifest.id || "").trim();
-      if (!pluginId) return;
-      const existed = orchestrator
-        .listPlugins()
-        .some((item) => String(item.id || "").trim() === pluginId);
-      if (existed) return;
-
-      const moduleInput = String(
-        pkg.moduleUrl || pkg.modulePath || pkg.module || "",
-      ).trim();
-      const moduleUrl = resolveModuleUrl(moduleInput);
-      const exportName =
-        String(pkg.exportName || "default").trim() || "default";
-      registerExtension(orchestrator, manifest, setup as never, {
-        replace: false,
-        enable: true,
-      });
-      orchestrator.events.emit("plugin.example.bootstrap", "global", {
-        pluginId,
-        moduleUrl,
-        exportName,
-      });
-    };
-
-    registerPackage(
-      exampleSendSuccessPluginPackage,
-      registerExampleSendSuccessPlugin as never,
-    );
-    registerPackage(
-      exampleMissionHudDogPluginPackage,
-      registerExampleMissionHudDogPlugin as never,
-    );
-  };
-
   const ensureBuiltinCapabilityPlugins = (): void => {
     type CapabilityStepInput = {
       sessionId: string;
@@ -3972,7 +3862,6 @@ export function createRuntimeLoopController(
     }
   };
 
-  ensureDefaultExampleRoutePlugins();
   ensureBuiltinCapabilityPlugins();
   ensureBuiltinBridgeCapabilityProviders();
   ensureBuiltinSandboxCapabilityProviders();
