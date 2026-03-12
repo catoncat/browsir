@@ -9,15 +9,12 @@ const store = useRuntimeStore();
 const { config, savingConfig, error } = storeToRefs(store);
 
 const dialogRef = ref<HTMLElement | null>(null);
-const apiBaseId = "settings-api-base";
-const apiKeyId = "settings-api-key";
-const modelNameId = "settings-model-name";
 const systemPromptCustomId = "settings-system-prompt-custom";
 const maxStepsId = "settings-max-steps";
 const autoTitleIntervalId = "settings-auto-title-interval";
+const browserRuntimeStrategyId = "settings-browser-runtime-strategy";
 const bridgeUrlId = "settings-bridge-url";
 const bridgeTokenId = "settings-bridge-token";
-const showApiKey = ref(false);
 const showBridgeToken = ref(false);
 
 async function handleSave() {
@@ -59,48 +56,9 @@ onMounted(() => {
       <section class="space-y-4">
         <div class="flex items-center gap-2 text-ui-text-muted opacity-60">
           <Cpu :size="14" />
-          <h3 class="text-[10px] font-bold uppercase tracking-[0.1em]">Engine Configuration</h3>
+          <h3 class="text-[10px] font-bold uppercase tracking-[0.1em]">Runtime Controls</h3>
         </div>
         <div class="space-y-4">
-          <div class="space-y-1.5">
-            <label :for="apiBaseId" class="block text-[11px] font-bold text-ui-text-muted/80 ml-0.5 uppercase tracking-tighter">API Base</label>
-            <input
-              :id="apiBaseId"
-              v-model="config.llmApiBase"
-              type="text"
-              class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-            />
-          </div>
-          <div class="space-y-1.5">
-            <label :for="apiKeyId" class="block text-[11px] font-bold text-ui-text-muted/80 ml-0.5 uppercase tracking-tighter">API Key</label>
-            <div class="relative">
-              <input
-                :id="apiKeyId"
-                v-model="config.llmApiKey"
-                :type="showApiKey ? 'text' : 'password'"
-                class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 pr-10 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-              />
-              <button
-                type="button"
-                class="absolute inset-y-0 right-0 px-2.5 text-ui-text-muted hover:text-ui-text transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-                :aria-label="showApiKey ? '隐藏 API Key' : '显示 API Key'"
-                :aria-pressed="showApiKey"
-                @click="showApiKey = !showApiKey"
-              >
-                <EyeOff v-if="showApiKey" :size="15" aria-hidden="true" />
-                <Eye v-else :size="15" aria-hidden="true" />
-              </button>
-            </div>
-          </div>
-          <div class="space-y-1.5">
-            <label :for="modelNameId" class="block text-[11px] font-bold text-ui-text-muted/80 ml-0.5 uppercase tracking-tighter">Model Name</label>
-            <input
-              :id="modelNameId"
-              v-model="config.llmModel"
-              type="text"
-              class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-            />
-          </div>
           <div class="space-y-1.5">
             <label :for="systemPromptCustomId" class="block text-[11px] font-bold text-ui-text-muted/80 ml-0.5 uppercase tracking-tighter">System Prompt（可编辑）</label>
             <textarea
@@ -134,6 +92,18 @@ onMounted(() => {
               class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
             />
             <p class="text-[10px] text-ui-text-muted/60 px-0.5">每隔多少条消息重刷标题。0 表示禁用自动重总结。</p>
+          </div>
+          <div class="space-y-1.5">
+            <label :for="browserRuntimeStrategyId" class="block text-[11px] font-bold text-ui-text-muted/80 ml-0.5 uppercase tracking-tighter">Browser Runtime Strategy</label>
+            <select
+              :id="browserRuntimeStrategyId"
+              v-model="config.browserRuntimeStrategy"
+              class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+            >
+              <option value="host-first">host-first（默认走 browser lifo）</option>
+              <option value="browser-first">browser-first（默认走 lifo sandbox）</option>
+            </select>
+            <p class="text-[10px] text-ui-text-muted/60 px-0.5">仅影响 browser_* 工具未显式指定 runtime 时的默认路由。</p>
           </div>
         </div>
       </section>

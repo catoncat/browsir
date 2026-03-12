@@ -80,6 +80,7 @@ export interface PanelLlmProfile {
   llmApiBase: string;
   llmApiKey: string;
   llmModel: string;
+  providerOptions?: Record<string, unknown>;
   role: string;
   llmTimeoutMs: number;
   llmRetryMaxAttempts: number;
@@ -94,9 +95,6 @@ interface PanelConfig {
   bridgeUrl: string;
   bridgeToken: string;
   browserRuntimeStrategy: BrowserRuntimeStrategy;
-  llmApiBase: string;
-  llmApiKey: string;
-  llmModel: string;
   llmDefaultProfile: string;
   llmProfiles: PanelLlmProfile[];
   llmProfileChains: PanelLlmProfileChains;
@@ -114,7 +112,8 @@ interface PanelConfig {
 
 interface RuntimeHealth {
   bridgeUrl: string;
-  llmApiBase: string;
+  llmDefaultProfile: string;
+  llmProvider: string;
   llmModel: string;
   hasLlmApiKey: boolean;
   systemPromptPreview: string;
@@ -432,40 +431,59 @@ function normalizeEscalationPolicy(raw: unknown): "upgrade_only" | "disabled" {
   return String(raw || "").trim().toLowerCase() === "disabled" ? "disabled" : "upgrade_only";
 }
 
-interface LlmProfileFallback {
+export const DEFAULT_PANEL_LLM_PROVIDER = "openai_compatible";
+export const DEFAULT_PANEL_LLM_API_BASE = "https://ai.chen.rs/v1";
+export const DEFAULT_PANEL_LLM_MODEL = "gpt-5.3-codex";
+
+interface LlmProfileDefaults {
   id: string;
-  llmApiBase: string;
-  llmApiKey: string;
-  llmModel: string;
   llmTimeoutMs: number;
   llmRetryMaxAttempts: number;
   llmMaxRetryDelayMs: number;
 }
 
-function normalizeSingleLlmProfile(raw: Record<string, unknown>, fallback: LlmProfileFallback): PanelLlmProfile {
-  const id = String(raw.id || raw.profile || fallback.id || "default").trim() || "default";
+function createDefaultLlmProfile(defaults: LlmProfileDefaults): PanelLlmProfile {
+  const id = String(defaults.id || "default").trim() || "default";
   return {
     id,
-    provider: String(raw.provider || raw.providerId || "openai_compatible").trim() || "openai_compatible",
-    llmApiBase: String(raw.llmApiBase || raw.base || fallback.llmApiBase || "").trim(),
-    llmApiKey: String(raw.llmApiKey ?? raw.key ?? fallback.llmApiKey ?? ""),
-    llmModel: String(raw.llmModel || raw.model || fallback.llmModel || "gpt-5.3-codex").trim() || "gpt-5.3-codex",
-    role: String(raw.role || "worker").trim() || "worker",
-    llmTimeoutMs: toIntInRange(raw.llmTimeoutMs, fallback.llmTimeoutMs, 1_000, 300_000),
-    llmRetryMaxAttempts: toIntInRange(raw.llmRetryMaxAttempts, fallback.llmRetryMaxAttempts, 0, 6),
-    llmMaxRetryDelayMs: toIntInRange(raw.llmMaxRetryDelayMs, fallback.llmMaxRetryDelayMs, 0, 300_000)
+    provider: DEFAULT_PANEL_LLM_PROVIDER,
+    llmApiBase: DEFAULT_PANEL_LLM_API_BASE,
+    llmApiKey: "",
+    llmModel: DEFAULT_PANEL_LLM_MODEL,
+    providerOptions: {},
+    role: "worker",
+    llmTimeoutMs: defaults.llmTimeoutMs,
+    llmRetryMaxAttempts: defaults.llmRetryMaxAttempts,
+    llmMaxRetryDelayMs: defaults.llmMaxRetryDelayMs
   };
 }
 
-function normalizeLlmProfiles(raw: unknown, fallback: LlmProfileFallback): PanelLlmProfile[] {
+function normalizeSingleLlmProfile(raw: Record<string, unknown>, defaults: LlmProfileDefaults): PanelLlmProfile {
+  const base = createDefaultLlmProfile(defaults);
+  const id = String(raw.id || base.id).trim() || base.id;
+  return {
+    id,
+    provider: String(raw.provider || base.provider).trim() || base.provider,
+    llmApiBase: String(raw.llmApiBase ?? base.llmApiBase).trim(),
+    llmApiKey: String(raw.llmApiKey ?? base.llmApiKey),
+    llmModel: String(raw.llmModel || base.llmModel).trim() || base.llmModel,
+    providerOptions: toRecord(raw.providerOptions),
+    role: String(raw.role || base.role).trim() || base.role,
+    llmTimeoutMs: toIntInRange(raw.llmTimeoutMs, defaults.llmTimeoutMs, 1_000, 300_000),
+    llmRetryMaxAttempts: toIntInRange(raw.llmRetryMaxAttempts, defaults.llmRetryMaxAttempts, 0, 6),
+    llmMaxRetryDelayMs: toIntInRange(raw.llmMaxRetryDelayMs, defaults.llmMaxRetryDelayMs, 0, 300_000)
+  };
+}
+
+function normalizeLlmProfiles(raw: unknown, defaults: LlmProfileDefaults): PanelLlmProfile[] {
   const out: PanelLlmProfile[] = [];
   const dedup = new Set<string>();
 
-  const pushProfile = (value: unknown, fallbackId?: string) => {
+  const pushProfile = (value: unknown, idOverride?: string) => {
     const row = toRecord(value);
     const profile = normalizeSingleLlmProfile(row, {
-      ...fallback,
-      id: String(fallbackId || fallback.id || "default").trim() || "default"
+      ...defaults,
+      id: String(idOverride || defaults.id || "default").trim() || "default"
     });
     if (dedup.has(profile.id)) return;
     dedup.add(profile.id);
@@ -474,15 +492,10 @@ function normalizeLlmProfiles(raw: unknown, fallback: LlmProfileFallback): Panel
 
   if (Array.isArray(raw)) {
     for (const item of raw) pushProfile(item);
-  } else {
-    const map = toRecord(raw);
-    for (const [key, value] of Object.entries(map)) {
-      pushProfile(value, key);
-    }
   }
 
   if (out.length === 0) {
-    pushProfile({}, fallback.id || "default");
+    out.push(createDefaultLlmProfile(defaults));
   }
 
   return out;
@@ -547,9 +560,6 @@ function extractContentFromStepExecuteResult(value: unknown): string {
 function normalizeConfig(raw: Record<string, unknown> | null | undefined): PanelConfig {
   const bridgeUrl = String(raw?.bridgeUrl || "ws://127.0.0.1:8787/ws");
   const bridgeToken = String(raw?.bridgeToken || "");
-  const llmApiBase = String(raw?.llmApiBase || "https://ai.chen.rs/v1").trim();
-  const llmApiKey = String(raw?.llmApiKey || "");
-  const llmModel = String(raw?.llmModel || "gpt-5.3-codex").trim() || "gpt-5.3-codex";
   const llmTimeoutMs = toIntInRange(raw?.llmTimeoutMs, 120000, 1_000, 300_000);
   const llmRetryMaxAttempts = toIntInRange(raw?.llmRetryMaxAttempts, 2, 0, 6);
   const llmMaxRetryDelayMs = toIntInRange(raw?.llmMaxRetryDelayMs, 60000, 0, 300_000);
@@ -557,9 +567,6 @@ function normalizeConfig(raw: Record<string, unknown> | null | undefined): Panel
 
   const llmProfiles = normalizeLlmProfiles(raw?.llmProfiles, {
     id: defaultProfile,
-    llmApiBase,
-    llmApiKey,
-    llmModel,
     llmTimeoutMs,
     llmRetryMaxAttempts,
     llmMaxRetryDelayMs
@@ -571,9 +578,6 @@ function normalizeConfig(raw: Record<string, unknown> | null | undefined): Panel
     bridgeUrl,
     bridgeToken,
     browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(raw?.browserRuntimeStrategy, "host-first"),
-    llmApiBase,
-    llmApiKey,
-    llmModel,
     llmDefaultProfile,
     llmProfiles,
     llmProfileChains: normalizeLlmProfileChains(raw?.llmProfileChains, validProfileIds),
@@ -593,8 +597,9 @@ function normalizeConfig(raw: Record<string, unknown> | null | undefined): Panel
 function normalizeHealth(raw: Record<string, unknown> | null | undefined): RuntimeHealth {
   return {
     bridgeUrl: String(raw?.bridgeUrl || "ws://127.0.0.1:8787/ws"),
-    llmApiBase: String(raw?.llmApiBase || ""),
-    llmModel: String(raw?.llmModel || "gpt-5.3-codex"),
+    llmDefaultProfile: String(raw?.llmDefaultProfile || "default"),
+    llmProvider: String(raw?.llmProvider || DEFAULT_PANEL_LLM_PROVIDER),
+    llmModel: String(raw?.llmModel || DEFAULT_PANEL_LLM_MODEL),
     hasLlmApiKey: Boolean(raw?.hasLlmApiKey),
     systemPromptPreview: String(raw?.systemPromptPreview || "")
   };
@@ -613,15 +618,16 @@ export const useRuntimeStore = defineStore("runtime", () => {
   const health = ref<RuntimeHealth>(
     normalizeHealth({
       bridgeUrl: "ws://127.0.0.1:8787/ws",
-      llmModel: "gpt-5.3-codex",
+      llmDefaultProfile: "default",
+      llmProvider: DEFAULT_PANEL_LLM_PROVIDER,
+      llmModel: DEFAULT_PANEL_LLM_MODEL,
       hasLlmApiKey: false
     })
   );
   const config = ref<PanelConfig>(
     normalizeConfig({
       bridgeUrl: "ws://127.0.0.1:8787/ws",
-      llmApiBase: "https://ai.chen.rs/v1",
-      llmModel: "gpt-5.3-codex",
+      llmDefaultProfile: "default",
       llmSystemPromptCustom: "",
       autoTitleInterval: 10,
       bridgeInvokeTimeoutMs: 120000,
@@ -1178,18 +1184,12 @@ export const useRuntimeStore = defineStore("runtime", () => {
     savingConfig.value = true;
     error.value = "";
     try {
-      const llmApiBase = config.value.llmApiBase.trim();
-      const llmApiKey = config.value.llmApiKey;
-      const llmModel = config.value.llmModel.trim() || "gpt-5.3-codex";
       const llmTimeoutMs = Math.max(1000, Number(config.value.llmTimeoutMs || 120000));
       const llmRetryMaxAttempts = Math.max(0, Math.min(6, Number(config.value.llmRetryMaxAttempts || 2)));
       const llmMaxRetryDelayMs = Math.max(0, Number(config.value.llmMaxRetryDelayMs || 60000));
 
       const llmProfiles = normalizeLlmProfiles(config.value.llmProfiles, {
         id: String(config.value.llmDefaultProfile || "default").trim() || "default",
-        llmApiBase,
-        llmApiKey,
-        llmModel,
         llmTimeoutMs,
         llmRetryMaxAttempts,
         llmMaxRetryDelayMs
@@ -1214,9 +1214,6 @@ export const useRuntimeStore = defineStore("runtime", () => {
           bridgeUrl: config.value.bridgeUrl.trim(),
           bridgeToken: config.value.bridgeToken,
           browserRuntimeStrategy,
-          llmApiBase,
-          llmApiKey,
-          llmModel,
           llmDefaultProfile,
           llmProfiles,
           llmProfileChains,

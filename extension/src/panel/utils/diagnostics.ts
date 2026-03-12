@@ -419,7 +419,10 @@ function buildToolTrace(events: NormalizedStepEvent[], limit = 120): ToolEventPo
         action: String(payload.action || ""),
         ok: payload.ok === true,
         error: clipText(payload.error, 1000),
-        preview: clipText(payload.preview, 1000)
+        preview: clipText(payload.preview, 1000),
+        modeUsed: String(payload.modeUsed || ""),
+        providerId: String(payload.providerId || ""),
+        fallbackFrom: String(payload.fallbackFrom || "")
       };
       output.push(point);
       continue;
@@ -428,7 +431,9 @@ function buildToolTrace(events: NormalizedStepEvent[], limit = 120): ToolEventPo
     if (event.type === "step_execute") {
       point.data = {
         mode: String(payload.mode || ""),
-        action: String(payload.action || "")
+        action: String(payload.action || ""),
+        capability: String(payload.capability || ""),
+        providerId: String(payload.providerId || "")
       };
       output.push(point);
       continue;
@@ -438,6 +443,7 @@ function buildToolTrace(events: NormalizedStepEvent[], limit = 120): ToolEventPo
       point.data = {
         ok: payload.ok === true,
         modeUsed: String(payload.modeUsed || ""),
+        providerId: String(payload.providerId || ""),
         fallbackFrom: String(payload.fallbackFrom || ""),
         verified: payload.verified === true,
         verifyReason: String(payload.verifyReason || ""),
@@ -711,6 +717,9 @@ function buildAgentDecisionTrace(events: NormalizedStepEvent[], limit = 80): Arr
       row.ok = payload.ok === true;
       row.error = clipText(payload.error, 360);
       row.preview = clipText(payload.preview, 360);
+      row.modeUsed = String(payload.modeUsed || "");
+      row.providerId = String(payload.providerId || "");
+      row.fallbackFrom = String(payload.fallbackFrom || "");
     } else if (event.type === "llm.response.parsed") {
       row.step = toPositiveInt(payload.step);
       row.toolCalls = toPositiveInt(payload.toolCalls);
@@ -773,7 +782,8 @@ export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}
     sessionId: sessionId || String(dumpRecord.sessionId || ""),
     config: {
       bridgeUrl: String(toRecord(config).bridgeUrl || ""),
-      llmApiBase: String(toRecord(config).llmApiBase || ""),
+      llmDefaultProfile: String(toRecord(config).llmDefaultProfile || "default"),
+      llmProvider: String(toRecord(config).llmProvider || ""),
       llmModel: String(toRecord(config).llmModel || ""),
       hasLlmApiKey: toRecord(config).hasLlmApiKey === true
     },

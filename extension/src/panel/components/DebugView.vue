@@ -209,8 +209,11 @@ onMounted(() => {
             <div class="text-[10px] uppercase tracking-wider text-ui-text-muted flex items-center gap-1">
               <Radio :size="12" /> LLM
             </div>
-            <p class="mt-1 text-[12px] font-semibold text-ui-text">{{ health.llmModel || "N/A" }}</p>
-            <p class="text-[10px] text-ui-text-muted">{{ health.hasLlmApiKey ? "Key 已配置" : "Key 缺失" }}</p>
+            <p class="mt-1 text-[12px] font-semibold text-ui-text">{{ health.llmProvider || "未配置 Provider" }}</p>
+            <p class="text-[10px] text-ui-text-muted">
+              {{ `${health.llmDefaultProfile || "default"} · ${health.llmModel || "auto"}` }}
+            </p>
+            <p class="text-[10px] text-ui-text-muted">{{ health.hasLlmApiKey ? "当前默认 Profile 可用" : "当前默认 Profile 缺少凭据" }}</p>
           </div>
           <div class="rounded border border-ui-border bg-ui-bg p-2.5">
             <div class="text-[10px] uppercase tracking-wider text-ui-text-muted flex items-center gap-1">
