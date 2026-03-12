@@ -5,6 +5,7 @@
   "description": "Browser-side planner + loop engine + CDP gateway + local WS bridge.",
   "permissions": [
     "debugger",
+    "scripting",
     "tabs",
     "storage",
     "sidePanel",
@@ -12,6 +13,27 @@
   ],
   "host_permissions": [
     "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://cursor.com/*"
+      ],
+      "js": [
+        "assets/cursor-help-page-hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://cursor.com/*"
+      ],
+      "js": [
+        "assets/cursor-help-content.js"
+      ],
+      "run_at": "document_start"
+    }
   ],
   "background": {
     "service_worker": "service-worker.js",
@@ -23,5 +45,15 @@
   "action": {
     "default_title": "Browser Brain Loop"
   },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "assets/cursor-help-web-shared.js"
+      ],
+      "matches": [
+        "https://cursor.com/*"
+      ]
+    }
+  ],
   "minimum_chrome_version": "120"
 }

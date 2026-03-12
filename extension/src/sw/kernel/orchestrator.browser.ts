@@ -39,6 +39,7 @@ import {
   type ToolDefinition
 } from "./tool-contract-registry";
 import { createOpenAiCompatibleLlmProvider } from "./llm-openai-compatible-provider";
+import { createCursorHelpWebProvider } from "./web-chat-executor.browser";
 import { DEFAULT_LLM_PROVIDER_ID, type LlmProviderAdapter } from "./llm-provider";
 import { LlmProviderRegistry, type RegisterLlmProviderOptions } from "./llm-provider-registry";
 
@@ -215,6 +216,9 @@ export class BrainOrchestrator {
       readText: options.skillContentReader
     });
     this.llmProviders.register(createOpenAiCompatibleLlmProvider(DEFAULT_LLM_PROVIDER_ID), {
+      replace: true
+    });
+    this.llmProviders.register(createCursorHelpWebProvider(), {
       replace: true
     });
 
@@ -696,7 +700,13 @@ export class BrainOrchestrator {
   private async invokeProviderWithHooks(
     mode: ExecuteMode,
     input: ExecuteStepInput
-  ): Promise<{ modeUsed: ExecuteMode; inputUsed: ExecuteStepInput; data: unknown; capabilityUsed?: ExecuteCapability }> {
+  ): Promise<{
+    modeUsed: ExecuteMode;
+    inputUsed: ExecuteStepInput;
+    data: unknown;
+    capabilityUsed?: ExecuteCapability;
+    providerId?: string;
+  }> {
     const beforeTool = await this.hooks.run("tool.before_call", { mode, capability: input.capability, input });
     if (beforeTool.blocked) {
       throw new HookBlockError(`tool.before_call blocked: ${beforeTool.reason || "blocked"}`);
@@ -709,6 +719,7 @@ export class BrainOrchestrator {
     const afterTool = await this.hooks.run("tool.after_result", {
       mode: rawInvoke.modeUsed,
       capability: rawInvoke.capabilityUsed,
+      providerId: rawInvoke.providerId,
       input: invokeInput,
       result: rawInvoke.data
     });
@@ -719,6 +730,7 @@ export class BrainOrchestrator {
     return {
       modeUsed: afterTool.value.mode,
       capabilityUsed: afterTool.value.capability,
+      providerId: typeof afterTool.value.providerId === "string" ? afterTool.value.providerId : rawInvoke.providerId,
       inputUsed: afterTool.value.input,
       data: afterTool.value.result
     };
@@ -764,6 +776,7 @@ export class BrainOrchestrator {
     let modeUsed: ExecuteMode = initialMode;
     let verifyInput: ExecuteStepInput = nextInput;
     let capabilityUsed: ExecuteCapability | undefined;
+    let providerId: string | undefined;
     let fallbackFrom: ExecuteMode | undefined;
     let data: unknown;
 
@@ -775,16 +788,18 @@ export class BrainOrchestrator {
       }
       verifyInput = invoked.inputUsed;
       capabilityUsed = invoked.capabilityUsed;
+      providerId = invoked.providerId;
       data = invoked.data;
     } catch (error) {
       if (error instanceof HookBlockError) {
         return this.applyAfterExecuteHook(nextInput, {
           ok: false,
-          modeUsed,
-          fallbackFrom,
-          error: error.message,
-          verified: false
-        });
+        modeUsed,
+        fallbackFrom,
+        providerId,
+        error: error.message,
+        verified: false
+      });
       }
 
       const err = error as Error & {
@@ -793,6 +808,7 @@ export class BrainOrchestrator {
         retryable?: unknown;
         modeUsed?: unknown;
         capabilityUsed?: unknown;
+        providerId?: unknown;
       };
       const modeFromError = toExecuteModeOrNull(err.modeUsed);
       if (modeFromError) {
@@ -805,11 +821,16 @@ export class BrainOrchestrator {
       if (capabilityFromError) {
         capabilityUsed = capabilityFromError;
       }
+      const providerIdFromError = typeof err.providerId === "string" ? err.providerId.trim() : "";
+      if (providerIdFromError) {
+        providerId = providerIdFromError;
+      }
 
       return this.applyAfterExecuteHook(nextInput, {
         ok: false,
         modeUsed,
         capabilityUsed,
+        providerId,
         fallbackFrom,
         error: error instanceof Error ? error.message : String(error),
         errorCode: typeof err.code === "string" && err.code.trim() ? err.code.trim() : undefined,
@@ -835,6 +856,7 @@ export class BrainOrchestrator {
       ok: true,
       modeUsed,
       capabilityUsed,
+      providerId,
       fallbackFrom,
       verified,
       verifyReason,

@@ -15,6 +15,7 @@ interface LlmProfileDef {
   llmBase: string;
   llmKey: string;
   llmModel: string;
+  providerOptions?: JsonRecord;
   llmTimeoutMs: number;
   llmRetryMaxAttempts: number;
   llmMaxRetryDelayMs: number;
@@ -85,6 +86,7 @@ function normalizeProfileDef(raw: JsonRecord, fallbackId: string, fallbackConfig
     llmBase,
     llmKey,
     llmModel,
+    providerOptions: asRecord(raw.providerOptions),
     llmTimeoutMs,
     llmRetryMaxAttempts,
     llmMaxRetryDelayMs,
@@ -166,6 +168,26 @@ export function resolveLlmRoute(input: ResolveLlmRouteInput): ResolveLlmRouteRes
   const role = normalizeRole(preferredRoleRaw || selected.role);
 
   if (!String(selected.llmBase || "").trim() || !String(selected.llmKey || "").trim()) {
+    if (selected.provider === "cursor_help_web") {
+      return {
+        ok: true,
+        route: {
+          profile: selected.id,
+          provider: selected.provider || DEFAULT_LLM_PROVIDER_ID,
+          llmBase: selected.llmBase,
+          llmKey: selected.llmKey,
+          llmModel: selected.llmModel,
+          providerOptions: selected.providerOptions || {},
+          llmTimeoutMs: selected.llmTimeoutMs,
+          llmRetryMaxAttempts: selected.llmRetryMaxAttempts,
+          llmMaxRetryDelayMs: selected.llmMaxRetryDelayMs,
+          role,
+          escalationPolicy,
+          orderedProfiles: resolveOrderedProfiles(config, role, selected.id, profiles),
+          fromLegacy: false
+        }
+      };
+    }
     return {
       ok: false,
       reason: "missing_llm_config",
@@ -183,6 +205,7 @@ export function resolveLlmRoute(input: ResolveLlmRouteInput): ResolveLlmRouteRes
       llmBase: selected.llmBase,
       llmKey: selected.llmKey,
       llmModel: selected.llmModel,
+      providerOptions: selected.providerOptions || {},
       llmTimeoutMs: selected.llmTimeoutMs,
       llmRetryMaxAttempts: selected.llmRetryMaxAttempts,
       llmMaxRetryDelayMs: selected.llmMaxRetryDelayMs,

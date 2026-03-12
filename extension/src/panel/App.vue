@@ -35,6 +35,10 @@ import { onClickOutside } from "@vueuse/core";
 const store = useRuntimeStore();
 const { loading, error, sessions, activeSessionId, messages, runtime, isRegeneratingTitle } = storeToRefs(store);
 
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
 const prompt = ref("");
 const scrollContainer = ref<HTMLElement | null>(null);
 const listOpen = ref(false);
@@ -2946,7 +2950,7 @@ onUnmounted(() => {
                 <Plug :size="14" aria-hidden="true" /> 插件管理
               </button>
               <button role="menuitem" @click="showProviderSettings = true; showPlugins = false; showSkills = false; showSettings = false; showDebug = false; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
-                <Server :size="14" aria-hidden="true" /> Provider 设置
+                <Server :size="14" aria-hidden="true" /> 模型与 Provider
               </button>
               <button role="menuitem" @click="showSettings = true; showProviderSettings = false; showPlugins = false; showSkills = false; showDebug = false; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
                 <Settings :size="14" aria-hidden="true" /> 系统设置

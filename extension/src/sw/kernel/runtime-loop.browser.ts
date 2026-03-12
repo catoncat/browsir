@@ -2350,6 +2350,8 @@ async function requestSessionTitleFromLlm(input: {
     const timer = setTimeout(() => ctrl.abort("title-timeout"), Math.min(30_000, route.llmTimeoutMs));
     try {
       const response = await provider.send({
+        sessionId: "title-generator",
+        step: 0,
         route,
         signal: ctrl.signal,
         payload: {
@@ -2472,6 +2474,8 @@ async function requestCompactionSummaryFromLlm(input: {
       let response: Response;
       try {
         response = await provider.send({
+          sessionId: input.sessionId,
+          step: 0,
           route,
           requestUrl,
           signal: ctrl.signal,
@@ -7100,6 +7104,8 @@ export function createRuntimeLoopController(orchestrator: BrainOrchestrator, inf
         });
 
         const resp = await provider.send({
+          sessionId,
+          step,
           route,
           requestUrl,
           payload: requestPayload,

@@ -12,6 +12,7 @@ export * from "./tool-provider-registry";
 export * from "./llm-provider";
 export * from "./llm-provider-registry";
 export * from "./llm-openai-compatible-provider";
+export * from "./web-chat-executor.browser";
 export * from "./llm-profile-resolver";
 export * from "./tool-contract-registry";
 export * from "./plugin-runtime";

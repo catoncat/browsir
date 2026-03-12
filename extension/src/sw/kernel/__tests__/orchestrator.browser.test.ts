@@ -141,6 +141,7 @@ describe("orchestrator.browser", () => {
 
     expect(result.ok).toBe(true);
     expect(result.modeUsed).toBe("script");
+    expect(result.providerId).toBe("test.script.success");
     expect(result.fallbackFrom).toBeUndefined();
     expect(result.data).toEqual({ ok: true, source: "script" });
   });
@@ -168,6 +169,7 @@ describe("orchestrator.browser", () => {
 
     expect(result.ok).toBe(false);
     expect(result.modeUsed).toBe("script");
+    expect(result.providerId).toBe("test.script.fail");
     expect(result.fallbackFrom).toBeUndefined();
     expect(String(result.error || "")).toContain("script-failed");
   });

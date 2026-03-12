@@ -7,6 +7,7 @@ import { registerExtension, type ExtensionFactory } from "./extension-api";
 import type { AgentPluginDefinition, AgentPluginManifest, AgentPluginPermissions } from "./plugin-runtime";
 import type { LlmProviderAdapter, LlmProviderSendInput } from "./llm-provider";
 import { normalizeSkillCreateRequest } from "./skill-create";
+import { handleWebChatRuntimeMessage } from "./web-chat-executor.browser";
 import {
   removeSessionIndexEntry,
   removeSessionMeta,
@@ -3559,22 +3560,31 @@ async function handleBrainDebug(
       return fail(cfgResult?.error || "config.get failed");
     }
     const cfg = toRecord(cfgResult.data);
-    const profiles = Array.isArray(cfg.llmProfiles) ? cfg.llmProfiles : [];
-    const hasAnyLlmApiKey = profiles.some((item) => {
-      const row = toRecord(item);
-      return !!String(row.llmApiKey || "").trim();
-    });
+    const profiles = Array.isArray(cfg.llmProfiles) ? cfg.llmProfiles.map((item) => toRecord(item)) : [];
+    const llmDefaultProfile = String(cfg.llmDefaultProfile || "default");
+    const activeProfile =
+      profiles.find((item) => String(item.id || "").trim() === llmDefaultProfile)
+      || profiles[0]
+      || ({} as Record<string, unknown>);
+    const activeProvider = String(activeProfile.provider || "openai_compatible").trim() || "openai_compatible";
+    const activeModel = String(activeProfile.llmModel || "").trim();
+    const hasLlmApiKey =
+      activeProvider === "cursor_help_web"
+        ? true
+        : !!String(activeProfile.llmApiKey || "").trim();
     const systemPromptPreview = await runtimeLoop.getSystemPromptPreview();
     return ok({
       bridgeUrl: String(cfg.bridgeUrl || ""),
       browserRuntimeStrategy: String(cfg.browserRuntimeStrategy || "host-first"),
-      llmDefaultProfile: String(cfg.llmDefaultProfile || "default"),
+      llmDefaultProfile,
       llmProfilesCount: profiles.length,
+      llmProvider: activeProvider,
+      llmModel: activeModel,
       bridgeInvokeTimeoutMs: Number(cfg.bridgeInvokeTimeoutMs || 0),
       llmTimeoutMs: Number(cfg.llmTimeoutMs || 0),
       llmRetryMaxAttempts: Number(cfg.llmRetryMaxAttempts || 0),
       llmMaxRetryDelayMs: Number(cfg.llmMaxRetryDelayMs || 0),
-      hasLlmApiKey: hasAnyLlmApiKey,
+      hasLlmApiKey,
       systemPromptPreview
     });
   }
@@ -3651,6 +3661,12 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
 
         if (type.startsWith("brain.debug.")) {
           return await applyAfter(await handleBrainDebug(orchestrator, runtimeLoop, infra, routeMessage));
+        }
+
+        if (type.startsWith("webchat.")) {
+          const senderTabId = Number((_sender?.tab?.id ?? 0) || 0);
+          const handled = await handleWebChatRuntimeMessage(routeMessage, Number.isInteger(senderTabId) && senderTabId > 0 ? senderTabId : undefined);
+          return await applyAfter(handled ? ok({ handled: true }) : fail(`Unknown message type: ${type}`));
         }
 
         if (type === "brain.agent.run") {

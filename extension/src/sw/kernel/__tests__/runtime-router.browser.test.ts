@@ -6432,6 +6432,9 @@ description missing`
     const debugCfgData = (debugCfg.data || {}) as Record<string, unknown>;
     expect(debugCfgData.bridgeUrl).toBe("ws://127.0.0.1:17777/ws");
     expect(String(debugCfgData.browserRuntimeStrategy || "")).toBe("browser-first");
+    expect(String(debugCfgData.llmDefaultProfile || "")).toBe("default");
+    expect(String(debugCfgData.llmProvider || "")).toBe("openai_compatible");
+    expect(String(debugCfgData.llmModel || "")).toBe("gpt-test");
     expect(typeof debugCfgData.hasLlmApiKey).toBe("boolean");
     expect(debugCfgData.bridgeInvokeTimeoutMs).toBe(180000);
     expect(debugCfgData.llmTimeoutMs).toBe(160000);

@@ -12,6 +12,7 @@ export interface LlmResolvedRoute {
   llmBase: string;
   llmKey: string;
   llmModel: string;
+  providerOptions?: JsonRecord;
   llmTimeoutMs: number;
   llmRetryMaxAttempts: number;
   llmMaxRetryDelayMs: number;
@@ -22,6 +23,8 @@ export interface LlmResolvedRoute {
 }
 
 export interface LlmProviderSendInput {
+  sessionId?: string;
+  step?: number;
   route: LlmResolvedRoute;
   payload: JsonRecord;
   signal: AbortSignal;
