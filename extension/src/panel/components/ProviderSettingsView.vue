@@ -618,16 +618,11 @@ onMounted(() => {
         class="border border-ui-border bg-ui-surface/30 p-4 rounded-sm space-y-3"
       >
         <div class="space-y-1">
-          <p
-            class="text-[11px] font-bold uppercase tracking-[0.14em] text-ui-text-muted/70"
-          >
-            Model Setup
+          <p class="text-[16px] font-semibold tracking-tight text-ui-text">
+            先选默认模型
           </p>
-          <h3 class="text-[16px] font-semibold tracking-tight text-ui-text">
-            为常用场景选好模型
-          </h3>
           <p class="text-[12px] text-ui-text-muted leading-relaxed">
-            默认模型用于大多数对话。你也可以单独为标题和摘要指定模型，并准备一个备用模型。
+            其他设置都可以留空。
           </p>
         </div>
 
@@ -650,13 +645,13 @@ onMounted(() => {
                 {{ getProfileOptionLabel(profile) }}
               </option>
             </select>
-            <p class="text-[11px] text-ui-text-muted/75">新对话默认使用它。</p>
+            <p class="text-[11px] text-ui-text-muted/75">用于新对话。</p>
           </label>
 
           <label class="space-y-1.5">
             <span
               class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
-              >标题与摘要</span
+              >标题摘要</span
             >
             <select
               :id="auxProfileId"
@@ -672,9 +667,7 @@ onMounted(() => {
                 {{ getProfileOptionLabel(profile) }}
               </option>
             </select>
-            <p class="text-[11px] text-ui-text-muted/75">
-              只影响自动标题和摘要。
-            </p>
+            <p class="text-[11px] text-ui-text-muted/75">可选。</p>
           </label>
 
           <label class="space-y-1.5">
@@ -696,9 +689,7 @@ onMounted(() => {
                 {{ getProfileOptionLabel(profile) }}
               </option>
             </select>
-            <p class="text-[11px] text-ui-text-muted/75">
-              默认模型连续失败时，再尝试它。
-            </p>
+            <p class="text-[11px] text-ui-text-muted/75">可选。</p>
           </label>
         </div>
       </section>
@@ -714,8 +705,7 @@ onMounted(() => {
               快速接入 Cursor
             </h3>
             <p class="text-[12px] text-ui-text-muted leading-relaxed">
-              把 Cursor Help
-              保存成一个可直接使用的模型方案，方便复用网页里的登录状态。
+              保存为一个可用模型。
             </p>
             <p class="text-[11px] text-ui-text-muted/80">
               {{
@@ -755,7 +745,7 @@ onMounted(() => {
               模型方案
             </h3>
             <p class="text-[12px] text-ui-text-muted">
-              先保存可用模型，再在上面选择默认、标题摘要和备用方案。
+              先把模型加到这里，再上去选择。
             </p>
           </div>
           <button
