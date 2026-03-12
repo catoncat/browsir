@@ -93,6 +93,7 @@ export const CURSOR_HELP_PROMPT_START_PREFIX = "<!-- BBL_PROMPT_START:";
 export const CURSOR_HELP_PROMPT_END_PREFIX = "<!-- BBL_PROMPT_END:";
 export const CURSOR_HELP_SYSTEM_PROMPT_START_PREFIX = "<!-- BBL_SYSTEM_PROMPT_START:";
 export const CURSOR_HELP_SYSTEM_PROMPT_END_PREFIX = "<!-- BBL_SYSTEM_PROMPT_END:";
+const CURSOR_HELP_PROMPT_ENVELOPE_RE = /<!-- BBL_PROMPT_START:[^>]+ -->[\s\S]*?<!-- BBL_PROMPT_END:[^>]+ -->\s*/g;
 
 const MODEL_ALIASES: Array<{ match: RegExp; apiModel: string }> = [
   { match: /anthropic\/claude-sonnet-4\.6|claude-sonnet-4\.6|sonnet 4\.6/i, apiModel: "anthropic/claude-sonnet-4.6" },
@@ -235,13 +236,11 @@ export function isCursorHelpTargetRequestUrl(url: string): boolean {
 export function injectCompiledPromptIdempotent(sourceText: string, compiledPrompt: string, requestId: string): string {
   const envelope = buildPromptEnvelope(compiledPrompt, requestId);
   const normalizedSource = String(sourceText || "");
-  const hasPromptEnvelope =
-    normalizedSource.includes(CURSOR_HELP_PROMPT_START_PREFIX) && normalizedSource.includes(CURSOR_HELP_PROMPT_END_PREFIX);
-  if (!hasPromptEnvelope) return envelope;
-  return normalizedSource.replace(
-    /<!-- BBL_PROMPT_START:[^>]+ -->[\s\S]*?<!-- BBL_PROMPT_END:[^>]+ -->/g,
-    envelope
-  );
+  const strippedSource =
+    normalizedSource.includes(CURSOR_HELP_PROMPT_START_PREFIX) && normalizedSource.includes(CURSOR_HELP_PROMPT_END_PREFIX)
+      ? normalizedSource.replace(CURSOR_HELP_PROMPT_ENVELOPE_RE, "").replace(/^\s+/, "")
+      : normalizedSource;
+  return strippedSource ? `${envelope}\n\n${strippedSource}` : envelope;
 }
 
 export function extractCursorHelpTargetMessagePointer(rawBody: unknown): CursorHelpTargetMessagePointer | null {
@@ -347,6 +346,66 @@ function isNativeControlMessage(rawMessage: unknown): boolean {
   const role = getMessageRole(rawMessage);
   if (role !== "system" && role !== "developer") return false;
   return !isInjectedSystemMessage(rawMessage);
+}
+
+function stripInjectedPromptEnvelopeFromMessage(rawMessage: unknown): boolean {
+  const message = toRecord(rawMessage);
+  let changed = false;
+
+  const stripText = (text: string): string => {
+    if (!text.includes(CURSOR_HELP_PROMPT_START_PREFIX) || !text.includes(CURSOR_HELP_PROMPT_END_PREFIX)) return text;
+    const next = text.replace(CURSOR_HELP_PROMPT_ENVELOPE_RE, "").replace(/^\s+/, "");
+    if (next !== text) changed = true;
+    return next;
+  };
+
+  if (Array.isArray(message.parts)) {
+    for (const part of message.parts) {
+      const row = toRecord(part);
+      if (typeof row.text === "string") {
+        row.text = stripText(row.text);
+      }
+    }
+  }
+
+  if (typeof message.content === "string") {
+    message.content = stripText(message.content);
+  } else if (Array.isArray(message.content)) {
+    for (const part of message.content) {
+      const row = toRecord(part);
+      if (typeof row.text === "string") {
+        row.text = stripText(row.text);
+      } else if (typeof row.content === "string") {
+        row.content = stripText(row.content);
+      } else if (typeof row.input_text === "string") {
+        row.input_text = stripText(row.input_text);
+      }
+    }
+  }
+
+  return changed;
+}
+
+function stripInjectedPromptEnvelopes(body: JsonRecord): number {
+  let strippedCount = 0;
+  if (Array.isArray(body.messages)) {
+    for (const rawMessage of body.messages) {
+      if (getMessageRole(rawMessage) !== "user") continue;
+      if (stripInjectedPromptEnvelopeFromMessage(rawMessage)) {
+        strippedCount += 1;
+      }
+    }
+  }
+
+  if (typeof body.input === "string") {
+    const next = body.input.replace(CURSOR_HELP_PROMPT_ENVELOPE_RE, "").replace(/^\s+/, "");
+    if (next !== body.input) {
+      body.input = next;
+      strippedCount += 1;
+    }
+  }
+
+  return strippedCount;
 }
 
 function buildInjectedSystemMessage(body: JsonRecord, compiledPrompt: string, requestId: string): JsonRecord {
@@ -476,12 +535,20 @@ export function rewriteCursorHelpNativeRequestBody(rawBody: unknown, rewritePlan
         strippedNativeControlMessageCount: 0
       };
   const systemMessageInjected = systemRewrite.injected;
-  let rewritten = systemMessageInjected || systemRewrite.strippedNativeControlMessageCount > 0;
+  const strippedPromptEnvelopeCount = stripInjectedPromptEnvelopes(body);
+  let rewritten =
+    systemMessageInjected ||
+    systemRewrite.strippedNativeControlMessageCount > 0 ||
+    strippedPromptEnvelopeCount > 0;
   const pointer = extractCursorHelpTargetMessagePointer(body);
   let rewrittenTargetText = pointer?.existingText || "";
   let userPromptInjected = false;
   if (pointer && injectUserPrefix) {
-    const nextText = injectCompiledPromptIdempotent(pointer.existingText, rewritePlan.compiledPrompt, rewritePlan.requestId);
+    const nextText = injectCompiledPromptIdempotent(
+      String(rewritePlan.latestUserPrompt || "").trim() || pointer.existingText,
+      rewritePlan.compiledPrompt,
+      rewritePlan.requestId
+    );
     if (nextText !== pointer.existingText) {
       writePathValue(body, pointer.path, nextText);
       rewritten = true;

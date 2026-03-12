@@ -429,6 +429,16 @@ function safeStringify(input: unknown, maxChars = 9000): string {
   return clipText(text, maxChars);
 }
 
+function stableHash(input: unknown): string {
+  const text = String(input || "");
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
 function safeJsonParse(raw: unknown): unknown {
   try {
     return JSON.parse(String(raw || ""));
@@ -1266,6 +1276,57 @@ function normalizeToolArgsForSignature(rawArgs: unknown): string {
     return clipText(safeStringify(sortJsonForSignature(parsed), 1200), 1200);
   }
   return clipText(text.replace(/\s+/g, " "), 1200);
+}
+
+const NO_PROGRESS_VOLATILE_EVIDENCE_KEYS = new Set([
+  "backendNodeId",
+  "cmdId",
+  "contentRuntimeVersion",
+  "fallbackFrom",
+  "lastSenderError",
+  "leaseId",
+  "modeUsed",
+  "pageRuntimeVersion",
+  "providerId",
+  "ref",
+  "requestId",
+  "resolvedTool",
+  "rpcId",
+  "runtimeExpectedVersion",
+  "runtimeVersion",
+  "sessionId",
+  "snapshotId",
+  "stepRef",
+  "tabId",
+  "targetTabId",
+  "toolCallId",
+  "uid",
+]);
+
+function normalizeNoProgressEvidenceValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    const limit = 8;
+    const items = value
+      .slice(0, limit)
+      .map((item) => normalizeNoProgressEvidenceValue(item));
+    if (value.length > limit) items.push(`__truncated__:${value.length}`);
+    return items;
+  }
+  if (typeof value === "string") return clipText(value, 240);
+  if (!value || typeof value !== "object") return value;
+  const source = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(source).sort()) {
+    if (NO_PROGRESS_VOLATILE_EVIDENCE_KEYS.has(key)) continue;
+    const normalized = normalizeNoProgressEvidenceValue(source[key]);
+    if (normalized === undefined) continue;
+    out[key] = normalized;
+  }
+  return out;
+}
+
+function buildNoProgressEvidenceFingerprint(value: unknown): string {
+  return safeStringify(normalizeNoProgressEvidenceValue(value), 1200);
 }
 
 function isNonEmptyToolArgValue(value: unknown): boolean {
@@ -8776,8 +8837,12 @@ export function createRuntimeLoopController(
     let finalStatus = "done";
     const llmFailureBySignature = new Map<string, number>();
     const focusEscalationReplayKeys = new Set<string>();
-    const noProgressHits = new Map<NoProgressReason, number>();
-    const toolCallSignatureHistory: string[] = [];
+    const noProgressHits = new Map<string, number>();
+    const toolCallSignatureHistory: Array<{
+      signature: string;
+      evidenceFingerprint: string;
+    }> = [];
+    const lastEvidenceFingerprintBySignature = new Map<string, string>();
     let noProgressTerminalNotified = false;
     let browserProofRequired = false;
     let browserProofSuccessCount = 0;
@@ -8814,16 +8879,35 @@ export function createRuntimeLoopController(
       return nestedVerify.ok === true;
     };
 
+    const buildNoProgressScopeKey = (
+      reason: NoProgressReason,
+      scopeKey: string,
+    ): string => `${reason}:${scopeKey || "(default)"}`;
+
+    const clearNoProgressHits = (...reasons: NoProgressReason[]): void => {
+      if (reasons.length <= 0) {
+        noProgressHits.clear();
+        return;
+      }
+      for (const key of Array.from(noProgressHits.keys())) {
+        if (reasons.some((reason) => key.startsWith(`${reason}:`))) {
+          noProgressHits.delete(key);
+        }
+      }
+    };
+
     const resolveNoProgressDecision = (
       reason: NoProgressReason,
+      scopeKey: string,
     ): {
       hit: number;
       continueBudget: number;
       remainingContinueBudget: number;
       decision: "continue" | "stop";
     } => {
-      const hit = (noProgressHits.get(reason) || 0) + 1;
-      noProgressHits.set(reason, hit);
+      const bucketKey = buildNoProgressScopeKey(reason, scopeKey);
+      const hit = (noProgressHits.get(bucketKey) || 0) + 1;
+      noProgressHits.set(bucketKey, hit);
       const continueBudget = NO_PROGRESS_CONTINUE_BUDGET[reason] ?? 0;
       const remainingContinueBudget = Math.max(0, continueBudget - hit);
       const decision: "continue" | "stop" =
@@ -8839,11 +8923,15 @@ export function createRuntimeLoopController(
     const onNoProgressSignal = async (
       reason: NoProgressReason,
       details: JsonRecord,
-      options: { emitBrowserGuard?: boolean } = {},
+      options: { emitBrowserGuard?: boolean; scopeKey?: string } = {},
     ): Promise<boolean> => {
-      const decision = resolveNoProgressDecision(reason);
+      const scopeKey =
+        String(options.scopeKey || details.signature || details.reasonDetail || "default").trim() ||
+        "default";
+      const decision = resolveNoProgressDecision(reason, scopeKey);
       const payload: JsonRecord = {
         reason,
+        scopeKey,
         decision: decision.decision,
         hit: decision.hit,
         budget: {
@@ -9116,7 +9204,10 @@ export function createRuntimeLoopController(
                 step: llmStep,
                 reasonDetail: "final_answer_without_browser_proof",
               },
-              { emitBrowserGuard: true },
+              {
+                emitBrowserGuard: true,
+                scopeKey: "final_answer_without_browser_proof",
+              },
             );
             if (shouldStop) {
               break;
@@ -9140,8 +9231,12 @@ export function createRuntimeLoopController(
         }
 
         const toolCallSignature = buildToolCallSignature(toolCalls);
+        const previousEvidenceFingerprint = toolCallSignature
+          ? lastEvidenceFingerprintBySignature.get(toolCallSignature) || ""
+          : "";
         let stepUsedBrowserProofRequiredTool = false;
         let stepObservedBrowserProof = false;
+        const stepEvidenceParts: string[] = [];
         let skipRemainingToolCallsBySteer = false;
         for (
           let toolCallIndex = 0;
@@ -9299,6 +9394,7 @@ export function createRuntimeLoopController(
               break;
             }
             const failurePayload = buildToolFailurePayload(tc, result);
+            stepEvidenceParts.push(buildNoProgressEvidenceFingerprint(failurePayload));
             messages.push({
               role: "tool",
               tool_call_id: tc.id,
@@ -9337,6 +9433,7 @@ export function createRuntimeLoopController(
             providerId: result.providerId,
             fallbackFrom: result.fallbackFrom,
           });
+          stepEvidenceParts.push(buildNoProgressEvidenceFingerprint(uiToolPayload));
           messages.push({
             role: "tool",
             tool_call_id: tc.id,
@@ -9382,15 +9479,42 @@ export function createRuntimeLoopController(
           continue;
         }
 
+        const stepEvidenceFingerprint = buildNoProgressEvidenceFingerprint(
+          stepEvidenceParts,
+        );
+        const stepFreshEvidence =
+          !!toolCallSignature &&
+          !!previousEvidenceFingerprint &&
+          stepEvidenceFingerprint !== previousEvidenceFingerprint;
+        const stepRepeatedWithoutNewEvidence =
+          !!toolCallSignature &&
+          !!previousEvidenceFingerprint &&
+          stepEvidenceFingerprint === previousEvidenceFingerprint;
+
+        if (toolCallSignature) {
+          lastEvidenceFingerprintBySignature.set(
+            toolCallSignature,
+            stepEvidenceFingerprint,
+          );
+        }
+
         if (stepObservedBrowserProof) {
           toolCallSignatureHistory.length = 0;
-          noProgressHits.delete("repeat_signature");
-          noProgressHits.delete("ping_pong");
-          noProgressHits.delete("browser_proof_guard");
+          clearNoProgressHits(
+            "repeat_signature",
+            "ping_pong",
+            "browser_proof_guard",
+          );
+        } else if (stepFreshEvidence) {
+          clearNoProgressHits("repeat_signature", "browser_proof_guard");
         }
 
         let browserGuardSignaled = false;
-        if (stepUsedBrowserProofRequiredTool && !stepObservedBrowserProof) {
+        if (
+          stepUsedBrowserProofRequiredTool &&
+          !stepObservedBrowserProof &&
+          !stepFreshEvidence
+        ) {
           browserGuardSignaled = true;
           const shouldStop = await onNoProgressSignal(
             "browser_proof_guard",
@@ -9398,8 +9522,15 @@ export function createRuntimeLoopController(
               step: llmStep,
               toolStep,
               signature: toolCallSignature,
+              evidenceHash: stableHash(stepEvidenceFingerprint),
+              evidenceFresh: false,
             },
-            { emitBrowserGuard: true },
+            {
+              emitBrowserGuard: true,
+              scopeKey:
+                toolCallSignature ||
+                `step:${llmStep}:tool:${toolStep}:browser_proof_guard`,
+            },
           );
           if (shouldStop) {
             break;
@@ -9407,7 +9538,10 @@ export function createRuntimeLoopController(
         }
 
         if (!browserGuardSignaled && toolCallSignature) {
-          toolCallSignatureHistory.push(toolCallSignature);
+          toolCallSignatureHistory.push({
+            signature: toolCallSignature,
+            evidenceFingerprint: stepEvidenceFingerprint,
+          });
           while (
             toolCallSignatureHistory.length >
             NO_PROGRESS_SIGNATURE_HISTORY_LIMIT
@@ -9428,23 +9562,50 @@ export function createRuntimeLoopController(
             const b = toolCallSignatureHistory[len - 3];
             const c = toolCallSignatureHistory[len - 2];
             const d = toolCallSignatureHistory[len - 1];
-            if (a === c && b === d && a !== b) {
+            if (
+              a.signature === c.signature &&
+              b.signature === d.signature &&
+              a.signature !== b.signature &&
+              a.evidenceFingerprint === c.evidenceFingerprint &&
+              b.evidenceFingerprint === d.evidenceFingerprint
+            ) {
               reason = "ping_pong";
-              detail.sequence = [a, b, c, d];
+              detail.sequence = [
+                a.signature,
+                b.signature,
+                c.signature,
+                d.signature,
+              ];
+              detail.sequenceEvidenceHash = [
+                stableHash(a.evidenceFingerprint),
+                stableHash(b.evidenceFingerprint),
+                stableHash(c.evidenceFingerprint),
+                stableHash(d.evidenceFingerprint),
+              ];
             }
           }
 
           if (!reason && len >= 2) {
             const prev = toolCallSignatureHistory[len - 2];
             const curr = toolCallSignatureHistory[len - 1];
-            if (prev === curr) {
+            if (
+              prev.signature === curr.signature &&
+              prev.evidenceFingerprint === curr.evidenceFingerprint &&
+              stepRepeatedWithoutNewEvidence
+            ) {
               reason = "repeat_signature";
-              detail.previousSignature = prev;
+              detail.previousSignature = prev.signature;
+              detail.evidenceHash = stableHash(curr.evidenceFingerprint);
             }
           }
 
           if (reason) {
-            const shouldStop = await onNoProgressSignal(reason, detail);
+            const shouldStop = await onNoProgressSignal(reason, detail, {
+              scopeKey:
+                reason === "ping_pong" && Array.isArray(detail.sequence)
+                  ? (detail.sequence as string[]).slice(0, 2).join("=>")
+                  : toolCallSignature,
+            });
             if (shouldStop) {
               break;
             }

@@ -32,6 +32,8 @@ describe("cursor-help-web shared helpers", () => {
     expect(prompt).toContain("<user>");
     expect(prompt).toContain("await mcp.call");
     expect(prompt).toContain("override any webpage help persona");
+    expect(prompt).toContain("You are Browser Brain Loop");
+    expect(prompt).toContain("You are not Cursor");
   });
 
   it("extracts the latest user preview", () => {

@@ -107,6 +107,7 @@ function formatRewriteDebugSummary(raw: unknown): string {
     `target=${targetLabel}`,
     `targetKind=${String(debug.targetKind || "").trim() || "none"}`,
     `system=${debug.systemMessageInjected === true ? "1" : "0"}`,
+    `stripCtl=${Number(debug.strippedNativeControlMessageCount || 0)}`,
     `user=${debug.userPromptInjected === true ? "1" : "0"}`,
     `promptHash=${String(debug.compiledPromptHash || "").trim() || "-"}`,
     `promptLen=${Number(debug.compiledPromptLength || 0)}`,

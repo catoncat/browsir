@@ -4840,6 +4840,406 @@ describe("runtime-router.browser", () => {
     expect(guardNoProgress).toBeDefined();
   });
 
+  it("不同浏览器动作签名的无 proof 尝试不应共享 browser proof guard hit", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    let actionInvoked = 0;
+    let verifyInvoked = 0;
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.browser.action.guard-scoped",
+        name: "browser-action-guard-scoped",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["browser.action", "browser.verify"],
+        },
+      },
+      providers: {
+        capabilities: {
+          "browser.action": {
+            id: "plugin.browser.action.guard-scoped.provider",
+            mode: "script",
+            priority: 80,
+            invoke: async (input) => {
+              actionInvoked += 1;
+              const action = asRecord(asRecord(input.args).action);
+              return {
+                data: {
+                  provider: "guard-scoped",
+                  ref: String(action.ref || ""),
+                },
+                verified: false,
+                verifyReason: "verify_skipped",
+              };
+            },
+          },
+          "browser.verify": {
+            id: "plugin.browser.verify.guard-scoped.provider",
+            mode: "script",
+            priority: 80,
+            invoke: async () => {
+              verifyInvoked += 1;
+              return {
+                data: {
+                  ok: true,
+                },
+                verified: true,
+                verifyReason: "verified",
+              };
+            },
+          },
+        },
+      },
+    });
+
+    let llmCall = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
+      if (llmCall === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_guard_scope_1",
+                      type: "function",
+                      function: {
+                        name: "click",
+                        arguments: JSON.stringify({
+                          tabId: 1,
+                          ref: "e0",
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      }
+      if (llmCall === 2) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_guard_scope_2",
+                      type: "function",
+                      function: {
+                        name: "click",
+                        arguments: JSON.stringify({
+                          tabId: 1,
+                          ref: "e1",
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      }
+      if (llmCall === 3) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_guard_scope_verify",
+                      type: "function",
+                      function: {
+                        name: "browser_verify",
+                        arguments: JSON.stringify({
+                          tabId: 1,
+                          expect: {
+                            urlContains: "example.com",
+                          },
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "完成",
+              },
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
+        llmRetryMaxAttempts: 0,
+      },
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "先点击两个不同目标，再确认结果",
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId, 5000);
+    expect(actionInvoked).toBe(2);
+    expect(verifyInvoked).toBe(1);
+    const done = stream.find(
+      (item) => String(item.type || "") === "loop_done",
+    ) as Record<string, unknown> | undefined;
+    const donePayload = (done?.payload || {}) as Record<string, unknown>;
+    expect(String(donePayload.status || "")).toBe("done");
+
+    const guardEvents = stream.filter((item) => {
+      if (String(item.type || "") !== "loop_no_progress") return false;
+      const payload = ((item as Record<string, unknown>).payload ||
+        {}) as Record<string, unknown>;
+      return String(payload.reason || "") === "browser_proof_guard";
+    });
+    expect(guardEvents).toHaveLength(2);
+    expect(
+      new Set(
+        guardEvents.map((item) =>
+          String(
+            (((item as Record<string, unknown>).payload || {}) as Record<
+              string,
+              unknown
+            >).scopeKey || "",
+          ),
+        ),
+      ).size,
+    ).toBe(2);
+  });
+
+  it("同签名浏览器动作出现新证据时不应继续累计 browser proof guard", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    let actionInvoked = 0;
+    let verifyInvoked = 0;
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.browser.action.guard-fresh-evidence",
+        name: "browser-action-guard-fresh-evidence",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["browser.action", "browser.verify"],
+        },
+      },
+      providers: {
+        capabilities: {
+          "browser.action": {
+            id: "plugin.browser.action.guard-fresh-evidence.provider",
+            mode: "script",
+            priority: 80,
+            invoke: async () => {
+              actionInvoked += 1;
+              return {
+                data: {
+                  provider: "guard-fresh-evidence",
+                  url: `https://example.com/step-${actionInvoked}`,
+                  title: `Step ${actionInvoked}`,
+                },
+                verified: false,
+                verifyReason: "verify_skipped",
+              };
+            },
+          },
+          "browser.verify": {
+            id: "plugin.browser.verify.guard-fresh-evidence.provider",
+            mode: "script",
+            priority: 80,
+            invoke: async () => {
+              verifyInvoked += 1;
+              return {
+                data: {
+                  ok: true,
+                },
+                verified: true,
+                verifyReason: "verified",
+              };
+            },
+          },
+        },
+      },
+    });
+
+    let llmCall = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
+      if (llmCall === 1 || llmCall === 2) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: `call_guard_fresh_${llmCall}`,
+                      type: "function",
+                      function: {
+                        name: "click",
+                        arguments: JSON.stringify({
+                          tabId: 1,
+                          ref: "e0",
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      }
+      if (llmCall === 3) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_guard_fresh_verify",
+                      type: "function",
+                      function: {
+                        name: "browser_verify",
+                        arguments: JSON.stringify({
+                          tabId: 1,
+                          expect: {
+                            urlContains: "example.com",
+                          },
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "完成",
+              },
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
+        llmRetryMaxAttempts: 0,
+      },
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "重复点击同一目标，但页面状态有变化时继续推进",
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId, 5000);
+    expect(actionInvoked).toBe(2);
+    expect(verifyInvoked).toBe(1);
+    const done = stream.find(
+      (item) => String(item.type || "") === "loop_done",
+    ) as Record<string, unknown> | undefined;
+    const donePayload = (done?.payload || {}) as Record<string, unknown>;
+    expect(String(donePayload.status || "")).toBe("done");
+
+    const guardEvents = stream.filter((item) => {
+      if (String(item.type || "") !== "loop_no_progress") return false;
+      const payload = ((item as Record<string, unknown>).payload ||
+        {}) as Record<string, unknown>;
+      return String(payload.reason || "") === "browser_proof_guard";
+    });
+    expect(guardEvents).toHaveLength(1);
+  });
+
   it("LLM 抛出字符串错误时应稳定收口，避免 details 写入字符串导致二次异常", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);

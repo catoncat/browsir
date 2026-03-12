@@ -78,6 +78,13 @@ describe("cursor-help-protocol", () => {
     expect(second).toBe(first);
   });
 
+  it("preserves the original user text when injecting the compiled prompt envelope", () => {
+    const injected = injectCompiledPromptIdempotent("hello", "compiled transcript", "req-keep-user");
+    expect(injected).toContain("BBL_PROMPT_START:req-keep-user");
+    expect(injected).toContain("compiled transcript");
+    expect(injected).toContain("hello");
+  });
+
   it("strips native control messages and keeps only the injected BBL control prompt", () => {
     const rewritten = rewriteCursorHelpNativeRequestBody(
       {
