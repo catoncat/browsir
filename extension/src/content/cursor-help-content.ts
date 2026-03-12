@@ -3,8 +3,7 @@ const CONTENT_SOURCE = "bbl-cursor-help-content";
 const PAGE_HOOK_READY_ATTR = "data-bbl-cursor-help-page-ready";
 const CONTENT_INSTALLED_FLAG = "__bblCursorHelpContentInstalled";
 
-if (!(window as typeof window & Record<string, unknown>)[CONTENT_INSTALLED_FLAG]) {
-  (window as typeof window & Record<string, unknown>)[CONTENT_INSTALLED_FLAG] = true;
+type JsonRecord = Record<string, unknown>;
 
 const CHAT_AUTOCLICK_SELECTOR = [
   "button[title='Expand Chat Sidebar']",
@@ -28,12 +27,51 @@ const MODEL_CONTROL_SELECTOR = [
 const MODEL_NAME_PATTERN =
   /\b(?:claude|gpt|gemini|cursor|o1|o3|o4)(?:[\s-]*(?:\d+(?:\.\d+)?|mini|nano|pro|flash|max|thinking|fast|auto|preview|opus|sonnet|haiku|turbo|reasoning))*\b/i;
 
+const PAGE_RPC_TIMEOUT_MS = 8_000;
+
 let pageReadyResolver: (() => void) | null = null;
 let pageReadyPromise: Promise<void> | null = null;
 let pageReady = false;
+let extensionContextAlive = true;
+const pendingRpc = new Map<string, { resolve: (value: JsonRecord) => void; reject: (reason?: unknown) => void; timeout: number }>();
+
+function isExtensionContextInvalidated(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || "");
+  return /Extension context invalidated/i.test(message);
+}
+
+function canUseExtensionRuntime(): boolean {
+  if (!extensionContextAlive) return false;
+  try {
+    return typeof chrome !== "undefined" && typeof chrome.runtime?.id === "string" && chrome.runtime.id.length > 0;
+  } catch (error) {
+    if (isExtensionContextInvalidated(error)) {
+      extensionContextAlive = false;
+      return false;
+    }
+    throw error;
+  }
+}
+
+function safeRuntimeSendMessage(message: Record<string, unknown>): void {
+  if (!canUseExtensionRuntime()) return;
+  try {
+    Promise.resolve(chrome.runtime.sendMessage(message)).catch((error) => {
+      if (isExtensionContextInvalidated(error)) {
+        extensionContextAlive = false;
+      }
+    });
+  } catch (error) {
+    if (isExtensionContextInvalidated(error)) {
+      extensionContextAlive = false;
+      return;
+    }
+    throw error;
+  }
+}
 
 function emitDemoLog(step: string, status: "running" | "done" | "failed", detail: string): void {
-  void chrome.runtime.sendMessage({
+  safeRuntimeSendMessage({
     type: "cursor-help-demo.log",
     payload: {
       ts: new Date().toISOString(),
@@ -41,17 +79,13 @@ function emitDemoLog(step: string, status: "running" | "done" | "failed", detail
       status,
       detail
     }
-  }).catch(() => {
-    // sidepanel may be closed
   });
 }
 
 function emitWebchatTransport(payload: Record<string, unknown>): void {
-  void chrome.runtime.sendMessage({
+  safeRuntimeSendMessage({
     type: "webchat.transport",
     ...payload
-  }).catch(() => {
-    // background may be reloading
   });
 }
 
@@ -87,11 +121,7 @@ function findExpandChatSidebarButton(): HTMLButtonElement | null {
   for (const button of buttons) {
     if (!(button instanceof HTMLButtonElement)) continue;
     if (!isElementVisible(button) || button.disabled) continue;
-    const signal = [
-      button.getAttribute("aria-label") || "",
-      button.getAttribute("title") || "",
-      button.textContent || ""
-    ].join(" ");
+    const signal = [button.getAttribute("aria-label") || "", button.getAttribute("title") || "", button.textContent || ""].join(" ");
     if (/expand chat sidebar/i.test(signal)) {
       return button;
     }
@@ -147,7 +177,7 @@ function ensurePageHookInjected(): Promise<void> {
       const timeout = window.setTimeout(() => {
         emitDemoLog("content.ensure_page_hook", "failed", "等待 WEBCHAT_PAGE_READY 超时");
         reject(new Error("Cursor Help page hook 未就绪"));
-      }, 8_000);
+      }, PAGE_RPC_TIMEOUT_MS);
       pageReadyResolver = () => {
         window.clearTimeout(timeout);
         resolve();
@@ -161,96 +191,167 @@ function postToPage(type: string, payload: Record<string, unknown>): void {
   window.postMessage({ source: CONTENT_SOURCE, type, payload }, window.location.origin);
 }
 
-window.addEventListener("message", (event) => {
-  if (event.source !== window) return;
-  const data = event.data;
-  if (!data || data.source !== PAGE_SOURCE || !data.type) return;
-
-  if (data.type === "WEBCHAT_PAGE_READY") {
-    pageReady = true;
-    emitDemoLog("content.ensure_page_hook", "done", "收到 WEBCHAT_PAGE_READY");
-    pageReadyResolver?.();
-    pageReadyResolver = null;
-    return;
-  }
-
-  if (data.type === "PAGE_HOOK_LOG") {
-    const payload = data.payload && typeof data.payload === "object" ? (data.payload as Record<string, unknown>) : {};
-    emitDemoLog(
-      `page.${String(payload.step || "log")}`,
-      String(payload.status || "running") === "failed" ? "failed" : String(payload.status || "running") === "done" ? "done" : "running",
-      String(payload.detail || payload.message || "")
-    );
-    return;
-  }
-
-  if (data.type === "WEBCHAT_TRANSPORT_EVENT") {
-    const payload = data.payload && typeof data.payload === "object" ? (data.payload as Record<string, unknown>) : {};
-    emitWebchatTransport(payload);
-  }
-});
-
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  const type = String(message?.type || "").trim();
-
-  if (type === "webchat.execute") {
-    void (async () => {
-      try {
-        emitDemoLog("content.execute", "running", "收到 webchat.execute");
-        await ensurePageHookInjected();
-        const requestId = String(message.requestId || "").trim();
-        const requestUrl = String(message.requestUrl || "").trim() || "/api/chat";
-        const requestBody =
-          message?.requestBody && typeof message.requestBody === "object"
-            ? (message.requestBody as Record<string, unknown>)
-            : {};
-        emitDemoLog("content.execute", "running", `postMessage 到 page hook requestId=${requestId}`);
-        postToPage("WEBCHAT_EXECUTE", {
-          requestId,
-          requestUrl,
-          requestBody
-        });
-        emitDemoLog("content.execute", "done", "page hook 已接管请求执行");
-        sendResponse({ ok: true });
-      } catch (error) {
-        emitDemoLog("content.execute", "failed", error instanceof Error ? error.message : String(error));
-        sendResponse({
-          ok: false,
-          error: error instanceof Error ? error.message : String(error)
-        });
-      }
-    })();
-    return true;
-  }
-
-  if (type === "webchat.abort") {
-    postToPage("WEBCHAT_ABORT", {
-      requestId: String(message.requestId || "").trim()
+function callPage(type: string, payload: Record<string, unknown>, timeoutMs = PAGE_RPC_TIMEOUT_MS): Promise<JsonRecord> {
+  const rpcId = crypto.randomUUID();
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      pendingRpc.delete(rpcId);
+      reject(new Error(`页面请求超时: ${type}`));
+    }, timeoutMs);
+    pendingRpc.set(rpcId, {
+      resolve,
+      reject,
+      timeout
     });
-    sendResponse({ ok: true });
-    return true;
-  }
+    postToPage(type, {
+      ...payload,
+      rpcId
+    });
+  });
+}
 
-  if (type === "webchat.inspect") {
-    void (async () => {
-      try {
-        await ensurePageHookInjected();
-        await ensureChatSidebarExpanded();
-      } catch {
-        // return current state even if page hook is not ready yet
-      }
-      const info = collectModelInfo();
-      sendResponse({
-        ok: true,
-        isReady: pageReady || document.documentElement?.getAttribute(PAGE_HOOK_READY_ATTR) === "1",
-        selectedModel: info.selectedModel,
-        availableModels: info.availableModels,
-        url: window.location.href
+const contentScope = globalThis as typeof globalThis & Record<string, unknown>;
+
+if (!contentScope[CONTENT_INSTALLED_FLAG]) {
+  contentScope[CONTENT_INSTALLED_FLAG] = true;
+
+  window.addEventListener("message", (event) => {
+    if (event.source !== window) return;
+    const data = event.data;
+    if (!data || data.source !== PAGE_SOURCE || !data.type) return;
+
+    if (data.type === "WEBCHAT_PAGE_READY") {
+      pageReady = true;
+      emitDemoLog("content.ensure_page_hook", "done", "收到 WEBCHAT_PAGE_READY");
+      pageReadyResolver?.();
+      pageReadyResolver = null;
+      return;
+    }
+
+    if (data.type === "WEBCHAT_RPC_RESULT") {
+      const payload = data.payload && typeof data.payload === "object" ? (data.payload as JsonRecord) : {};
+      const rpcId = String(payload.rpcId || "").trim();
+      const entry = pendingRpc.get(rpcId);
+      if (!entry) return;
+      window.clearTimeout(entry.timeout);
+      pendingRpc.delete(rpcId);
+      entry.resolve(payload);
+      return;
+    }
+
+    if (data.type === "PAGE_HOOK_LOG") {
+      const payload = data.payload && typeof data.payload === "object" ? (data.payload as Record<string, unknown>) : {};
+      emitDemoLog(
+        `page.${String(payload.step || "log")}`,
+        String(payload.status || "running") === "failed" ? "failed" : String(payload.status || "running") === "done" ? "done" : "running",
+        String(payload.detail || payload.message || "")
+      );
+      return;
+    }
+
+    if (data.type === "WEBCHAT_TRANSPORT_EVENT") {
+      const payload = data.payload && typeof data.payload === "object" ? (data.payload as Record<string, unknown>) : {};
+      emitWebchatTransport(payload);
+    }
+  });
+
+  if (canUseExtensionRuntime()) {
+    try {
+      chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+        const type = String(message?.type || "").trim();
+
+        if (type === "webchat.execute") {
+          void (async () => {
+            try {
+              emitDemoLog("content.execute", "running", "收到 webchat.execute");
+              await ensurePageHookInjected();
+              const requestId = String(message.requestId || "").trim();
+              const sessionId = String(message.sessionId || "").trim() || "default";
+              const compiledPrompt = String(message.compiledPrompt || "");
+              const requestedModel = String(message.requestedModel || "auto").trim() || "auto";
+              const result = await callPage("WEBCHAT_EXECUTE", {
+                requestId,
+                sessionId,
+                compiledPrompt,
+                requestedModel
+              });
+              emitDemoLog(
+                "content.execute",
+                result.ok === true ? "done" : "failed",
+                result.ok === true ? `native sender 已触发 requestId=${requestId}` : String(result.error || "内部入口未就绪")
+              );
+              sendResponse({
+                ok: result.ok === true,
+                error: result.ok === true ? undefined : String(result.error || "内部入口未就绪"),
+                senderKind: String(result.senderKind || "").trim() || undefined
+              });
+            } catch (error) {
+              emitDemoLog("content.execute", "failed", error instanceof Error ? error.message : String(error));
+              sendResponse({
+                ok: false,
+                error: error instanceof Error ? error.message : String(error)
+              });
+            }
+          })();
+          return true;
+        }
+
+        if (type === "webchat.abort") {
+          postToPage("WEBCHAT_ABORT", {
+            requestId: String(message.requestId || "").trim()
+          });
+          sendResponse({ ok: true });
+          return true;
+        }
+
+        if (type === "webchat.inspect") {
+          void (async () => {
+            try {
+              await ensurePageHookInjected();
+              await ensureChatSidebarExpanded();
+            } catch {
+              // return current state even if page hook is not ready yet
+            }
+
+            const pageInspect = (await callPage("WEBCHAT_INSPECT", {}, 4_000).catch(() => ({} as JsonRecord))) as JsonRecord;
+            const info = collectModelInfo();
+            const selectedModel = String(pageInspect.selectedModel || info.selectedModel || "").trim();
+            const availableModels = new Set<string>(
+              Array.isArray(pageInspect.availableModels)
+                ? pageInspect.availableModels.map((item: unknown) => String(item || "").trim()).filter(Boolean)
+                : []
+            );
+            for (const model of info.availableModels) {
+              availableModels.add(model);
+            }
+
+            const pageHookReady = pageReady || document.documentElement?.getAttribute(PAGE_HOOK_READY_ATTR) === "1";
+            const fetchHookReady = pageInspect.fetchHookReady === true;
+            const senderReady = pageInspect.senderReady === true;
+            sendResponse({
+              ok: true,
+              pageHookReady,
+              fetchHookReady,
+              senderReady,
+              canExecute: pageHookReady && fetchHookReady && senderReady,
+              selectedModel: selectedModel || undefined,
+              availableModels: Array.from(availableModels),
+              senderKind: String(pageInspect.senderKind || "").trim() || undefined,
+              lastSenderError: String(pageInspect.lastSenderError || "").trim() || undefined,
+              url: window.location.href
+            });
+          })();
+          return true;
+        }
+
+        return false;
       });
-    })();
-    return true;
+    } catch (error) {
+      if (isExtensionContextInvalidated(error)) {
+        extensionContextAlive = false;
+      } else {
+        throw error;
+      }
+    }
   }
-
-  return false;
-});
 }
