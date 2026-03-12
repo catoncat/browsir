@@ -268,11 +268,13 @@ if (!contentScope[CONTENT_INSTALLED_FLAG]) {
               const requestId = String(message.requestId || "").trim();
               const sessionId = String(message.sessionId || "").trim() || "default";
               const compiledPrompt = String(message.compiledPrompt || "");
+              const latestUserPrompt = String(message.latestUserPrompt || "").trim() || "Continue";
               const requestedModel = String(message.requestedModel || "auto").trim() || "auto";
               const result = await callPage("WEBCHAT_EXECUTE", {
                 requestId,
                 sessionId,
                 compiledPrompt,
+                latestUserPrompt,
                 requestedModel
               });
               emitDemoLog(

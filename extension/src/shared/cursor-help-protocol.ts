@@ -1,30 +1,5 @@
 type JsonRecord = Record<string, unknown>;
 
-export interface CursorHelpChatContextItem {
-  type: string;
-  content?: string;
-  filePath?: string;
-}
-
-export interface CursorHelpChatMessagePart {
-  type: "text";
-  text: string;
-}
-
-export interface CursorHelpChatMessage {
-  parts: CursorHelpChatMessagePart[];
-  id: string;
-  role: "user";
-}
-
-export interface CursorHelpRequestBody {
-  context: CursorHelpChatContextItem[];
-  model: string;
-  id: string;
-  messages: CursorHelpChatMessage[];
-  trigger: "submit-message";
-}
-
 export interface CursorHelpParsedSseEvent {
   kind: "delta" | "done" | "error" | "ignore";
   text?: string;
@@ -39,13 +14,55 @@ export type CursorHelpTransportEventType =
   | "invalid_response"
   | "network_error";
 
-export interface CursorHelpTransportExecutePayload {
+export interface CursorHelpExecutionPayload {
   requestId: string;
-  requestUrl: string;
-  requestBody: CursorHelpRequestBody;
+  sessionId: string;
+  compiledPrompt: string;
+  latestUserPrompt: string;
+  requestedModel: string;
 }
 
-export const CURSOR_HELP_REQUEST_PATH = "/api/chat";
+export interface CursorHelpSenderInspect {
+  pageHookReady: boolean;
+  fetchHookReady: boolean;
+  senderReady: boolean;
+  canExecute: boolean;
+  selectedModel?: string;
+  availableModels?: string[];
+  senderKind?: string;
+  lastSenderError?: string;
+}
+
+export interface CursorHelpRewritePlan {
+  requestId: string;
+  compiledPrompt: string;
+  latestUserPrompt: string;
+  requestedModel: string;
+  detectedModel?: string;
+}
+
+export interface CursorHelpNativeEnvelope {
+  body: JsonRecord;
+  sessionKey: string;
+  rewritten: boolean;
+}
+
+export interface CursorHelpTargetMessagePointer {
+  existingText: string;
+  kind: "message_part_text" | "message_content_string" | "message_content_part_text" | "input";
+  path: string[];
+}
+
+export const CURSOR_HELP_PRIMARY_REQUEST_PATH = "/api/chat";
+export const CURSOR_HELP_REQUEST_PATHS = [
+  "/api/chat",
+  "/chat/completions",
+  "/v1/chat/completions"
+] as const;
+export const CURSOR_HELP_PROMPT_START_PREFIX = "<!-- BBL_PROMPT_START:";
+export const CURSOR_HELP_PROMPT_END_PREFIX = "<!-- BBL_PROMPT_END:";
+export const CURSOR_HELP_SYSTEM_PROMPT_START_PREFIX = "<!-- BBL_SYSTEM_PROMPT_START:";
+export const CURSOR_HELP_SYSTEM_PROMPT_END_PREFIX = "<!-- BBL_SYSTEM_PROMPT_END:";
 
 const MODEL_ALIASES: Array<{ match: RegExp; apiModel: string }> = [
   { match: /anthropic\/claude-sonnet-4\.6|claude-sonnet-4\.6|sonnet 4\.6/i, apiModel: "anthropic/claude-sonnet-4.6" },
@@ -60,19 +77,85 @@ const MODEL_ALIASES: Array<{ match: RegExp; apiModel: string }> = [
   { match: /openai\/o1|o1/i, apiModel: "openai/o1" }
 ];
 
+function toRecord(value: unknown): JsonRecord {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
+}
+
+function cloneJsonRecord(value: unknown): JsonRecord {
+  return JSON.parse(JSON.stringify(toRecord(value))) as JsonRecord;
+}
+
 function normalizeModelText(text: string): string {
   return String(text || "").replace(/\s+/g, " ").trim();
 }
 
-export function createCursorHelpClientId(length = 16): string {
-  const size = Number.isInteger(length) && length > 0 ? length : 16;
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  const bytes = crypto.getRandomValues(new Uint8Array(size));
-  let out = "";
-  for (let i = 0; i < bytes.length; i += 1) {
-    out += chars[bytes[i] % chars.length];
+function buildPromptEnvelope(compiledPrompt: string, requestId: string): string {
+  const normalizedRequestId = String(requestId || "").trim() || "unknown";
+  return [
+    `${CURSOR_HELP_PROMPT_START_PREFIX}${normalizedRequestId} -->`,
+    String(compiledPrompt || ""),
+    `${CURSOR_HELP_PROMPT_END_PREFIX}${normalizedRequestId} -->`
+  ].join("\n");
+}
+
+function buildSystemPromptEnvelope(compiledPrompt: string, requestId: string): string {
+  const normalizedRequestId = String(requestId || "").trim() || "unknown";
+  return [
+    `${CURSOR_HELP_SYSTEM_PROMPT_START_PREFIX}${normalizedRequestId} -->`,
+    String(compiledPrompt || ""),
+    `${CURSOR_HELP_SYSTEM_PROMPT_END_PREFIX}${normalizedRequestId} -->`
+  ].join("\n");
+}
+
+function readPathValue(root: unknown, path: string[]): unknown {
+  let current: unknown = root;
+  for (const segment of path) {
+    if (current === null || current === undefined) return undefined;
+    if (Array.isArray(current)) {
+      const index = Number(segment);
+      current = Number.isInteger(index) ? current[index] : undefined;
+      continue;
+    }
+    if (typeof current !== "object") return undefined;
+    current = (current as JsonRecord)[segment];
   }
-  return out;
+  return current;
+}
+
+function writePathValue(root: unknown, path: string[], value: unknown): boolean {
+  if (path.length <= 0 || root === null || root === undefined) return false;
+  let current: unknown = root;
+  for (let index = 0; index < path.length - 1; index += 1) {
+    const segment = path[index];
+    if (Array.isArray(current)) {
+      const arrayIndex = Number(segment);
+      if (!Number.isInteger(arrayIndex)) return false;
+      current = current[arrayIndex];
+      continue;
+    }
+    if (typeof current !== "object" || current === null) return false;
+    current = (current as JsonRecord)[segment];
+  }
+  const last = path[path.length - 1];
+  if (Array.isArray(current)) {
+    const arrayIndex = Number(last);
+    if (!Number.isInteger(arrayIndex)) return false;
+    current[arrayIndex] = value;
+    return true;
+  }
+  if (typeof current !== "object" || current === null) return false;
+  (current as JsonRecord)[last] = value;
+  return true;
+}
+
+function stableHash(input: string): string {
+  let hash = 2166136261;
+  const text = String(input || "");
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 export function resolveCursorHelpApiModel(requestedModel: string, detectedModel = ""): string {
@@ -90,30 +173,227 @@ export function resolveCursorHelpApiModel(requestedModel: string, detectedModel 
   return "anthropic/claude-sonnet-4.6";
 }
 
-export function buildCursorHelpRequestBody(input: {
-  prompt: string;
-  requestId: string;
-  messageId: string;
-  requestedModel: string;
-  detectedModel?: string;
-}): CursorHelpRequestBody {
-  return {
-    context: [],
-    model: resolveCursorHelpApiModel(input.requestedModel, input.detectedModel || ""),
-    id: input.requestId,
-    messages: [
-      {
+export function isCursorHelpTargetRequestUrl(url: string): boolean {
+  const normalized = String(url || "").trim();
+  if (!normalized) return false;
+  try {
+    const pathname = new URL(normalized, "https://cursor.com").pathname;
+    return CURSOR_HELP_REQUEST_PATHS.includes(pathname as (typeof CURSOR_HELP_REQUEST_PATHS)[number]);
+  } catch {
+    return false;
+  }
+}
+
+export function injectCompiledPromptIdempotent(sourceText: string, compiledPrompt: string, requestId: string): string {
+  const envelope = buildPromptEnvelope(compiledPrompt, requestId);
+  const normalizedSource = String(sourceText || "");
+  const hasPromptEnvelope =
+    normalizedSource.includes(CURSOR_HELP_PROMPT_START_PREFIX) && normalizedSource.includes(CURSOR_HELP_PROMPT_END_PREFIX);
+  if (!hasPromptEnvelope) return envelope;
+  return normalizedSource.replace(
+    /<!-- BBL_PROMPT_START:[^>]+ -->[\s\S]*?<!-- BBL_PROMPT_END:[^>]+ -->/g,
+    envelope
+  );
+}
+
+export function extractCursorHelpTargetMessagePointer(rawBody: unknown): CursorHelpTargetMessagePointer | null {
+  const body = toRecord(rawBody);
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = toRecord(messages[messageIndex]);
+    const role = String(message.role || "").trim().toLowerCase();
+    if (role && role !== "user") continue;
+
+    const parts = Array.isArray(message.parts) ? message.parts : [];
+    for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
+      const part = toRecord(parts[partIndex]);
+      if (typeof part.text === "string") {
+        return {
+          existingText: String(part.text || ""),
+          kind: "message_part_text",
+          path: ["messages", String(messageIndex), "parts", String(partIndex), "text"]
+        };
+      }
+    }
+
+    if (typeof message.content === "string") {
+      return {
+        existingText: String(message.content || ""),
+        kind: "message_content_string",
+        path: ["messages", String(messageIndex), "content"]
+      };
+    }
+
+    const contentParts = Array.isArray(message.content) ? message.content : [];
+    for (let partIndex = 0; partIndex < contentParts.length; partIndex += 1) {
+      const part = toRecord(contentParts[partIndex]);
+      const textValue =
+        typeof part.text === "string"
+          ? part.text
+          : typeof part.content === "string"
+            ? part.content
+            : typeof part.input_text === "string"
+              ? part.input_text
+              : null;
+      if (typeof textValue === "string") {
+        const field = typeof part.text === "string" ? "text" : typeof part.content === "string" ? "content" : "input_text";
+        return {
+          existingText: textValue,
+          kind: "message_content_part_text",
+          path: ["messages", String(messageIndex), "content", String(partIndex), field]
+        };
+      }
+    }
+  }
+
+  if (typeof body.input === "string") {
+    return {
+      existingText: String(body.input || ""),
+      kind: "input",
+      path: ["input"]
+    };
+  }
+
+  return null;
+}
+
+function getMessageText(rawMessage: unknown): string {
+  const message = toRecord(rawMessage);
+  const parts = Array.isArray(message.parts) ? message.parts : [];
+  for (const part of parts) {
+    const row = toRecord(part);
+    if (typeof row.text === "string") return row.text;
+  }
+
+  if (typeof message.content === "string") {
+    return message.content;
+  }
+
+  const contentParts = Array.isArray(message.content) ? message.content : [];
+  for (const part of contentParts) {
+    const row = toRecord(part);
+    if (typeof row.text === "string") return row.text;
+    if (typeof row.content === "string") return row.content;
+    if (typeof row.input_text === "string") return row.input_text;
+  }
+
+  return "";
+}
+
+function isInjectedSystemMessage(rawMessage: unknown): boolean {
+  const message = toRecord(rawMessage);
+  const role = String(message.role || "").trim().toLowerCase();
+  if (role !== "system") return false;
+  const text = getMessageText(message);
+  return (
+    text.includes(CURSOR_HELP_SYSTEM_PROMPT_START_PREFIX) &&
+    text.includes(CURSOR_HELP_SYSTEM_PROMPT_END_PREFIX)
+  );
+}
+
+function buildInjectedSystemMessage(body: JsonRecord, compiledPrompt: string, requestId: string): JsonRecord {
+  const envelope = buildSystemPromptEnvelope(compiledPrompt, requestId);
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  for (const rawMessage of messages) {
+    const message = toRecord(rawMessage);
+    if (Array.isArray(message.parts)) {
+      return {
+        role: "system",
         parts: [
           {
             type: "text",
-            text: String(input.prompt || "")
+            text: envelope
           }
-        ],
-        id: input.messageId,
-        role: "user"
-      }
-    ],
-    trigger: "submit-message"
+        ]
+      };
+    }
+    if (typeof message.content === "string") {
+      return {
+        role: "system",
+        content: envelope
+      };
+    }
+    if (Array.isArray(message.content)) {
+      return {
+        role: "system",
+        content: [
+          {
+            type: "text",
+            text: envelope
+          }
+        ]
+      };
+    }
+  }
+
+  return {
+    role: "system",
+    content: envelope
+  };
+}
+
+function upsertInjectedSystemMessage(body: JsonRecord, compiledPrompt: string, requestId: string): boolean {
+  if (!Array.isArray(body.messages)) return false;
+  const messages = body.messages.filter((message) => !isInjectedSystemMessage(message));
+  messages.unshift(buildInjectedSystemMessage(body, compiledPrompt, requestId));
+  body.messages = messages;
+  return true;
+}
+
+export function deriveCursorHelpSessionKey(rawBody: unknown, requestUrl = ""): string {
+  const body = toRecord(rawBody);
+  const directIdCandidates = [
+    body.id,
+    body.requestId,
+    body.request_id,
+    body.conversationId,
+    body.conversation_id,
+    body.sessionId,
+    body.session_id
+  ];
+  for (const candidate of directIdCandidates) {
+    const normalized = String(candidate || "").trim();
+    if (normalized) return `cursor-help:${normalized}`;
+  }
+
+  const pointer = extractCursorHelpTargetMessagePointer(body);
+  const messageIdSeed = Array.isArray(body.messages)
+    ? Array.from(body.messages)
+        .reverse()
+        .map((item) => String(toRecord(item).id || "").trim())
+        .find(Boolean) || ""
+    : "";
+  const urlPath = (() => {
+    try {
+      return new URL(String(requestUrl || ""), "https://cursor.com").pathname;
+    } catch {
+      return String(requestUrl || "");
+    }
+  })();
+  const seed = [urlPath, messageIdSeed, pointer?.existingText.slice(0, 160) || ""].join("|");
+  return `cursor-help:derived:${stableHash(seed)}`;
+}
+
+export function rewriteCursorHelpNativeRequestBody(rawBody: unknown, rewritePlan: CursorHelpRewritePlan): CursorHelpNativeEnvelope {
+  const body = cloneJsonRecord(rawBody);
+  let rewritten = upsertInjectedSystemMessage(body, rewritePlan.compiledPrompt, rewritePlan.requestId);
+  const pointer = extractCursorHelpTargetMessagePointer(body);
+  if (pointer) {
+    const nextText = String(rewritePlan.latestUserPrompt || "").trim() || pointer.existingText;
+    if (nextText !== pointer.existingText) {
+      writePathValue(body, pointer.path, nextText);
+      rewritten = true;
+    }
+  }
+
+  if (typeof body.model === "string" && String(rewritePlan.requestedModel || "").trim().toLowerCase() !== "auto") {
+    body.model = resolveCursorHelpApiModel(rewritePlan.requestedModel, rewritePlan.detectedModel || String(body.model || ""));
+  }
+
+  return {
+    body,
+    sessionKey: deriveCursorHelpSessionKey(body),
+    rewritten
   };
 }
 

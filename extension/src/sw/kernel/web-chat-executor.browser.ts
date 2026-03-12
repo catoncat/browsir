@@ -1,12 +1,16 @@
-import { buildCursorHelpCompiledPrompt, type WebToolCall, parseToolProtocolFromText } from "../../shared/cursor-help-web-shared";
+import {
+  buildCursorHelpCompiledPrompt,
+  extractLastUserMessage,
+  type WebToolCall,
+  parseToolProtocolFromText
+} from "../../shared/cursor-help-web-shared";
 import { CURSOR_HELP_WEB_BASE_URL } from "../../shared/llm-provider-config";
 import {
-  CURSOR_HELP_REQUEST_PATH,
-  buildCursorHelpRequestBody,
   classifyCursorHelpHttpError,
   classifyCursorHelpInvalidResponse,
-  createCursorHelpClientId,
-  parseCursorHelpSseLine
+  parseCursorHelpSseLine,
+  resolveCursorHelpApiModel,
+  type CursorHelpSenderInspect
 } from "../../shared/cursor-help-protocol";
 import type { LlmProviderSendInput } from "./llm-provider";
 
@@ -35,6 +39,21 @@ interface PendingExecution {
   outputText: string;
   firstDeltaLogged: boolean;
   closed: boolean;
+  sessionKey: string | null;
+}
+
+interface CursorHelpSlotRecord {
+  sessionId: string;
+  tabId: number;
+  windowId?: number;
+  lastKnownUrl: string;
+  lastReadyAt: number;
+}
+
+interface CursorHelpInspectResult extends CursorHelpSenderInspect {
+  url: string;
+  selectedModel?: string;
+  availableModels?: string[];
 }
 
 const PROVIDER_ID = "cursor_help_web";
@@ -42,12 +61,13 @@ const CURSOR_HELP_URL = "https://cursor.com/help";
 const CURSOR_TAB_PATTERNS = ["https://cursor.com/help*"] as const;
 const ACTIVE_BY_REQUEST_ID = new Map<string, PendingExecution>();
 const ACTIVE_REQUEST_ID_BY_TAB = new Map<number, string>();
+const ACTIVE_REQUEST_ID_BY_SESSION = new Map<string, string>();
 const EXECUTION_BOOT_TIMEOUT_MS = 20_000;
 const EXECUTION_STALE_MS = 90_000;
 const encoder = new TextEncoder();
 const CONTENT_SCRIPT_FILE = "assets/cursor-help-content.js";
 const PAGE_HOOK_SCRIPT_FILE = "assets/cursor-help-page-hook.js";
-const CURSOR_HELP_SINGLETON_TAB_STORAGE_KEY = "cursor_help_web.singleton_tab_id";
+const CURSOR_HELP_SESSION_SLOT_STORAGE_KEY = "cursor_help_web.session_slots";
 
 function emitProviderDebugLog(step: string, status: "running" | "done" | "failed", detail: string): void {
   void chrome.runtime.sendMessage({
@@ -102,6 +122,7 @@ function closeExecution(entry: PendingExecution): void {
   }
   ACTIVE_BY_REQUEST_ID.delete(entry.requestId);
   ACTIVE_REQUEST_ID_BY_TAB.delete(entry.tabId);
+  ACTIVE_REQUEST_ID_BY_SESSION.delete(entry.sessionId);
   if (entry.controller) {
     entry.controller.close();
   }
@@ -150,6 +171,7 @@ function failExecution(entry: PendingExecution, error: string): void {
   }
   ACTIVE_BY_REQUEST_ID.delete(entry.requestId);
   ACTIVE_REQUEST_ID_BY_TAB.delete(entry.tabId);
+  ACTIVE_REQUEST_ID_BY_SESSION.delete(entry.sessionId);
   if (entry.controller) {
     entry.controller.error(new Error(error));
   }
@@ -168,16 +190,22 @@ function armExecutionWatchdog(entry: PendingExecution, timeoutMs: number, reason
   }, timeoutMs);
 }
 
-function clearStaleTabExecution(tabId: number): void {
-  const requestId = ACTIVE_REQUEST_ID_BY_TAB.get(tabId);
-  if (!requestId) return;
-  const entry = ACTIVE_BY_REQUEST_ID.get(requestId);
-  if (!entry) {
-    ACTIVE_REQUEST_ID_BY_TAB.delete(tabId);
-    return;
+function clearStaleExecution(sessionId: string, tabId: number): void {
+  const requestIds = new Set<string>();
+  const bySession = ACTIVE_REQUEST_ID_BY_SESSION.get(sessionId);
+  const byTab = ACTIVE_REQUEST_ID_BY_TAB.get(tabId);
+  if (bySession) requestIds.add(bySession);
+  if (byTab) requestIds.add(byTab);
+  for (const requestId of requestIds) {
+    const entry = ACTIVE_BY_REQUEST_ID.get(requestId);
+    if (!entry) {
+      ACTIVE_REQUEST_ID_BY_SESSION.delete(sessionId);
+      ACTIVE_REQUEST_ID_BY_TAB.delete(tabId);
+      continue;
+    }
+    if (Date.now() - entry.lastEventAt < EXECUTION_STALE_MS) continue;
+    failExecution(entry, "网页 provider 请求已超时，已自动回收旧执行");
   }
-  if (Date.now() - entry.lastEventAt < EXECUTION_STALE_MS) return;
-  failExecution(entry, "网页 provider 请求已超时，已自动回收旧执行");
 }
 
 async function waitForCursorHelpTabReady(tabId: number, timeoutMs = 20_000): Promise<void> {
@@ -189,21 +217,30 @@ async function waitForCursorHelpTabReady(tabId: number, timeoutMs = 20_000): Pro
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
+  throw new Error("等待 Cursor Help 页面加载超时");
 }
 
-async function inspectCursorTab(tabId: number): Promise<{ isReady: boolean; url: string; selectedModel?: string; availableModels?: string[] } | null> {
+async function inspectCursorTab(tabId: number): Promise<CursorHelpInspectResult | null> {
   const response = await sendTabMessageWithRetry(tabId, {
     type: "webchat.inspect"
   }).catch(() => null);
   const row = response && typeof response === "object" ? (response as Record<string, unknown>) : null;
   if (!row || row.ok !== true) return null;
+  const pageHookReady = row.pageHookReady === true || row.isReady === true;
+  const fetchHookReady = row.fetchHookReady === true;
+  const senderReady = row.senderReady === true;
   return {
-    isReady: row.isReady === true,
+    pageHookReady,
+    fetchHookReady,
+    senderReady,
+    canExecute: row.canExecute === true || (pageHookReady && fetchHookReady && senderReady),
     url: String(row.url || ""),
     selectedModel: String(row.selectedModel || "").trim() || undefined,
     availableModels: Array.isArray(row.availableModels)
       ? row.availableModels.map((item) => String(item || "").trim()).filter(Boolean)
-      : undefined
+      : undefined,
+    senderKind: String(row.senderKind || "").trim() || undefined,
+    lastSenderError: String(row.lastSenderError || "").trim() || undefined
   };
 }
 
@@ -219,36 +256,56 @@ async function injectCursorHelpScripts(tabId: number): Promise<void> {
   });
 }
 
-async function inspectCursorTabEnsured(tabId: number): Promise<{ isReady: boolean; url: string; selectedModel?: string; availableModels?: string[] } | null> {
+async function inspectCursorTabEnsured(tabId: number): Promise<CursorHelpInspectResult | null> {
   const firstTry = await inspectCursorTab(tabId);
-  if (firstTry?.isReady) return firstTry;
+  if (firstTry?.pageHookReady) return firstTry;
   await injectCursorHelpScripts(tabId).catch(() => {
     // noop
   });
   return inspectCursorTab(tabId);
 }
 
-async function loadSingletonTabId(): Promise<number | null> {
-  const stored = await chrome.storage.local.get(CURSOR_HELP_SINGLETON_TAB_STORAGE_KEY).catch(() => null);
-  const raw = Number(stored?.[CURSOR_HELP_SINGLETON_TAB_STORAGE_KEY]);
-  return Number.isInteger(raw) && raw > 0 ? raw : null;
+async function loadSessionSlots(): Promise<Record<string, CursorHelpSlotRecord>> {
+  const stored = await chrome.storage.local.get(CURSOR_HELP_SESSION_SLOT_STORAGE_KEY).catch(() => null);
+  const raw = toRecord(stored?.[CURSOR_HELP_SESSION_SLOT_STORAGE_KEY]);
+  const slots: Record<string, CursorHelpSlotRecord> = {};
+  for (const [sessionId, value] of Object.entries(raw)) {
+    const row = toRecord(value);
+    const tabId = Number(row.tabId);
+    if (!sessionId.trim() || !Number.isInteger(tabId) || tabId <= 0) continue;
+    slots[sessionId] = {
+      sessionId,
+      tabId,
+      windowId: Number.isInteger(Number(row.windowId)) ? Number(row.windowId) : undefined,
+      lastKnownUrl: String(row.lastKnownUrl || ""),
+      lastReadyAt: Number(row.lastReadyAt || 0)
+    };
+  }
+  return slots;
 }
 
-async function saveSingletonTabId(tabId: number): Promise<void> {
-  if (!Number.isInteger(tabId) || tabId <= 0) return;
+async function saveSessionSlot(slot: CursorHelpSlotRecord): Promise<void> {
+  const slots = await loadSessionSlots();
+  slots[slot.sessionId] = slot;
   await chrome.storage.local
     .set({
-      [CURSOR_HELP_SINGLETON_TAB_STORAGE_KEY]: tabId
+      [CURSOR_HELP_SESSION_SLOT_STORAGE_KEY]: slots
     })
     .catch(() => {
       // noop
     });
 }
 
-async function clearSingletonTabId(): Promise<void> {
-  await chrome.storage.local.remove(CURSOR_HELP_SINGLETON_TAB_STORAGE_KEY).catch(() => {
-    // noop
-  });
+async function clearSessionSlot(sessionId: string): Promise<void> {
+  const slots = await loadSessionSlots();
+  delete slots[sessionId];
+  await chrome.storage.local
+    .set({
+      [CURSOR_HELP_SESSION_SLOT_STORAGE_KEY]: slots
+    })
+    .catch(() => {
+      // noop
+    });
 }
 
 async function sendTabMessageWithRetry(tabId: number, message: Record<string, unknown>, retries = 12): Promise<unknown> {
@@ -264,47 +321,93 @@ async function sendTabMessageWithRetry(tabId: number, message: Record<string, un
   throw lastError instanceof Error ? lastError : new Error(String(lastError || "目标网页执行器未就绪"));
 }
 
-async function resolveTargetTabId(input: LlmProviderSendInput): Promise<number> {
+function formatInspectFailure(inspect: CursorHelpInspectResult | null): string {
+  if (!inspect) return "未找到可用的 Cursor Help 页面。请确认页面已完成加载。";
+  if (!inspect.pageHookReady) return "Cursor Help 页面 hook 未就绪，请稍后重试。";
+  if (!inspect.fetchHookReady) return "Cursor Help 请求接管未就绪，请稍后重试。";
+  if (!inspect.senderReady) {
+    const suffix = inspect.lastSenderError ? ` ${inspect.lastSenderError}` : "";
+    return `Cursor Help 内部入口未就绪。${suffix}`.trim();
+  }
+  return "Cursor Help 页面暂不可执行正式链路。";
+}
+
+async function tryUseTabForSession(
+  sessionId: string,
+  tabId: number
+): Promise<{ tabId: number; inspect: CursorHelpInspectResult; windowId?: number } | null> {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab?.id) return null;
+  await waitForCursorHelpTabReady(tab.id);
+  const inspect = await inspectCursorTabEnsured(tab.id);
+  if (!inspect?.canExecute) return null;
+  await saveSessionSlot({
+    sessionId,
+    tabId: tab.id,
+    windowId: typeof tab.windowId === "number" ? tab.windowId : undefined,
+    lastKnownUrl: inspect.url,
+    lastReadyAt: Date.now()
+  });
+  return {
+    tabId: tab.id,
+    inspect,
+    windowId: typeof tab.windowId === "number" ? tab.windowId : undefined
+  };
+}
+
+async function resolveTargetSlot(
+  input: LlmProviderSendInput
+): Promise<{ sessionId: string; tabId: number; inspect: CursorHelpInspectResult }> {
+  const sessionId = String(input.sessionId || "").trim() || "default";
   const options = toRecord(input.route.providerOptions);
-  const singletonTabId = await loadSingletonTabId();
-  if (singletonTabId) {
-    const singletonTab = await chrome.tabs.get(singletonTabId).catch(() => null);
-    if (singletonTab?.id) {
-      await waitForCursorHelpTabReady(singletonTab.id);
-      const inspected = await inspectCursorTabEnsured(singletonTab.id);
-      if (inspected?.isReady) {
-        return singletonTab.id;
-      }
+  const slots = await loadSessionSlots();
+  const boundTabIds = new Set<number>(
+    Object.values(slots)
+      .map((slot) => Number(slot.tabId))
+      .filter((tabId) => Number.isInteger(tabId) && tabId > 0)
+  );
+
+  const existingSlot = slots[sessionId];
+  if (existingSlot?.tabId) {
+    const resolved = await tryUseTabForSession(sessionId, existingSlot.tabId).catch(() => null);
+    if (resolved) {
+      return {
+        sessionId,
+        tabId: resolved.tabId,
+        inspect: resolved.inspect
+      };
     }
-    await clearSingletonTabId();
+    await clearSessionSlot(sessionId);
   }
 
   const preferredTabId = Number(options.targetTabId);
   if (Number.isInteger(preferredTabId) && preferredTabId > 0) {
-    const preferredTab = await chrome.tabs.get(preferredTabId).catch(() => null);
-    if (preferredTab?.id) {
-      await waitForCursorHelpTabReady(preferredTab.id);
-      const inspected = await inspectCursorTabEnsured(preferredTab.id);
-      if (inspected?.isReady) {
-        await saveSingletonTabId(preferredTab.id);
-        return preferredTab.id;
+    const alreadyBoundSession = Object.values(slots).find(
+      (slot) => slot.sessionId !== sessionId && slot.tabId === preferredTabId
+    );
+    if (!alreadyBoundSession) {
+      const resolved = await tryUseTabForSession(sessionId, preferredTabId).catch(() => null);
+      if (resolved) {
+        return {
+          sessionId,
+          tabId: resolved.tabId,
+          inspect: resolved.inspect
+        };
       }
     }
   }
 
   const existingTabs = await chrome.tabs.query({ url: [...CURSOR_TAB_PATTERNS] });
-  const sortedTabs = [...existingTabs].sort((left, right) => {
-    const leftHelp = String(left.url || "").startsWith(CURSOR_HELP_URL) ? 1 : 0;
-    const rightHelp = String(right.url || "").startsWith(CURSOR_HELP_URL) ? 1 : 0;
-    return rightHelp - leftHelp;
-  });
-  for (const tab of sortedTabs) {
+  for (const tab of existingTabs) {
     if (!tab.id) continue;
-    await waitForCursorHelpTabReady(tab.id);
-    const inspected = await inspectCursorTabEnsured(tab.id);
-    if (inspected?.isReady) {
-      await saveSingletonTabId(tab.id);
-      return tab.id;
+    if (boundTabIds.has(tab.id)) continue;
+    const resolved = await tryUseTabForSession(sessionId, tab.id).catch(() => null);
+    if (resolved) {
+      return {
+        sessionId,
+        tabId: resolved.tabId,
+        inspect: resolved.inspect
+      };
     }
   }
 
@@ -326,26 +429,28 @@ async function resolveTargetTabId(input: LlmProviderSendInput): Promise<number> 
   if (!created?.id) {
     throw new Error("cursor_help_web 无法打开 Cursor Help 页面");
   }
-  if (typeof createdWindow?.id === "number") {
-    await chrome.windows.update(createdWindow.id, {
-      focused: false,
-      state: "minimized"
-    }).catch(() => {
-      // noop
-    });
-  }
   await chrome.tabs.update(created.id, {
     autoDiscardable: false
   }).catch(() => {
     // noop
   });
   await waitForCursorHelpTabReady(created.id);
-  const inspected = await inspectCursorTabEnsured(created.id);
-  if (inspected?.isReady) {
-    await saveSingletonTabId(created.id);
-    return created.id;
+  const inspect = await inspectCursorTabEnsured(created.id);
+  if (inspect?.canExecute) {
+    await saveSessionSlot({
+      sessionId,
+      tabId: created.id,
+      windowId: typeof created.windowId === "number" ? created.windowId : undefined,
+      lastKnownUrl: inspect.url,
+      lastReadyAt: Date.now()
+    });
+    return {
+      sessionId,
+      tabId: created.id,
+      inspect
+    };
   }
-  throw new Error("未找到可用的 Cursor Help 页面。请先在浏览器里打开已加载完成的 Cursor Help 页面，再重新连接。");
+  throw new Error(formatInspectFailure(inspect));
 }
 
 export function createCursorHelpWebProvider() {
@@ -355,14 +460,16 @@ export function createCursorHelpWebProvider() {
       return `${CURSOR_HELP_WEB_BASE_URL}/chat/completions`;
     },
     async send(input: LlmProviderSendInput): Promise<Response> {
-      emitProviderDebugLog("provider.resolve_tab", "running", "开始解析目标 Cursor Help 标签页");
-      const tabId = await resolveTargetTabId(input);
-      emitProviderDebugLog("provider.resolve_tab", "done", `命中 tab=${tabId}`);
-      clearStaleTabExecution(tabId);
-      const existingRequestId = ACTIVE_REQUEST_ID_BY_TAB.get(tabId);
-      if (existingRequestId) {
-        emitProviderDebugLog("provider.lock", "failed", `tab=${tabId} 已有执行中的 provider 请求`);
-        throw new Error(`目标标签页 ${tabId} 正在执行网页 provider 请求`);
+      emitProviderDebugLog("provider.resolve_slot", "running", "开始解析目标 Cursor Help 会话槽位");
+      const resolved = await resolveTargetSlot(input);
+      emitProviderDebugLog("provider.resolve_slot", "done", `session=${resolved.sessionId} 命中 tab=${resolved.tabId}`);
+      clearStaleExecution(resolved.sessionId, resolved.tabId);
+
+      if (ACTIVE_REQUEST_ID_BY_SESSION.has(resolved.sessionId)) {
+        throw new Error(`会话 ${resolved.sessionId} 已有执行中的网页 provider 请求`);
+      }
+      if (ACTIVE_REQUEST_ID_BY_TAB.has(resolved.tabId)) {
+        throw new Error(`目标标签页 ${resolved.tabId} 正在执行网页 provider 请求`);
       }
 
       const requestId = `cursor-help-${crypto.randomUUID()}`;
@@ -371,20 +478,13 @@ export function createCursorHelpWebProvider() {
         input.payload.tools,
         input.payload.tool_choice
       );
-      const requestedModel = String(input.route.llmModel || "").trim();
-      const detectedModel = String(toRecord(input.route.providerOptions).detectedModel || "").trim();
-      const requestBody = buildCursorHelpRequestBody({
-        prompt: compiledPrompt,
-        requestId,
-        messageId: createCursorHelpClientId(),
-        requestedModel,
-        detectedModel
-      });
+      const latestUserPrompt = extractLastUserMessage(input.payload.messages);
+      const requestedModel = String(input.route.llmModel || "").trim() || "auto";
       const entry: PendingExecution = {
         requestId,
-        sessionId: String(input.sessionId || "").trim() || "default",
-        tabId,
-        model: requestBody.model,
+        sessionId: resolved.sessionId,
+        tabId: resolved.tabId,
+        model: resolveCursorHelpApiModel(requestedModel, resolved.inspect.selectedModel || ""),
         stream: input.payload.stream !== false,
         createdAt: Date.now(),
         lastEventAt: Date.now(),
@@ -394,7 +494,8 @@ export function createCursorHelpWebProvider() {
         queue: [],
         outputText: "",
         firstDeltaLogged: false,
-        closed: false
+        closed: false,
+        sessionKey: null
       };
 
       const stream = new ReadableStream<Uint8Array>({
@@ -410,14 +511,15 @@ export function createCursorHelpWebProvider() {
       });
 
       ACTIVE_BY_REQUEST_ID.set(requestId, entry);
-      ACTIVE_REQUEST_ID_BY_TAB.set(tabId, requestId);
+      ACTIVE_REQUEST_ID_BY_TAB.set(resolved.tabId, requestId);
+      ACTIVE_REQUEST_ID_BY_SESSION.set(resolved.sessionId, requestId);
       armExecutionWatchdog(entry, EXECUTION_BOOT_TIMEOUT_MS, "网页 provider 请求未启动，请确认 Cursor Help 页面已加载完成");
-      emitProviderDebugLog("provider.execute", "running", `向 tab=${tabId} 发送 webchat.execute`);
+      emitProviderDebugLog("provider.execute", "running", `向 tab=${resolved.tabId} 发送 webchat.execute`);
 
       input.signal.addEventListener(
         "abort",
         () => {
-          void chrome.tabs.sendMessage(tabId, {
+          void chrome.tabs.sendMessage(resolved.tabId, {
             type: "webchat.abort",
             requestId
           }).catch(() => {
@@ -429,22 +531,28 @@ export function createCursorHelpWebProvider() {
       );
 
       try {
-        const response = await sendTabMessageWithRetry(tabId, {
+        const response = await sendTabMessageWithRetry(resolved.tabId, {
           type: "webchat.execute",
           requestId,
-          targetSite: "cursor_help",
-          requestUrl: CURSOR_HELP_REQUEST_PATH,
-          requestBody
+          sessionId: resolved.sessionId,
+          compiledPrompt,
+          latestUserPrompt,
+          requestedModel
         });
         const row = toRecord(response);
         if (row.ok !== true) {
           emitProviderDebugLog("provider.execute", "failed", String(row.error || "目标网页执行器未就绪"));
           throw new Error(String(row.error || "目标网页执行器未就绪"));
         }
-        emitProviderDebugLog("provider.execute", "done", "content script 已确认接收 execute 请求");
+        emitProviderDebugLog(
+          "provider.execute",
+          "done",
+          `content script 已确认接收 execute 请求${row.senderKind ? ` (${String(row.senderKind)})` : ""}`
+        );
       } catch (error) {
         ACTIVE_BY_REQUEST_ID.delete(requestId);
-        ACTIVE_REQUEST_ID_BY_TAB.delete(tabId);
+        ACTIVE_REQUEST_ID_BY_TAB.delete(resolved.tabId);
+        ACTIVE_REQUEST_ID_BY_SESSION.delete(resolved.sessionId);
         emitProviderDebugLog("provider.execute", "failed", error instanceof Error ? error.message : String(error));
         throw error instanceof Error ? error : new Error(String(error));
       }
@@ -517,10 +625,17 @@ export async function handleWebChatRuntimeMessage(message: unknown, senderTabId?
 
   const transportType = String(payload.transportType || "").trim() as WebChatTransportType;
   touchExecution(entry);
+  if (typeof payload.sessionKey === "string" && payload.sessionKey.trim()) {
+    entry.sessionKey = payload.sessionKey.trim();
+  }
   if (transportType === "request_started") {
     entry.startedAt = Date.now();
     armExecutionWatchdog(entry, EXECUTION_STALE_MS, "网页 provider 请求长时间未结束");
-    emitProviderDebugLog("provider.request_started", "done", `tab=${entry.tabId} 页面内聊天请求已发出`);
+    emitProviderDebugLog(
+      "provider.request_started",
+      "done",
+      `tab=${entry.tabId} 页面内聊天请求已发出${entry.sessionKey ? ` sessionKey=${entry.sessionKey}` : ""}`
+    );
     return true;
   }
 

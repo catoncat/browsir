@@ -104,15 +104,19 @@ function formatMessageBlock(raw: unknown): string | null {
   return ["<message>", content, "</message>"].join("\n");
 }
 
-export function extractLastUserPreview(messages: unknown): string {
+export function extractLastUserMessage(messages: unknown): string {
   const rows = Array.isArray(messages) ? messages : [];
   for (let i = rows.length - 1; i >= 0; i -= 1) {
     const row = toRecord(rows[i]);
     if (String(row.role || "").trim().toLowerCase() !== "user") continue;
     const content = normalizeTextContent(row.content).trim();
-    if (content) return content.slice(0, 240);
+    if (content) return content;
   }
   return "Continue";
+}
+
+export function extractLastUserPreview(messages: unknown): string {
+  return extractLastUserMessage(messages).slice(0, 240);
 }
 
 export function buildCursorHelpCompiledPrompt(

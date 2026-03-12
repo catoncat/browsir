@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildCursorHelpCompiledPrompt,
+  extractLastUserMessage,
   extractLastUserPreview,
   parseToolProtocolFromText
 } from "../../../shared/cursor-help-web-shared";
@@ -39,6 +40,14 @@ describe("cursor-help-web shared helpers", () => {
       { role: "user", content: "Tell me a story about typed providers." }
     ]);
     expect(preview).toContain("typed providers");
+  });
+
+  it("extracts the latest user message without truncation", () => {
+    const message = extractLastUserMessage([
+      { role: "assistant", content: "hi" },
+      { role: "user", content: "Tell me exactly who you are." }
+    ]);
+    expect(message).toBe("Tell me exactly who you are.");
   });
 
   it("parses text protocol tool calls into function calls", () => {
