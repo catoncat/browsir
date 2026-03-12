@@ -421,6 +421,8 @@ const activeRunToken = ref(0);
 
 const toolPendingCardLeaving = computed(() => runPhase.value === "tool_handoff_leaving");
 
+const llmStreamingPendingText = ref("");
+
 const finalAssistantStreamingPhase = computed({
   get: () => runPhase.value === "final_assistant",
   set: (value: boolean) => {
@@ -858,7 +860,7 @@ function startInitialToolSync() {
 
 function flushLlmStreamingDeltaBuffer() {
   if (!llmStreamingDeltaBuffer) return;
-  llmStreamingText.value = `${llmStreamingText.value}${llmStreamingDeltaBuffer}`;
+  llmStreamingPendingText.value = `${llmStreamingPendingText.value}${llmStreamingDeltaBuffer}`;
   llmStreamingDeltaBuffer = "";
 }
 
@@ -877,12 +879,18 @@ function appendLlmStreamingDelta(chunk: string) {
   scheduleLlmStreamingFlush();
 }
 
+function commitPendingLlmStreamingText() {
+  flushLlmStreamingDeltaBuffer();
+  llmStreamingText.value = llmStreamingPendingText.value;
+}
+
 function resetLlmStreamingState() {
   if (llmStreamFlushRaf != null) {
     cancelAnimationFrame(llmStreamFlushRaf);
     llmStreamFlushRaf = null;
   }
   llmStreamingDeltaBuffer = "";
+  llmStreamingPendingText.value = "";
   llmStreamingText.value = "";
   llmStreamingSessionId.value = "";
   llmStreamingActive.value = false;
@@ -1161,16 +1169,14 @@ function applyRuntimeEventToolRun(event: unknown) {
   }
   if (type === "llm.stream.start") {
     flushLlmStreamingDeltaBuffer();
-    if (String(llmStreamingText.value || "").trim()) {
-      const tail = llmStreamingText.value.endsWith("\n") ? "" : "\n";
-      llmStreamingText.value = `${llmStreamingText.value}${tail}`;
-    }
+    llmStreamingPendingText.value = "";
+    llmStreamingText.value = "";
     llmStreamingSessionId.value = eventSessionId || String(activeSessionId.value || "");
     llmStreamingActive.value = true;
     if (runPhase.value !== "tool_running" && runPhase.value !== "tool_handoff_leaving") {
-      runPhase.value = "final_assistant";
+      runPhase.value = "llm";
     }
-    setLlmRunHint("回答中", "正在生成回复");
+    setLlmRunHint("思考中", "正在规划下一步");
     return;
   }
   if (type === "llm.stream.delta") {
@@ -1190,9 +1196,10 @@ function applyRuntimeEventToolRun(event: unknown) {
     return;
   }
   if (type === "llm.response.parsed") {
+    flushLlmStreamingDeltaBuffer();
     const toolCalls = Number(payload.toolCalls || 0);
     if (Number.isFinite(toolCalls) && toolCalls > 0) {
-      flushLlmStreamingDeltaBuffer();
+      llmStreamingPendingText.value = "";
       llmStreamingText.value = "";
       llmStreamingActive.value = false;
       finalAssistantStreamingPhase.value = false;
@@ -1200,6 +1207,7 @@ function applyRuntimeEventToolRun(event: unknown) {
         runPhase.value = "llm";
       }
     } else {
+      commitPendingLlmStreamingText();
       finalAssistantStreamingPhase.value = true;
       setLlmRunHint("整理回复", "正在生成最终回答");
     }
