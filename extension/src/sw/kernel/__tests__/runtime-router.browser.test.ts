@@ -2302,6 +2302,264 @@ describe("runtime-router.browser", () => {
     ).toBe(true);
   });
 
+  it("search_elements 在打字意图时应使用 interactive filter", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const observedFilters: string[] = [];
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.browser.search-elements.typing-filter",
+        name: "browser-search-elements-typing-filter",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["browser.snapshot"],
+        },
+      },
+      providers: {
+        capabilities: {
+          "browser.snapshot": {
+            id: "plugin.browser.search-elements.typing-filter.snapshot",
+            mode: "script",
+            priority: 90,
+            invoke: async (input) => {
+              const args = asRecord(input.args);
+              const options = asRecord(args.options);
+              observedFilters.push(String(options.filter || ""));
+              return {
+                data: {
+                  snapshotId: "snap-typing-filter",
+                  tabId: 1,
+                  nodes: [
+                    {
+                      uid: "e-input",
+                      ref: "e-input",
+                      role: "textbox",
+                      editable: true,
+                      selector: "#prompt-textarea",
+                    },
+                  ],
+                },
+                verified: false,
+                verifyReason: "verify_policy_off",
+              };
+            },
+          },
+        },
+      },
+    });
+
+    let llmCall = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
+      if (llmCall === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_search_typing_filter",
+                      type: "function",
+                      function: {
+                        name: "search_elements",
+                        arguments: JSON.stringify({
+                          tabId: 1,
+                          query: "message input textarea prompt",
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "完成",
+              },
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
+      },
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "找到输入框并准备继续输入",
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId);
+    const done = stream.find(
+      (item) => String(item.type || "") === "loop_done",
+    ) as Record<string, unknown> | undefined;
+    const donePayload = (done?.payload || {}) as Record<string, unknown>;
+    expect(String(donePayload.status || "")).toBe("done");
+    expect(observedFilters).toEqual(["interactive"]);
+  });
+
+  it("search_elements 在读取静态文本时应保留 all filter", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const observedFilters: string[] = [];
+    orchestrator.registerPlugin({
+      manifest: {
+        id: "plugin.browser.search-elements.read-filter",
+        name: "browser-search-elements-read-filter",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["browser.snapshot"],
+        },
+      },
+      providers: {
+        capabilities: {
+          "browser.snapshot": {
+            id: "plugin.browser.search-elements.read-filter.snapshot",
+            mode: "script",
+            priority: 90,
+            invoke: async (input) => {
+              const args = asRecord(input.args);
+              const options = asRecord(args.options);
+              observedFilters.push(String(options.filter || ""));
+              return {
+                data: {
+                  snapshotId: "snap-read-filter",
+                  tabId: 1,
+                  nodes: [
+                    {
+                      uid: "reply-1",
+                      ref: "reply-1",
+                      role: "div",
+                      editable: false,
+                      selector: "[data-message-author-role='assistant'] p",
+                      name: "我会先故意什么都不做一分钟",
+                    },
+                  ],
+                },
+                verified: false,
+                verifyReason: "verify_policy_off",
+              };
+            },
+          },
+        },
+      },
+    });
+
+    let llmCall = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      llmCall += 1;
+      if (llmCall === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call_search_read_filter",
+                      type: "function",
+                      function: {
+                        name: "search_elements",
+                        arguments: JSON.stringify({
+                          tabId: 1,
+                          query: "我会 自由意志 选择",
+                          selector: "[data-message-author-role='assistant']",
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "完成",
+              },
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      );
+    });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
+      },
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "读取回复文本",
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId);
+    const done = stream.find(
+      (item) => String(item.type || "") === "loop_done",
+    ) as Record<string, unknown> | undefined;
+    const donePayload = (done?.payload || {}) as Record<string, unknown>;
+    expect(String(donePayload.status || "")).toBe("done");
+    expect(observedFilters).toEqual(["all"]);
+  });
+
   it("tool_call 支持 AIPex 风格工具名（get_all_tabs/search_elements/fill_element_by_uid/click）", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);

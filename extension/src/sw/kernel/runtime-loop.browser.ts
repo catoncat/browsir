@@ -1584,6 +1584,49 @@ function summarizeToolTarget(
   return "";
 }
 
+const SEARCH_ELEMENTS_INTERACTIVE_INTENT_TOKENS = [
+  "input",
+  "textarea",
+  "textbox",
+  "searchbox",
+  "combobox",
+  "editable",
+  "contenteditable",
+  "type",
+  "fill",
+  "write",
+  "prompt",
+  "compose",
+  "composer",
+  "send",
+  "输入",
+  "输入框",
+  "键入",
+  "可编辑",
+  "发送",
+];
+
+function inferSearchElementsFilter(
+  queryRaw: string,
+): "all" | "interactive" {
+  const needles = String(queryRaw || "")
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (
+    needles.some((needle) =>
+      SEARCH_ELEMENTS_INTERACTIVE_INTENT_TOKENS.some(
+        (token) => needle.includes(token) || token.includes(needle),
+      ),
+    )
+  ) {
+    return "interactive";
+  }
+  return "all";
+}
+
 function scoreSearchNode(
   node: JsonRecord,
   needles: string[],
@@ -5698,18 +5741,19 @@ export function createRuntimeLoopController(
         const maxResults = Number.isFinite(maxResultsRaw)
           ? Math.max(1, Math.min(120, Math.floor(maxResultsRaw)))
           : 20;
+        const query = String(args.query || "").trim();
         return {
           ok: true,
           plan: {
             kind: "step.search_elements",
             capability: CAPABILITIES.browserSnapshot,
             tabId,
-            query: String(args.query || "").trim(),
+            query,
             maxResults,
             options: {
               mode: "interactive",
               selector: String(args.selector || ""),
-              filter: "all",
+              filter: inferSearchElementsFilter(query),
               format: "json",
               diff: args.diff === true,
               maxTokens: args.maxTokens,
