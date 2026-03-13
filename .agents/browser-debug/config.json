@@ -2,8 +2,8 @@
   "version": 1,
   "projectType": "chrome-extension",
   "enginePolicy": {
-    "defaultEngine": "playwright",
-    "fallbackEngine": "playwriter"
+    "defaultEngine": "playwriter",
+    "fallbackEngine": "agent-browser"
   },
   "browser": {
     "appName": "Google Chrome Beta",
@@ -19,7 +19,7 @@
   "cdpMcp": {
     "channel": "beta",
     "headless": false,
-    "autoConnect": false,
+    "autoConnect": true,
     "isolated": false,
     "slim": true,
     "acceptInsecureCerts": false

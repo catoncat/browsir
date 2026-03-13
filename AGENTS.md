@@ -1,22 +1,54 @@
 ## 项目概述
 
-Browser Brain Loop：浏览器侧 AI Agent 系统。大脑（Planner + Loop Engine）运行在 Chrome 扩展的 SidePanel / Service Worker 中，本地 Bun WebSocket 服务（Bridge）仅做执行代理，提供 `read/write/edit/bash` 四个工具。
+Browser Brain Loop：浏览器侧 AI Agent 系统。大脑（Kernel Engine + Loop Controller）运行在 Chrome 扩展的 Service Worker 中，SidePanel 提供对话 UI，本地 Bun WebSocket 服务（Bridge）仅做执行代理，提供 `read/write/edit/bash` 四个工具。
 
 **架构铁律：大脑永远在浏览器侧，本地 WS 只做执行代理，不做任务决策。**
+
+Kernel 引擎（31 个模块）聚合在 `BrainOrchestrator` 单例中，详见 [docs/kernel-architecture.md](docs/kernel-architecture.md)。
 
 ## 项目级系统提示词约束（Legacy/Fallback）
 
 - 在本项目中进行功能开发或写代码时，**完全不要考虑 Legacy/Fallback 方案**，默认按目标态实现。
 - 一旦发现现存的 Legacy/Fallback 路径，**必须立即询问用户是否删除**，未经确认不得继续沿用或扩展该路径。
 
-## 外部参考仓库（LLM Provider）
+## 项目级系统提示词约束（注入脚本）
 
-- Pi monorepo 固定位置：`~/work/repos/_research/pi-mono/`
-- 后续涉及 “LLM Provider 兼容 / 自动注册 / 多模型上下文切换” 时，默认先看：
-  - `~/work/repos/_research/pi-mono/packages/ai/`
-  - `~/work/repos/_research/pi-mono/packages/coding-agent/src/core/model-registry.ts`
-  - `~/work/repos/_research/pi-mono/packages/coding-agent/docs/custom-provider.md`
-  - `~/work/repos/_research/pi-mono/packages/ai/src/providers/transform-messages.ts`
+- 所有注入到网页执行环境的脚本都必须按“单文件自包含”设计与交付，包括：
+  - `manifest.json > content_scripts`
+  - `chrome.scripting.executeScript` 注入文件
+  - `world: "MAIN"` 的 page hook / injected script
+- 这些脚本的最终产物**禁止**出现顶层 `import` / `export`、共享 chunk 依赖、运行时模块加载器假设。默认心智模型是“浏览器会把它当普通脚本直接执行”，不是 ESM 宿主。
+- 如果确实需要复用逻辑，优先选择：
+  - 在注入脚本内保留一份小型自包含实现
+  - 或调整构建，使该入口最终产出单文件 bundle
+- 禁止直接从注入脚本入口 import 共享模块后期待构建器“自动处理”；这在本项目里默认视为高风险错误。
+- 任何涉及注入脚本的改动，完成前必须做两个校验：
+  - 构建后检查对应 `dist/assets/*.js` 入口文件头部，确认没有顶层 `import` / `export`
+  - 确认 `manifest` 或注入调用引用的就是该可直接执行的产物
+
+## 外部参考仓库（设计对齐）
+
+### Pi monorepo — Agent Core + LLM Provider
+
+固定位置：`~/work/repos/_research/pi-mono/`
+
+关键参考路径：
+- `packages/ai/` — 统一消息模型 + Provider 双层
+- `packages/coding-agent/src/core/model-registry.ts` — Model Registry
+- `packages/coding-agent/docs/custom-provider.md` — 自定义 Provider 文档
+- `packages/ai/src/providers/transform-messages.ts` — Message 变换
+
+对齐要点：统一消息模型（role/content/tool_call）、Provider 双层（Adapter + Registry）、Model Registry 自动发现、Message 变换管道。
+
+### AIPex — 浏览器自动化
+
+固定位置：`~/work/repos/_research/AIPex/`
+
+关键参考路径：
+- `packages/browser-runtime/src/tools/` — 工具实现
+- `packages/browser-runtime/src/automation/` — 自动化引擎
+
+对齐要点：UID 元素定位、A11y-first 快照、双模式执行（semantic/coordinate）、Post-action stabilization。
 
 ## 常用命令
 
@@ -27,28 +59,34 @@ BRIDGE_TOKEN="<token>" bun run brain:dev
 # 单独启动 bridge
 cd bridge && bun install && BRIDGE_TOKEN="<token>" bun run start
 
-# 扩展热重载 watcher（文件变化自动 bump bridge 版本触发 chrome.runtime.reload）
+# 扩展构建
+cd extension && bun run build
+
+# 扩展热重载 watcher
 BRIDGE_TOKEN="<token>" bun run brain:ext:watch
 
 # Bridge 类型检查 + 单元测试
-bun run check:brain-bridge          # = cd bridge && bun run typecheck && bun run test
+bun run check:brain-bridge
 
-# 单跑 bridge 测试
-cd bridge && bun test               # 全部
-cd bridge && bun test test/fs-guard.test.ts  # 单个文件
+# 扩展测试（Vitest browser mode）
+cd extension && bun run test
+
+# Bridge 测试
+cd bridge && bun test
+cd bridge && bun test test/fs-guard.test.ts
 
 # 类型检查
 cd bridge && bunx tsc --noEmit
 
-# E2E（纯 CDP，无 Playwright；需 Chrome for Testing 或 Chromium）
+# E2E（纯 CDP，无 Playwright）
 bun run brain:e2e
-BRIDGE_TOKEN="<token>" bun run brain:e2e:live              # 真实 LLM 冒烟（需下方 LLM 环境变量）
-CHROME_BIN="/path/to/chrome" bun run brain:e2e       # 指定浏览器
-BRAIN_E2E_HEADLESS=true bun run brain:e2e            # headless 模式
+BRIDGE_TOKEN="<token>" bun run brain:e2e:live
+CHROME_BIN="/path/to/chrome" bun run brain:e2e
+BRAIN_E2E_HEADLESS=true bun run brain:e2e
 
 # BDD 契约校验 + 门禁
 bun run bdd:validate && bun run bdd:gate
-bun run bdd:gate:live                                 # 检查 live profile 契约
+bun run bdd:gate:live
 ```
 
 live LLM 环境变量（用于 `brain:e2e:live`）：
@@ -64,33 +102,78 @@ BRAIN_E2E_LIVE_LLM_MODEL="gpt-5.3-codex"
 
 ```
 browser-brain-loop/
-├── bridge/          # Bun 本地 WS 服务 (ws://127.0.0.1:8787)
+├── bridge/              # Bun 本地 WS 服务 (ws://127.0.0.1:8787)
 │   └── src/
-│       ├── server.ts       # Bun.serve WS 入口，认证/并发控制/审计
-│       ├── dispatcher.ts   # invoke 分发到 tools/{read,write,edit,bash}
-│       ├── config.ts       # 环境变量配置（BridgeConfig）
-│       ├── cmd-registry.ts # bash 命令白名单（cmdId → argv 映射）
-│       ├── fs-guard.ts     # 文件系统路径守卫（god/strict 模式）
-│       ├── protocol.ts     # WS 帧解析 + 类型转换辅助函数
-│       └── tools/          # read/write/edit/bash 四个工具实现
-├── extension/       # MV3 Chrome 扩展（直接 JS，无构建步骤）
-│   ├── service-worker.js  # CDP Gateway + WS Client + 租约管理
-│   ├── sidepanel.{html,js} # Planner UI + Loop Engine + 自治修复
+│       ├── server.ts         # Bun.serve WS 入口，认证/并发控制/审计
+│       ├── dispatcher.ts     # invoke 分发到 tools/
+│       ├── config.ts         # 环境变量配置
+│       ├── cmd-registry.ts   # bash 命令白名单
+│       ├── fs-guard.ts       # 路径守卫（god/strict）
+│       ├── protocol.ts       # WS 帧解析
+│       └── tools/            # read/write/edit/bash
+├── extension/           # MV3 Chrome 扩展（Vite 8 + Vue 3 + TS）
+│   ├── src/
+│   │   ├── background/
+│   │   │   └── sw-main.ts         # Service Worker 入口 → BrainOrchestrator + RuntimeRouter
+│   │   ├── panel/
+│   │   │   ├── main.ts            # SidePanel Vue app
+│   │   │   ├── plugin-studio-main.ts  # Plugin Studio 入口
+│   │   │   ├── components/        # Vue 组件（Chat/Settings/Plugins/Skills/...）
+│   │   │   ├── stores/            # Pinia stores
+│   │   │   └── utils/             # UI 工具函数
+│   │   └── sw/kernel/             # Kernel 引擎（31 模块）→ docs/kernel-architecture.md
+│   │       ├── orchestrator.browser.ts    # BrainOrchestrator 单例
+│   │       ├── runtime-loop.browser.ts    # LLM loop 引擎
+│   │       ├── runtime-router.ts          # SW 消息路由
+│   │       ├── tool-contract-registry.ts  # 工具 Schema（46 内置）
+│   │       ├── tool-provider-registry.ts  # 工具执行层
+│   │       ├── plugin-runtime.ts          # 插件系统
+│   │       ├── skill-registry.ts          # Skill 管理
+│   │       ├── virtual-fs.browser.ts      # mem:// 虚拟文件系统
+│   │       └── ...                        # 其余 23 个模块
+│   ├── vite.config.ts   # 4 入口：sidepanel / debug / plugin-studio / service-worker
 │   └── manifest.json
-├── bdd/             # 行为契约驱动开发
-│   ├── contracts/   # BHV-* 行为契约 JSON
-│   ├── features/    # Gherkin .feature 文件（@contract(...) 引用契约）
-│   ├── mappings/    # contract-to-tests.json 契约到证明层映射
-│   ├── schemas/     # 契约 JSON Schema
-│   └── evidence/    # e2e 运行产出的证据 JSON
-└── tools/           # 构建/测试/门禁脚本
-    ├── brain-e2e.ts      # 纯 CDP e2e 测试
-    ├── brain-dev.sh      # 一键开发启动
-    ├── brain-ext-watch.ts # 扩展文件变化 → 自动重载
-    ├── bdd-validate.ts   # 契约结构校验
-    ├── bdd-gate.ts       # 门禁（契约覆盖 + 证据 passed=true）
-    └── bdd-lib.ts        # BDD 工具共享库
+├── bdd/                 # 行为契约驱动开发
+│   ├── contracts/       # BHV-* 契约 JSON
+│   ├── features/        # Gherkin .feature
+│   ├── mappings/        # contract-to-tests.json
+│   ├── schemas/         # JSON Schema
+│   └── evidence/        # e2e 证据
+└── tools/               # 构建/测试/门禁脚本
 ```
+
+## Kernel 概要
+
+Kernel 引擎（`extension/src/sw/kernel/`）由 `BrainOrchestrator` 聚合 6 大子系统，详见 [docs/kernel-architecture.md](docs/kernel-architecture.md)：
+
+- **Orchestrator**：Session 生命周期 + RunState 状态机（running/paused/stopped/compacting/queue）
+- **Tool 双层**：ToolContract（Schema，46 内置工具）+ ToolProvider（执行，3 种 mode: script/cdp/bridge）
+- **LLM Provider**：`LlmProviderAdapter` 接口 + OpenAI-compatible 默认实现 + Profile 多路由 + 升级策略
+- **Plugin 系统**：`AgentPluginDefinition` + 权限模型 + 卸载自动恢复 + Plugin Studio
+- **Skill 系统**：IndexedDB 持久化 + `<skill>` prompt block 注入 + `create_skill` 原子创建
+- **Virtual FS**：`mem://` 浏览器侧 VFS + LIFO 沙箱 + Runtime Strategy（browser-first / host-first）
+
+辅助子系统：Hook 系统（17 个 hook 点）、事件总线（50+ 事件类型）、Compaction（overflow/threshold）、Snapshot Enricher。
+
+## 扩展侧工具契约
+
+46 个内置工具，按类别：
+
+**文件/Shell（8）：** `host_bash`, `browser_bash`, `host_read_file`, `browser_read_file`, `host_write_file`, `browser_write_file`, `host_edit_file`, `browser_edit_file`
+
+**元素交互（8）：** `search_elements`, `click`, `fill_element_by_uid`, `select_option_by_uid`, `hover_element_by_uid`, `get_editor_value`, `fill_form`, `computer`
+
+**导航/滚动（4）：** `press_key`, `scroll_page`, `navigate_tab`, `scroll_to_element`
+
+**Tab 管理（6）：** `get_all_tabs`, `get_current_tab`, `create_new_tab`, `get_tab_info`, `close_tab`, `ungroup_tabs`
+
+**验证/视觉/下载（9）：** `browser_verify`, `get_page_metadata`, `highlight_element`, `highlight_text_inline`, `capture_screenshot`, `capture_tab_screenshot`, `capture_screenshot_with_highlight`, `download_image`, `download_chat_images`
+
+**Intervention（4）：** `list_interventions`, `get_intervention_info`, `request_intervention`, `cancel_intervention`
+
+**Skill（7）：** `create_skill`, `load_skill`, `execute_skill_script`, `read_skill_reference`, `get_skill_asset`, `list_skills`, `get_skill_info`
+
+**元素定位优先级：** `uid` > `ref` > `backendNodeId` > `selector`（fallback）
 
 ## UI 与无障碍 (Accessibility First)
 
@@ -125,6 +208,62 @@ Bridge WS 通信使用统一 `invoke` 帧格式：
 
 关键环境变量：`BRIDGE_TOKEN`、`BRIDGE_MODE`、`BRIDGE_ROOTS`、`BRIDGE_PORT`(8787)、`BRIDGE_ENABLE_BASH_EXEC`、`BRIDGE_MAX_CONCURRENCY`(6)。
 
+## 对话调试
+
+- 当需要调试某个会话/对话为什么失败、卡住、无进展、工具调用异常时，**优先使用诊断导出 API**，不要让用户粘贴整段大诊断 JSON 到对话上下文。
+- 正确做法：先让系统生成诊断链接，再由 Agent 用命令行下载到本地文件，然后用 `rg`、`jq`、`sed` 等工具离线检索。
+- 模块级窄接口见 [docs/debug-interfaces.md](docs/debug-interfaces.md)。外部 AI / Codex 先按模块抓 `brain.debug.snapshot`，证据不足时再下载完整 diagnostics。
+- 诊断 JSON 结构约定见 [docs/diagnostics-format.md](docs/diagnostics-format.md)。外部 AI / Codex 进入仓库后，调试诊断时应先读这份文档，再下载 JSON。
+- 全局模块调试快照结构约定见 [docs/debug-snapshot-format.md](docs/debug-snapshot-format.md)。当问题更像 plugin/skill/provider/runtime cache 异常，而不是单会话故障时，优先使用这类快照。
+- 诊断 API 走本地 Bridge HTTP：
+  - `GET /api/diagnostics?token=<BRIDGE_TOKEN>`：列出已有导出
+  - `GET /api/diagnostics/<id>?token=<BRIDGE_TOKEN>`：下载单个诊断 JSON
+  - `GET /api/debug-snapshots?token=<BRIDGE_TOKEN>`：列出已有调试快照
+  - `GET /api/debug-snapshots/<id>?token=<BRIDGE_TOKEN>`：下载单个调试快照 JSON
+- 典型调试流程：
+
+```bash
+# 1. 列出导出
+curl 'http://127.0.0.1:8787/api/diagnostics?token=<BRIDGE_TOKEN>'
+
+# 2. 下载单个诊断
+curl 'http://127.0.0.1:8787/api/diagnostics/<id>?token=<BRIDGE_TOKEN>' -o diag.json
+
+# 3. 本地搜索关键线索
+rg 'loop_error|llm.skipped|step_finished|failed_execute|failed_verify|no_progress' diag.json
+```
+
+- 如果用户给的是“复制诊断链接”，默认认为链接已包含 `token`，可直接下载；如果返回 `unauthorized`，先检查 `BRIDGE_TOKEN` 与扩展配置里的 `bridgeToken` 是否一致。
+- 调试入口优先级：
+  - 先用 `brain.debug.snapshot` 取模块级小快照：`runtime` / `sandbox` / `plugins` / `skills`
+  - 再用 diagnostics 导出拿整包会话证据
+- 分析诊断时关注：
+  - `summary.lastError`
+  - `timeline`
+  - `sandbox.summary`
+  - `sandbox.trace`
+  - `llm.trace`
+  - `tools.trace`
+  - `agent.loopRuns`
+  - `rawEventTail`
+- 推荐检索顺序：
+  - `summary.lastError -> timeline -> sandbox.summary -> sandbox.trace -> llm.trace -> tools.trace -> agent.loopRuns -> rawEventTail`
+- 分析调试快照时关注：
+  - `payload.data.runtime.summary`
+  - `payload.data.plugins.summary`
+  - `payload.data.skills.summary`
+  - `payload.data.skills.resolver`
+  - `payload.data.plugins.capabilityProviders`
+  - `payload.data.plugins.capabilityPolicies`
+- 诊断原则：**先下载到文件、再搜索定位、最后只把结论和必要片段带回对话**；不要把整个诊断文件内容直接贴回模型上下文。
+- 当需要看“当前 runtime 运行态”而不是历史诊断导出时，使用 `brain.debug.runtime`。结构约定见 [docs/runtime-debug-interface.md](docs/runtime-debug-interface.md)。
+- `brain.debug.runtime` 适合外部 AI 查看：
+  - 当前 session / queue / kernel 概况
+  - plugin persisted registry / ui extensions / hook trace / runtime messages
+  - skill installed 清单
+  - 最近 `brain.*` 路由调用尾巴
+  - sandbox runtime 摘要
+
 ## BDD 规则
 
 - BDD 索引文档：`bdd/README.md`
@@ -135,29 +274,24 @@ Bridge WS 通信使用统一 `invoke` 帧格式：
 - `BDD_GATE_PROFILE=default` 只检查默认契约；`BDD_GATE_PROFILE=live` 额外检查 `context.gate_profile=live` 契约
 - 会话中断续跑参考 `bdd/SESSION-HANDOFF.md`
 
-## 扩展侧 CDP API
-
-通过 `chrome.runtime.sendMessage` 调用，四类操作：
-- `cdp.snapshot`：A11y-first 快照（text/interactive/full），支持 `filter/format/diff/maxTokens/depth/selector/noAnimations`
-- 返回以 `nodes[*].ref/role/name/depth/backendNodeId` 为主，并附带 `compact/truncated/hash/diff`
-- `cdp.action`：页面动作（click/type/fill/press/scroll/select/navigate），`ref` 优先 `backendNodeId`
-- `cdp.verify`：URL/title/text/selector 断言，支持 `urlChanged(previousUrl)`
-- `lease.*`：tab 写操作租约（acquire → action → release）
-
 ## Loop 编排约束（实现口径）
 
 - LLM 消费 snapshot 时优先 `compact + 元信息`，不要把整段大 JSON 直接塞回对话。
 - LLM 默认配置：`base=https://ai.chen.rs/v1`、`model=gpt-5.3-codex`（key 由运行时注入）。
-- strict verify 模式下，`browser_action` 默认需要动作后验证；“执行成功”不等于“目标推进成功”。
+- strict verify 模式下，`browser_action` 默认需要动作后验证；"执行成功"不等于"目标推进成功"。
 - 必须启用 `no_progress` 检测（重复签名 / ping-pong 往返）并提前终止当前轮。
 - auto-repair 仅在 `failed_execute/failed_verify/progress_uncertain` 或 `loop_no_progress` 信号触发；`max_steps/stopped/timeout` 不自动续跑下一轮。
 - `stopped` 回复优先状态文案，不回显 memory 中的大段 snapshot 内容。
 - BDD 必须覆盖 LLM 能力门禁：`tool_call` 闭环成功、无 LLM 的规则降级成功、不可降级时 `failed_execute`、LLM HTTP 失败回退规则 planner。
 - BDD 采用双层：默认 profile 用 mock 保证编排稳定；live profile 用真实 LLM 验证浏览器任务成功率（`brain:e2e:live` + `bdd:gate:live`）。
+- **Runtime Strategy**：`browser-first`（默认走浏览器沙箱）/ `host-first`（默认走 host bridge），通过 `BrowserRuntimeStrategy` 配置。
 
 ## 技术栈
 
-- 运行时：Bun（bridge）、Chrome MV3（extension）
-- 语言：TypeScript（bridge）、纯 JS（extension，无构建步骤）
-- 测试：`bun test`（bridge 单元测试）、纯 CDP e2e（无 Playwright）
-- 扩展无构建流程，直接加载 `extension/` 目录
+- 运行时：Bun（bridge）、Chrome MV3 + Service Worker（extension）
+- 语言：TypeScript（全项目统一）
+- 构建：Vite 8（4 入口：sidepanel / debug / plugin-studio / service-worker）
+- UI：Vue 3.5 + Pinia 3 + Tailwind CSS 4
+- 持久化：IndexedDB（via `idb` 8）
+- 沙箱：`@lifo-sh/core` 0.5 + `@lifo-sh/ui` 0.5
+- 测试：Vitest 4（extension browser tests）、bun test（bridge）、纯 CDP e2e
