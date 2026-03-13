@@ -192,6 +192,24 @@ const toolOutputHtml = computed(() => {
   return text.split(/\r?\n/u).map((line) => renderToolOutputLine(line)).join("");
 });
 
+const toolTitle = computed(() => toolRender.value.title);
+const toolSubtitle = computed(() => toolRender.value.subtitle);
+const toolDetail = computed(() => toolRender.value.detail);
+
+const toolIconContainerClass = computed(() => {
+  if (toolRender.value.tone === "error") return "bg-rose-500/10 text-rose-600 dark:text-rose-400";
+  if (toolRender.value.kind === "snapshot") return "bg-amber-500/10 text-amber-600 dark:text-amber-400";
+  if (toolRender.value.kind === "tabs") return "bg-blue-500/10 text-blue-600 dark:text-blue-400";
+  if (toolRender.value.kind === "invoke") return "bg-purple-500/10 text-purple-600 dark:text-purple-400";
+  if (toolRender.value.kind === "browser") return "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400";
+  return "bg-ui-text-muted/10 text-ui-text-muted";
+});
+
+const toolStatusDotClass = computed(() => {
+  if (toolRender.value.tone === "error") return "bg-rose-500";
+  return "bg-emerald-500";
+});
+
 const messageAriaPreview = computed(() => {
   if (isSummarySystemMessage.value) return "历史摘要";
   if (isSystem.value) return "系统消息";
