@@ -5,6 +5,15 @@ node_modules/
 # Build outputs
 extension/dist/
 bridge/tmp/
+.tmp/
+tmp/
+temp/
+dist/
+build/
+.vite/
+**/.vite/
+.cache/
+**/.cache/
 
 # Logs
 *.log
@@ -20,13 +29,22 @@ pnpm-debug.log*
 
 # Coverage / caches
 coverage/
+**/coverage/
 .nyc_output/
+.turbo/
+playwright-report/
+test-results/
 *.tsbuildinfo
 
 # OS / editor
 .DS_Store
 .vscode/
 .idea/
+
+# Local agent/runtime artifacts
+.agents/browser-debug/artifacts/
+.agents/browser-debug/agent-browser-profile/
+.agents/browser-debug/state.json
 
 # Local trace artifacts
 .brain-loop-trace-latest.json
