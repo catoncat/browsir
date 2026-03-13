@@ -7679,7 +7679,7 @@ describe("runtime-router.browser", () => {
           llmProviders: ["route.proxy"],
         },
       },
-      setup(pi: Record<string, unknown>) {
+      setup: function (pi: Record<string, unknown>) {
         (pi as Record<string, (hook: string, handler: () => unknown) => void>).on(
           "tool.after_result",
           () => ({
@@ -7751,7 +7751,9 @@ describe("runtime-router.browser", () => {
         runtime: "sandbox",
       },
     });
-    expect(String(persistedSource.content || "")).toContain("registerPlugin");
+    expect(String(persistedSource.content || "")).toContain(
+      'pi.registerProvider("route.proxy"',
+    );
 
     const patched = await invokeRuntime({
       type: "brain.step.execute",
@@ -7851,7 +7853,7 @@ describe("runtime-router.browser", () => {
           llmProviders: ["route.proxy"],
         },
       },
-      setup(pi: any) {
+      setup: function (pi: any) {
         pi.registerCapabilityProvider("fs.read", {
           id: "plugin.route.register.reload.fs-read",
           mode: "script",
@@ -8034,7 +8036,7 @@ describe("runtime-router.browser", () => {
           llmProviders: ["route.structured"],
         },
       },
-      setup(pi: any) {
+      setup: function (pi: any) {
         pi.registerCapabilityProvider("fs.read", {
           get id() {
             return "plugin.route.structured.values.fs-read";
@@ -8216,7 +8218,7 @@ describe("runtime-router.browser", () => {
           capabilities: ["fs.read"],
         },
       },
-      setup(pi: any) {
+      setup: function (pi: any) {
         pi.registerCapabilityProvider("fs.read", {
           id: "plugin.route.free-variable.reject.fs-read",
           mode: "script",
@@ -8257,76 +8259,6 @@ describe("runtime-router.browser", () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
 
-    class ClassFsReadProvider {
-      id = "plugin.route.class-instance.fs-read";
-      mode = "script" as const;
-
-      constructor() {
-        Object.defineProperty(this, "hiddenLabel", {
-          value: "stealth-class-provider",
-          enumerable: false,
-          configurable: true,
-          writable: true,
-        });
-        Object.defineProperty(this, "tag", {
-          enumerable: false,
-          configurable: true,
-          get() {
-            return `${this.hiddenLabel}:tag`;
-          },
-        });
-        (
-          this as unknown as Record<symbol, unknown>
-        )[Symbol.for("plugin.secret")] = "symbolic-secret";
-      }
-
-      canHandle(input: Record<string, unknown>) {
-        const args =
-          input.args && typeof input.args === "object"
-            ? (input.args as Record<string, unknown>)
-            : {};
-        const frame =
-          args.frame && typeof args.frame === "object"
-            ? (args.frame as Record<string, unknown>)
-            : {};
-        return String(frame.tool || "") === "read";
-      }
-
-      describe() {
-        return `${this.hiddenLabel}:prototype-method`;
-      }
-
-      invoke(input: Record<string, unknown>) {
-        const args =
-          input.args && typeof input.args === "object"
-            ? (input.args as Record<string, unknown>)
-            : {};
-        const frame =
-          args.frame && typeof args.frame === "object"
-            ? (args.frame as Record<string, unknown>)
-            : {};
-        const frameArgs =
-          frame.args && typeof frame.args === "object"
-            ? (frame.args as Record<string, unknown>)
-            : {};
-        const symbolValue = (
-          this as unknown as Record<symbol, unknown>
-        )[Symbol.for("plugin.secret")];
-        return {
-          source: "plugin-class-instance",
-          providerId: this.id,
-          hiddenLabel: this.hiddenLabel,
-          tag: this.tag,
-          description: this.describe(),
-          symbolValue: String(symbolValue || ""),
-          path: String(frameArgs.path || ""),
-        };
-      }
-
-      declare hiddenLabel: string;
-      declare tag: string;
-    }
-
     const pluginId = "plugin.route.class-instance";
     const registered = await invokeRuntime({
       type: "brain.plugin.register_extension",
@@ -8338,7 +8270,76 @@ describe("runtime-router.browser", () => {
           capabilities: ["fs.read"],
         },
       },
-      setup(pi: any) {
+      setup: function (pi: any) {
+        class ClassFsReadProvider {
+          id = "plugin.route.class-instance.fs-read";
+          mode = "script" as const;
+
+          constructor() {
+            Object.defineProperty(this, "hiddenLabel", {
+              value: "stealth-class-provider",
+              enumerable: false,
+              configurable: true,
+              writable: true,
+            });
+            Object.defineProperty(this, "tag", {
+              enumerable: false,
+              configurable: true,
+              get() {
+                return `${this.hiddenLabel}:tag`;
+              },
+            });
+            (
+              this as unknown as Record<symbol, unknown>
+            )[Symbol.for("plugin.secret")] = "symbolic-secret";
+          }
+
+          canHandle(input: Record<string, unknown>) {
+            const args =
+              input.args && typeof input.args === "object"
+                ? (input.args as Record<string, unknown>)
+                : {};
+            const frame =
+              args.frame && typeof args.frame === "object"
+                ? (args.frame as Record<string, unknown>)
+                : {};
+            return String(frame.tool || "") === "read";
+          }
+
+          describe() {
+            return `${this.hiddenLabel}:prototype-method`;
+          }
+
+          invoke(input: Record<string, unknown>) {
+            const args =
+              input.args && typeof input.args === "object"
+                ? (input.args as Record<string, unknown>)
+                : {};
+            const frame =
+              args.frame && typeof args.frame === "object"
+                ? (args.frame as Record<string, unknown>)
+                : {};
+            const frameArgs =
+              frame.args && typeof frame.args === "object"
+                ? (frame.args as Record<string, unknown>)
+                : {};
+            const symbolValue = (
+              this as unknown as Record<symbol, unknown>
+            )[Symbol.for("plugin.secret")];
+            return {
+              source: "plugin-class-instance",
+              providerId: this.id,
+              hiddenLabel: this.hiddenLabel,
+              tag: this.tag,
+              description: this.describe(),
+              symbolValue: String(symbolValue || ""),
+              path: String(frameArgs.path || ""),
+            };
+          }
+
+          declare hiddenLabel: string;
+          declare tag: string;
+        }
         pi.registerCapabilityProvider("fs.read", new ClassFsReadProvider());
       },
     });
@@ -9067,7 +9068,7 @@ describe("runtime-router.browser", () => {
           replaceLlmProviders: true,
         },
       },
-      setup(pi: any) {
+      setup: function (pi: any) {
         pi.registerProvider("openai_compatible", {
           resolveRequestUrl() {
             return "https://proxy.example.com/v1/chat/completions";

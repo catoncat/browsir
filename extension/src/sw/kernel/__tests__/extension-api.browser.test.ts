@@ -9,6 +9,7 @@ function createDummyRoute(overrides: Partial<LlmResolvedRoute> = {}): LlmResolve
   return {
     profile: "default",
     provider: "openai_compatible",
+    runtimeKind: "model_llm",
     llmBase: "https://example.invalid/v1",
     llmKey: "demo-key",
     llmModel: "gpt-test",

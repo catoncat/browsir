@@ -32,6 +32,16 @@ const packageLocation = ref("mem://plugins/demo/plugin.json");
 const BUILTIN_PLUGIN_ID_PREFIX = "runtime.builtin.plugin.";
 const isStandaloneStudioPage = ref(false);
 
+function buildPluginPackage(
+  manifest: Record<string, unknown>,
+  indexJs: string,
+): Record<string, unknown> {
+  return {
+    manifest,
+    indexJs,
+  };
+}
+
 const presets: PluginPreset[] = [
   {
     id: "preset-llm-proxy-basic",
@@ -39,8 +49,8 @@ const presets: PluginPreset[] = [
     description: "新增一个独立 provider，不覆盖系统默认 openai_compatible。",
     replace: true,
     enable: true,
-    plugin: {
-      manifest: {
+    plugin: buildPluginPackage(
+      {
         id: "plugin.preset.llm.proxy.basic",
         name: "preset-llm-proxy-basic",
         version: "1.0.0",
@@ -48,14 +58,27 @@ const presets: PluginPreset[] = [
           llmProviders: ["proxy.route.basic"]
         }
       },
-      llmProviders: [
-        {
-          id: "proxy.route.basic",
-          transport: "openai_compatible",
-          baseUrl: "https://proxy.example.com/v1"
-        }
-      ]
-    }
+      `module.exports = function registerPlugin(pi) {
+  const baseUrl = "https://proxy.example.com/v1";
+  pi.registerProvider("proxy.route.basic", {
+    resolveRequestUrl() {
+      return baseUrl + "/chat/completions";
+    },
+    async send(input) {
+      const requestUrl = String(input.requestUrl || "").trim() || (baseUrl + "/chat/completions");
+      return await fetch(requestUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer " + String(input.route && input.route.llmKey || ""),
+        },
+        body: JSON.stringify(input.payload),
+        signal: input.signal,
+      });
+    },
+  });
+};`,
+    )
   },
   {
     id: "preset-llm-replace-openai",
@@ -63,8 +86,8 @@ const presets: PluginPreset[] = [
     description: "把 openai_compatible 路由切到代理地址。禁用/卸载插件后可回滚。",
     replace: true,
     enable: true,
-    plugin: {
-      manifest: {
+    plugin: buildPluginPackage(
+      {
         id: "plugin.preset.llm.replace.openai",
         name: "preset-llm-replace-openai",
         version: "1.0.0",
@@ -73,14 +96,27 @@ const presets: PluginPreset[] = [
           replaceLlmProviders: true
         }
       },
-      llmProviders: [
-        {
-          id: "openai_compatible",
-          transport: "openai_compatible",
-          baseUrl: "https://proxy.example.com/v1"
-        }
-      ]
-    }
+      `module.exports = function registerPlugin(pi) {
+  const baseUrl = "https://proxy.example.com/v1";
+  pi.registerProvider("openai_compatible", {
+    resolveRequestUrl() {
+      return baseUrl + "/chat/completions";
+    },
+    async send(input) {
+      const requestUrl = String(input.requestUrl || "").trim() || (baseUrl + "/chat/completions");
+      return await fetch(requestUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer " + String(input.route && input.route.llmKey || ""),
+        },
+        body: JSON.stringify(input.payload),
+        signal: input.signal,
+      });
+    },
+  });
+};`,
+    )
   },
   {
     id: "preset-browser-action-strict",
@@ -88,8 +124,8 @@ const presets: PluginPreset[] = [
     description: "把 browser.action 的 verify 策略提升为 always，减少“执行成功但无进展”。",
     replace: true,
     enable: true,
-    plugin: {
-      manifest: {
+    plugin: buildPluginPackage(
+      {
         id: "plugin.preset.browser.action.strict",
         name: "preset-browser-action-strict",
         version: "1.0.0",
@@ -97,15 +133,13 @@ const presets: PluginPreset[] = [
           capabilities: ["browser.action"]
         }
       },
-      policies: {
-        capabilities: {
-          "browser.action": {
-            defaultVerifyPolicy: "always",
-            leasePolicy: "required"
-          }
-        }
-      }
-    }
+      `module.exports = function registerPlugin(pi) {
+  pi.registerCapabilityPolicy("browser.action", {
+    defaultVerifyPolicy: "always",
+    leasePolicy: "required",
+  });
+};`,
+    )
   },
   {
     id: "preset-browser-verify-relaxed",
@@ -113,8 +147,8 @@ const presets: PluginPreset[] = [
     description: "把 browser.action 的 verify 策略改为 on_critical，适合探索式任务。",
     replace: true,
     enable: true,
-    plugin: {
-      manifest: {
+    plugin: buildPluginPackage(
+      {
         id: "plugin.preset.browser.action.relaxed",
         name: "preset-browser-verify-relaxed",
         version: "1.0.0",
@@ -122,15 +156,13 @@ const presets: PluginPreset[] = [
           capabilities: ["browser.action"]
         }
       },
-      policies: {
-        capabilities: {
-          "browser.action": {
-            defaultVerifyPolicy: "on_critical",
-            leasePolicy: "required"
-          }
-        }
-      }
-    }
+      `module.exports = function registerPlugin(pi) {
+  pi.registerCapabilityPolicy("browser.action", {
+    defaultVerifyPolicy: "on_critical",
+    leasePolicy: "required",
+  });
+};`,
+    )
   }
 ];
 
@@ -245,10 +277,6 @@ function toRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
 
-function readTextField(row: Record<string, unknown>, key: string): string {
-  return String(row[key] || "").trim();
-}
-
 function parsePluginJsonDraft(): Record<string, unknown> {
   const text = String(pluginJson.value || "").trim();
   if (!text) {
@@ -277,10 +305,16 @@ async function installPreset(preset: PluginPreset) {
   registering.value = true;
   pageError.value = "";
   try {
-    await store.registerPlugin(deepCloneRecord(preset.plugin), {
-      replace: preset.replace,
-      enable: preset.enable
-    });
+    await store.installPlugin(
+      {
+        package: deepCloneRecord(preset.plugin),
+        sessionId: String(store.activeSessionId || "").trim() || undefined
+      },
+      {
+        replace: preset.replace,
+        enable: preset.enable
+      }
+    );
     applyPreset(preset);
     await refreshPlugins();
   } catch (error) {
@@ -310,31 +344,16 @@ async function handleRegister() {
   pageError.value = "";
   try {
     const plugin = parsePluginJsonDraft();
-    const manifest = toRecord(plugin.manifest);
-    const moduleUrl = readTextField(plugin, "moduleUrl");
-    const modulePath = readTextField(plugin, "modulePath");
-    const moduleName = readTextField(plugin, "module");
-    const exportName = readTextField(plugin, "exportName");
-    if (Object.keys(manifest).length > 0 && (moduleUrl || modulePath || moduleName)) {
-      await store.registerPluginExtension(
-        {
-          manifest,
-          ...(moduleUrl ? { moduleUrl } : {}),
-          ...(modulePath ? { modulePath } : {}),
-          ...(moduleName ? { module: moduleName } : {}),
-          ...(exportName ? { exportName } : {})
-        },
-        {
-          replace: replaceOnRegister.value,
-          enable: enableOnRegister.value
-        }
-      );
-    } else {
-      await store.registerPlugin(plugin, {
+    await store.installPlugin(
+      {
+        package: plugin,
+        sessionId: String(store.activeSessionId || "").trim() || undefined
+      },
+      {
         replace: replaceOnRegister.value,
         enable: enableOnRegister.value
-      });
-    }
+      }
+    );
     await refreshPlugins();
   } catch (error) {
     setPageError(error);
@@ -505,10 +524,7 @@ onMounted(async () => {
       <section class="space-y-3">
         <h3 class="text-[11px] font-bold uppercase tracking-[0.1em] text-ui-text-muted">高级模式（JSON）</h3>
         <p class="text-[11px] text-ui-text-muted">
-          这里走 `brain.plugin.register`。用于声明式插件（LLM Provider / Policy / ToolContract）。
-        </p>
-        <p class="text-[11px] text-ui-text-muted">
-          若 JSON 内包含 `manifest + moduleUrl/modulePath/module`，会自动切到 `brain.plugin.register_extension`。
+          这里直接提交插件包 JSON。支持 `moduleUrl/modulePath/module` 或内联 `indexJs/uiJs`。
         </p>
         <textarea
           v-model="pluginJson"
@@ -532,7 +548,7 @@ onMounted(async () => {
           >
             <Loader2 v-if="registering" :size="14" class="inline-block animate-spin mr-1" />
             <Plus v-else :size="14" class="inline-block mr-1" />
-            注册插件
+            安装插件
           </button>
         </div>
       </section>

@@ -46,6 +46,35 @@ describe("virtual-fs.browser", () => {
     expect(String(readAfterEdit.content || "")).toBe("hello vfs");
   });
 
+  it("routes /mem paths to browser vfs and normalizes to mem://", async () => {
+    expect(
+      shouldRouteFrameToBrowserVfs({
+        tool: "read",
+        args: {
+          path: "/mem/skills/slash-demo.md"
+        }
+      })
+    ).toBe(true);
+
+    const written = await invokeVirtualFrame({
+      tool: "write",
+      args: {
+        path: "/mem/skills/slash-demo.md",
+        content: "slash route",
+        mode: "overwrite"
+      }
+    });
+    expect(String(written.path || "")).toBe("mem://skills/slash-demo.md");
+
+    const read = await invokeVirtualFrame({
+      tool: "read",
+      args: {
+        path: "/mem/skills/slash-demo.md"
+      }
+    });
+    expect(String(read.content || "")).toBe("slash route");
+  });
+
   it("supports create/append mode and read offset-limit truncation", async () => {
     await invokeVirtualFrame({
       tool: "write",
@@ -137,6 +166,36 @@ describe("virtual-fs.browser", () => {
     });
     expect(Number(unsupported.exitCode || 0)).not.toBe(0);
     expect(String(unsupported.stderr || "")).not.toBe("");
+  });
+
+  it("supports stat/list through virtual frame invoke", async () => {
+    await invokeVirtualFrame({
+      sessionId: "vf-inspect",
+      tool: "write",
+      args: {
+        path: "mem://inspect/demo.txt",
+        content: "demo",
+        mode: "overwrite"
+      }
+    });
+
+    const statOut = await invokeVirtualFrame({
+      sessionId: "vf-inspect",
+      tool: "stat",
+      args: {
+        path: "mem://inspect/demo.txt"
+      }
+    });
+    expect(String(statOut.type || "")).toBe("file");
+
+    const listOut = await invokeVirtualFrame({
+      sessionId: "vf-inspect",
+      tool: "list",
+      args: {
+        path: "mem://inspect"
+      }
+    });
+    expect(String(listOut.type || "")).toBe("directory");
   });
 
   it("routes frame to browser vfs by runtime/path semantics", () => {

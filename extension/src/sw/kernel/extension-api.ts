@@ -25,7 +25,11 @@ export interface ExtensionAPI {
   registerModeProvider(mode: ExecuteMode, provider: StepToolProvider): void;
   registerCapabilityProvider(capability: ExecuteCapability, provider: StepToolProvider): void;
   registerCapabilityPolicy(capability: ExecuteCapability, policy: CapabilityExecutionPolicy): void;
-  registerProvider(name: string, provider: Pick<LlmProviderAdapter, "resolveRequestUrl" | "send">): void;
+  registerProvider(
+    name: string,
+    provider: Pick<LlmProviderAdapter, "resolveRequestUrl" | "send"> &
+      Record<string, unknown>,
+  ): void;
 }
 
 export type ExtensionFactory = (api: ExtensionAPI) => void;
@@ -45,6 +49,12 @@ function ensureNonEmptyString(value: unknown, message: string): string {
     throw new Error(message);
   }
   return normalized;
+}
+
+function cloneObjectWithDescriptors<T extends object>(value: T): T {
+  const clone = Object.create(Object.getPrototypeOf(value));
+  Object.defineProperties(clone, Object.getOwnPropertyDescriptors(value));
+  return clone;
 }
 
 export function buildPluginDefinitionFromExtension(
@@ -86,11 +96,14 @@ export function buildPluginDefinitionFromExtension(
     },
     registerProvider(name, provider) {
       const id = ensureNonEmptyString(name, "registerProvider 需要 provider id");
-      llmProviders.set(id, {
-        id,
-        resolveRequestUrl: provider.resolveRequestUrl,
-        send: provider.send
+      const providerObject = cloneObjectWithDescriptors(provider);
+      Object.defineProperty(providerObject, "id", {
+        value: id,
+        configurable: true,
+        enumerable: true,
+        writable: true,
       });
+      llmProviders.set(id, providerObject as unknown as LlmProviderAdapter);
     }
   };
 
