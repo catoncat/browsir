@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildHostedChatTurnResult,
   buildCursorHelpCompiledPrompt,
   extractLastUserMessage,
   extractLastUserPreview,
@@ -143,5 +144,45 @@ await mcp.call("fill_element_by_uid", {"tabId":543592833,"uid":"bn-2383","value"
         forceFocus: true,
       }),
     );
+  });
+
+  it("builds a hosted turn result with leading assistant text and tool calls", () => {
+    const result = buildHostedChatTurnResult(`
+我已经看到回复了，现在继续找输入框。
+[TM_TOOL_CALL_START:call_scroll]
+await mcp.call("scroll_page", {"deltaY":500})
+[TM_TOOL_CALL_END:call_scroll]
+`);
+
+    expect(result.finishReason).toBe("tool_calls");
+    expect(result.assistantText).toContain("我已经看到回复了");
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls[0]?.function.name).toBe("scroll_page");
+  });
+
+  it("accepts markdown fences and smart quotes in hosted tool protocol", () => {
+    const result = buildHostedChatTurnResult(`
+[TM_TOOL_CALL_START:call_1]
+\`\`\`js
+await mcp.call("search_docs", {“q”：“runtime router”})
+\`\`\`
+[TM_TOOL_CALL_END:call_1]
+`);
+
+    expect(result.finishReason).toBe("tool_calls");
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls[0]?.function.arguments).toBe(
+      JSON.stringify({ q: "runtime router" }),
+    );
+  });
+
+  it("does not convert literal pseudo tool text into executable tool calls", () => {
+    const result = buildHostedChatTurnResult(
+      '用户提到了字面量 [TM_TOOL_CALL_START:test]，但这里没有真正的 await 调用。',
+    );
+
+    expect(result.finishReason).toBe("stop");
+    expect(result.toolCalls).toHaveLength(0);
+    expect(result.assistantText).toContain("[TM_TOOL_CALL_START:test]");
   });
 });

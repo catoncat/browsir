@@ -1,15 +1,11 @@
 import {
   buildCursorHelpCompiledPrompt,
   extractLastUserMessage,
-  type WebToolCall,
-  parseToolProtocolFromText
+  parseHostedChatTransportEvent,
+  serializeHostedChatTransportEvent,
+  type HostedChatTransportEvent
 } from "../../shared/cursor-help-web-shared";
-import { CURSOR_HELP_WEB_BASE_URL } from "../../shared/llm-provider-config";
 import {
-  classifyCursorHelpHttpError,
-  classifyCursorHelpInvalidResponse,
-  parseCursorHelpSseLine,
-  resolveCursorHelpApiModel,
   type CursorHelpSenderInspect
 } from "../../shared/cursor-help-protocol";
 import { CURSOR_HELP_RUNTIME_VERSION } from "../../shared/cursor-help-runtime-meta";
@@ -17,30 +13,18 @@ import type { LlmProviderSendInput } from "./llm-provider";
 
 type JsonRecord = Record<string, unknown>;
 
-type WebChatTransportType =
-  | "request_started"
-  | "sse_line"
-  | "stream_end"
-  | "http_error"
-  | "invalid_response"
-  | "network_error";
-
 interface PendingExecution {
   requestId: string;
   sessionId: string;
   tabId: number;
-  model: string;
-  stream: boolean;
   createdAt: number;
   lastEventAt: number;
   startedAt: number | null;
   timeoutHandle: ReturnType<typeof setTimeout> | null;
   controller: ReadableStreamDefaultController<Uint8Array> | null;
   queue: Uint8Array[];
-  outputText: string;
   firstDeltaLogged: boolean;
   closed: boolean;
-  sessionKey: string | null;
 }
 
 interface CursorHelpSlotRecord {
@@ -71,6 +55,7 @@ const PAGE_HOOK_SCRIPT_FILE = "assets/cursor-help-page-hook.js";
 const CURSOR_HELP_SESSION_SLOT_STORAGE_KEY = "cursor_help_web.session_slots";
 const CURSOR_HELP_CONTAINER_WIDTH = 1280;
 const CURSOR_HELP_CONTAINER_HEIGHT = 900;
+const HOSTED_CHAT_RESPONSE_CONTENT_TYPE = "application/x-browser-brain-loop-hosted-chat+jsonl";
 let cursorHelpSlotLifecycleBoundTabs: typeof chrome.tabs | null = null;
 
 function emitProviderDebugLog(step: string, status: "running" | "done" | "failed", detail: string): void {
@@ -116,25 +101,9 @@ function formatRewriteDebugSummary(raw: unknown): string {
   ].join(" ");
 }
 
-function buildChunk(requestId: string, model: string, delta: JsonRecord, finishReason: string | null = null): string {
-  return `data: ${JSON.stringify({
-    id: `chatcmpl-${requestId}`,
-    object: "chat.completion.chunk",
-    created: Math.floor(Date.now() / 1000),
-    model,
-    choices: [
-      {
-        index: 0,
-        delta,
-        finish_reason: finishReason
-      }
-    ]
-  })}\n\n`;
-}
-
-function enqueueSse(entry: PendingExecution, payload: string): void {
+function enqueueHostedEvent(entry: PendingExecution, event: HostedChatTransportEvent): void {
   if (entry.closed) return;
-  const chunk = encoder.encode(payload);
+  const chunk = encoder.encode(serializeHostedChatTransportEvent(event));
   if (entry.controller) {
     entry.controller.enqueue(chunk);
     return;
@@ -155,40 +124,6 @@ function closeExecution(entry: PendingExecution): void {
   if (entry.controller) {
     entry.controller.close();
   }
-}
-
-function buildJsonResponseBody(entry: PendingExecution, finishReason: string | null = "stop"): string {
-  return JSON.stringify({
-    id: `chatcmpl-${entry.requestId}`,
-    object: "chat.completion",
-    created: Math.floor(Date.now() / 1000),
-    model: entry.model,
-    choices: [
-      {
-        index: 0,
-        message: {
-          role: "assistant",
-          content: entry.outputText
-        },
-        finish_reason: finishReason
-      }
-    ]
-  });
-}
-
-function normalizeTransportErrorMessage(payload: JsonRecord): string {
-  const transportType = String(payload.transportType || "").trim();
-  if (transportType === "http_error") {
-    return classifyCursorHelpHttpError(Number(payload.status || 0), String(payload.bodyText || ""));
-  }
-  if (transportType === "invalid_response") {
-    return classifyCursorHelpInvalidResponse(
-      Number(payload.status || 0),
-      String(payload.contentType || ""),
-      String(payload.bodyText || "")
-    );
-  }
-  return String(payload.error || "网页聊天执行失败");
 }
 
 function failExecution(entry: PendingExecution, error: string): void {
@@ -560,7 +495,7 @@ export function createCursorHelpWebProvider() {
   return {
     id: PROVIDER_ID,
     resolveRequestUrl() {
-      return `${CURSOR_HELP_WEB_BASE_URL}/chat/completions`;
+      return "browser-brain-loop://hosted-chat/cursor-help-web";
     },
     async send(input: LlmProviderSendInput): Promise<Response> {
       emitProviderDebugLog("provider.resolve_slot", "running", "开始解析目标 Cursor Help 会话槽位");
@@ -587,18 +522,14 @@ export function createCursorHelpWebProvider() {
         requestId,
         sessionId: resolved.sessionId,
         tabId: resolved.tabId,
-        model: resolveCursorHelpApiModel(requestedModel, resolved.inspect.selectedModel || ""),
-        stream: input.payload.stream !== false,
         createdAt: Date.now(),
         lastEventAt: Date.now(),
         startedAt: null,
         timeoutHandle: null,
         controller: null,
         queue: [],
-        outputText: "",
         firstDeltaLogged: false,
-        closed: false,
-        sessionKey: null
+        closed: false
       };
 
       const stream = new ReadableStream<Uint8Array>({
@@ -663,20 +594,10 @@ export function createCursorHelpWebProvider() {
         throw error instanceof Error ? error : new Error(String(error));
       }
 
-      if (!entry.stream) {
-        return new Response(stream, {
-          status: 200,
-          headers: {
-            "content-type": "application/json; charset=utf-8",
-            "cache-control": "no-cache"
-          }
-        });
-      }
-
       return new Response(stream, {
         status: 200,
         headers: {
-          "content-type": "text/event-stream; charset=utf-8",
+          "content-type": HOSTED_CHAT_RESPONSE_CONTENT_TYPE,
           "cache-control": "no-cache"
         }
       });
@@ -684,119 +605,72 @@ export function createCursorHelpWebProvider() {
   };
 }
 
-function emitToolCalls(entry: PendingExecution, toolCalls: WebToolCall[]): void {
-  if (toolCalls.length <= 0) return;
-  if (!entry.stream) {
-    failExecution(entry, "cursor_help_web 目前不支持在非流式请求中返回 tool_calls");
-    return;
-  }
-  enqueueSse(
-    entry,
-    buildChunk(
-      entry.requestId,
-      entry.model,
-      {
-        tool_calls: toolCalls.map((call, index) => ({
-          ...call,
-          index
-        }))
-      }
-    )
-  );
-  enqueueSse(entry, buildChunk(entry.requestId, entry.model, {}, "tool_calls"));
-  enqueueSse(entry, "data: [DONE]\n\n");
-  closeExecution(entry);
-}
-
-function emitBufferedText(entry: PendingExecution): void {
-  if (!entry.stream) return;
-  const text = String(entry.outputText || "");
-  if (!text) return;
-  enqueueSse(entry, buildChunk(entry.requestId, entry.model, { content: text }));
-}
-
-function emitFinalDone(entry: PendingExecution): void {
-  if (!entry.stream) {
-    enqueueSse(entry, buildJsonResponseBody(entry));
-    closeExecution(entry);
-    return;
-  }
-  emitBufferedText(entry);
-  enqueueSse(entry, buildChunk(entry.requestId, entry.model, {}, "stop"));
-  enqueueSse(entry, "data: [DONE]\n\n");
-  closeExecution(entry);
-}
-
 export async function handleWebChatRuntimeMessage(message: unknown, senderTabId?: number): Promise<boolean> {
   const payload = toRecord(message);
   if (String(payload.type || "").trim() !== "webchat.transport") return false;
-
-  const requestId = String(payload.requestId || "").trim();
-  if (!requestId) return true;
-  const entry = ACTIVE_BY_REQUEST_ID.get(requestId);
+  const event = parseHostedChatTransportEvent(payload.envelope);
+  if (!event) return true;
+  const entry = ACTIVE_BY_REQUEST_ID.get(event.requestId);
   if (!entry) return true;
   if (senderTabId && entry.tabId !== senderTabId) return true;
 
-  const transportType = String(payload.transportType || "").trim() as WebChatTransportType;
   touchExecution(entry);
-  if (typeof payload.sessionKey === "string" && payload.sessionKey.trim()) {
-    entry.sessionKey = payload.sessionKey.trim();
-  }
-  if (transportType === "request_started") {
-    entry.startedAt = Date.now();
-    armExecutionWatchdog(entry, EXECUTION_STALE_MS, "网页 provider 请求长时间未结束");
-    emitProviderDebugLog(
-      "provider.request_started",
-      "done",
-      `tab=${entry.tabId} 页面内聊天请求已发出${entry.sessionKey ? ` sessionKey=${entry.sessionKey}` : ""}`
-    );
-    const rewriteSummary = formatRewriteDebugSummary(payload.rewriteDebug);
-    if (rewriteSummary) {
-      emitProviderDebugLog("provider.request_rewrite", "done", rewriteSummary);
+
+  if (event.type === "hosted_chat.debug") {
+    enqueueHostedEvent(entry, event);
+    if (event.stage === "request_started") {
+      entry.startedAt = Date.now();
+      armExecutionWatchdog(entry, EXECUTION_STALE_MS, "网页 provider 请求长时间未结束");
+      const sessionKey = String(toRecord(event.meta).sessionKey || "").trim();
+      emitProviderDebugLog(
+        "provider.request_started",
+        "done",
+        `tab=${entry.tabId} 页面内聊天请求已发出${sessionKey ? ` sessionKey=${sessionKey}` : ""}`
+      );
+      const rewriteSummary = formatRewriteDebugSummary(toRecord(event.meta).rewriteDebug);
+      if (rewriteSummary) {
+        emitProviderDebugLog("provider.request_rewrite", "done", rewriteSummary);
+      }
     }
     return true;
   }
 
-  if (transportType === "sse_line") {
-    const parsedEvent = parseCursorHelpSseLine(String(payload.line || ""));
-    if (parsedEvent.kind === "ignore") return true;
-    if (parsedEvent.kind === "error") {
-      emitProviderDebugLog("provider.error", "failed", String(parsedEvent.error || "网页聊天执行失败"));
-      failExecution(entry, String(parsedEvent.error || "网页聊天执行失败"));
-      return true;
-    }
-    if (parsedEvent.kind === "done") {
-      if (!entry.closed) emitFinalDone(entry);
-      emitProviderDebugLog("provider.done", "done", "网页 provider 请求完成");
-      return true;
-    }
-
-    const text = String(parsedEvent.text || "");
-    if (!text) return true;
-    entry.outputText += text;
-    const protocol = parseToolProtocolFromText(entry.outputText);
-    if (protocol?.toolCalls.length) {
-      emitToolCalls(entry, protocol.toolCalls);
-      return true;
-    }
-    if (!entry.firstDeltaLogged) {
+  if (event.type === "hosted_chat.stream_text_delta") {
+    enqueueHostedEvent(entry, event);
+    if (!entry.firstDeltaLogged && event.deltaText) {
       entry.firstDeltaLogged = true;
-      emitProviderDebugLog("provider.first_delta", "done", `收到输出片段，长度=${text.length}`);
+      emitProviderDebugLog("provider.first_delta", "done", `收到输出片段，长度=${event.deltaText.length}`);
     }
     armExecutionWatchdog(entry, EXECUTION_STALE_MS, "网页 provider 请求长时间无新输出");
     return true;
   }
 
-  if (transportType === "stream_end") {
-    if (!entry.closed) emitFinalDone(entry);
-    emitProviderDebugLog("provider.done", "done", "网页 provider 数据流结束");
+  if (event.type === "hosted_chat.tool_call_detected") {
+    enqueueHostedEvent(entry, event);
+    emitProviderDebugLog(
+      "provider.tool_detected",
+      "done",
+      `检测到 ${event.toolCalls.length} 个工具计划`
+    );
+    armExecutionWatchdog(entry, EXECUTION_STALE_MS, "网页 provider 请求长时间无新输出");
     return true;
   }
 
-  if (transportType === "http_error" || transportType === "invalid_response" || transportType === "network_error") {
-    const error = normalizeTransportErrorMessage(payload);
-    emitProviderDebugLog("provider.error", "failed", error);
-    failExecution(entry, error);
+  if (event.type === "hosted_chat.turn_resolved") {
+    enqueueHostedEvent(entry, event);
+    closeExecution(entry);
+    emitProviderDebugLog(
+      "provider.done",
+      "done",
+      `网页 provider 回合完成 finishReason=${event.result.finishReason}`
+    );
+    return true;
+  }
+
+  if (event.type === "hosted_chat.transport_error") {
+    enqueueHostedEvent(entry, event);
+    emitProviderDebugLog("provider.error", "failed", event.error);
+    closeExecution(entry);
     return true;
   }
 

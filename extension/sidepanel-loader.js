@@ -9,9 +9,29 @@ function loadCss(url) {
   });
 }
 
+async function loadCssList(urls, options = {}) {
+  const { optional = [] } = options;
+  for (const url of urls) {
+    const isOptional = optional.includes(url);
+    try {
+      await loadCss(url);
+    } catch (error) {
+      if (!isOptional) throw error;
+    }
+  }
+}
+
 async function bootSidepanel() {
   try {
-    await loadCss("./dist/assets/sidepanel.css");
+    await loadCssList(
+      [
+        "./dist/assets/styles.css",
+        "./dist/assets/sidepanel.css"
+      ],
+      {
+        optional: ["./dist/assets/sidepanel.css"]
+      }
+    );
     await import("./dist/assets/sidepanel.js");
   } catch (err) {
     console.error("[sidepanel-loader] failed to boot dist assets", err);

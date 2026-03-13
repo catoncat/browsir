@@ -31,6 +31,7 @@ export interface OrchestratorHookMap {
   "tool.after_result": {
     mode: ExecuteMode;
     capability?: ExecuteCapability;
+    providerId?: string;
     input: ExecuteStepInput;
     result: unknown;
   };

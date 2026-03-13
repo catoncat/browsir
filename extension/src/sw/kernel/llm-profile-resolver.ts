@@ -6,6 +6,7 @@ import {
   type LlmResolvedRoute,
 } from "./llm-provider";
 import type { LlmProfileEscalationPolicy } from "./llm-profile-policy";
+import { getProviderRuntimeKind } from "../../shared/llm-provider-config";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -209,10 +210,12 @@ export function resolveLlmRoute(
     };
   }
   const role = normalizeRole(preferredRoleRaw);
+  const runtimeKind = getProviderRuntimeKind(selected.provider);
 
   if (
-    !String(selected.llmBase || "").trim() ||
-    !String(selected.llmKey || "").trim()
+    runtimeKind === "model_llm" &&
+    (!String(selected.llmBase || "").trim() ||
+      !String(selected.llmKey || "").trim())
   ) {
     return {
       ok: false,
@@ -228,6 +231,7 @@ export function resolveLlmRoute(
     route: {
       profile: selected.id,
       provider: selected.provider || DEFAULT_LLM_PROVIDER_ID,
+      runtimeKind,
       llmBase: selected.llmBase,
       llmKey: selected.llmKey,
       llmModel: selected.llmModel,

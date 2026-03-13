@@ -1,4 +1,5 @@
 import type { LlmProfileEscalationPolicy } from "./llm-profile-policy";
+import type { ProviderRuntimeKind } from "../../shared/llm-provider-config";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -9,6 +10,7 @@ export const DEFAULT_LLM_ROLE = "worker";
 export interface LlmResolvedRoute {
   profile: string;
   provider: string;
+  runtimeKind?: ProviderRuntimeKind;
   llmBase: string;
   llmKey: string;
   llmModel: string;

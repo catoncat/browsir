@@ -1,9 +1,17 @@
 export const CURSOR_HELP_WEB_PROVIDER_ID = "cursor_help_web";
-export const CURSOR_HELP_WEB_BASE_URL = "browser-brain-loop://cursor-help-web";
-export const CURSOR_HELP_WEB_API_KEY = "cursor-help-web";
+
+export type ProviderRuntimeKind = "model_llm" | "hosted_chat";
 
 export function isCursorHelpWebProvider(provider: unknown): boolean {
   return String(provider || "").trim().toLowerCase() === CURSOR_HELP_WEB_PROVIDER_ID;
+}
+
+export function getProviderRuntimeKind(provider: unknown): ProviderRuntimeKind {
+  return isCursorHelpWebProvider(provider) ? "hosted_chat" : "model_llm";
+}
+
+export function providerRequiresApiConnection(provider: unknown): boolean {
+  return getProviderRuntimeKind(provider) === "model_llm";
 }
 
 export function normalizeProviderConnectionConfig(input: {
@@ -11,15 +19,15 @@ export function normalizeProviderConnectionConfig(input: {
   llmApiBase: unknown;
   llmApiKey: unknown;
 }): { llmApiBase: string; llmApiKey: string } {
-  if (isCursorHelpWebProvider(input.provider)) {
+  if (!providerRequiresApiConnection(input.provider)) {
     return {
-      llmApiBase: CURSOR_HELP_WEB_BASE_URL,
-      llmApiKey: CURSOR_HELP_WEB_API_KEY
+      llmApiBase: "",
+      llmApiKey: "",
     };
   }
 
   return {
     llmApiBase: String(input.llmApiBase || "").trim(),
-    llmApiKey: String(input.llmApiKey || "")
+    llmApiKey: String(input.llmApiKey || ""),
   };
 }

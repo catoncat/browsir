@@ -32,6 +32,7 @@ export interface UiChatInputPayload {
   text: string;
   tabIds: number[];
   skillIds: string[];
+  contextRefs: Array<Record<string, unknown>>;
   mode: "normal" | "steer" | "followUp";
   sessionId?: string;
 }
@@ -482,7 +483,7 @@ export class PanelUiPluginRuntime {
       return {
         blocked: false,
         value: {
-          ...(toRecord(current) as UiHookPayloadMap[K]),
+          ...(toRecord(current) as unknown as UiHookPayloadMap[K]),
           ...(patch as Partial<UiHookPayloadMap[K]>)
         }
       };

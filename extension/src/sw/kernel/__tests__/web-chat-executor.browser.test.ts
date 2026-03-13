@@ -3,7 +3,10 @@ import "./test-setup";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createCursorHelpWebProvider, handleWebChatRuntimeMessage } from "../web-chat-executor.browser";
 import type { LlmResolvedRoute } from "../llm-provider";
-import { CURSOR_HELP_WEB_API_KEY, CURSOR_HELP_WEB_BASE_URL } from "../../../shared/llm-provider-config";
+import {
+  parseHostedChatTransportEvent,
+  type HostedChatTransportEvent,
+} from "../../../shared/cursor-help-web-shared";
 import { CURSOR_HELP_REWRITE_STRATEGY, CURSOR_HELP_RUNTIME_VERSION } from "../../../shared/cursor-help-runtime-meta";
 
 const CURSOR_HELP_SESSION_SLOT_STORAGE_KEY = "cursor_help_web.session_slots";
@@ -12,8 +15,9 @@ function createRoute(): LlmResolvedRoute {
   return {
     profile: "cursor-help",
     provider: "cursor_help_web",
-    llmBase: CURSOR_HELP_WEB_BASE_URL,
-    llmKey: CURSOR_HELP_WEB_API_KEY,
+    runtimeKind: "hosted_chat",
+    llmBase: "",
+    llmKey: "",
     llmModel: "auto",
     providerOptions: {
       targetTabId: 7,
@@ -97,6 +101,14 @@ async function readResponseText(response: Response): Promise<string> {
   return await new Response(response.body).text();
 }
 
+async function readHostedEvents(response: Response): Promise<HostedChatTransportEvent[]> {
+  const text = await readResponseText(response);
+  return text
+    .split(/\r?\n/)
+    .map((line) => parseHostedChatTransportEvent(line))
+    .filter((item): item is HostedChatTransportEvent => Boolean(item));
+}
+
 function getLastExecuteRequestId(): string {
   const sendMessage = (chrome.tabs as unknown as Record<string, unknown>).sendMessage as ReturnType<typeof vi.fn>;
   const executeCall = sendMessage.mock.calls.find(
@@ -106,8 +118,9 @@ function getLastExecuteRequestId(): string {
 }
 
 describe("web-chat-executor.browser", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     buildChromeMock();
+    await chrome.storage.local.clear();
   });
 
   it("parses transport SSE lines in SW and emits final text stream", async () => {
@@ -125,7 +138,7 @@ describe("web-chat-executor.browser", () => {
       }
     });
 
-    const textPromise = readResponseText(response);
+    const eventsPromise = readHostedEvents(response);
     const requestId = getLastExecuteRequestId();
     expect(requestId).not.toBe("");
     const sendMessage = (chrome.tabs as unknown as Record<string, unknown>).sendMessage as ReturnType<typeof vi.fn>;
@@ -138,27 +151,50 @@ describe("web-chat-executor.browser", () => {
 
     await handleWebChatRuntimeMessage({
       type: "webchat.transport",
-      requestId,
-      transportType: "request_started"
+      envelope: {
+        type: "hosted_chat.debug",
+        requestId,
+        stage: "request_started",
+      }
     });
     await handleWebChatRuntimeMessage({
       type: "webchat.transport",
-      requestId,
-      transportType: "sse_line",
-      line: 'data: {"type":"text-delta","delta":"hello"}'
+      envelope: {
+        type: "hosted_chat.stream_text_delta",
+        requestId,
+        deltaText: "hello",
+      }
     });
     await handleWebChatRuntimeMessage({
       type: "webchat.transport",
-      requestId,
-      transportType: "stream_end"
+      envelope: {
+        type: "hosted_chat.turn_resolved",
+        requestId,
+        result: {
+          assistantText: "hello",
+          toolCalls: [],
+          finishReason: "stop",
+          meta: {
+            assistantTextLength: 5
+          }
+        }
+      }
     });
 
-    const text = await textPromise;
-    expect(text).toContain('"content":"hello"');
-    expect(text).toContain('"finish_reason":"stop"');
+    const events = await eventsPromise;
+    expect(events.map((item) => item.type)).toEqual([
+      "hosted_chat.debug",
+      "hosted_chat.stream_text_delta",
+      "hosted_chat.turn_resolved",
+    ]);
+    const resolved = events[2];
+    expect(resolved.type).toBe("hosted_chat.turn_resolved");
+    if (resolved.type !== "hosted_chat.turn_resolved") return;
+    expect(resolved.result.assistantText).toBe("hello");
+    expect(resolved.result.finishReason).toBe("stop");
   });
 
-  it("detects tool protocol from transport SSE lines inside SW", async () => {
+  it("emits hosted transport events for tool handoff", async () => {
     const provider = createCursorHelpWebProvider();
     const response = await provider.send({
       sessionId: "session-2",
@@ -185,23 +221,82 @@ describe("web-chat-executor.browser", () => {
     const requestId = getLastExecuteRequestId();
     expect(requestId).not.toBe("");
 
-    const textPromise = readResponseText(response);
+    const eventsPromise = readHostedEvents(response);
     await handleWebChatRuntimeMessage({
       type: "webchat.transport",
-      requestId,
-      transportType: "request_started"
+      envelope: {
+        type: "hosted_chat.debug",
+        requestId,
+        stage: "request_started",
+      }
     });
     await handleWebChatRuntimeMessage({
       type: "webchat.transport",
-      requestId,
-      transportType: "sse_line",
-      line: 'data: {"type":"text-delta","delta":"[TM_TOOL_CALL_START:call_1]\\nawait mcp.call(\\"search_docs\\", {\\"q\\":\\"runtime router\\"})\\n[TM_TOOL_CALL_END:call_1]"}'
+      envelope: {
+        type: "hosted_chat.stream_text_delta",
+        requestId,
+        deltaText:
+          '[TM_TOOL_CALL_START:call_1]\nawait mcp.call("search_docs", {"q":"runtime router"})\n[TM_TOOL_CALL_END:call_1]',
+      }
+    });
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.tool_call_detected",
+        requestId,
+        assistantText: "",
+        toolCalls: [
+          {
+            callId: "call_1",
+            toolName: "search_docs",
+            rawArgumentsText: '{"q":"runtime router"}',
+            parsedArguments: { q: "runtime router" },
+            sourceRange: { start: 0, end: 97 },
+            leadingAssistantText: "",
+            trailingAssistantText: "",
+          },
+        ],
+      }
+    });
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.turn_resolved",
+        requestId,
+        result: {
+          assistantText: "",
+          toolCalls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: {
+                name: "search_docs",
+                arguments: '{"q":"runtime router"}',
+              },
+            },
+          ],
+          finishReason: "tool_calls",
+          meta: {}
+        }
+      }
     });
 
-    const text = await textPromise;
-    expect(text).toContain('"tool_calls"');
-    expect(text).toContain('"name":"search_docs"');
-    expect(text).toContain('"finish_reason":"tool_calls"');
+    const events = await eventsPromise;
+    expect(events.map((item) => item.type)).toEqual([
+      "hosted_chat.debug",
+      "hosted_chat.stream_text_delta",
+      "hosted_chat.tool_call_detected",
+      "hosted_chat.turn_resolved",
+    ]);
+    const toolDetected = events[2];
+    expect(toolDetected.type).toBe("hosted_chat.tool_call_detected");
+    if (toolDetected.type !== "hosted_chat.tool_call_detected") return;
+    expect(toolDetected.toolCalls[0]?.toolName).toBe("search_docs");
+    const resolved = events[3];
+    expect(resolved.type).toBe("hosted_chat.turn_resolved");
+    if (resolved.type !== "hosted_chat.turn_resolved") return;
+    expect(resolved.result.finishReason).toBe("tool_calls");
+    expect(resolved.result.toolCalls[0]?.function.name).toBe("search_docs");
   });
 
   it("repairs malformed JSON in tool protocol and still emits tool_calls", async () => {
@@ -239,24 +334,84 @@ describe("web-chat-executor.browser", () => {
     const requestId = getLastExecuteRequestId();
     expect(requestId).not.toBe("");
 
-    const textPromise = readResponseText(response);
+    const eventsPromise = readHostedEvents(response);
     await handleWebChatRuntimeMessage({
       type: "webchat.transport",
-      requestId,
-      transportType: "request_started",
+      envelope: {
+        type: "hosted_chat.debug",
+        requestId,
+        stage: "request_started",
+      },
     });
     await handleWebChatRuntimeMessage({
       type: "webchat.transport",
-      requestId,
-      transportType: "sse_line",
-      line: 'data: {"type":"text-delta","delta":"[TM_TOOL_CALL_START:fill1]\\nawait mcp.call(\\"fill_element_by_uid\\", {\\"tabId\\":543592833,\\"uid\\":\\"bn-2383\\",\\"value\\":\\"你理解\\"痛苦\\"、\\"美\\"、\\"死亡\\"这些概念时有什么不同？\\",\\"forceFocus\\":true})\\n[TM_TOOL_CALL_END:fill1]"}',
+      envelope: {
+        type: "hosted_chat.stream_text_delta",
+        requestId,
+        deltaText:
+          '[TM_TOOL_CALL_START:fill1]\nawait mcp.call("fill_element_by_uid", {"tabId":543592833,"uid":"bn-2383","value":"你理解"痛苦"、"美"、"死亡"这些概念时有什么不同？","forceFocus":true})\n[TM_TOOL_CALL_END:fill1]',
+      },
+    });
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.tool_call_detected",
+        requestId,
+        assistantText: "",
+        toolCalls: [
+          {
+            callId: "fill1",
+            toolName: "fill_element_by_uid",
+            rawArgumentsText:
+              '{"tabId":543592833,"uid":"bn-2383","value":"你理解"痛苦"、"美"、"死亡"这些概念时有什么不同？","forceFocus":true}',
+            parsedArguments: {
+              tabId: 543592833,
+              uid: "bn-2383",
+              value: '你理解"痛苦"、"美"、"死亡"这些概念时有什么不同？',
+              forceFocus: true,
+            },
+            sourceRange: { start: 0, end: 0 },
+            leadingAssistantText: "",
+            trailingAssistantText: "",
+          },
+        ],
+      }
+    });
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.turn_resolved",
+        requestId,
+        result: {
+          assistantText: "",
+          toolCalls: [
+            {
+              id: "fill1",
+              type: "function",
+              function: {
+                name: "fill_element_by_uid",
+                arguments:
+                  '{"tabId":543592833,"uid":"bn-2383","value":"你理解\\"痛苦\\"、\\"美\\"、\\"死亡\\"这些概念时有什么不同？","forceFocus":true}',
+              },
+            },
+          ],
+          finishReason: "tool_calls",
+          meta: {}
+        }
+      }
     });
 
-    const text = await textPromise;
-    expect(text).toContain('"tool_calls"');
-    expect(text).toContain('"name":"fill_element_by_uid"');
-    expect(text).toContain('\\"uid\\":\\"bn-2383\\"');
-    expect(text).toContain('"finish_reason":"tool_calls"');
+    const events = await eventsPromise;
+    const resolved = events.at(-1);
+    expect(resolved?.type).toBe("hosted_chat.turn_resolved");
+    if (!resolved || resolved.type !== "hosted_chat.turn_resolved") return;
+    expect(resolved.result.toolCalls[0]?.function.name).toBe(
+      "fill_element_by_uid",
+    );
+    expect(resolved.result.toolCalls[0]?.function.arguments).toContain(
+      '"uid":"bn-2383"',
+    );
+    expect(resolved.result.finishReason).toBe("tool_calls");
   });
 
   it("withholds provisional text when the turn resolves to tool_calls", async () => {
@@ -286,30 +441,83 @@ describe("web-chat-executor.browser", () => {
     const requestId = getLastExecuteRequestId();
     expect(requestId).not.toBe("");
 
-    const textPromise = readResponseText(response);
+    const eventsPromise = readHostedEvents(response);
     await handleWebChatRuntimeMessage({
       type: "webchat.transport",
-      requestId,
-      transportType: "request_started"
+      envelope: {
+        type: "hosted_chat.debug",
+        requestId,
+        stage: "request_started",
+      }
     });
     await handleWebChatRuntimeMessage({
       type: "webchat.transport",
-      requestId,
-      transportType: "sse_line",
-      line: 'data: {"type":"text-delta","delta":"我已经看到回复了，现在继续找输入框。"}'
+      envelope: {
+        type: "hosted_chat.stream_text_delta",
+        requestId,
+        deltaText: "我已经看到回复了，现在继续找输入框。",
+      }
     });
     await handleWebChatRuntimeMessage({
       type: "webchat.transport",
-      requestId,
-      transportType: "sse_line",
-      line: 'data: {"type":"text-delta","delta":"\\n[TM_TOOL_CALL_START:call_scroll]\\nawait mcp.call(\\"scroll_page\\", {\\"deltaY\\":500})\\n[TM_TOOL_CALL_END:call_scroll]"}'
+      envelope: {
+        type: "hosted_chat.stream_text_delta",
+        requestId,
+        deltaText:
+          '\n[TM_TOOL_CALL_START:call_scroll]\nawait mcp.call("scroll_page", {"deltaY":500})\n[TM_TOOL_CALL_END:call_scroll]',
+      }
+    });
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.tool_call_detected",
+        requestId,
+        assistantText: "我已经看到回复了，现在继续找输入框。",
+        toolCalls: [
+          {
+            callId: "call_scroll",
+            toolName: "scroll_page",
+            rawArgumentsText: '{"deltaY":500}',
+            parsedArguments: { deltaY: 500 },
+            sourceRange: { start: 0, end: 0 },
+            leadingAssistantText: "我已经看到回复了，现在继续找输入框。",
+            trailingAssistantText: "",
+          },
+        ],
+      }
+    });
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.turn_resolved",
+        requestId,
+        result: {
+          assistantText: "我已经看到回复了，现在继续找输入框。",
+          toolCalls: [
+            {
+              id: "call_scroll",
+              type: "function",
+              function: {
+                name: "scroll_page",
+                arguments: '{"deltaY":500}',
+              },
+            },
+          ],
+          finishReason: "tool_calls",
+          meta: {}
+        }
+      }
     });
 
-    const text = await textPromise;
-    expect(text).toContain('"tool_calls"');
-    expect(text).toContain('"name":"scroll_page"');
-    expect(text).not.toContain("我已经看到回复了");
-    expect(text).toContain('"finish_reason":"tool_calls"');
+    const events = await eventsPromise;
+    const resolved = events.at(-1);
+    expect(resolved?.type).toBe("hosted_chat.turn_resolved");
+    if (!resolved || resolved.type !== "hosted_chat.turn_resolved") return;
+    expect(resolved.result.toolCalls[0]?.function.name).toBe("scroll_page");
+    expect(resolved.result.assistantText).toBe(
+      "我已经看到回复了，现在继续找输入框。",
+    );
+    expect(resolved.result.finishReason).toBe("tool_calls");
   });
 
   it("buffers plain text until stream_end when no tool protocol appears", async () => {
@@ -330,33 +538,51 @@ describe("web-chat-executor.browser", () => {
     const requestId = getLastExecuteRequestId();
     expect(requestId).not.toBe("");
 
-    const textPromise = readResponseText(response);
+    const eventsPromise = readHostedEvents(response);
     await handleWebChatRuntimeMessage({
       type: "webchat.transport",
-      requestId,
-      transportType: "request_started"
+      envelope: {
+        type: "hosted_chat.debug",
+        requestId,
+        stage: "request_started",
+      }
     });
     await handleWebChatRuntimeMessage({
       type: "webchat.transport",
-      requestId,
-      transportType: "sse_line",
-      line: 'data: {"type":"text-delta","delta":"hello"}'
+      envelope: {
+        type: "hosted_chat.stream_text_delta",
+        requestId,
+        deltaText: "hello",
+      }
     });
     await handleWebChatRuntimeMessage({
       type: "webchat.transport",
-      requestId,
-      transportType: "sse_line",
-      line: 'data: {"type":"text-delta","delta":" world"}'
+      envelope: {
+        type: "hosted_chat.stream_text_delta",
+        requestId,
+        deltaText: " world",
+      }
     });
     await handleWebChatRuntimeMessage({
       type: "webchat.transport",
-      requestId,
-      transportType: "stream_end"
+      envelope: {
+        type: "hosted_chat.turn_resolved",
+        requestId,
+        result: {
+          assistantText: "hello world",
+          toolCalls: [],
+          finishReason: "stop",
+          meta: {}
+        }
+      }
     });
 
-    const text = await textPromise;
-    expect(text).toContain('"content":"hello world"');
-    expect(text).toContain('"finish_reason":"stop"');
+    const events = await eventsPromise;
+    const resolved = events.at(-1);
+    expect(resolved?.type).toBe("hosted_chat.turn_resolved");
+    if (!resolved || resolved.type !== "hosted_chat.turn_resolved") return;
+    expect(resolved.result.assistantText).toBe("hello world");
+    expect(resolved.result.finishReason).toBe("stop");
   });
 
   it("locks execution by session instead of only by tab singleton", async () => {
@@ -392,13 +618,24 @@ describe("web-chat-executor.browser", () => {
     const requestId = getLastExecuteRequestId();
     await handleWebChatRuntimeMessage({
       type: "webchat.transport",
-      requestId,
-      transportType: "request_started"
+      envelope: {
+        type: "hosted_chat.debug",
+        requestId,
+        stage: "request_started",
+      }
     });
     await handleWebChatRuntimeMessage({
       type: "webchat.transport",
-      requestId,
-      transportType: "stream_end"
+      envelope: {
+        type: "hosted_chat.turn_resolved",
+        requestId,
+        result: {
+          assistantText: "",
+          toolCalls: [],
+          finishReason: "stop",
+          meta: {}
+        }
+      }
     });
     await readResponseText(first);
   });
@@ -504,8 +741,12 @@ describe("web-chat-executor.browser", () => {
   });
 
   it("drops the stale slot binding after startup timeout before any request_started event", async () => {
-    vi.useFakeTimers();
+    const realSetTimeout = globalThis.setTimeout;
     try {
+      (globalThis as typeof globalThis & {
+        setTimeout: typeof setTimeout;
+      }).setTimeout = ((handler: TimerHandler, _timeout?: number, ...args: unknown[]) =>
+        realSetTimeout(handler, 0, ...args)) as typeof setTimeout;
       buildChromeMock();
       const provider = createCursorHelpWebProvider();
 
@@ -535,17 +776,18 @@ describe("web-chat-executor.browser", () => {
       });
 
       const textErrorPromise = readResponseText(response).catch((error) => error);
-      await vi.advanceTimersByTimeAsync(20_000);
+      await Promise.resolve();
+      await Promise.resolve();
       const error = await textErrorPromise;
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toContain("网页 provider 请求未启动");
-      await Promise.resolve();
-      await Promise.resolve();
 
       const stored = await chrome.storage.local.get(CURSOR_HELP_SESSION_SLOT_STORAGE_KEY);
       expect(stored[CURSOR_HELP_SESSION_SLOT_STORAGE_KEY]).toEqual({});
     } finally {
-      vi.useRealTimers();
+      (globalThis as typeof globalThis & {
+        setTimeout: typeof setTimeout;
+      }).setTimeout = realSetTimeout;
     }
   });
 });

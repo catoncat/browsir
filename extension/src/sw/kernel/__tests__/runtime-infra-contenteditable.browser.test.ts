@@ -60,8 +60,10 @@ describe("runtime-infra contenteditable backend action", () => {
     });
 
     expect(action?.ok).toBe(true);
-    expect(functionDeclaration).toContain('document.execCommand("insertText", false, text)');
-    expect(functionDeclaration).toContain("backend-node-contenteditable-inserttext");
-    expect(functionDeclaration).toContain("backend-node-contenteditable-fallback");
+    if (!action || action.ok !== true) return;
+    expect((action.data as Record<string, unknown> | undefined)?.via).toBe(
+      "cdp-native-input",
+    );
+    expect(functionDeclaration).toContain("dispatchEvent(new Event('input'");
   });
 });

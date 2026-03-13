@@ -6,6 +6,13 @@
     "permissions": {
       "hooks": [
         "runtime.route.after"
+      ],
+      "runtimeMessages": [
+        "bbloop.global.message",
+        "brain.event"
+      ],
+      "brainEvents": [
+        "plugin.global_message"
       ]
     }
   },

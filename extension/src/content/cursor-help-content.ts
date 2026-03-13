@@ -10,6 +10,316 @@ const CURSOR_HELP_CONTENT_RUNTIME_VERSION_ATTR = "data-bbl-cursor-help-content-v
 
 type JsonRecord = Record<string, unknown>;
 
+interface HostedWebToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+interface HostedChatToolCallPayload {
+  callId: string;
+  toolName: string;
+  rawArgumentsText: string;
+  parsedArguments?: unknown;
+  parseError?: string;
+  sourceRange: {
+    start: number;
+    end: number;
+  };
+  leadingAssistantText: string;
+  trailingAssistantText: string;
+}
+
+interface HostedChatTurnResult {
+  assistantText: string;
+  toolCalls: HostedWebToolCall[];
+  finishReason: "stop" | "tool_calls" | "transport_error";
+  meta: JsonRecord;
+}
+
+type HostedChatTransportEvent =
+  | {
+      type: "hosted_chat.stream_text_delta";
+      requestId: string;
+      deltaText: string;
+      meta?: JsonRecord;
+    }
+  | {
+      type: "hosted_chat.tool_call_detected";
+      requestId: string;
+      assistantText: string;
+      toolCalls: HostedChatToolCallPayload[];
+      meta?: JsonRecord;
+    }
+  | {
+      type: "hosted_chat.turn_resolved";
+      requestId: string;
+      result: HostedChatTurnResult;
+    }
+  | {
+      type: "hosted_chat.transport_error";
+      requestId: string;
+      error: string;
+      meta?: JsonRecord;
+    }
+  | {
+      type: "hosted_chat.debug";
+      requestId: string;
+      stage: string;
+      detail?: string;
+      meta?: JsonRecord;
+    };
+
+function hostedFindNextNonWhitespace(text: string, start: number): string {
+  for (let i = start; i < text.length; i += 1) {
+    const char = text[i];
+    if (!char || /\s/.test(char)) continue;
+    return char;
+  }
+  return "";
+}
+
+function hostedStripMarkdownFence(raw: string): string {
+  const text = String(raw || "").trim();
+  const fenceMatch = text.match(
+    /^```(?:json|javascript|js|ts)?\s*([\s\S]*?)\s*```$/i,
+  );
+  return fenceMatch ? String(fenceMatch[1] || "").trim() : text;
+}
+
+function hostedNormalizeToolProtocolJsonText(raw: string): string {
+  return hostedStripMarkdownFence(String(raw || ""))
+    .replace(/[“”]/g, "\"")
+    .replace(/[‘’]/g, "'")
+    .replace(/[，]/g, ",")
+    .replace(/[：]/g, ":")
+    .replace(/[；]/g, ";")
+    .replace(/[（]/g, "(")
+    .replace(/[）]/g, ")")
+    .replace(/[｛]/g, "{")
+    .replace(/[｝]/g, "}")
+    .replace(/[［]/g, "[")
+    .replace(/[］]/g, "]")
+    .trim();
+}
+
+function hostedRepairMalformedJsonStringQuotes(raw: string): string {
+  const source = hostedNormalizeToolProtocolJsonText(raw);
+  if (!source) return source;
+  let out = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i];
+    if (!inString) {
+      out += char;
+      if (char === "\"") {
+        inString = true;
+        escaped = false;
+      }
+      continue;
+    }
+
+    if (escaped) {
+      out += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      out += char;
+      escaped = true;
+      continue;
+    }
+
+    if (char === "\"") {
+      const next = hostedFindNextNonWhitespace(source, i + 1);
+      const shouldClose =
+        !next || next === ":" || next === "," || next === "}" || next === "]";
+      if (shouldClose) {
+        out += char;
+        inString = false;
+      } else {
+        out += "\\\"";
+      }
+      continue;
+    }
+
+    out += char;
+  }
+
+  return out;
+}
+
+function hostedParseToolProtocolArgs(rawArgs: string): unknown {
+  const normalized = hostedNormalizeToolProtocolJsonText(rawArgs);
+  try {
+    return JSON.parse(normalized);
+  } catch {
+    return JSON.parse(hostedRepairMalformedJsonStringQuotes(normalized));
+  }
+}
+
+function hostedCompactAssistantText(raw: string): string {
+  return String(raw || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function hostedInspectToolProtocolText(source: string): {
+  assistantText: string;
+  validToolCalls: HostedWebToolCall[];
+  detectedToolCalls: HostedChatToolCallPayload[];
+  matchedText: string;
+  hasProtocolCandidate: boolean;
+} {
+  const text = String(source || "");
+  if (!text) {
+    return {
+      assistantText: "",
+      validToolCalls: [],
+      detectedToolCalls: [],
+      matchedText: "",
+      hasProtocolCandidate: false,
+    };
+  }
+
+  const pattern =
+    /\[TM_TOOL_CALL_START:([^\]\n]+)\]([\s\S]*?)\[TM_TOOL_CALL_END:\1\]/g;
+  const validToolCalls: HostedWebToolCall[] = [];
+  const detectedToolCalls: HostedChatToolCallPayload[] = [];
+  const matchedParts: string[] = [];
+  const ranges: Array<{ start: number; end: number }> = [];
+  let match: RegExpExecArray | null = null;
+
+  while ((match = pattern.exec(text))) {
+    const fullBlock = String(match[0] || "");
+    const callId = String(match[1] || "").trim();
+    const body = hostedStripMarkdownFence(String(match[2] || "").trim());
+    if (!/await\s+mcp\.call\s*\(/.test(body)) continue;
+
+    const toolPayload: HostedChatToolCallPayload = {
+      callId: callId || `tool_${detectedToolCalls.length + 1}`,
+      toolName: "",
+      rawArgumentsText: "",
+      sourceRange: {
+        start: match.index,
+        end: match.index + fullBlock.length,
+      },
+      leadingAssistantText: hostedCompactAssistantText(text.slice(0, match.index)),
+      trailingAssistantText: hostedCompactAssistantText(
+        text.slice(match.index + fullBlock.length),
+      ),
+    };
+
+    const invokeMatch = body.match(
+      /await\s+mcp\.call\(\s*(['"])([^'"]+)\1\s*,\s*([\s\S]+?)\s*\)\s*;?\s*$/,
+    );
+    if (!invokeMatch) {
+      toolPayload.parseError = "invalid_invoke_syntax";
+      detectedToolCalls.push(toolPayload);
+      matchedParts.push(fullBlock);
+      ranges.push(toolPayload.sourceRange);
+      continue;
+    }
+
+    const toolName = String(invokeMatch[2] || "").trim();
+    const rawArgumentsText = String(invokeMatch[3] || "").trim();
+    toolPayload.toolName = toolName;
+    toolPayload.rawArgumentsText = rawArgumentsText;
+    matchedParts.push(fullBlock);
+    ranges.push(toolPayload.sourceRange);
+
+    if (!toolName || !rawArgumentsText) {
+      toolPayload.parseError = "missing_tool_name_or_arguments";
+      detectedToolCalls.push(toolPayload);
+      continue;
+    }
+
+    try {
+      const parsedArgs = hostedParseToolProtocolArgs(rawArgumentsText);
+      toolPayload.parsedArguments = parsedArgs;
+      validToolCalls.push({
+        id: toolPayload.callId,
+        type: "function",
+        function: {
+          name: toolName,
+          arguments: JSON.stringify(parsedArgs),
+        },
+      });
+    } catch (error) {
+      toolPayload.parseError =
+        error instanceof Error && error.message
+          ? error.message
+          : "invalid_json_arguments";
+    }
+
+    detectedToolCalls.push(toolPayload);
+  }
+
+  if (ranges.length <= 0) {
+    return {
+      assistantText: hostedCompactAssistantText(text),
+      validToolCalls,
+      detectedToolCalls,
+      matchedText: "",
+      hasProtocolCandidate: false,
+    };
+  }
+
+  let cursor = 0;
+  const segments: string[] = [];
+  for (const range of ranges.sort((a, b) => a.start - b.start)) {
+    if (range.start > cursor) {
+      segments.push(text.slice(cursor, range.start));
+    }
+    cursor = Math.max(cursor, range.end);
+  }
+  if (cursor < text.length) {
+    segments.push(text.slice(cursor));
+  }
+
+  return {
+    assistantText: hostedCompactAssistantText(segments.join("")),
+    validToolCalls,
+    detectedToolCalls,
+    matchedText: matchedParts.join("\n"),
+    hasProtocolCandidate: true,
+  };
+}
+
+function buildHostedChatTurnResult(source: unknown): HostedChatTurnResult {
+  const text = String(source || "");
+  const inspected = hostedInspectToolProtocolText(text);
+  const parseErrors = inspected.detectedToolCalls
+    .filter((item) => item.parseError)
+    .map((item) => ({
+      callId: item.callId,
+      toolName: item.toolName,
+      parseError: item.parseError,
+    }));
+  return {
+    assistantText:
+      inspected.validToolCalls.length > 0
+        ? inspected.assistantText
+        : hostedCompactAssistantText(text),
+    toolCalls: inspected.validToolCalls,
+    finishReason: inspected.validToolCalls.length > 0 ? "tool_calls" : "stop",
+    meta: {
+      rawText: text,
+      matchedText: inspected.matchedText,
+      hasToolProtocolCandidate: inspected.hasProtocolCandidate,
+      parseErrors,
+      detectedToolCalls: inspected.detectedToolCalls,
+    },
+  };
+}
+
 function isCursorHelpRuntimeMismatch(runtimeVersion: string, expectedVersion = CURSOR_HELP_RUNTIME_VERSION): boolean {
   const actual = String(runtimeVersion || "").trim();
   const expected = String(expectedVersion || "").trim();
@@ -54,6 +364,49 @@ let pageReadyPromise: Promise<void> | null = null;
 let pageReady = false;
 let extensionContextAlive = true;
 const pendingRpc = new Map<string, { resolve: (value: JsonRecord) => void; reject: (reason?: unknown) => void; timeout: number }>();
+const hostedRequestStateById = new Map<string, HostedRequestState>();
+
+interface HostedRequestState {
+  requestId: string;
+  rawText: string;
+  toolDetectedSignature: string;
+}
+
+function parseCursorHelpSseLine(line: string): {
+  kind: "delta" | "done" | "error" | "ignore";
+  text?: string;
+  error?: string;
+} {
+  const trimmed = String(line || "").trim();
+  if (!trimmed.startsWith("data:")) return { kind: "ignore" };
+  const payload = trimmed.slice(5).trim();
+  if (!payload) return { kind: "ignore" };
+  if (payload === "[DONE]") return { kind: "done" };
+
+  let parsed: JsonRecord = {};
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    return { kind: "ignore" };
+  }
+
+  if (parsed.type === "text-delta" && typeof parsed.delta === "string") {
+    return {
+      kind: "delta",
+      text: parsed.delta
+    };
+  }
+  if (parsed.type === "finish") {
+    return { kind: "done" };
+  }
+  if (parsed.type === "error") {
+    return {
+      kind: "error",
+      error: String(parsed.errorText || parsed.message || "Cursor Help SSE error")
+    };
+  }
+  return { kind: "ignore" };
+}
 
 function isExtensionContextInvalidated(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error || "");
@@ -107,6 +460,192 @@ function emitWebchatTransport(payload: Record<string, unknown>): void {
     type: "webchat.transport",
     ...payload
   });
+}
+
+function emitHostedTransportEvent(event: HostedChatTransportEvent): void {
+  emitWebchatTransport({
+    envelope: event
+  });
+}
+
+function getHostedRequestState(requestId: string): HostedRequestState {
+  const normalizedRequestId = String(requestId || "").trim();
+  const existing = hostedRequestStateById.get(normalizedRequestId);
+  if (existing) return existing;
+  const next: HostedRequestState = {
+    requestId: normalizedRequestId,
+    rawText: "",
+    toolDetectedSignature: ""
+  };
+  hostedRequestStateById.set(normalizedRequestId, next);
+  return next;
+}
+
+function clearHostedRequestState(requestId: string): void {
+  hostedRequestStateById.delete(String(requestId || "").trim());
+}
+
+function toHostedToolCallPayloads(raw: unknown): HostedChatToolCallPayload[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => {
+      const row = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+      const range = row.sourceRange && typeof row.sourceRange === "object"
+        ? (row.sourceRange as Record<string, unknown>)
+        : {};
+      return {
+        callId: String(row.callId || "").trim(),
+        toolName: String(row.toolName || "").trim(),
+        rawArgumentsText: String(row.rawArgumentsText || ""),
+        parsedArguments: row.parsedArguments,
+        parseError: String(row.parseError || "").trim() || undefined,
+        sourceRange: {
+          start: Number(range.start || 0),
+          end: Number(range.end || 0)
+        },
+        leadingAssistantText: String(row.leadingAssistantText || ""),
+        trailingAssistantText: String(row.trailingAssistantText || "")
+      };
+    })
+    .filter((item) => item.callId || item.toolName || item.rawArgumentsText);
+}
+
+function sanitizeHostedTurnMeta(meta: unknown): JsonRecord {
+  const row = meta && typeof meta === "object" ? { ...(meta as JsonRecord) } : {};
+  delete row.rawText;
+  row.assistantTextLength = Number(row.assistantTextLength || 0);
+  return row;
+}
+
+function emitToolCallDetectedIfNeeded(state: HostedRequestState): void {
+  const result = buildHostedChatTurnResult(state.rawText);
+  if (result.toolCalls.length <= 0) return;
+  const toolCalls = toHostedToolCallPayloads(result.meta.detectedToolCalls);
+  const signature = JSON.stringify(
+    toolCalls.map((item) => ({
+      callId: item.callId,
+      toolName: item.toolName,
+      rawArgumentsText: item.rawArgumentsText,
+      parseError: item.parseError || ""
+    }))
+  );
+  if (!signature || signature === state.toolDetectedSignature) return;
+  state.toolDetectedSignature = signature;
+  emitHostedTransportEvent({
+    type: "hosted_chat.tool_call_detected",
+    requestId: state.requestId,
+    assistantText: result.assistantText,
+    toolCalls,
+    meta: {
+      ...sanitizeHostedTurnMeta(result.meta),
+      toolCallCount: result.toolCalls.length
+    }
+  });
+}
+
+function resolveHostedRequest(requestId: string, extraMeta: JsonRecord = {}): void {
+  const state = getHostedRequestState(requestId);
+  const result = buildHostedChatTurnResult(state.rawText);
+  emitHostedTransportEvent({
+    type: "hosted_chat.turn_resolved",
+    requestId: state.requestId,
+    result: {
+      ...result,
+      meta: {
+        ...sanitizeHostedTurnMeta(result.meta),
+        assistantTextLength: result.assistantText.length,
+        ...extraMeta
+      }
+    }
+  });
+  clearHostedRequestState(state.requestId);
+}
+
+function handleHostedTransportPayload(payload: Record<string, unknown>): void {
+  const requestId = String(payload.requestId || "").trim();
+  if (!requestId) return;
+  const transportType = String(payload.transportType || "").trim();
+
+  if (transportType === "request_started") {
+    hostedRequestStateById.set(requestId, {
+      requestId,
+      rawText: "",
+      toolDetectedSignature: ""
+    });
+    emitHostedTransportEvent({
+      type: "hosted_chat.debug",
+      requestId,
+      stage: "request_started",
+      detail: "网页宿主会话已发出请求",
+      meta: {
+        sessionKey: String(payload.sessionKey || "").trim() || undefined,
+        rewriteDebug:
+          payload.rewriteDebug && typeof payload.rewriteDebug === "object"
+            ? payload.rewriteDebug
+            : undefined
+      }
+    });
+    return;
+  }
+
+  if (transportType === "sse_line") {
+    const parsed = parseCursorHelpSseLine(String(payload.line || ""));
+    if (parsed.kind === "ignore") return;
+    if (parsed.kind === "error") {
+      emitHostedTransportEvent({
+        type: "hosted_chat.transport_error",
+        requestId,
+        error: String(parsed.error || "网页宿主聊天执行失败"),
+        meta: {
+          transportType
+        }
+      });
+      clearHostedRequestState(requestId);
+      return;
+    }
+    if (parsed.kind === "done") {
+      resolveHostedRequest(requestId, { transportType: "done" });
+      return;
+    }
+
+    const deltaText = String(parsed.text || "");
+    if (!deltaText) return;
+    const state = getHostedRequestState(requestId);
+    state.rawText += deltaText;
+    emitHostedTransportEvent({
+      type: "hosted_chat.stream_text_delta",
+      requestId,
+      deltaText,
+      meta: {
+        accumulatedChars: state.rawText.length
+      }
+    });
+    emitToolCallDetectedIfNeeded(state);
+    return;
+  }
+
+  if (transportType === "stream_end") {
+    resolveHostedRequest(requestId, { transportType });
+    return;
+  }
+
+  if (
+    transportType === "http_error" ||
+    transportType === "invalid_response" ||
+    transportType === "network_error"
+  ) {
+    emitHostedTransportEvent({
+      type: "hosted_chat.transport_error",
+      requestId,
+      error: String(payload.error || payload.bodyText || "网页宿主聊天执行失败"),
+      meta: {
+        transportType,
+        status: Number(payload.status || 0) || undefined,
+        contentType: String(payload.contentType || "").trim() || undefined
+      }
+    });
+    clearHostedRequestState(requestId);
+  }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -356,7 +895,7 @@ if (!contentScope[CONTENT_INSTALLED_FLAG]) {
 
     if (data.type === "WEBCHAT_TRANSPORT_EVENT") {
       const payload = data.payload && typeof data.payload === "object" ? (data.payload as Record<string, unknown>) : {};
-      emitWebchatTransport(payload);
+      handleHostedTransportPayload(payload);
     }
   });
 
@@ -415,6 +954,7 @@ if (!contentScope[CONTENT_INSTALLED_FLAG]) {
         }
 
         if (type === "webchat.abort") {
+          clearHostedRequestState(String(message.requestId || "").trim());
           postToPage("WEBCHAT_ABORT", {
             requestId: String(message.requestId || "").trim()
           });

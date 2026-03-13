@@ -9,6 +9,70 @@ export interface WebToolCall {
   };
 }
 
+export type NormalizedToolCall = WebToolCall;
+
+export interface HostedChatToolCallPayload {
+  callId: string;
+  toolName: string;
+  rawArgumentsText: string;
+  parsedArguments?: unknown;
+  parseError?: string;
+  sourceRange: {
+    start: number;
+    end: number;
+  };
+  leadingAssistantText: string;
+  trailingAssistantText: string;
+}
+
+export interface HostedChatTurnResult {
+  assistantText: string;
+  toolCalls: NormalizedToolCall[];
+  finishReason: "stop" | "tool_calls" | "transport_error";
+  meta: JsonRecord;
+}
+
+export interface HostedChatContinuationRequest {
+  sessionId: string;
+  tabId: number;
+  conversationKey: string;
+  toolResults: JsonRecord[];
+  resumeReason: string;
+}
+
+export type HostedChatTransportEvent =
+  | {
+      type: "hosted_chat.stream_text_delta";
+      requestId: string;
+      deltaText: string;
+      meta?: JsonRecord;
+    }
+  | {
+      type: "hosted_chat.tool_call_detected";
+      requestId: string;
+      assistantText: string;
+      toolCalls: HostedChatToolCallPayload[];
+      meta?: JsonRecord;
+    }
+  | {
+      type: "hosted_chat.turn_resolved";
+      requestId: string;
+      result: HostedChatTurnResult;
+    }
+  | {
+      type: "hosted_chat.transport_error";
+      requestId: string;
+      error: string;
+      meta?: JsonRecord;
+    }
+  | {
+      type: "hosted_chat.debug";
+      requestId: string;
+      stage: string;
+      detail?: string;
+      meta?: JsonRecord;
+    };
+
 export interface ParsedToolProtocol {
   toolCalls: WebToolCall[];
   matchedText: string;
@@ -95,8 +159,30 @@ function findNextNonWhitespace(text: string, start: number): string {
   return "";
 }
 
+function stripMarkdownFence(raw: string): string {
+  const text = String(raw || "").trim();
+  const fenceMatch = text.match(/^```(?:json|javascript|js|ts)?\s*([\s\S]*?)\s*```$/i);
+  return fenceMatch ? String(fenceMatch[1] || "").trim() : text;
+}
+
+function normalizeToolProtocolJsonText(raw: string): string {
+  return stripMarkdownFence(String(raw || ""))
+    .replace(/[“”]/g, "\"")
+    .replace(/[‘’]/g, "'")
+    .replace(/[，]/g, ",")
+    .replace(/[：]/g, ":")
+    .replace(/[；]/g, ";")
+    .replace(/[（]/g, "(")
+    .replace(/[）]/g, ")")
+    .replace(/[｛]/g, "{")
+    .replace(/[｝]/g, "}")
+    .replace(/[［]/g, "[")
+    .replace(/[］]/g, "]")
+    .trim();
+}
+
 function repairMalformedJsonStringQuotes(raw: string): string {
-  const source = String(raw || "");
+  const source = normalizeToolProtocolJsonText(raw);
   if (!source) return source;
   let out = "";
   let inString = false;
@@ -145,11 +231,138 @@ function repairMalformedJsonStringQuotes(raw: string): string {
 }
 
 function parseToolProtocolArgs(rawArgs: string): unknown {
+  const normalized = normalizeToolProtocolJsonText(rawArgs);
   try {
-    return JSON.parse(rawArgs);
+    return JSON.parse(normalized);
   } catch {
-    return JSON.parse(repairMalformedJsonStringQuotes(rawArgs));
+    return JSON.parse(repairMalformedJsonStringQuotes(normalized));
   }
+}
+
+function compactAssistantText(raw: string): string {
+  return String(raw || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function inspectToolProtocolText(source: string): {
+  assistantText: string;
+  validToolCalls: WebToolCall[];
+  detectedToolCalls: HostedChatToolCallPayload[];
+  matchedText: string;
+  hasProtocolCandidate: boolean;
+} {
+  const text = String(source || "");
+  if (!text) {
+    return {
+      assistantText: "",
+      validToolCalls: [],
+      detectedToolCalls: [],
+      matchedText: "",
+      hasProtocolCandidate: false
+    };
+  }
+
+  const pattern = /\[TM_TOOL_CALL_START:([^\]\n]+)\]([\s\S]*?)\[TM_TOOL_CALL_END:\1\]/g;
+  const validToolCalls: WebToolCall[] = [];
+  const detectedToolCalls: HostedChatToolCallPayload[] = [];
+  const matchedParts: string[] = [];
+  const ranges: Array<{ start: number; end: number }> = [];
+  let match: RegExpExecArray | null = null;
+
+  while ((match = pattern.exec(text))) {
+    const fullBlock = String(match[0] || "");
+    const callId = String(match[1] || "").trim();
+    const body = stripMarkdownFence(String(match[2] || "").trim());
+    if (!/await\s+mcp\.call\s*\(/.test(body)) continue;
+
+    const toolPayload: HostedChatToolCallPayload = {
+      callId: callId || `tool_${detectedToolCalls.length + 1}`,
+      toolName: "",
+      rawArgumentsText: "",
+      sourceRange: {
+        start: match.index,
+        end: match.index + fullBlock.length
+      },
+      leadingAssistantText: compactAssistantText(text.slice(0, match.index)),
+      trailingAssistantText: compactAssistantText(text.slice(match.index + fullBlock.length))
+    };
+
+    const invokeMatch = body.match(
+      /await\s+mcp\.call\(\s*(['"])([^'"]+)\1\s*,\s*([\s\S]+?)\s*\)\s*;?\s*$/
+    );
+    if (!invokeMatch) {
+      toolPayload.parseError = "invalid_invoke_syntax";
+      detectedToolCalls.push(toolPayload);
+      matchedParts.push(fullBlock);
+      ranges.push(toolPayload.sourceRange);
+      continue;
+    }
+
+    const toolName = String(invokeMatch[2] || "").trim();
+    const rawArgumentsText = String(invokeMatch[3] || "").trim();
+    toolPayload.toolName = toolName;
+    toolPayload.rawArgumentsText = rawArgumentsText;
+    matchedParts.push(fullBlock);
+    ranges.push(toolPayload.sourceRange);
+
+    if (!toolName || !rawArgumentsText) {
+      toolPayload.parseError = "missing_tool_name_or_arguments";
+      detectedToolCalls.push(toolPayload);
+      continue;
+    }
+
+    try {
+      const parsedArgs = parseToolProtocolArgs(rawArgumentsText);
+      toolPayload.parsedArguments = parsedArgs;
+      validToolCalls.push({
+        id: toolPayload.callId,
+        type: "function",
+        function: {
+          name: toolName,
+          arguments: JSON.stringify(parsedArgs)
+        }
+      });
+    } catch (error) {
+      toolPayload.parseError =
+        error instanceof Error && error.message
+          ? error.message
+          : "invalid_json_arguments";
+    }
+
+    detectedToolCalls.push(toolPayload);
+  }
+
+  if (ranges.length <= 0) {
+    return {
+      assistantText: compactAssistantText(text),
+      validToolCalls,
+      detectedToolCalls,
+      matchedText: "",
+      hasProtocolCandidate: false
+    };
+  }
+
+  let cursor = 0;
+  const segments: string[] = [];
+  for (const range of ranges.sort((a, b) => a.start - b.start)) {
+    if (range.start > cursor) {
+      segments.push(text.slice(cursor, range.start));
+    }
+    cursor = Math.max(cursor, range.end);
+  }
+  if (cursor < text.length) {
+    segments.push(text.slice(cursor));
+  }
+
+  return {
+    assistantText: compactAssistantText(segments.join("")),
+    validToolCalls,
+    detectedToolCalls,
+    matchedText: matchedParts.join("\n"),
+    hasProtocolCandidate: true
+  };
 }
 
 function formatToolDefinition(raw: unknown): string | null {
@@ -283,41 +496,126 @@ export function buildCursorHelpCompiledPrompt(
 }
 
 export function parseToolProtocolFromText(source: unknown): ParsedToolProtocol | null {
-  const text = String(source || "");
-  if (!text) return null;
-
-  const pattern = /\[TM_TOOL_CALL_START:([^\]\n]+)\]([\s\S]*?)\[TM_TOOL_CALL_END:\1\]/g;
-  const toolCalls: WebToolCall[] = [];
-  const matchedParts: string[] = [];
-  let match: RegExpExecArray | null = null;
-
-  while ((match = pattern.exec(text))) {
-    const callId = String(match[1] || "").trim();
-    const body = String(match[2] || "").trim();
-    const invokeMatch = body.match(/await\s+mcp\.call\(\s*(['"])([^'"]+)\1\s*,\s*([\s\S]+?)\s*\)\s*;?\s*$/);
-    if (!invokeMatch) continue;
-    const toolName = String(invokeMatch[2] || "").trim();
-    const rawArgs = String(invokeMatch[3] || "").trim();
-    if (!toolName || !rawArgs) continue;
-    try {
-      const parsedArgs = parseToolProtocolArgs(rawArgs);
-      toolCalls.push({
-        id: callId || `tool_${toolCalls.length + 1}`,
-        type: "function",
-        function: {
-          name: toolName,
-          arguments: JSON.stringify(parsedArgs)
-        }
-      });
-      matchedParts.push(match[0]);
-    } catch {
-      continue;
-    }
-  }
-
-  if (toolCalls.length <= 0) return null;
+  const inspected = inspectToolProtocolText(String(source || ""));
+  if (inspected.validToolCalls.length <= 0) return null;
   return {
-    toolCalls,
-    matchedText: matchedParts.join("\n")
+    toolCalls: inspected.validToolCalls,
+    matchedText: inspected.matchedText
   };
+}
+
+export function buildHostedChatTurnResult(source: unknown): HostedChatTurnResult {
+  const text = String(source || "");
+  const inspected = inspectToolProtocolText(text);
+  const parseErrors = inspected.detectedToolCalls
+    .filter((item) => item.parseError)
+    .map((item) => ({
+      callId: item.callId,
+      toolName: item.toolName,
+      parseError: item.parseError
+    }));
+  return {
+    assistantText:
+      inspected.validToolCalls.length > 0
+        ? inspected.assistantText
+        : compactAssistantText(text),
+    toolCalls: inspected.validToolCalls,
+    finishReason: inspected.validToolCalls.length > 0 ? "tool_calls" : "stop",
+    meta: {
+      rawText: text,
+      matchedText: inspected.matchedText,
+      hasToolProtocolCandidate: inspected.hasProtocolCandidate,
+      parseErrors,
+      detectedToolCalls: inspected.detectedToolCalls
+    }
+  };
+}
+
+export function serializeHostedChatTransportEvent(event: HostedChatTransportEvent): string {
+  return `${JSON.stringify(event)}\n`;
+}
+
+export function parseHostedChatTransportEvent(raw: unknown): HostedChatTransportEvent | null {
+  const parsed = (() => {
+    if (raw && typeof raw === "object") return toRecord(raw);
+    const text = String(raw || "").trim();
+    if (!text) return null;
+    try {
+      return toRecord(JSON.parse(text));
+    } catch {
+      return null;
+    }
+  })();
+  if (!parsed) return null;
+  const type = String(parsed.type || "").trim();
+  const requestId = String(parsed.requestId || "").trim();
+  if (!type || !requestId) return null;
+
+  if (type === "hosted_chat.stream_text_delta") {
+    return {
+      type,
+      requestId,
+      deltaText: String(parsed.deltaText || ""),
+      meta: toRecord(parsed.meta)
+    };
+  }
+  if (type === "hosted_chat.tool_call_detected") {
+    return {
+      type,
+      requestId,
+      assistantText: String(parsed.assistantText || ""),
+      toolCalls: Array.isArray(parsed.toolCalls)
+        ? parsed.toolCalls.map((item) => ({
+            callId: String(toRecord(item).callId || ""),
+            toolName: String(toRecord(item).toolName || ""),
+            rawArgumentsText: String(toRecord(item).rawArgumentsText || ""),
+            parsedArguments: toRecord(item).parsedArguments,
+            parseError: String(toRecord(item).parseError || "") || undefined,
+            sourceRange: {
+              start: Number(toRecord(toRecord(item).sourceRange).start || 0),
+              end: Number(toRecord(toRecord(item).sourceRange).end || 0)
+            },
+            leadingAssistantText: String(toRecord(item).leadingAssistantText || ""),
+            trailingAssistantText: String(toRecord(item).trailingAssistantText || "")
+          }))
+        : [],
+      meta: toRecord(parsed.meta)
+    };
+  }
+  if (type === "hosted_chat.turn_resolved") {
+    const result = toRecord(parsed.result);
+    return {
+      type,
+      requestId,
+      result: {
+        assistantText: String(result.assistantText || ""),
+        toolCalls: normalizeToolCalls(result.toolCalls),
+        finishReason:
+          String(result.finishReason || "") === "tool_calls"
+            ? "tool_calls"
+            : String(result.finishReason || "") === "transport_error"
+              ? "transport_error"
+              : "stop",
+        meta: toRecord(result.meta)
+      }
+    };
+  }
+  if (type === "hosted_chat.transport_error") {
+    return {
+      type,
+      requestId,
+      error: String(parsed.error || "网页宿主聊天执行失败"),
+      meta: toRecord(parsed.meta)
+    };
+  }
+  if (type === "hosted_chat.debug") {
+    return {
+      type,
+      requestId,
+      stage: String(parsed.stage || "").trim() || "debug",
+      detail: String(parsed.detail || "") || undefined,
+      meta: toRecord(parsed.meta)
+    };
+  }
+  return null;
 }

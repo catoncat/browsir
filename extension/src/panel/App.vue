@@ -4,7 +4,8 @@ import { storeToRefs } from "pinia";
 import { computed, onMounted, onUnmounted, ref, nextTick, watch } from "vue";
 import { useRuntimeStore } from "./stores/runtime";
 import { useMessageActions, type PanelMessageLike, type PendingRegenerateState } from "./utils/message-actions";
-import { collectDiagnostics } from "./utils/diagnostics";
+import { publishDiagnosticsToBridge } from "./utils/diagnostics";
+import { publishDebugSnapshotToBridge } from "./utils/debug-snapshot";
 import {
   createPanelUiPluginRuntime,
   type UiChatInputPayload,
@@ -33,7 +34,7 @@ import { Loader2, Plus, Settings, Bug, Activity, History, MoreVertical, FileText
 import { onClickOutside } from "@vueuse/core";
 
 const store = useRuntimeStore();
-const { loading, error, sessions, activeSessionId, messages, runtime, isRegeneratingTitle } = storeToRefs(store);
+const { loading, error, sessions, activeSessionId, messages, runtime, isRegeneratingTitle, config } = storeToRefs(store);
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -95,6 +96,8 @@ const queuedPromptViewItems = computed<QueuedPromptViewItem[]>(() => {
   return out.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 });
 const showBridgeOfflineDot = computed(() => bridgeConnectionStatus.value === "disconnected");
+const publishingDiagnostics = ref(false);
+const publishingDebugSnapshot = ref(false);
 const activeSession = computed(() => sessions.value.find((item) => item.id === activeSessionId.value) || null);
 
 const activeSessionTitle = computed(() => {
@@ -1145,6 +1148,7 @@ function applyRuntimeEventToolRun(event: unknown) {
   const mode = String(payload.mode || "");
   const ts = normalizeEventTs(envelope);
   const eventSessionId = String(envelope.sessionId || "").trim();
+  const responseSource = String(payload.source || "").trim();
   if (type === "loop_start") {
     activeRunToken.value += 1;
     bumpRunViewEpoch("llm");
@@ -1164,7 +1168,64 @@ function applyRuntimeEventToolRun(event: unknown) {
     if (runPhase.value === "idle") {
       runPhase.value = "llm";
     }
+    if (responseSource === "hosted_chat_transport") {
+      setLlmRunHint("宿主生成中", "正在通过网页会话规划下一步");
+      return;
+    }
     setLlmRunHint("调用模型", "正在生成下一步计划");
+    return;
+  }
+  if (type === "hosted_chat.debug") {
+    if (runPhase.value === "idle") {
+      runPhase.value = "llm";
+    }
+    setLlmRunHint("宿主生成中", "正在接管网页会话");
+    return;
+  }
+  if (type === "hosted_chat.stream_text_delta") {
+    if (runPhase.value !== "tool_running" && runPhase.value !== "tool_handoff_leaving") {
+      runPhase.value = "llm";
+    }
+    llmStreamingPendingText.value = "";
+    llmStreamingText.value = "";
+    llmStreamingActive.value = false;
+    finalAssistantStreamingPhase.value = false;
+    setLlmRunHint("宿主生成中", "正在等待网页会话完成当前回合");
+    return;
+  }
+  if (type === "hosted_chat.tool_call_detected") {
+    llmStreamingPendingText.value = "";
+    llmStreamingText.value = "";
+    llmStreamingActive.value = false;
+    finalAssistantStreamingPhase.value = false;
+    if (runPhase.value !== "tool_running") {
+      runPhase.value = "llm";
+    }
+    setLlmRunHint("检测到工具计划", "即将进入工具执行");
+    return;
+  }
+  if (type === "hosted_chat.turn_resolved") {
+    llmStreamingPendingText.value = "";
+    llmStreamingText.value = "";
+    llmStreamingActive.value = false;
+    const finishReason = String(payload.finishReason || "").trim();
+    if (finishReason === "tool_calls") {
+      finalAssistantStreamingPhase.value = false;
+      if (runPhase.value !== "tool_running") {
+        runPhase.value = "llm";
+      }
+      setLlmRunHint("准备执行工具", "宿主回合已完成，正在交给工具执行");
+      return;
+    }
+    finalAssistantStreamingPhase.value = true;
+    setLlmRunHint("整理回复", "正在整理网页会话结果");
+    return;
+  }
+  if (type === "hosted_chat.transport_error") {
+    llmStreamingPendingText.value = "";
+    llmStreamingText.value = "";
+    llmStreamingActive.value = false;
+    finalAssistantStreamingPhase.value = false;
     return;
   }
   if (type === "llm.stream.start") {
@@ -1198,6 +1259,7 @@ function applyRuntimeEventToolRun(event: unknown) {
   if (type === "llm.response.parsed") {
     flushLlmStreamingDeltaBuffer();
     const toolCalls = Number(payload.toolCalls || 0);
+    const isHostedTransport = responseSource === "hosted_chat_transport";
     if (Number.isFinite(toolCalls) && toolCalls > 0) {
       llmStreamingPendingText.value = "";
       llmStreamingText.value = "";
@@ -1207,9 +1269,18 @@ function applyRuntimeEventToolRun(event: unknown) {
         runPhase.value = "llm";
       }
     } else {
-      commitPendingLlmStreamingText();
+      if (isHostedTransport) {
+        llmStreamingPendingText.value = "";
+        llmStreamingText.value = "";
+        llmStreamingActive.value = false;
+      } else {
+        commitPendingLlmStreamingText();
+      }
       finalAssistantStreamingPhase.value = true;
-      setLlmRunHint("整理回复", "正在生成最终回答");
+      setLlmRunHint(
+        "整理回复",
+        isHostedTransport ? "正在生成网页宿主聊天的最终回答" : "正在生成最终回答",
+      );
     }
     return;
   }
@@ -2013,10 +2084,16 @@ function normalizeUiChatInputPayload(input: unknown): UiChatInputPayload {
   const skillIds = Array.isArray(row.skillIds)
     ? row.skillIds.map((item) => String(item || "").trim()).filter((item) => item.length > 0)
     : [];
+  const contextRefs = Array.isArray(row.contextRefs)
+    ? row.contextRefs
+      .filter((item) => item && typeof item === "object")
+      .map((item) => ({ ...(item as Record<string, unknown>) }))
+    : [];
   return {
     text: String(row.text || ""),
     tabIds,
     skillIds,
+    contextRefs,
     mode: normalizeSendMode(row.mode),
     sessionId: String(row.sessionId || "").trim() || undefined
   };
@@ -2634,7 +2711,7 @@ async function handlePromoteQueuedPromptToSteer(queuedPromptId: string) {
   }
 }
 
-async function handleSend(payload: { text: string; tabIds: number[]; skillIds: string[]; mode: "normal" | "steer" | "followUp" }) {
+async function handleSend(payload: { text: string; tabIds: number[]; skillIds: string[]; contextRefs: Array<Record<string, unknown>>; mode: "normal" | "steer" | "followUp" }) {
   if (createSessionTask) {
     await createSessionTask;
   }
@@ -2658,7 +2735,7 @@ async function handleSend(payload: { text: string; tabIds: number[]; skillIds: s
 
   const sendInput = normalizeUiChatInputPayload(beforeSend.value);
   const text = String(sendInput.text || "");
-  if (!text.trim() && sendInput.skillIds.length === 0) return;
+  if (!text.trim() && sendInput.skillIds.length === 0 && sendInput.contextRefs.length === 0) return;
   const isNew = !currentSessionId;
   const shouldExpectRunStart = !isRunActive.value;
 
@@ -2670,6 +2747,7 @@ async function handleSend(payload: { text: string; tabIds: number[]; skillIds: s
       newSession: isNew,
       tabIds: sendInput.tabIds,
       skillIds: sendInput.skillIds,
+      contextRefs: sendInput.contextRefs,
       streamingBehavior: sendInput.mode === "normal" ? undefined : sendInput.mode
     });
     const sessionIdAfterSend = String(activeSessionId.value || "").trim() || sendInput.sessionId;
@@ -2722,11 +2800,16 @@ async function handleCopyMarkdown() {
   showExportMenu.value = false;
 }
 
-async function handleCopyDiagnostics() {
+async function handlePublishDiagnostics() {
+  if (publishingDiagnostics.value) return;
+  publishingDiagnostics.value = true;
   try {
     const sessionId = String(activeSessionId.value || "").trim();
-    const { text } = await collectDiagnostics({
+    const { downloadUrl } = await publishDiagnosticsToBridge({
       sessionId: sessionId || undefined,
+      bridgeUrl: config.value.bridgeUrl,
+      bridgeToken: config.value.bridgeToken,
+      title: activeSessionTitle.value,
       recentEvents: recentRuntimeEvents.value.map((item) => ({
         source: item.source,
         ts: item.ts,
@@ -2736,14 +2819,41 @@ async function handleCopyDiagnostics() {
       })),
       timelineLimit: 28
     });
-    await navigator.clipboard.writeText(text);
+    await navigator.clipboard.writeText(downloadUrl);
     await showActionNoticeWithPlugins({
       type: "success",
-      message: "诊断信息已复制",
-      source: "panel.copy_diagnostics"
+      message: "诊断链接已复制",
+      source: "panel.publish_diagnostics"
     });
   } catch (err) {
-    setErrorMessage(err, "复制诊断信息失败");
+    setErrorMessage(err, "发布诊断失败");
+  } finally {
+    publishingDiagnostics.value = false;
+  }
+}
+
+async function handlePublishDebugSnapshot() {
+  if (publishingDebugSnapshot.value) return;
+  publishingDebugSnapshot.value = true;
+  try {
+    const sessionId = String(activeSessionId.value || "").trim();
+    const { downloadUrl } = await publishDebugSnapshotToBridge({
+      sessionId: sessionId || undefined,
+      bridgeUrl: config.value.bridgeUrl,
+      bridgeToken: config.value.bridgeToken,
+      title: activeSessionTitle.value,
+      scope: "all",
+    });
+    await navigator.clipboard.writeText(downloadUrl);
+    await showActionNoticeWithPlugins({
+      type: "success",
+      message: "调试快照链接已复制",
+      source: "panel.publish_debug_snapshot"
+    });
+  } catch (err) {
+    setErrorMessage(err, "发布调试快照失败");
+  } finally {
+    publishingDebugSnapshot.value = false;
   }
 }
 
@@ -2939,8 +3049,11 @@ onUnmounted(() => {
               class="absolute right-0 mt-1 w-40 bg-ui-bg border border-ui-border rounded-lg shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-100"
               role="menu"
             >
-              <button role="menuitem" @click="handleCopyDiagnostics(); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none">
-                <Copy :size="14" aria-hidden="true" /> 复制诊断信息
+              <button role="menuitem" @click="handlePublishDiagnostics(); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none">
+                <ExternalLink :size="14" aria-hidden="true" /> 复制诊断链接
+              </button>
+              <button role="menuitem" @click="handlePublishDebugSnapshot(); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
+                <ExternalLink :size="14" aria-hidden="true" /> 复制调试快照链接
               </button>
               <button role="menuitem" @click="handleRefreshSession(activeSessionId); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
                 <RefreshCcw :size="14" aria-hidden="true" /> 重新生成标题

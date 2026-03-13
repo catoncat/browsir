@@ -19,6 +19,9 @@ const dialogRef = ref<HTMLElement | null>(null);
 const localError = ref("");
 const showApiKeys = ref<Record<string, boolean>>({});
 const bindingLoading = ref<Record<string, boolean>>({});
+const cursorHelpRuntimeByProfile = ref<Record<string, CursorHelpRuntimeState>>(
+  {},
+);
 
 const defaultProfileId = "provider-default-profile";
 const auxProfileId = "provider-aux-profile";
@@ -26,6 +29,10 @@ const fallbackProfileId = "provider-fallback-profile";
 const CURSOR_WEB_PROFILE_ID = "cursor-web";
 const CURSOR_HELP_URL = "https://cursor.com/help";
 const CURSOR_TAB_PATTERNS = ["https://cursor.com/help*"] as const;
+const CURSOR_HELP_CONTAINER_WIDTH = 1280;
+const CURSOR_HELP_CONTAINER_HEIGHT = 900;
+const CURSOR_HELP_CONNECT_TIMEOUT_MS = 20_000;
+const CURSOR_HELP_CONNECT_POLL_MS = 250;
 const builtinProviderOptions = [
   { value: "openai_compatible", label: "通用 API" },
   { value: "cursor_help_web", label: "Cursor" },
@@ -34,6 +41,62 @@ const builtinProviderOptions = [
 const visibleError = computed(
   () => localError.value || String(error.value || ""),
 );
+
+interface CursorHelpRuntimeState {
+  canExecute: boolean;
+  pageHookReady: boolean;
+  fetchHookReady: boolean;
+  senderReady: boolean;
+  selectedModel: string;
+  availableModels: string[];
+  senderKind: string;
+  lastSenderError: string;
+  url: string;
+  targetTabId: number | null;
+}
+
+interface LocatedCursorHelpTab {
+  tab: chrome.tabs.Tab;
+  inspect: CursorHelpRuntimeState | null;
+}
+
+function emptyCursorHelpRuntimeState(): CursorHelpRuntimeState {
+  return {
+    canExecute: false,
+    pageHookReady: false,
+    fetchHookReady: false,
+    senderReady: false,
+    selectedModel: "",
+    availableModels: [],
+    senderKind: "",
+    lastSenderError: "",
+    url: "",
+    targetTabId: null,
+  };
+}
+
+function runtimeState(profile: PanelLlmProfile): CursorHelpRuntimeState {
+  const profileId = String(profile.id || "").trim();
+  if (!profileId) return emptyCursorHelpRuntimeState();
+  return (
+    cursorHelpRuntimeByProfile.value[profileId] || emptyCursorHelpRuntimeState()
+  );
+}
+
+function patchCursorHelpRuntimeState(
+  profile: PanelLlmProfile,
+  patch: Partial<CursorHelpRuntimeState>,
+): void {
+  const profileId = String(profile.id || "").trim();
+  if (!profileId) return;
+  cursorHelpRuntimeByProfile.value = {
+    ...cursorHelpRuntimeByProfile.value,
+    [profileId]: {
+      ...runtimeState(profile),
+      ...patch,
+    },
+  };
+}
 const secondaryProfileOptions = computed(() => {
   const defaultProfile = String(config.value.llmDefaultProfile || "").trim();
   return config.value.llmProfiles.filter(
@@ -122,7 +185,7 @@ function getProviderLabel(profile: PanelLlmProfile): string {
   const provider = String(profile.provider || "")
     .trim()
     .toLowerCase();
-  if (provider === "cursor_help_web") return "Cursor";
+  if (provider === "cursor_help_web") return "Cursor 宿主聊天";
   if (provider === "openai_compatible") return "通用 API";
   return String(profile.provider || "").trim() || "未设置接入方式";
 }
@@ -133,9 +196,17 @@ function getProfileTitle(profile: PanelLlmProfile, index: number): string {
 
 function getProfileSummary(profile: PanelLlmProfile): string {
   if (isCursorHelpWebProvider(profile)) {
-    return getCursorHelpTargetTabId(profile)
-      ? "已连接 Cursor，会沿用当前页面的登录状态。"
-      : "保存后会自动连接 Cursor。";
+    const state = runtimeState(profile);
+    if (state.canExecute) {
+      return "已连接，沿用当前 Cursor 页面会话与登录状态。";
+    }
+    if (state.pageHookReady && state.fetchHookReady && !state.senderReady) {
+      return "已绑定 Cursor 页面，正在等待聊天入口。";
+    }
+    if (state.targetTabId || state.pageHookReady || state.fetchHookReady) {
+      return "已绑定 Cursor 页面，正在等待页面就绪。";
+    }
+    return "未连接到可用的 Cursor 聊天页。";
   }
   const model = String(profile.llmModel || "").trim() || "未设置模型";
   const base = String(profile.llmApiBase || "").trim() || "未设置接口地址";
@@ -153,15 +224,29 @@ function getCursorHelpTargetTabId(profile: PanelLlmProfile): number | "" {
   return Number.isInteger(raw) && raw > 0 ? raw : "";
 }
 
+function getCursorHelpConnectionLabel(profile: PanelLlmProfile): string {
+  const state = runtimeState(profile);
+  if (state.canExecute) return "已连接";
+  if (state.pageHookReady && state.fetchHookReady && !state.senderReady) {
+    return "等待聊天入口";
+  }
+  if (state.targetTabId || state.pageHookReady || state.fetchHookReady) {
+    return "等待页面就绪";
+  }
+  return "未连接";
+}
+
+function getCursorWebConnectionLabel(): string {
+  const profile = findCursorWebProfile();
+  return profile ? getCursorHelpConnectionLabel(profile) : "未连接";
+}
+
 function getCursorHelpDetectedModel(profile: PanelLlmProfile): string {
-  return String(providerOptions(profile).detectedModel || "").trim();
+  return runtimeState(profile).selectedModel;
 }
 
 function getCursorHelpAvailableModels(profile: PanelLlmProfile): string[] {
-  const raw = providerOptions(profile).availableModels;
-  return Array.isArray(raw)
-    ? raw.map((item) => String(item || "").trim()).filter(Boolean)
-    : [];
+  return runtimeState(profile).availableModels;
 }
 
 function getCursorHelpModelOptions(profile: PanelLlmProfile): string[] {
@@ -182,10 +267,35 @@ function setCursorHelpTargetTabId(
   const raw = Number(value);
   if (Number.isInteger(raw) && raw > 0) {
     options.targetTabId = raw;
+    patchCursorHelpRuntimeState(profile, { targetTabId: raw });
   } else {
     delete options.targetTabId;
+    patchCursorHelpRuntimeState(profile, { targetTabId: null });
   }
   options.targetSite = "cursor_help";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatCursorHelpConnectionError(
+  state: CursorHelpRuntimeState | null,
+): string {
+  if (!state) {
+    return "已打开 Cursor 页面，但页面还没有完成加载。请稍后重试。";
+  }
+  if (!state.pageHookReady) {
+    return "已打开 Cursor 页面，但页面脚本还没有准备好。请稍后重试。";
+  }
+  if (!state.fetchHookReady) {
+    return "已连接到 Cursor 页面，但会话通道还没有准备好。请稍后重试。";
+  }
+  if (!state.senderReady) {
+    const suffix = state.lastSenderError ? ` ${state.lastSenderError}` : "";
+    return `已连接到 Cursor 页面，但聊天入口还没有准备好。请稍后重试。${suffix}`.trim();
+  }
+  return "Cursor 页面暂时不可用，请稍后重试。";
 }
 
 async function sendTabMessageWithRetry(
@@ -209,7 +319,7 @@ async function sendTabMessageWithRetry(
 
 async function inspectCursorTab(
   tabId: number,
-): Promise<{ isReady: boolean; url: string } | null> {
+): Promise<CursorHelpRuntimeState | null> {
   const response = await sendTabMessageWithRetry(tabId, {
     type: "webchat.inspect",
   }).catch(() => null);
@@ -219,14 +329,26 @@ async function inspectCursorTab(
       : null;
   if (!row || row.ok !== true) return null;
   return {
-    isReady: row.isReady === true,
+    canExecute: row.canExecute === true,
+    pageHookReady: row.pageHookReady === true,
+    fetchHookReady: row.fetchHookReady === true,
+    senderReady: row.senderReady === true,
+    selectedModel: String(row.selectedModel || "").trim(),
+    availableModels: Array.isArray(row.availableModels)
+      ? row.availableModels
+          .map((item) => String(item || "").trim())
+          .filter(Boolean)
+      : [],
+    senderKind: String(row.senderKind || "").trim(),
+    lastSenderError: String(row.lastSenderError || "").trim(),
     url: String(row.url || ""),
+    targetTabId: tabId,
   };
 }
 
 async function locateCursorChatTab(
   active: boolean,
-): Promise<chrome.tabs.Tab | null> {
+): Promise<LocatedCursorHelpTab | null> {
   const tabs = await chrome.tabs.query({ url: [...CURSOR_TAB_PATTERNS] });
   const sorted = [...tabs].sort((left, right) => {
     const leftHelp = String(left.url || "").startsWith(CURSOR_HELP_URL) ? 1 : 0;
@@ -235,34 +357,61 @@ async function locateCursorChatTab(
       : 0;
     return rightHelp - leftHelp;
   });
+  let pending: LocatedCursorHelpTab | null = null;
   for (const tab of sorted) {
     if (!tab.id) continue;
     const inspected = await inspectCursorTab(tab.id);
-    if (!inspected?.isReady) continue;
-    if (active) {
-      await chrome.tabs.update(tab.id, { active: true }).catch(() => {
-        // noop
-      });
-      if (typeof tab.windowId === "number") {
-        await chrome.windows
-          .update(tab.windowId, { focused: true })
-          .catch(() => {
-            // noop
-          });
+    const located = { tab, inspect: inspected };
+    if (inspected?.canExecute) {
+      if (active) {
+        await focusTab(tab);
       }
+      return located;
     }
-    return tab;
+    if (!pending) {
+      pending = located;
+    }
   }
-  return null;
+  if (pending && active) {
+    await focusTab(pending.tab);
+  }
+  return pending;
 }
 
 async function openCursorFallbackTab(
-  active: boolean,
+  _active: boolean,
 ): Promise<chrome.tabs.Tab> {
-  return chrome.tabs.create({
-    url: CURSOR_HELP_URL,
-    active,
+  const createdWindow = await chrome.windows
+    .create({
+      url: CURSOR_HELP_URL,
+      focused: false,
+      type: "popup",
+      width: CURSOR_HELP_CONTAINER_WIDTH,
+      height: CURSOR_HELP_CONTAINER_HEIGHT,
+    })
+    .catch(async () => {
+      return chrome.windows.create({
+        url: CURSOR_HELP_URL,
+        focused: false,
+        width: CURSOR_HELP_CONTAINER_WIDTH,
+        height: CURSOR_HELP_CONTAINER_HEIGHT,
+      });
+    });
+  const createdTab = Array.isArray(createdWindow?.tabs)
+    ? createdWindow.tabs[0]
+    : null;
+  if (!createdTab?.id) {
+    throw new Error("未能打开 Cursor 页面");
+  }
+  await chrome.tabs.update(createdTab.id, { autoDiscardable: false }).catch(() => {
+    // noop
   });
+  if (typeof createdWindow?.id === "number") {
+    await chrome.windows.update(createdWindow.id, { state: "minimized" }).catch(() => {
+      // noop
+    });
+  }
+  return createdTab;
 }
 
 async function focusTab(tab: chrome.tabs.Tab): Promise<void> {
@@ -281,6 +430,34 @@ async function bindCurrentTab(profile: PanelLlmProfile): Promise<void> {
   await ensureCursorHelpTab(profile, true);
 }
 
+async function waitForCursorHelpTabUsable(
+  profile: PanelLlmProfile,
+  tabId: number,
+  timeoutMs = CURSOR_HELP_CONNECT_TIMEOUT_MS,
+): Promise<CursorHelpRuntimeState | null> {
+  const deadline = Date.now() + timeoutMs;
+  let lastState: CursorHelpRuntimeState | null = null;
+  while (Date.now() < deadline) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab?.id) break;
+    if (
+      String(tab.url || "").startsWith(CURSOR_HELP_URL) &&
+      tab.status === "complete"
+    ) {
+      lastState = await inspectCursorTab(tabId).catch(() => lastState);
+      patchCursorHelpRuntimeState(profile, {
+        ...(lastState || emptyCursorHelpRuntimeState()),
+        targetTabId: tabId,
+      });
+      if (lastState?.canExecute) {
+        return lastState;
+      }
+    }
+    await sleep(CURSOR_HELP_CONNECT_POLL_MS);
+  }
+  return lastState;
+}
+
 async function ensureCursorHelpTab(
   profile: PanelLlmProfile,
   active: boolean,
@@ -293,22 +470,36 @@ async function ensureCursorHelpTab(
   };
   localError.value = "";
   try {
-    let boundTab = await locateCursorChatTab(active);
+    const located = await locateCursorChatTab(active);
+    let boundTab = located?.tab || null;
+    let inspected = located?.inspect || null;
+    const createdNewTab = !boundTab?.id;
 
     if (!boundTab?.id) {
       boundTab = await openCursorFallbackTab(active);
+      inspected = null;
     }
 
     if (!boundTab?.id) {
       throw new Error("未能打开 Cursor 页面");
     }
-    await focusTab(boundTab);
+    if (inspected) {
+      patchCursorHelpRuntimeState(profile, inspected);
+    }
+    if (active && !createdNewTab) {
+      await focusTab(boundTab);
+    }
     setCursorHelpTargetTabId(profile, boundTab.id);
-    await inspectCursorHelpTab(profile, boundTab.id);
-    const inspected = await inspectCursorTab(boundTab.id);
-    if (!inspected?.isReady) {
-      localError.value =
-        "已打开 Cursor 页面，但暂时还不能使用。请等待页面加载完成后重试。";
+    if (!inspected?.canExecute) {
+      inspected = await waitForCursorHelpTabUsable(profile, boundTab.id);
+    } else {
+      patchCursorHelpRuntimeState(profile, {
+        ...inspected,
+        targetTabId: boundTab.id,
+      });
+    }
+    if (!inspected?.canExecute) {
+      localError.value = formatCursorHelpConnectionError(inspected);
     }
   } catch (err) {
     localError.value = err instanceof Error ? err.message : String(err);
@@ -325,30 +516,11 @@ async function inspectCursorHelpTab(
   tabId = Number(getCursorHelpTargetTabId(profile)),
 ): Promise<void> {
   if (!Number.isInteger(tabId) || tabId <= 0) return;
-  const response = await sendTabMessageWithRetry(tabId, {
-    type: "webchat.inspect",
-  }).catch(() => null);
-  const row =
-    response && typeof response === "object"
-      ? (response as Record<string, unknown>)
-      : {};
-  const options = providerOptions(profile);
-  const selectedModel = String(row.selectedModel || "").trim();
-  const availableModels = Array.isArray(row.availableModels)
-    ? row.availableModels
-        .map((item) => String(item || "").trim())
-        .filter(Boolean)
-    : [];
-  if (selectedModel) {
-    options.detectedModel = selectedModel;
-  } else {
-    delete options.detectedModel;
-  }
-  if (availableModels.length > 0) {
-    options.availableModels = availableModels;
-  } else {
-    delete options.availableModels;
-  }
+  const inspected = await inspectCursorTab(tabId);
+  patchCursorHelpRuntimeState(profile, {
+    ...(inspected || emptyCursorHelpRuntimeState()),
+    targetTabId: tabId,
+  });
   if (!String(profile.llmModel || "").trim()) {
     profile.llmModel = "auto";
   }
@@ -521,6 +693,15 @@ function normalizeProfilesBeforeSave(): void {
         ? { ...raw.providerOptions }
         : {};
     if (provider.toLowerCase() === "cursor_help_web") {
+      delete nextProviderOptions.detectedModel;
+      delete nextProviderOptions.availableModels;
+      delete nextProviderOptions.lastSenderError;
+      delete nextProviderOptions.senderKind;
+      delete nextProviderOptions.pageHookReady;
+      delete nextProviderOptions.fetchHookReady;
+      delete nextProviderOptions.senderReady;
+      delete nextProviderOptions.canExecute;
+      delete nextProviderOptions.url;
       nextProviderOptions.targetSite = "cursor_help";
     }
     const connection = normalizeProviderConnectionConfig({
@@ -570,10 +751,7 @@ async function handleSave(): Promise<void> {
   try {
     normalizeProfilesBeforeSave();
     for (const profile of config.value.llmProfiles) {
-      if (
-        isCursorHelpWebProvider(profile) &&
-        !getCursorHelpTargetTabId(profile)
-      ) {
+      if (isCursorHelpWebProvider(profile) && !runtimeState(profile).canExecute) {
         await ensureCursorHelpTab(profile, false);
       }
     }
@@ -586,6 +764,19 @@ async function handleSave(): Promise<void> {
 
 onMounted(() => {
   ensureProfiles();
+  for (const profile of config.value.llmProfiles) {
+    if (!isCursorHelpWebProvider(profile)) continue;
+    const targetTabId = getCursorHelpTargetTabId(profile);
+    if (targetTabId) {
+      void inspectCursorHelpTab(profile);
+      continue;
+    }
+    void locateCursorChatTab(false).then((located) => {
+      if (located?.tab.id) {
+        void inspectCursorHelpTab(profile, located.tab.id);
+      }
+    });
+  }
   dialogRef.value?.focus();
 });
 </script>
@@ -709,12 +900,12 @@ onMounted(() => {
               Cursor
             </h3>
             <p class="text-[12px] text-ui-text-muted leading-relaxed">
-              连接当前 Cursor 页面。
+              通过已打开的 Cursor 页面发起宿主聊天。
             </p>
             <p class="text-[11px] text-ui-text-muted/80">
               {{
                 findCursorWebProfile()
-                  ? "已连接当前 Cursor 页面"
+                  ? getCursorWebConnectionLabel()
                   : "未连接 Cursor"
               }}
             </p>
@@ -851,16 +1042,14 @@ onMounted(() => {
               <label class="space-y-1 block">
                 <span
                   class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
-                  >连接页面</span
+                  >连接状态</span
                 >
                 <div class="flex items-center gap-2">
                   <div
                     class="w-full bg-ui-surface border border-ui-border rounded-sm px-2.5 py-2 text-[12px] text-ui-text-muted"
                   >
                     {{
-                      getCursorHelpTargetTabId(profile)
-                        ? `已连接 Cursor 页面 #${getCursorHelpTargetTabId(profile)}`
-                        : "保存时会自动连接 Cursor"
+                      getCursorHelpConnectionLabel(profile)
                     }}
                   </div>
                   <button
@@ -875,7 +1064,7 @@ onMounted(() => {
                       :size="12"
                       aria-hidden="true"
                     />
-                    <span>重新连接页面</span>
+                    <span>重新连接</span>
                   </button>
                 </div>
               </label>
@@ -892,7 +1081,9 @@ onMounted(() => {
                     {{
                       getCursorHelpDetectedModel(profile)
                         ? `当前检测到：${getCursorHelpDetectedModel(profile)}`
-                        : "暂未识别，默认跟随 Cursor 页面当前模型"
+                        : runtimeState(profile).lastSenderError
+                          ? getCursorHelpConnectionLabel(profile)
+                          : "暂未识别，默认跟随当前页面模型"
                     }}
                   </div>
                   <button
@@ -907,7 +1098,7 @@ onMounted(() => {
                       :size="12"
                       aria-hidden="true"
                     />
-                    <span>刷新页面状态</span>
+                    <span>刷新状态</span>
                   </button>
                 </div>
               </label>
