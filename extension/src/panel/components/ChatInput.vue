@@ -735,7 +735,7 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
           
           <div class="flex-1 min-w-0">
             <div class="text-[12px] font-medium text-ui-text truncate">{{ tab.title }}</div>
-            <div class="text-[9px] text-ui-text-muted truncate opacity-60 font-mono tracking-tight">{{ tab.url }}</div>
+            <div class="text-[10px] text-ui-text-muted truncate opacity-60 font-mono tracking-tight">{{ tab.url }}</div>
           </div>
 
           <div v-if="isTabSelected(tab.id)" class="shrink-0 text-ui-accent">
@@ -775,16 +775,16 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
                   +{{ selectedTabs.length - 2 }}
                 </span>
               </div>
-              <span class="truncate text-[10px] font-bold text-ui-text uppercase tracking-tight">
-                {{ selectedTabs.length === 1 ? '1 Tab' : `${selectedTabs.length} Tabs` }}
+              <span class="truncate text-[10px] font-bold text-ui-text tracking-tight">
+                {{ selectedTabs.length === 1 ? selectedTabs[0].title : `${selectedTabs.length} 个标签页` }}
               </span>
             </div>
 
             <!-- SKILLS ICON GROUP -->
             <div v-if="selectedSkills.length > 0" class="flex items-center gap-1.5 shrink-0 bg-ui-accent/5 px-1.5 py-0.5 rounded-full border border-ui-accent/10">
               <Wand2 :size="11" class="text-ui-accent" />
-              <span class="truncate text-[10px] font-bold text-ui-accent uppercase tracking-tight">
-                {{ selectedSkills.length === 1 ? '1 Skill' : `${selectedSkills.length} Skills` }}
+              <span class="truncate text-[10px] font-bold text-ui-accent tracking-tight">
+                {{ selectedSkills.length === 1 ? selectedSkills[0].name : `${selectedSkills.length} 个技能` }}
               </span>
             </div>
           </div>
@@ -797,7 +797,7 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
               :aria-expanded="isContextExpanded"
               :title="isContextExpanded ? '收起详情' : '管理上下文'"
             >
-              <span class="text-[10px] font-medium hidden xs:inline">{{ isContextExpanded ? 'HIDE' : 'MANAGE' }}</span>
+              <span class="text-[10px] font-medium">{{ isContextExpanded ? '收起' : '管理' }}</span>
               <ChevronDown v-if="!isContextExpanded" :size="11" aria-hidden="true" />
               <ChevronUp v-else :size="11" aria-hidden="true" />
             </button>
@@ -1046,13 +1046,6 @@ textarea::-webkit-scrollbar {
   transform: translateY(-1px);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 4px 12px rgba(15, 23, 42, 0.24);
 }
-.custom-scrollbar::-webkit-scrollbar {
-  width: 2px;
-}
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background-color: var(--border);
-  border-radius: 10px;
-}
 .shortcut-kbd {
   display: inline-flex;
   align-items: center;
@@ -1061,7 +1054,7 @@ textarea::-webkit-scrollbar {
   padding: 0 0.35em;
   border: 1px solid color-mix(in oklab, var(--border) 85%, transparent);
   border-radius: 6px;
-  background: color-mix(in oklab, var(--card) 92%, var(--bg) 8%);
+  background: color-mix(in oklab, var(--surface) 92%, var(--bg) 8%);
   color: color-mix(in oklab, var(--text) 70%, transparent);
   font-size: 9px;
   line-height: 1.4;
