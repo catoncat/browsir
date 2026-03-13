@@ -11,7 +11,14 @@ import {
   Pause,
   FileJson2,
   FileCode2,
-  Radio
+  Radio,
+  Cpu,
+  History,
+  Terminal,
+  Settings,
+  Sidebar,
+  Layout,
+  Activity
 } from "lucide-vue-next";
 
 interface StudioFiles {
@@ -59,6 +66,7 @@ const projects = ref<StudioProject[]>([]);
 const selectedProjectId = ref("");
 const selectedPluginId = ref("");
 const activeFile = ref<StudioFileName>("plugin.json");
+const activeLogTab = ref<"runtime" | "brain" | "trigger" | "hook">("trigger");
 
 const pluginJsonCode = ref("");
 const indexJsCode = ref("");
@@ -1202,81 +1210,105 @@ onUnmounted(() => {
       </aside>
 
       <section class="studio-center">
-        <div class="editor-toolbar">
-          <button
-            class="file-tab"
-            :class="{ active: activeFile === 'plugin.json' }"
-            @click="activeFile = 'plugin.json'"
-          >
-            <FileJson2 :size="13" />
-            plugin.json
-          </button>
-          <button
-            class="file-tab"
-            :class="{ active: activeFile === 'index.js' }"
-            @click="activeFile = 'index.js'"
-          >
-            <FileCode2 :size="13" />
-            index.js
-          </button>
-          <button
-            class="file-tab"
-            :class="{ active: activeFile === 'ui.js' }"
-            @click="activeFile = 'ui.js'"
-          >
-            <Radio :size="13" />
-            ui.js
-          </button>
+        <div class="editor-header">
+          <div class="editor-tabs">
+            <button
+              class="file-tab"
+              :class="{ active: activeFile === 'plugin.json' }"
+              @click="activeFile = 'plugin.json'"
+            >
+              <FileJson2 :size="14" />
+              <span>plugin.json</span>
+            </button>
+            <button
+              class="file-tab"
+              :class="{ active: activeFile === 'index.js' }"
+              @click="activeFile = 'index.js'"
+            >
+              <FileCode2 :size="14" />
+              <span>index.js</span>
+            </button>
+            <button
+              class="file-tab"
+              :class="{ active: activeFile === 'ui.js' }"
+              @click="activeFile = 'ui.js'"
+            >
+              <Radio :size="14" />
+              <span>ui.js</span>
+            </button>
+          </div>
+          <div class="editor-actions">
+             <span class="file-path-hint">{{ activeFile }}</span>
+          </div>
         </div>
 
-        <textarea
-          v-model="activeEditor"
-          class="editor-area"
-          :aria-label="`编辑 ${activeFile}`"
-          spellcheck="false"
-        />
+        <div class="editor-container">
+          <textarea
+            v-model="activeEditor"
+            class="editor-area"
+            :aria-label="`编辑 ${activeFile}`"
+            spellcheck="false"
+            placeholder="在此编写代码..."
+          />
+        </div>
       </section>
 
       <aside class="studio-right">
-        <section class="studio-panel log-panel">
-          <p class="panel-title">触发记录</p>
-          <ul class="panel-list logs">
-            <li v-for="item in triggerLogs" :key="item.id" class="panel-item log-item">
-              <p class="item-title">{{ item.title }}</p>
-              <p class="item-sub">{{ item.text }}</p>
-            </li>
-          </ul>
-        </section>
-
-        <section class="studio-panel log-panel">
-          <p class="panel-title">Hook 时间线</p>
-          <ul class="panel-list logs">
-            <li v-for="item in hookTraceLogs" :key="item.id" class="panel-item log-item">
-              <p class="item-title">{{ item.title }}</p>
-              <p class="item-sub">{{ item.text }}</p>
-            </li>
-          </ul>
-        </section>
-
-        <section class="studio-panel log-panel">
-          <p class="panel-title">Runtime 消息</p>
-          <ul class="panel-list logs">
-            <li v-for="item in runtimeLogs" :key="item.id" class="panel-item log-item">
-              <p class="item-title">{{ item.title }}</p>
-              <p class="item-sub">{{ item.text }}</p>
-            </li>
-          </ul>
-        </section>
-
-        <section class="studio-panel log-panel">
-          <p class="panel-title">Brain 事件</p>
-          <ul class="panel-list logs">
-            <li v-for="item in brainLogs" :key="item.id" class="panel-item log-item">
-              <p class="item-title">{{ item.title }}</p>
-              <p class="item-sub">{{ item.text }}</p>
-            </li>
-          </ul>
-        </section>
+        <div class="log-container">
+          <div class="log-header">
+            <div class="log-tabs">
+              <button :class="['log-tab-btn', activeLogTab === 'trigger' ? 'active' : '']" @click="activeLogTab = 'trigger'">
+                <Zap :size="13" /> Triggers
+              </button>
+              <button :class="['log-tab-btn', activeLogTab === 'hook' ? 'active' : '']" @click="activeLogTab = 'hook'">
+                <Activity :size="13" /> Hooks
+              </button>
+              <button :class="['log-tab-btn', activeLogTab === 'brain' ? 'active' : '']" @click="activeLogTab = 'brain'">
+                <Cpu :size="13" /> Brain
+              </button>
+              <button :class="['log-tab-btn', activeLogTab === 'runtime' ? 'active' : '']" @click="activeLogTab = 'runtime'">
+                <Terminal :size="13" /> Runtime
+              </button>
+            </div>
+            <button class="log-clear-btn" title="清空当前日志" @click="clearLogs">
+              <History :size="13" />
+            </button>
+          </div>
+          
+          <div class="log-content">
+            <ul v-if="activeLogTab === 'trigger'" class="log-list">
+              <li v-for="item in triggerLogs" :key="item.id" class="log-row">
+                <span class="log-time">{{ item.ts.split('T')[1].slice(0, 8) }}</span>
+                <span class="log-title">{{ item.title }}</span>
+                <p class="log-msg">{{ item.text }}</p>
+              </li>
+            </ul>
+            <ul v-else-if="activeLogTab === 'hook'" class="log-list">
+              <li v-for="item in hookTraceLogs" :key="item.id" class="log-row">
+                <span class="log-time">{{ item.ts.split('T')[1].slice(0, 8) }}</span>
+                <span class="log-title">{{ item.title }}</span>
+                <p class="log-msg">{{ item.text }}</p>
+              </li>
+            </ul>
+            <ul v-else-if="activeLogTab === 'brain'" class="log-list">
+              <li v-for="item in brainLogs" :key="item.id" class="log-row">
+                <span class="log-time">{{ item.ts.split('T')[1].slice(0, 8) }}</span>
+                <span class="log-title">{{ item.title }}</span>
+                <p class="log-msg">{{ item.text }}</p>
+              </li>
+            </ul>
+            <ul v-else class="log-list">
+              <li v-for="item in runtimeLogs" :key="item.id" class="log-row">
+                <span class="log-time">{{ item.ts.split('T')[1].slice(0, 8) }}</span>
+                <span class="log-title">{{ item.title }}</span>
+                <p class="log-msg">{{ item.text }}</p>
+              </li>
+            </ul>
+            <div v-if="((activeLogTab === 'trigger' ? triggerLogs : activeLogTab === 'hook' ? hookTraceLogs : activeLogTab === 'brain' ? brainLogs : runtimeLogs).length === 0)" class="log-empty">
+              暂无日志数据
+            </div>
+          </div>
+        </div>
       </aside>
     </main>
 
@@ -1392,45 +1424,187 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.editor-toolbar {
+.editor-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px;
+  justify-content: space-between;
+  padding: 0 12px;
+  height: 40px;
   border-bottom: 1px solid #e3dccf;
   background: #fbf7ee;
+}
+
+.editor-tabs {
+  display: flex;
+  gap: 4px;
+  height: 100%;
+  align-items: flex-end;
 }
 
 .file-tab {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border: 1px solid #d6cdbe;
-  border-radius: 8px;
-  padding: 6px 10px;
+  padding: 6px 12px;
   font-size: 12px;
-  background: #fff;
-  color: #413b31;
+  font-weight: 600;
+  color: #6b6254;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 6px 6px 0 0;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.file-tab:hover {
+  background: rgba(255, 255, 255, 0.5);
 }
 
 .file-tab.active {
-  border-color: #7c5cff;
-  background: #f2edff;
-  color: #3a286f;
+  background: #fffdfa;
+  border-color: #d8cfc0;
+  color: #7c5cff;
+}
+
+.file-path-hint {
+  font-size: 11px;
+  color: #a39b8f;
+  font-family: monospace;
+}
+
+.editor-container {
+  flex: 1;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: #fffdfa;
 }
 
 .editor-area {
   flex: 1;
-  min-height: 0;
+  width: 100%;
+  height: 100%;
   resize: none;
   border: 0;
-  outline: none;
-  padding: 12px;
-  font-size: 12px;
-  line-height: 1.5;
-  font-family: "IBM Plex Mono", "SF Mono", "Menlo", monospace;
-  background: #fffdfa;
+  outline: none !important;
+  padding: 16px;
+  font-size: 13px;
+  line-height: 1.6;
+  font-family: "JetBrains Mono", "IBM Plex Mono", "SF Mono", monospace;
+  background: transparent;
   color: #1f2937;
+}
+
+.log-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #d8cfc0;
+  border-radius: 10px;
+  background: #fffdfa;
+  overflow: hidden;
+}
+
+.log-header {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px;
+  background: #fbf7ee;
+  border-bottom: 1px solid #e3dccf;
+}
+
+.log-tabs {
+  display: flex;
+  gap: 2px;
+}
+
+.log-tab-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #8b7d6b;
+  border-radius: 4px;
+}
+
+.log-tab-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.log-tab-btn.active {
+  background: #7c5cff;
+  color: white;
+}
+
+.log-clear-btn {
+  padding: 4px;
+  color: #8b7d6b;
+  border-radius: 4px;
+}
+
+.log-clear-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: #ef4444;
+}
+
+.log-content {
+  flex: 1;
+  overflow: auto;
+  padding: 8px;
+  background: #fffdfa;
+}
+
+.log-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.log-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed #efe8dc;
+}
+
+.log-row:last-child {
+  border-bottom: 0;
+}
+
+.log-time {
+  font-size: 10px;
+  font-family: monospace;
+  color: #a39b8f;
+}
+
+.log-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: #4b5563;
+}
+
+.log-msg {
+  font-size: 11px;
+  color: #6b7280;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.log-empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: #a39b8f;
 }
 
 .studio-panel {
