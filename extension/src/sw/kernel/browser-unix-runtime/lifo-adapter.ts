@@ -1,7 +1,15 @@
 import { Sandbox } from "@lifo-sh/core";
 import { kvGet, kvKeys, kvRemove, kvSet } from "../idb-storage";
-import { sandboxBash, type VfsFile } from "../eval-bridge";
+import { sandboxBash, type SandboxBashResult, type VfsFile } from "../eval-bridge";
 import { SessionRuntimeManager } from "./session-runtime-manager";
+
+// Test hook: when set, bypasses sandboxBash and uses direct execution.
+type BashExecutor = (sandbox: Sandbox, command: string, cwd: string | undefined, timeoutMs?: number) => Promise<SandboxBashResult>;
+let _testBashExecutor: BashExecutor | null = null;
+
+export function _setTestBashExecutor(executor: BashExecutor | null): void {
+  _testBashExecutor = executor;
+}
 
 type JsonRecord = Record<string, unknown>;
 type NamespaceScope = "ephemeral" | "global" | "session";
@@ -1008,15 +1016,14 @@ async function bashFrame(args: JsonRecord, sessionId: string): Promise<JsonRecor
     const timeoutMs = args.timeoutMs == null ? undefined : Math.max(1000, toInt(args.timeoutMs, 120_000));
     const startedAt = Date.now();
 
-    // Collect VFS files for sandbox page
-    const files = await collectVfsFilesForBridge(sandbox);
-
-    const result = await sandboxBash({
-      command,
-      files,
-      cwd: cwdResolved?.unixPath ?? sandbox.cwd,
-      timeoutMs,
-    });
+    const cwd = cwdResolved?.unixPath ?? sandbox.cwd;
+    let result: SandboxBashResult;
+    if (_testBashExecutor) {
+      result = await _testBashExecutor(sandbox, command, cwdResolved?.unixPath, timeoutMs);
+    } else {
+      const files = await collectVfsFilesForBridge(sandbox);
+      result = await sandboxBash({ command, files, cwd, timeoutMs });
+    }
 
     // Apply VFS diff back to the SW sandbox
     for (const diff of result.vfsDiff) {
@@ -1033,7 +1040,7 @@ async function bashFrame(args: JsonRecord, sessionId: string): Promise<JsonRecor
 
     const durationMs = Date.now() - startedAt;
     const exitCode = result.exitCode;
-    const timeoutHit = result.stderr.includes("sandbox bash timeout");
+    const timeoutHit = result.stderr.includes("timed out");
     recordCommandFinished(sessionId, rawCommand, durationMs, exitCode, timeoutHit);
     sandboxManager.markDirty(sessionId);
     await checkpointSessionSandbox(sessionId, "bash", { force: true });

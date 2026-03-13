@@ -154,7 +154,7 @@ async function handleBash(req: BashRequest): Promise<BashResult> {
     const result = await Promise.race([
       pending,
       new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("sandbox bash timeout")), timeoutMs)
+        setTimeout(() => reject(new Error("sandbox bash timed out")), timeoutMs)
       ),
     ]);
 

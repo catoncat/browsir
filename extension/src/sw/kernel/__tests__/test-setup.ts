@@ -1,5 +1,7 @@
 import "fake-indexeddb/auto";
 import { beforeEach } from "vitest";
+import type { Sandbox } from "@lifo-sh/core";
+import { _setTestBashExecutor } from "../browser-unix-runtime/lifo-adapter";
 
 type Store = Record<string, unknown>;
 
@@ -44,7 +46,11 @@ beforeEach(() => {
     },
     runtime: {
       onMessage: { addListener() {} },
-      sendMessage: async () => ({ ok: true })
+      sendMessage: async () => ({ ok: true }),
+      getContexts: async () => []
+    },
+    offscreen: {
+      createDocument: async () => {}
     },
     sidePanel: {
       open: async () => {}
@@ -53,4 +59,51 @@ beforeEach(() => {
       onClicked: { addListener() {} }
     }
   };
+
+  // Install direct LIFO executor for tests (no sandbox page relay needed)
+  _setTestBashExecutor(async (sandbox: Sandbox, command: string, cwd: string | undefined, timeoutMs?: number) => {
+    const processRegistry = sandbox.shell.getProcessRegistry();
+    const baselinePids = new Set(processRegistry.getAllPIDs());
+    let timeoutHit = false;
+
+    const options = cwd != null ? { cwd } : {};
+    const pending = sandbox.commands.run(command, options);
+    const timer = timeoutMs == null ? null : setTimeout(() => {
+      timeoutHit = true;
+      for (const row of processRegistry.getAll()) {
+        if (baselinePids.has(row.pid)) continue;
+        processRegistry.kill(row.pid, "SIGTERM");
+      }
+    }, timeoutMs);
+
+    try {
+      const result = await pending;
+      if (timer != null) clearTimeout(timer);
+
+      if (timeoutHit) {
+        const stderr = String(result.stderr || "").trim();
+        const msg = `sandbox bash timed out`;
+        return {
+          ok: false, stdout: String(result.stdout || ""),
+          stderr: stderr ? `${stderr}\n${msg}` : msg,
+          exitCode: 124, vfsDiff: [],
+        };
+      }
+
+      return {
+        ok: Number(result.exitCode ?? 0) === 0,
+        stdout: String(result.stdout || ""),
+        stderr: String(result.stderr || ""),
+        exitCode: Number(result.exitCode ?? 0),
+        vfsDiff: [],
+      };
+    } catch (err) {
+      if (timer != null) clearTimeout(timer);
+      return {
+        ok: false, stdout: "",
+        stderr: err instanceof Error ? err.message : String(err),
+        exitCode: 1, vfsDiff: [],
+      };
+    }
+  });
 });
