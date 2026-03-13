@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useRuntimeStore, type PluginMetadata } from "../stores/runtime";
+import ShikiCodeEditor from "./ShikiCodeEditor.vue";
+import HookReference from "./HookReference.vue";
 import {
   RefreshCcw,
   Plus,
@@ -15,10 +17,8 @@ import {
   Cpu,
   History,
   Terminal,
-  Settings,
-  Sidebar,
-  Layout,
-  Activity
+  Activity,
+  BookOpen
 } from "lucide-vue-next";
 
 interface StudioFiles {
@@ -67,6 +67,8 @@ const selectedProjectId = ref("");
 const selectedPluginId = ref("");
 const activeFile = ref<StudioFileName>("plugin.json");
 const activeLogTab = ref<"runtime" | "brain" | "trigger" | "hook">("trigger");
+const rightPanelMode = ref<"logs" | "docs">("docs");
+const showBuiltinPlugins = ref(false);
 
 const pluginJsonCode = ref("");
 const indexJsCode = ref("");
@@ -940,6 +942,18 @@ function clearLogs(): void {
   hookTraceLogs.value = [];
 }
 
+function handleInsertSnippet(snippet: string): void {
+  const target = activeFile.value === "plugin.json" ? "plugin.json" : activeFile.value === "ui.js" ? "ui.js" : "index.js";
+  if (target === "plugin.json") return;
+  if (target === "ui.js") {
+    uiJsCode.value = uiJsCode.value ? uiJsCode.value + "\n\n" + snippet : snippet;
+    activeFile.value = "ui.js";
+  } else {
+    indexJsCode.value = indexJsCode.value ? indexJsCode.value + "\n\n" + snippet : snippet;
+    activeFile.value = "index.js";
+  }
+}
+
 function isBuiltinPlugin(plugin: PluginMetadata): boolean {
   return String(plugin.id || "").trim().startsWith(BUILTIN_PLUGIN_ID_PREFIX);
 }
@@ -1135,7 +1149,12 @@ onUnmounted(() => {
     <main class="studio-main">
       <aside class="studio-left">
         <section class="studio-panel">
-          <p class="panel-title">示例项目</p>
+          <div class="panel-header">
+            <p class="panel-title">项目</p>
+            <button class="panel-action-btn" title="新建项目" :disabled="busy" @click="handleCreateProject">
+              <Plus :size="13" />
+            </button>
+          </div>
           <ul class="panel-list">
             <li
               v-for="project in exampleProjects"
@@ -1144,14 +1163,8 @@ onUnmounted(() => {
               @click="selectProject(project)"
             >
               <p class="item-title">{{ project.name }}</p>
-              <p class="item-sub">{{ project.pluginId || "未绑定 pluginId" }}</p>
+              <p class="item-sub">{{ project.pluginId || "示例" }}</p>
             </li>
-          </ul>
-        </section>
-
-        <section class="studio-panel">
-          <p class="panel-title">用户项目</p>
-          <ul class="panel-list">
             <li
               v-for="project in userProjects"
               :key="project.id"
@@ -1164,8 +1177,8 @@ onUnmounted(() => {
           </ul>
         </section>
 
-        <section class="studio-panel">
-          <p class="panel-title">已安装插件（示例）</p>
+        <section class="studio-panel flex-1">
+          <p class="panel-title">已安装</p>
           <ul class="panel-list">
             <li
               v-for="plugin in installedExamplePlugins"
@@ -1176,12 +1189,6 @@ onUnmounted(() => {
               <p class="item-title">{{ plugin.name || plugin.id }}</p>
               <p class="item-sub">{{ plugin.id }}</p>
             </li>
-          </ul>
-        </section>
-
-        <section class="studio-panel">
-          <p class="panel-title">已安装插件（用户）</p>
-          <ul class="panel-list">
             <li
               v-for="plugin in installedUserPlugins"
               :key="plugin.id"
@@ -1191,12 +1198,17 @@ onUnmounted(() => {
               <p class="item-title">{{ plugin.name || plugin.id }}</p>
               <p class="item-sub">{{ plugin.id }}</p>
             </li>
+            <li v-if="installedExamplePlugins.length === 0 && installedUserPlugins.length === 0" class="panel-empty">
+              暂无已安装插件
+            </li>
           </ul>
-        </section>
-
-        <section class="studio-panel">
-          <p class="panel-title">已安装插件（内置）</p>
-          <ul class="panel-list">
+          <button
+            class="builtin-toggle"
+            @click="showBuiltinPlugins = !showBuiltinPlugins"
+          >
+            {{ showBuiltinPlugins ? '隐藏内置' : `显示内置 (${installedBuiltinPlugins.length})` }}
+          </button>
+          <ul v-if="showBuiltinPlugins" class="panel-list builtin-list">
             <li
               v-for="plugin in installedBuiltinPlugins"
               :key="plugin.id"
@@ -1243,70 +1255,96 @@ onUnmounted(() => {
         </div>
 
         <div class="editor-container">
-          <textarea
-            v-model="activeEditor"
-            class="editor-area"
+          <ShikiCodeEditor
+            :modelValue="activeEditor"
+            :language="activeFile === 'plugin.json' ? 'json' : 'javascript'"
             :aria-label="`编辑 ${activeFile}`"
-            spellcheck="false"
             placeholder="在此编写代码..."
+            @update:modelValue="(v: string) => (activeEditor = v)"
           />
         </div>
       </section>
 
       <aside class="studio-right">
-        <div class="log-container">
-          <div class="log-header">
-            <div class="log-tabs">
-              <button :class="['log-tab-btn', activeLogTab === 'trigger' ? 'active' : '']" @click="activeLogTab = 'trigger'">
-                <Zap :size="13" /> Triggers
-              </button>
-              <button :class="['log-tab-btn', activeLogTab === 'hook' ? 'active' : '']" @click="activeLogTab = 'hook'">
-                <Activity :size="13" /> Hooks
-              </button>
-              <button :class="['log-tab-btn', activeLogTab === 'brain' ? 'active' : '']" @click="activeLogTab = 'brain'">
-                <Cpu :size="13" /> Brain
-              </button>
-              <button :class="['log-tab-btn', activeLogTab === 'runtime' ? 'active' : '']" @click="activeLogTab = 'runtime'">
-                <Terminal :size="13" /> Runtime
-              </button>
-            </div>
-            <button class="log-clear-btn" title="清空当前日志" @click="clearLogs">
-              <History :size="13" />
+        <div class="right-panel-mode-toggle">
+          <button
+            :class="['mode-toggle-btn', rightPanelMode === 'docs' ? 'active' : '']"
+            @click="rightPanelMode = 'docs'"
+            aria-label="Hook 参考文档"
+          >
+            <BookOpen :size="13" aria-hidden="true" />
+            Hook 参考
+          </button>
+          <button
+            :class="['mode-toggle-btn', rightPanelMode === 'logs' ? 'active' : '']"
+            @click="rightPanelMode = 'logs'"
+            aria-label="运行日志"
+          >
+            <Terminal :size="13" aria-hidden="true" />
+            日志
+          </button>
+        </div>
+
+        <HookReference
+          v-if="rightPanelMode === 'docs'"
+          @insert-snippet="handleInsertSnippet"
+        />
+
+        <div v-else class="log-sections">
+          <div class="log-sections-header">
+            <span class="log-sections-title">运行日志</span>
+            <button class="log-clear-btn" title="清空日志" @click="clearLogs">
+              <History :size="13" aria-hidden="true" />
             </button>
           </div>
-          
-          <div class="log-content">
-            <ul v-if="activeLogTab === 'trigger'" class="log-list">
-              <li v-for="item in triggerLogs" :key="item.id" class="log-row">
-                <span class="log-time">{{ item.ts.split('T')[1].slice(0, 8) }}</span>
-                <span class="log-title">{{ item.title }}</span>
-                <p class="log-msg">{{ item.text }}</p>
-              </li>
-            </ul>
-            <ul v-else-if="activeLogTab === 'hook'" class="log-list">
-              <li v-for="item in hookTraceLogs" :key="item.id" class="log-row">
-                <span class="log-time">{{ item.ts.split('T')[1].slice(0, 8) }}</span>
-                <span class="log-title">{{ item.title }}</span>
-                <p class="log-msg">{{ item.text }}</p>
-              </li>
-            </ul>
-            <ul v-else-if="activeLogTab === 'brain'" class="log-list">
-              <li v-for="item in brainLogs" :key="item.id" class="log-row">
-                <span class="log-time">{{ item.ts.split('T')[1].slice(0, 8) }}</span>
-                <span class="log-title">{{ item.title }}</span>
-                <p class="log-msg">{{ item.text }}</p>
-              </li>
-            </ul>
-            <ul v-else class="log-list">
-              <li v-for="item in runtimeLogs" :key="item.id" class="log-row">
-                <span class="log-time">{{ item.ts.split('T')[1].slice(0, 8) }}</span>
-                <span class="log-title">{{ item.title }}</span>
-                <p class="log-msg">{{ item.text }}</p>
-              </li>
-            </ul>
-            <div v-if="((activeLogTab === 'trigger' ? triggerLogs : activeLogTab === 'hook' ? hookTraceLogs : activeLogTab === 'brain' ? brainLogs : runtimeLogs).length === 0)" class="log-empty">
-              暂无日志数据
-            </div>
+          <div class="log-sections-body">
+            <section class="log-section">
+              <h4 class="log-section-heading"><Zap :size="11" aria-hidden="true" /> 触发记录</h4>
+              <ul v-if="triggerLogs.length > 0" class="log-list" role="log" aria-live="polite">
+                <li v-for="item in triggerLogs" :key="item.id" class="log-row">
+                  <span class="log-time">{{ (item.ts.split('T')[1] || '').slice(0, 8) }}</span>
+                  <span class="log-title">{{ item.title }}</span>
+                  <p class="log-msg">{{ item.text }}</p>
+                </li>
+              </ul>
+              <div v-else class="log-empty-inline">暂无</div>
+            </section>
+
+            <section class="log-section">
+              <h4 class="log-section-heading"><Activity :size="11" aria-hidden="true" /> Hook 时间线</h4>
+              <ul v-if="hookTraceLogs.length > 0" class="log-list" role="log" aria-live="polite">
+                <li v-for="item in hookTraceLogs" :key="item.id" class="log-row">
+                  <span class="log-time">{{ (item.ts.split('T')[1] || '').slice(0, 8) }}</span>
+                  <span class="log-title">{{ item.title }}</span>
+                  <p class="log-msg">{{ item.text }}</p>
+                </li>
+              </ul>
+              <div v-else class="log-empty-inline">暂无</div>
+            </section>
+
+            <section class="log-section">
+              <h4 class="log-section-heading"><Cpu :size="11" aria-hidden="true" /> Brain 事件</h4>
+              <ul v-if="brainLogs.length > 0" class="log-list" role="log" aria-live="polite">
+                <li v-for="item in brainLogs" :key="item.id" class="log-row">
+                  <span class="log-time">{{ (item.ts.split('T')[1] || '').slice(0, 8) }}</span>
+                  <span class="log-title">{{ item.title }}</span>
+                  <p class="log-msg">{{ item.text }}</p>
+                </li>
+              </ul>
+              <div v-else class="log-empty-inline">暂无</div>
+            </section>
+
+            <section class="log-section">
+              <h4 class="log-section-heading"><Terminal :size="11" aria-hidden="true" /> Runtime 消息</h4>
+              <ul v-if="runtimeLogs.length > 0" class="log-list" role="log" aria-live="polite">
+                <li v-for="item in runtimeLogs" :key="item.id" class="log-row">
+                  <span class="log-time">{{ (item.ts.split('T')[1] || '').slice(0, 8) }}</span>
+                  <span class="log-title">{{ item.title }}</span>
+                  <p class="log-msg">{{ item.text }}</p>
+                </li>
+              </ul>
+              <div v-else class="log-empty-inline">暂无</div>
+            </section>
           </div>
         </div>
       </aside>
@@ -1314,40 +1352,36 @@ onUnmounted(() => {
 
     <footer class="studio-footer">
       <div class="footer-actions">
-        <button class="studio-btn" :disabled="busy" @click="handleCreateProject">
-          <Plus :size="14" />
-          新建
-        </button>
-        <button class="studio-btn" :disabled="busy" @click="handleSaveProject">
-          <Save :size="14" />
-          保存项目
-        </button>
-        <button class="studio-btn primary" :disabled="busy" @click="handleInstall(false)">
-          <Play :size="14" />
-          安装
-        </button>
-        <button class="studio-btn primary" :disabled="busy" @click="handleInstall(true)">
-          <Zap :size="14" />
-          热更新
-        </button>
-        <button class="studio-btn" :disabled="busy || !selectedPluginId" @click="handleTogglePlugin(true)">
-          <Play :size="14" />
-          启用
-        </button>
-        <button class="studio-btn" :disabled="busy || !selectedPluginId" @click="handleTogglePlugin(false)">
-          <Pause :size="14" />
-          禁用
-        </button>
-        <button class="studio-btn" :disabled="busy" @click="handleExportPackage">
-          <Download :size="14" />
-          导出
-        </button>
-        <button class="studio-btn" @click="clearLogs">清空日志</button>
+        <div class="action-group">
+          <button class="studio-btn" :disabled="busy" @click="handleSaveProject">
+            <Save :size="14" />
+            保存
+          </button>
+          <button class="studio-btn primary" :disabled="busy" @click="handleInstall(!!selectedPluginId)">
+            <Zap :size="14" />
+            {{ selectedPluginId ? '热更新' : '安装' }}
+          </button>
+          <button
+            v-if="selectedPluginId"
+            class="studio-btn"
+            :disabled="busy"
+            @click="handleTogglePlugin(!selectedInstalledPluginEnabled)"
+          >
+            <component :is="selectedInstalledPluginEnabled ? Pause : Play" :size="14" />
+            {{ selectedInstalledPluginEnabled ? '禁用' : '启用' }}
+          </button>
+        </div>
+
+        <div class="action-group secondary">
+          <button class="studio-btn" :disabled="busy" @click="handleExportPackage" title="导出插件包">
+            <Download :size="14" />
+          </button>
+        </div>
       </div>
 
       <div class="footer-status">
         <span v-if="selectedInstalledPlugin" class="status-pill">
-          当前插件: {{ selectedInstalledPlugin.id }} · {{ selectedInstalledPluginEnabled ? "enabled" : "disabled" }}
+          {{ selectedInstalledPlugin.id }} · {{ selectedInstalledPluginEnabled ? "enabled" : "disabled" }}
         </span>
         <span v-if="statusMessage" class="status-pill success">{{ statusMessage }}</span>
         <span v-if="errorMessage" class="status-pill error">{{ errorMessage }}</span>
@@ -1362,8 +1396,8 @@ onUnmounted(() => {
   width: 100vw;
   display: flex;
   flex-direction: column;
-  color: #111827;
-  background: linear-gradient(180deg, #f7f4ee 0%, #efe8dc 100%);
+  color: var(--text);
+  background: var(--surface);
 }
 
 .studio-header {
@@ -1372,8 +1406,8 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: 12px;
   padding: 12px 16px;
-  border-bottom: 1px solid #d8cfc0;
-  background: rgba(255, 255, 255, 0.6);
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in oklab, var(--bg) 60%, transparent);
   backdrop-filter: blur(6px);
 }
 
@@ -1387,7 +1421,7 @@ onUnmounted(() => {
 .studio-subtitle {
   margin: 2px 0 0;
   font-size: 12px;
-  color: #60584a;
+  color: var(--text-muted);
 }
 
 .studio-header-actions {
@@ -1411,16 +1445,17 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .studio-center {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border: 1px solid #d8cfc0;
+  border: 1px solid var(--border);
   border-radius: 10px;
-  background: #fdfbf6;
+  background: var(--bg);
   overflow: hidden;
 }
 
@@ -1430,8 +1465,8 @@ onUnmounted(() => {
   justify-content: space-between;
   padding: 0 12px;
   height: 40px;
-  border-bottom: 1px solid #e3dccf;
-  background: #fbf7ee;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
 }
 
 .editor-tabs {
@@ -1448,7 +1483,7 @@ onUnmounted(() => {
   padding: 6px 12px;
   font-size: 12px;
   font-weight: 600;
-  color: #6b6254;
+  color: var(--text-muted);
   border: 1px solid transparent;
   border-bottom: 0;
   border-radius: 6px 6px 0 0;
@@ -1457,18 +1492,18 @@ onUnmounted(() => {
 }
 
 .file-tab:hover {
-  background: rgba(255, 255, 255, 0.5);
+  background: color-mix(in oklab, var(--bg) 50%, transparent);
 }
 
 .file-tab.active {
-  background: #fffdfa;
-  border-color: #d8cfc0;
-  color: #7c5cff;
+  background: var(--bg);
+  border-color: var(--border);
+  color: var(--accent);
 }
 
 .file-path-hint {
   font-size: 11px;
-  color: #a39b8f;
+  color: var(--text-muted);
   font-family: monospace;
 }
 
@@ -1477,7 +1512,7 @@ onUnmounted(() => {
   position: relative;
   display: flex;
   flex-direction: column;
-  background: #fffdfa;
+  background: var(--bg);
 }
 
 .editor-area {
@@ -1492,70 +1527,109 @@ onUnmounted(() => {
   line-height: 1.6;
   font-family: "JetBrains Mono", "IBM Plex Mono", "SF Mono", monospace;
   background: transparent;
-  color: #1f2937;
+  color: var(--text);
 }
 
-.log-container {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  border: 1px solid #d8cfc0;
-  border-radius: 10px;
-  background: #fffdfa;
-  overflow: hidden;
-}
-
-.log-header {
-  height: 36px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 8px;
-  background: #fbf7ee;
-  border-bottom: 1px solid #e3dccf;
-}
-
-.log-tabs {
+.right-panel-mode-toggle {
   display: flex;
   gap: 2px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
 }
 
-.log-tab-btn {
+.mode-toggle-btn {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 8px;
+  padding: 4px 10px;
   font-size: 11px;
-  font-weight: 600;
-  color: #8b7d6b;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
   border-radius: 4px;
+  font-weight: 500;
 }
 
-.log-tab-btn:hover {
-  background: rgba(0, 0, 0, 0.05);
+.mode-toggle-btn.active {
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
 }
 
-.log-tab-btn.active {
-  background: #7c5cff;
-  color: white;
+.mode-toggle-btn:hover:not(.active) {
+  background: color-mix(in oklab, var(--bg) 50%, transparent);
+}
+
+.log-sections {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.log-sections-header {
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.log-sections-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .log-clear-btn {
   padding: 4px;
-  color: #8b7d6b;
+  color: var(--text-muted);
   border-radius: 4px;
 }
 
 .log-clear-btn:hover {
-  background: rgba(0, 0, 0, 0.05);
+  background: color-mix(in oklab, var(--text) 5%, transparent);
   color: #ef4444;
 }
 
-.log-content {
+.log-sections-body {
   flex: 1;
   overflow: auto;
-  padding: 8px;
-  background: #fffdfa;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.log-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.log-section-heading {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--border);
 }
 
 .log-list {
@@ -1564,57 +1638,122 @@ onUnmounted(() => {
   margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
 }
 
 .log-row {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding-bottom: 8px;
-  border-bottom: 1px dashed #efe8dc;
-}
-
-.log-row:last-child {
-  border-bottom: 0;
+  gap: 1px;
+  padding: 2px 0;
 }
 
 .log-time {
   font-size: 10px;
   font-family: monospace;
-  color: #a39b8f;
+  color: var(--text-muted);
 }
 
 .log-title {
   font-size: 11px;
   font-weight: 700;
-  color: #4b5563;
+  color: var(--text);
 }
 
 .log-msg {
   font-size: 11px;
-  color: #6b7280;
+  color: var(--text-muted);
   line-height: 1.4;
   word-break: break-all;
 }
 
-.log-empty {
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  color: #a39b8f;
+.log-empty-inline {
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.5;
+  padding: 2px 0;
 }
 
 .studio-panel {
-  border: 1px solid #d8cfc0;
+  border: 1px solid var(--border);
   border-radius: 10px;
-  background: #fffaf1;
+  background: var(--bg);
   padding: 8px;
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+.studio-panel.flex-1 {
+  flex: 1;
+  overflow: hidden;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 0 6px;
+}
+
+.panel-header .panel-title {
+  margin: 0;
+}
+
+.panel-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.panel-action-btn:hover {
+  background: color-mix(in oklab, var(--accent) 10%, var(--bg));
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.panel-action-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.panel-empty {
+  padding: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.6;
+  text-align: center;
+}
+
+.builtin-toggle {
+  margin-top: 4px;
+  padding: 4px 8px;
+  font-size: 10px;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  opacity: 0.7;
+  transition: opacity 0.15s;
+}
+
+.builtin-toggle:hover {
+  opacity: 1;
+}
+
+.builtin-list {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
 }
 
 .panel-title {
@@ -1623,7 +1762,7 @@ onUnmounted(() => {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #6b6254;
+  color: var(--text-muted);
 }
 
 .panel-list {
@@ -1637,9 +1776,9 @@ onUnmounted(() => {
 }
 
 .panel-item {
-  border: 1px solid #ddd3c2;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--bg);
   padding: 8px;
   cursor: pointer;
 }
@@ -1650,22 +1789,22 @@ onUnmounted(() => {
 }
 
 .panel-item.active {
-  border-color: #7c5cff;
-  background: #f3efff;
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 8%, var(--bg));
 }
 
 .item-title {
   margin: 0;
   font-size: 12px;
   font-weight: 700;
-  color: #1f2937;
+  color: var(--text);
 }
 
 .item-sub {
   margin: 3px 0 0;
   font-size: 11px;
   line-height: 1.35;
-  color: #6b7280;
+  color: var(--text-muted);
   word-break: break-all;
 }
 
@@ -1682,9 +1821,9 @@ onUnmounted(() => {
 }
 
 .studio-footer {
-  border-top: 1px solid #d8cfc0;
+  border-top: 1px solid var(--border);
   padding: 10px 12px;
-  background: rgba(255, 255, 255, 0.6);
+  background: color-mix(in oklab, var(--bg) 60%, transparent);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1693,8 +1832,22 @@ onUnmounted(() => {
 .footer-actions {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
-  flex-wrap: wrap;
+}
+
+.action-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.action-group.secondary {
+  opacity: 0.7;
+}
+
+.action-group.secondary:hover {
+  opacity: 1;
 }
 
 .studio-btn {
@@ -1704,10 +1857,10 @@ onUnmounted(() => {
   gap: 6px;
   height: 32px;
   padding: 0 10px;
-  border: 1px solid #ccbfa8;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fffdf8;
-  color: #3f372b;
+  background: var(--bg);
+  color: var(--text);
   font-size: 12px;
   font-weight: 700;
 }
@@ -1717,9 +1870,9 @@ onUnmounted(() => {
 }
 
 .studio-btn.primary {
-  border-color: #7c5cff;
-  background: #f2edff;
-  color: #3a286f;
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 8%, var(--bg));
+  color: var(--accent);
 }
 
 .studio-btn.danger {
@@ -1741,9 +1894,9 @@ onUnmounted(() => {
   min-height: 24px;
   padding: 2px 8px;
   border-radius: 999px;
-  border: 1px solid #d7cfbf;
-  background: #fff;
-  color: #5b5345;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-muted);
   font-size: 11px;
 }
 
