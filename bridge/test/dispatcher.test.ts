@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
 import { dispatchInvoke, registerInvokeToolHandler, unregisterInvokeToolHandler } from "../src/dispatcher";
 import { FsGuard } from "../src/fs-guard";
@@ -111,6 +111,90 @@ describe("dispatchInvoke", () => {
           fsGuard: new FsGuard("strict", [root]),
         })
       ).rejects.toThrow("Unknown tool");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("routes stat tool and reports missing/file/directory metadata", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "bridge-dispatch-stat-"));
+    try {
+      await mkdir(path.join(root, "nested"), { recursive: true });
+      await writeFile(path.join(root, "nested", "demo.txt"), "hello", "utf8");
+
+      const statFile = parseInvokeFrame(JSON.stringify({
+        id: "s1",
+        type: "invoke",
+        tool: "stat",
+        args: {
+          path: "nested/demo.txt",
+          cwd: root,
+        },
+      }));
+      const statDir = parseInvokeFrame(JSON.stringify({
+        id: "s2",
+        type: "invoke",
+        tool: "stat",
+        args: {
+          path: "nested",
+          cwd: root,
+        },
+      }));
+      const statMissing = parseInvokeFrame(JSON.stringify({
+        id: "s3",
+        type: "invoke",
+        tool: "stat",
+        args: {
+          path: "nested/missing.txt",
+          cwd: root,
+        },
+      }));
+
+      const ctx = {
+        config: createTestConfig(root),
+        fsGuard: new FsGuard("strict", [root]),
+      };
+      const fileOut = await dispatchInvoke(statFile, ctx);
+      const dirOut = await dispatchInvoke(statDir, ctx);
+      const missingOut = await dispatchInvoke(statMissing, ctx);
+
+      expect(fileOut.type).toBe("file");
+      expect(fileOut.exists).toBe(true);
+      expect(Number(fileOut.size || 0)).toBeGreaterThan(0);
+      expect(dirOut.type).toBe("directory");
+      expect(dirOut.exists).toBe(true);
+      expect(missingOut.type).toBe("missing");
+      expect(missingOut.exists).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("routes list tool and returns shallow directory entries", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "bridge-dispatch-list-"));
+    try {
+      await mkdir(path.join(root, "nested", "child"), { recursive: true });
+      await writeFile(path.join(root, "nested", "a.txt"), "a", "utf8");
+      await writeFile(path.join(root, "nested", "child", "b.txt"), "b", "utf8");
+
+      const req = parseInvokeFrame(JSON.stringify({
+        id: "l1",
+        type: "invoke",
+        tool: "list",
+        args: {
+          path: "nested",
+          cwd: root,
+        },
+      }));
+      const out = await dispatchInvoke(req, {
+        config: createTestConfig(root),
+        fsGuard: new FsGuard("strict", [root]),
+      });
+
+      expect(out.type).toBe("directory");
+      expect(out.exists).toBe(true);
+      const entries = Array.isArray(out.entries) ? out.entries : [];
+      expect(entries.map((item) => String((item as Record<string, unknown>).name || ""))).toEqual(["child", "a.txt"]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

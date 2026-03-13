@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { BridgeError } from "./errors";
 import type { BridgeMode } from "./config";
@@ -7,6 +8,15 @@ import type { BridgeMode } from "./config";
 function hasPathPrefix(target: string, root: string): boolean {
   const normalizedRoot = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
   return target === root || target.startsWith(normalizedRoot);
+}
+
+function expandUserPath(input: string): string {
+  const raw = String(input || "").trim();
+  if (raw === "~") return os.homedir();
+  if (raw.startsWith("~/") || raw.startsWith(`~${path.sep}`)) {
+    return path.join(os.homedir(), raw.slice(2));
+  }
+  return raw;
 }
 
 export class FsGuard {
@@ -30,9 +40,26 @@ export class FsGuard {
   }
 
   private async resolveForCreate(absPath: string): Promise<string> {
-    const parent = path.dirname(absPath);
-    const parentReal = await realpath(parent);
-    return path.join(parentReal, path.basename(absPath));
+    const pendingSegments: string[] = [];
+    let cursor = absPath;
+
+    while (true) {
+      try {
+        const existingReal = await realpath(cursor);
+        return pendingSegments.length > 0
+          ? path.join(existingReal, ...pendingSegments.reverse())
+          : existingReal;
+      } catch {
+        const parent = path.dirname(cursor);
+        if (parent === cursor) {
+          throw new BridgeError("E_PATH", "Path parent does not exist", {
+            path: absPath,
+          });
+        }
+        pendingSegments.push(path.basename(cursor));
+        cursor = parent;
+      }
+    }
   }
 
   private assertAllowed(canonical: string): void {
@@ -52,7 +79,10 @@ export class FsGuard {
   }
 
   async resolveRead(filePath: string, cwd?: string): Promise<string> {
-    const absPath = path.resolve(cwd ?? process.cwd(), filePath);
+    const absPath = path.resolve(
+      expandUserPath(cwd ?? process.cwd()),
+      expandUserPath(filePath),
+    );
     const canonical = await this.resolveExisting(absPath).catch(() => {
       throw new BridgeError("E_PATH", "File does not exist", { path: absPath });
     });
@@ -61,7 +91,10 @@ export class FsGuard {
   }
 
   async resolveWrite(filePath: string, cwd?: string): Promise<string> {
-    const absPath = path.resolve(cwd ?? process.cwd(), filePath);
+    const absPath = path.resolve(
+      expandUserPath(cwd ?? process.cwd()),
+      expandUserPath(filePath),
+    );
     const canonical = await this.resolveExisting(absPath).catch(async () => {
       return this.resolveForCreate(absPath);
     });
@@ -69,8 +102,12 @@ export class FsGuard {
     return canonical;
   }
 
+  async resolveInspect(filePath: string, cwd?: string): Promise<string> {
+    return this.resolveWrite(filePath, cwd);
+  }
+
   async resolveCwd(cwd?: string): Promise<string> {
-    const abs = path.resolve(cwd ?? process.cwd());
+    const abs = path.resolve(expandUserPath(cwd ?? process.cwd()));
     const canonical = await realpath(abs).catch(() => {
       throw new BridgeError("E_PATH", "cwd does not exist", { cwd: abs });
     });

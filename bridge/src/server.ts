@@ -77,6 +77,20 @@ function summarizeInvokeMetrics(tool: string, result: Record<string, unknown> | 
     return base;
   }
 
+  if (tool === "stat") {
+    base.exists = result.exists;
+    base.type = result.type;
+    base.size = result.size;
+    return base;
+  }
+
+  if (tool === "list") {
+    base.exists = result.exists;
+    base.type = result.type;
+    base.entryCount = Array.isArray(result.entries) ? result.entries.length : 0;
+    return base;
+  }
+
   return base;
 }
 

@@ -10,7 +10,9 @@ const BUILTIN_TOOL_CONTRACTS: ToolContract[] = [
   { name: "read" },
   { name: "write" },
   { name: "edit" },
-  { name: "bash" }
+  { name: "bash" },
+  { name: "stat" },
+  { name: "list" }
 ];
 
 const builtinContracts = new Map<string, ToolContract>();

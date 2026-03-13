@@ -13,6 +13,8 @@ describe("tool-registry", () => {
     expect(resolveToolName("write")).toBe("write");
     expect(resolveToolName("edit")).toBe("edit");
     expect(resolveToolName("bash")).toBe("bash");
+    expect(resolveToolName("stat")).toBe("stat");
+    expect(resolveToolName("list")).toBe("list");
   });
 
   test("rejects legacy alias names", () => {
@@ -32,6 +34,8 @@ describe("tool-registry", () => {
     expect(names).toContain("write");
     expect(names).toContain("edit");
     expect(names).toContain("bash");
+    expect(names).toContain("stat");
+    expect(names).toContain("list");
   });
 
   test("supports dynamic register/unregister for custom contract", () => {

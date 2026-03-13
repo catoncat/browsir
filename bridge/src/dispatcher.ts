@@ -6,6 +6,8 @@ import { runRead } from "./tools/read";
 import { runWrite } from "./tools/write";
 import { runEdit } from "./tools/edit";
 import { runBash } from "./tools/bash";
+import { runStat } from "./tools/stat";
+import { runList } from "./tools/list";
 
 export interface DispatchContext {
   config: BridgeConfig;
@@ -37,6 +39,10 @@ const BUILTIN_TOOL_HANDLERS: Record<string, InvokeToolHandler> = {
       ctx.config.maxOutputBytes,
       onBashChunk,
     )) as unknown as Record<string, unknown>,
+  stat: async (req, ctx) =>
+    (await runStat(req.args, ctx.fsGuard)) as unknown as Record<string, unknown>,
+  list: async (req, ctx) =>
+    (await runList(req.args, ctx.fsGuard)) as unknown as Record<string, unknown>,
 };
 const overrideToolHandlers = new Map<string, InvokeToolHandler>();
 
