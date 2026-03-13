@@ -21,6 +21,19 @@ interface CollectedDiagnostics {
   text: string;
 }
 
+interface PublishDiagnosticsOptions extends CollectDiagnosticsOptions {
+  bridgeUrl: string;
+  bridgeToken: string;
+  title?: string;
+}
+
+interface PublishedDiagnosticsResult {
+  payload: JsonRecord;
+  exportId: string;
+  downloadUrl: string;
+  item: JsonRecord;
+}
+
 interface NormalizedStepEvent {
   idx: number;
   ts: string;
@@ -42,6 +55,27 @@ interface ToolEventPoint {
   data: JsonRecord;
 }
 
+interface CompactTable {
+  columns: string[];
+  rows: unknown[][];
+}
+
+interface SandboxTelemetryRow {
+  ts: string;
+  type: string;
+  reason?: string;
+  durationMs?: number;
+  bytes?: number;
+  fileCount?: number;
+  namespaceCount?: number;
+  persistedNamespaceCount?: number;
+  forced?: boolean;
+  dirty?: boolean;
+  command?: string;
+  exitCode?: number;
+  timeoutHit?: boolean;
+}
+
 const SANITIZE_MAX_DEPTH = 5;
 const SANITIZE_MAX_ARRAY = 80;
 const SANITIZE_MAX_OBJECT_KEYS = 80;
@@ -57,6 +91,29 @@ function clipText(value: unknown, max = 220): string {
   const text = String(value || "").trim();
   if (!text) return "";
   return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function resolveBridgeHttpBase(bridgeUrlRaw: unknown): string {
+  const fallback = "http://127.0.0.1:8787";
+  const raw = String(bridgeUrlRaw || "").trim();
+  if (!raw) return fallback;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === "ws:") return `http://${parsed.host}`;
+    if (parsed.protocol === "wss:") return `https://${parsed.host}`;
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return `${parsed.protocol}//${parsed.host}`;
+    }
+  } catch {
+    return fallback;
+  }
+  return fallback;
+}
+
+function appendBridgeTokenToUrl(urlRaw: string, token: string): string {
+  const url = new URL(urlRaw);
+  url.searchParams.set("token", token);
+  return url.toString();
 }
 
 async function sendMessage<T = unknown>(type: string, payload: JsonRecord = {}): Promise<T> {
@@ -161,15 +218,38 @@ function normalizeStepTimeline(stepStream: unknown, limit = 24): string[] {
     if (type === "llm.request") {
       const mode = String(payload.mode || "").trim();
       const summaryMode = String(payload.summaryMode || "").trim();
+      const source = String(payload.source || "").trim();
       if (mode === "compaction") {
         lines.push(`LLM 摘要请求 · mode=${summaryMode || "history"} · model=${String(payload.model || "")}`);
+      } else if (source === "hosted_chat_transport") {
+        lines.push(`Hosted transport 请求 · model=${String(payload.model || "")}`);
       } else {
         lines.push(`LLM 请求 · model=${String(payload.model || "")}`);
       }
       continue;
     }
     if (type === "llm.response.parsed") {
-      lines.push(`LLM 解析 · toolCalls=${String(payload.toolCalls || 0)}`);
+      if (String(payload.source || "").trim() === "hosted_chat_transport") {
+        lines.push(`Hosted turn 解析 · toolCalls=${String(payload.toolCalls || 0)}`);
+      } else {
+        lines.push(`LLM 解析 · toolCalls=${String(payload.toolCalls || 0)}`);
+      }
+      continue;
+    }
+    if (type === "hosted_chat.debug") {
+      lines.push(`Hosted transport · ${clipText(payload.stage || payload.detail, 140)}`);
+      continue;
+    }
+    if (type === "hosted_chat.tool_call_detected") {
+      lines.push(`Hosted 工具提取 · toolCalls=${String(payload.toolCalls || 0)}`);
+      continue;
+    }
+    if (type === "hosted_chat.turn_resolved") {
+      lines.push(`Hosted 回合完成 · finish=${String(payload.finishReason || "stop")}`);
+      continue;
+    }
+    if (type === "hosted_chat.transport_error") {
+      lines.push(`Hosted transport 错误 · ${clipText(payload.error || payload.message, 140)}`);
       continue;
     }
     if (type === "auto_retry_start") {
@@ -261,6 +341,102 @@ function buildConversationTail(messages: unknown, limit = 14): Array<Record<stri
   });
 }
 
+function buildCompactTable(
+  rows: Array<Record<string, unknown>>,
+  preferredColumns: string[] = []
+): CompactTable {
+  const columnSet = new Set<string>();
+  const columns: string[] = [];
+
+  for (const column of preferredColumns) {
+    if (!column || columnSet.has(column)) continue;
+    columnSet.add(column);
+    columns.push(column);
+  }
+
+  for (const row of rows) {
+    for (const key of Object.keys(row)) {
+      if (columnSet.has(key)) continue;
+      columnSet.add(key);
+      columns.push(key);
+    }
+  }
+
+  return {
+    columns,
+    rows: rows.map((row) => columns.map((column) => sanitizeValue(row[column])))
+  };
+}
+
+function flattenEventPoint(point: { idx: number; ts: string; type: string; data: JsonRecord }): Record<string, unknown> {
+  return {
+    idx: point.idx,
+    ts: point.ts,
+    type: point.type,
+    ...point.data
+  };
+}
+
+function buildSandboxTimeline(sandboxSession: JsonRecord): string[] {
+  const summary = toRecord(sandboxSession.summary);
+  const lines: string[] = [];
+  const flushCount = Number(summary.flushCount || 0);
+  const skipped = Number(summary.flushSkippedCount || 0);
+  const timeouts = Number(summary.commandTimeoutCount || 0);
+  const lastFlushReason = String(summary.lastFlushReason || "").trim();
+  const lastFlushMs = Number(summary.lastFlushDurationMs || 0);
+  const lastFlushFiles = Number(summary.lastFlushFiles || 0);
+  const lastFlushBytes = Number(summary.lastFlushBytes || 0);
+  const lastCommand = clipText(summary.lastCommand, 80);
+  const lastCommandExitCode = summary.lastCommandExitCode;
+
+  if (flushCount > 0) {
+    lines.push(
+      `Sandbox flush ${flushCount} 次` +
+        (lastFlushReason ? ` · 最近=${lastFlushReason}` : "") +
+        (lastFlushFiles > 0 ? ` · ${lastFlushFiles} files` : "") +
+        (lastFlushBytes > 0 ? ` · ${lastFlushBytes} bytes` : "") +
+        (lastFlushMs > 0 ? ` · ${lastFlushMs}ms` : "")
+    );
+  }
+  if (skipped > 0) {
+    lines.push(`Sandbox flush 合并跳过 ${skipped} 次`);
+  }
+  if (lastCommand) {
+    lines.push(
+      `Sandbox command · ${lastCommand}` +
+        (lastCommandExitCode != null ? ` · exit=${String(lastCommandExitCode)}` : "") +
+        (timeouts > 0 ? ` · timeout=${timeouts}` : "")
+    );
+  }
+  return lines.slice(-3);
+}
+
+function buildSandboxTrace(sandboxSession: JsonRecord, limit = 32): SandboxTelemetryRow[] {
+  const recent = Array.isArray(sandboxSession.recent) ? sandboxSession.recent : [];
+  return recent.slice(-Math.max(1, limit)).map((item) => {
+    const row = toRecord(item);
+    return {
+      ts: normalizeTs(row.ts),
+      type: String(row.type || "unknown"),
+      reason: String(row.reason || ""),
+      durationMs: toPositiveInt(row.durationMs),
+      bytes: toPositiveInt(row.bytes),
+      fileCount: toPositiveInt(row.fileCount),
+      namespaceCount: toPositiveInt(row.namespaceCount),
+      persistedNamespaceCount: toPositiveInt(row.persistedNamespaceCount),
+      forced: row.forced === true,
+      dirty: row.dirty === true,
+      command: clipText(row.command, 180),
+      exitCode:
+        row.exitCode == null || row.exitCode === ""
+          ? undefined
+          : Number(row.exitCode),
+      timeoutHit: row.timeoutHit === true
+    };
+  });
+}
+
 function summarizeLlmRequestPayload(payload: JsonRecord): JsonRecord {
   const req = toRecord(payload.payload);
   const messages = Array.isArray(req.messages) ? req.messages : [];
@@ -303,6 +479,10 @@ function buildLlmTrace(events: NormalizedStepEvent[], limit = 80): LlmEventPoint
     "llm.response.parsed",
     "llm.stream.start",
     "llm.stream.end",
+    "hosted_chat.debug",
+    "hosted_chat.tool_call_detected",
+    "hosted_chat.turn_resolved",
+    "hosted_chat.transport_error",
     "llm.skipped",
     "auto_retry_start",
     "auto_retry_end"
@@ -319,7 +499,10 @@ function buildLlmTrace(events: NormalizedStepEvent[], limit = 80): LlmEventPoint
     };
 
     if (event.type === "llm.request") {
-      point.data = summarizeLlmRequestPayload(payload);
+      point.data = {
+        ...summarizeLlmRequestPayload(payload),
+        source: String(payload.source || "") || "llm_provider"
+      };
     } else if (event.type === "llm.response.raw") {
       const rawBody = String(payload.body || payload.bodyPreview || "");
       point.data = {
@@ -335,7 +518,8 @@ function buildLlmTrace(events: NormalizedStepEvent[], limit = 80): LlmEventPoint
       point.data = {
         step: toPositiveInt(payload.step),
         toolCalls: toPositiveInt(payload.toolCalls),
-        hasText: payload.hasText === true
+        hasText: payload.hasText === true,
+        source: String(payload.source || "") || "llm_provider"
       };
     } else if (event.type === "llm.stream.start") {
       point.data = {
@@ -349,6 +533,34 @@ function buildLlmTrace(events: NormalizedStepEvent[], limit = 80): LlmEventPoint
         packetCount: toPositiveInt(payload.packetCount),
         contentLength: toPositiveInt(payload.contentLength),
         toolCalls: toPositiveInt(payload.toolCalls)
+      };
+    } else if (event.type === "hosted_chat.debug") {
+      point.data = {
+        step: toPositiveInt(payload.step),
+        attempt: toPositiveInt(payload.attempt),
+        stage: String(payload.stage || ""),
+        detail: String(payload.detail || "")
+      };
+    } else if (event.type === "hosted_chat.tool_call_detected") {
+      point.data = {
+        step: toPositiveInt(payload.step),
+        attempt: toPositiveInt(payload.attempt),
+        toolCalls: toPositiveInt(payload.toolCalls),
+        assistantTextLength: toPositiveInt(payload.assistantTextLength)
+      };
+    } else if (event.type === "hosted_chat.turn_resolved") {
+      point.data = {
+        step: toPositiveInt(payload.step),
+        attempt: toPositiveInt(payload.attempt),
+        finishReason: String(payload.finishReason || ""),
+        toolCalls: toPositiveInt(payload.toolCalls),
+        assistantTextLength: toPositiveInt(payload.assistantTextLength)
+      };
+    } else if (event.type === "hosted_chat.transport_error") {
+      point.data = {
+        step: toPositiveInt(payload.step),
+        attempt: toPositiveInt(payload.attempt),
+        error: clipText(payload.error || payload.message, 240)
       };
     } else if (event.type === "llm.skipped") {
       point.data = {
@@ -657,9 +869,9 @@ function buildRawEventTail(events: NormalizedStepEvent[], limit = 72): Array<Rec
 function buildDiagnosticsText(payload: JsonRecord): string {
   // 复制内容优先服务 AI：稳定标记 + 结构化 JSON，便于索引和解析。
   return [
-    "[[BBL_DIAGNOSTIC_V2]]",
+    "[[BBL_DIAGNOSTIC_V4]]",
     JSON.stringify(payload, null, 2),
-    "[[/BBL_DIAGNOSTIC_V2]]"
+    "[[/BBL_DIAGNOSTIC_V4]]"
   ].join("\n");
 }
 
@@ -685,7 +897,10 @@ function buildAgentDecisionTrace(events: NormalizedStepEvent[], limit = 80): Arr
     "loop_restart",
     "step_planned",
     "step_finished",
-    "llm.response.parsed"
+    "llm.response.parsed",
+    "hosted_chat.tool_call_detected",
+    "hosted_chat.turn_resolved",
+    "hosted_chat.transport_error"
   ]);
 
   for (const event of events) {
@@ -724,6 +939,20 @@ function buildAgentDecisionTrace(events: NormalizedStepEvent[], limit = 80): Arr
       row.step = toPositiveInt(payload.step);
       row.toolCalls = toPositiveInt(payload.toolCalls);
       row.hasText = payload.hasText === true;
+      row.source = String(payload.source || "") || "llm_provider";
+    } else if (event.type === "hosted_chat.tool_call_detected") {
+      row.step = toPositiveInt(payload.step);
+      row.toolCalls = toPositiveInt(payload.toolCalls);
+      row.phase = "tool_extraction";
+    } else if (event.type === "hosted_chat.turn_resolved") {
+      row.step = toPositiveInt(payload.step);
+      row.toolCalls = toPositiveInt(payload.toolCalls);
+      row.finishReason = String(payload.finishReason || "");
+      row.phase = "turn_resolved";
+    } else if (event.type === "hosted_chat.transport_error") {
+      row.step = toPositiveInt(payload.step);
+      row.phase = "transport_error";
+      row.error = clipText(payload.error || payload.message, 360);
     }
 
     rows.push(row);
@@ -754,9 +983,12 @@ export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}
   const messages = Array.isArray(conversationView.messages) ? conversationView.messages : [];
   const stepStream = Array.isArray(dumpRecord.stepStream) ? (dumpRecord.stepStream as unknown[]) : [];
   const stepStreamMeta = toRecord(dumpRecord.stepStreamMeta);
+  const sandboxRuntime = toRecord(dumpRecord.sandboxRuntime);
+  const sandboxSession = toRecord(sandboxRuntime.session);
   const events = normalizeStepEvents(stepStream);
 
   const timeline = normalizeStepTimeline(stepStream, options.timelineLimit ?? 24);
+  const sandboxTimeline = buildSandboxTimeline(sandboxSession);
   const lastError = findLastError(stepStream);
   const recentEvents = buildRecentEventsSummary(options.recentEvents || [], events);
   const loopRuns = buildLoopRuns(events);
@@ -766,6 +998,9 @@ export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}
   const eventTypeCounts = buildEventTypeCounts(events);
   const conversationTail = buildConversationTail(messages, options.conversationTailLimit ?? 14);
   const agentDecisionTrace = buildAgentDecisionTrace(events, 100);
+  const sandboxTrace = buildSandboxTrace(sandboxSession, 32);
+  const sandboxSummary = toRecord(sandboxSession.summary);
+  const sandboxRuntimeInfo = toRecord(sandboxSession.runtime);
   const llmSkipped = events
     .filter((event) => event.type === "llm.skipped")
     .map((event) => ({
@@ -777,7 +1012,26 @@ export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}
     }));
 
   const payload: JsonRecord = {
-    schemaVersion: "bbl.diagnostic.v2",
+    schemaVersion: "bbl.diagnostic.v4",
+    diagnosticGuide: {
+      preferredLookupOrder: [
+        "summary.lastError",
+        "timeline",
+        "sandbox.summary",
+        "sandbox.trace",
+        "llm.trace",
+        "tools.trace",
+        "agent.loopRuns",
+        "rawEventTail"
+      ],
+      jqHints: [
+        ".summary.lastError",
+        ".sandbox.summary",
+        ".sandbox.trace.rows[]",
+        ".llm.trace.rows[]",
+        ".tools.trace.rows[]"
+      ]
+    },
     generatedAt: new Date().toISOString(),
     sessionId: sessionId || String(dumpRecord.sessionId || ""),
     config: {
@@ -796,38 +1050,209 @@ export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}
       messageCount: Number(conversationView.messageCount || messages.length || 0),
       stepCount: events.length,
       stepStreamTruncated: stepStreamMeta.truncated === true,
-      lastError
+      lastError,
+      sandbox: {
+        live: Object.keys(sandboxRuntimeInfo).length > 0,
+        dirty: sandboxRuntimeInfo.dirty === true,
+        flushCount: Number(sandboxSummary.flushCount || 0),
+        flushSkippedCount: Number(sandboxSummary.flushSkippedCount || 0),
+        forcedFlushCount: Number(sandboxSummary.forcedFlushCount || 0),
+        commandCount: Number(sandboxSummary.commandCount || 0),
+        commandTimeoutCount: Number(sandboxSummary.commandTimeoutCount || 0),
+        lastFlushAt: String(sandboxSummary.lastFlushAt || ""),
+        lastCommandAt: String(sandboxSummary.lastCommandAt || "")
+      }
     },
-    timeline,
+    timeline: [...timeline, ...sandboxTimeline].slice(-(options.timelineLimit ?? 24)),
     recentEvents,
     eventTypeCounts,
+    sandbox: {
+      summary: sanitizeValue({
+        ...sandboxSummary,
+        runtime: sandboxRuntimeInfo
+      }),
+      trace: buildCompactTable(sandboxTrace, [
+        "ts",
+        "type",
+        "reason",
+        "durationMs",
+        "bytes",
+        "fileCount",
+        "namespaceCount",
+        "persistedNamespaceCount",
+        "forced",
+        "dirty",
+        "command",
+        "exitCode",
+        "timeoutHit"
+      ])
+    },
     agent: {
       parentSessionId: String(conversationView.parentSessionId || ""),
       forkedFrom: sanitizeValue(conversationView.forkedFrom),
       runtimeState: sanitizeValue(runtime),
       lastStatus: sanitizeValue(conversationView.lastStatus),
       loopRuns,
-      decisionTrace: agentDecisionTrace,
-      conversationTail
+      decisionTrace: buildCompactTable(agentDecisionTrace, [
+        "idx",
+        "ts",
+        "type",
+        "step",
+        "action",
+        "ok",
+        "status",
+        "toolCalls",
+        "hasText",
+        "mode",
+        "prompt",
+        "arguments",
+        "error",
+        "preview",
+        "modeUsed",
+        "providerId",
+        "fallbackFrom",
+        "llmSteps",
+        "toolSteps",
+        "message"
+      ]),
+      conversationTail: buildCompactTable(conversationTail, [
+        "index",
+        "role",
+        "entryId",
+        "toolName",
+        "toolCallId",
+        "content"
+      ])
     },
     llm: {
-      skipped: llmSkipped,
-      trace: llmTrace
+      skipped: buildCompactTable(llmSkipped, ["idx", "ts", "reason", "hasBase", "hasKey"]),
+      trace: buildCompactTable(
+        llmTrace.map((point) => flattenEventPoint(point)),
+        [
+          "idx",
+          "ts",
+          "type",
+          "step",
+          "attempt",
+          "status",
+          "ok",
+          "toolCalls",
+          "packetCount",
+          "contentLength",
+          "messageCount",
+          "messageChars",
+          "maxMessageChars",
+          "requestBytes",
+          "requestMessageCount",
+          "toolResultCount",
+          "hasToolsDefinition",
+          "model",
+          "url",
+          "lastUserSnippet",
+          "bodyLength",
+          "bodyTruncated",
+          "body",
+          "reason",
+          "delayMs",
+          "maxAttempts",
+          "success",
+          "finalError",
+          "hasText",
+          "hasBase",
+          "hasKey"
+        ]
+      )
     },
     tools: {
-      trace: toolTrace
+      trace: buildCompactTable(
+        toolTrace.map((point) => flattenEventPoint(point)),
+        [
+          "idx",
+          "ts",
+          "type",
+          "step",
+          "mode",
+          "action",
+          "ok",
+          "modeUsed",
+          "capability",
+          "providerId",
+          "fallbackFrom",
+          "verified",
+          "verifyReason",
+          "retryable",
+          "arguments",
+          "errorCode",
+          "error",
+          "preview"
+        ]
+      )
     },
-    rawEventTail,
+    rawEventTail: buildCompactTable(rawEventTail, ["idx", "ts", "type", "payload"]),
     debug: {
       entryCount: Number(dumpRecord.entryCount || 0),
       stepStreamCount: events.length,
       stepStreamMeta: sanitizeValue(stepStreamMeta),
-      globalTailCount: Array.isArray(dumpRecord.globalTail) ? dumpRecord.globalTail.length : 0
+      globalTailCount: Array.isArray(dumpRecord.globalTail) ? dumpRecord.globalTail.length : 0,
+      sandboxRuntimeMeta: sanitizeValue({
+        schemaVersion: String(sandboxRuntime.schemaVersion || ""),
+        totals: toRecord(sandboxRuntime.totals)
+      })
     }
   };
 
   return {
     payload,
     text: buildDiagnosticsText(payload)
+  };
+}
+
+export async function publishDiagnosticsToBridge(
+  options: PublishDiagnosticsOptions
+): Promise<PublishedDiagnosticsResult> {
+  const bridgeUrl = String(options.bridgeUrl || "").trim();
+  const bridgeToken = String(options.bridgeToken || "").trim();
+  if (!bridgeUrl) {
+    throw new Error("bridgeUrl 未配置");
+  }
+  if (!bridgeToken) {
+    throw new Error("bridgeToken 未配置");
+  }
+
+  const { payload } = await collectDiagnostics(options);
+  const sessionId = String(payload.sessionId || options.sessionId || "").trim();
+  const title = clipText(options.title || sessionId || "未命名会话", 120);
+  const baseUrl = resolveBridgeHttpBase(bridgeUrl);
+
+  const response = await fetch(`${baseUrl}/api/diagnostics?token=${encodeURIComponent(bridgeToken)}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      sessionId,
+      title,
+      payload
+    })
+  });
+
+  const result = toRecord(await response.json().catch(() => ({})));
+  if (!response.ok || result.ok === false) {
+    throw new Error(String(result.error || `publish diagnostics failed: ${response.status}`));
+  }
+
+  const resultData = toRecord(result.data);
+  const item = toRecord(resultData.item || result.item);
+  const downloadPath = String(resultData.downloadUrl || result.downloadUrl || "").trim();
+  const unsignedDownloadUrl = downloadPath.startsWith("http://") || downloadPath.startsWith("https://")
+    ? downloadPath
+    : `${baseUrl}${downloadPath}`;
+  const downloadUrl = appendBridgeTokenToUrl(unsignedDownloadUrl, bridgeToken);
+
+  return {
+    payload,
+    exportId: String(item.id || ""),
+    downloadUrl,
+    item
   };
 }
