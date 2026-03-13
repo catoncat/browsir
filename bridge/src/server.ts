@@ -6,9 +6,23 @@ import { AuditLogger } from "./audit";
 import type { AuditRecord } from "./audit";
 import { loadConfig, originAllowed } from "./config";
 import type { BridgeConfig } from "./config";
+import {
+  listDiagnosticExports,
+  listDebugSnapshotExports,
+  readDiagnosticExport,
+  readDebugSnapshotExport,
+  sanitizeFileSegment,
+  writeDiagnosticExport,
+  writeDebugSnapshotExport,
+} from "./diagnostics-store";
 import { dispatchInvoke } from "./dispatcher";
 import { errorToPayload } from "./errors";
 import { FsGuard } from "./fs-guard";
+import {
+  buildInvokeFingerprint,
+  estimatePayloadBytes,
+  summarizeInvokeMetrics,
+} from "./invoke-metrics";
 import { parseInvokeFrame } from "./protocol";
 import type { EventFrame, InvokeFailure, InvokeSuccess } from "./types";
 
@@ -38,88 +52,6 @@ function eventFrame(
     ...fields,
     data,
   };
-}
-
-function summarizeInvokeMetrics(tool: string, result: Record<string, unknown> | null, durationMs: number) {
-  const base: Record<string, unknown> = {
-    tool,
-    durationMs,
-  };
-
-  if (!result) return base;
-
-  if (tool === "bash") {
-    base.exitCode = result.exitCode;
-    base.bytesOut = result.bytesOut;
-    base.stdoutBytes = result.stdoutBytes;
-    base.stderrBytes = result.stderrBytes;
-    base.truncated = result.truncated;
-    base.timeoutHit = result.timeoutHit;
-    base.cmdId = result.cmdId;
-    base.risk = result.risk;
-    return base;
-  }
-
-  if (tool === "read") {
-    base.size = result.size;
-    base.limit = result.limit;
-    base.truncated = result.truncated;
-    return base;
-  }
-
-  if (tool === "write") {
-    base.mode = result.mode;
-    base.bytesWritten = result.bytesWritten;
-    return base;
-  }
-
-  if (tool === "edit") {
-    base.hunks = result.hunks;
-    base.replacements = result.replacements;
-    return base;
-  }
-
-  if (tool === "stat") {
-    base.exists = result.exists;
-    base.type = result.type;
-    base.size = result.size;
-    return base;
-  }
-
-  if (tool === "list") {
-    base.exists = result.exists;
-    base.type = result.type;
-    base.entryCount = Array.isArray(result.entries) ? result.entries.length : 0;
-    return base;
-  }
-
-  return base;
-}
-
-function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== "object") {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
-  }
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  const entries = keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`);
-  return `{${entries.join(",")}}`;
-}
-
-function buildInvokeFingerprint(canonicalTool: string, args: Record<string, unknown>): string {
-  const payload = `${canonicalTool}:${stableStringify(args)}`;
-  return crypto.createHash("sha1").update(payload).digest("hex");
-}
-
-function estimatePayloadBytes(value: unknown): number {
-  try {
-    return Buffer.byteLength(JSON.stringify(value), "utf8");
-  } catch {
-    return 0;
-  }
 }
 
 interface AuditSink {
