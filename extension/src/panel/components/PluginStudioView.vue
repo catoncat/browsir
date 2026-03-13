@@ -505,17 +505,46 @@ function applyEditorFiles(files: StudioFiles): void {
   uiJsCode.value = String(files.uiJs || "");
 }
 
+function applyDefaultDraftFiles(): void {
+  applyEditorFiles({
+    pluginJson: defaultPluginJson(),
+    indexJs: defaultIndexJs(),
+    uiJs: defaultUiJs()
+  });
+}
+
 function getSelectedProject(): StudioProject | null {
   const id = String(selectedProjectId.value || "").trim();
   if (!id) return null;
   return projects.value.find((item) => item.id === id) || null;
 }
 
+function findInstalledPluginById(pluginId: string): PluginMetadata | null {
+  const id = String(pluginId || "").trim();
+  if (!id) return null;
+  return plugins.value.find((item) => item.id === id) || null;
+}
+
+function syncSelectedPluginForProject(project: StudioProject | null): void {
+  const pluginId = String(project?.pluginId || "").trim();
+  selectedPluginId.value = findInstalledPluginById(pluginId)?.id || "";
+}
+
+function syncSelectionAfterPluginRefresh(): void {
+  const project = getSelectedProject();
+  if (project) {
+    syncSelectedPluginForProject(project);
+    return;
+  }
+  if (!selectedPluginId.value) return;
+  if (!findInstalledPluginById(selectedPluginId.value)) {
+    selectedPluginId.value = "";
+  }
+}
+
 function selectProject(project: StudioProject): void {
   selectedProjectId.value = project.id;
-  if (project.pluginId) {
-    selectedPluginId.value = project.pluginId;
-  }
+  syncSelectedPluginForProject(project);
   applyEditorFiles(project.files);
   writeSelectedProjectToStorage(project.id);
 }
@@ -734,6 +763,7 @@ async function refreshPlugins(): Promise<void> {
   try {
     const out = await store.listPlugins();
     plugins.value = out.plugins;
+    syncSelectionAfterPluginRefresh();
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : String(error || "刷新插件失败");
   } finally {
@@ -785,7 +815,8 @@ async function handleInstall(replace: boolean): Promise<void> {
 }
 
 async function handleTogglePlugin(enable: boolean): Promise<void> {
-  const pluginId = String(selectedPluginId.value || "").trim();
+  const plugin = selectedInstalledPlugin.value;
+  const pluginId = String(plugin?.id || "").trim();
   if (!pluginId) {
     errorMessage.value = "请先在左侧选择一个已安装插件";
     return;
@@ -845,8 +876,31 @@ function handleSaveProject(): void {
   }
 }
 
-async function handleUnregisterPlugin(): Promise<void> {
-  const plugin = selectedInstalledPlugin.value;
+function handleDeleteProject(project: StudioProject): void {
+  if (project.category !== "user") return;
+  const confirmed = globalThis.confirm(`确认删除项目 ${project.name}？`);
+  if (!confirmed) return;
+  const nextProjects = projects.value.filter((item) => item.id !== project.id);
+  projects.value = nextProjects;
+  writeProjectsToStorage(nextProjects);
+  errorMessage.value = "";
+  statusMessage.value = "项目已删除";
+  if (selectedProjectId.value !== project.id) {
+    return;
+  }
+  const nextSelected = nextProjects[0] || null;
+  if (nextSelected) {
+    selectProject(nextSelected);
+    return;
+  }
+  selectedProjectId.value = "";
+  selectedPluginId.value = "";
+  writeSelectedProjectToStorage("");
+  applyDefaultDraftFiles();
+}
+
+async function handleUnregisterPlugin(targetPlugin?: PluginMetadata | null): Promise<void> {
+  const plugin = targetPlugin || selectedInstalledPlugin.value;
   if (!plugin) {
     errorMessage.value = "请先选择一个已安装插件";
     return;
@@ -863,9 +917,11 @@ async function handleUnregisterPlugin(): Promise<void> {
   statusMessage.value = "";
   try {
     await store.unregisterPlugin(pluginId);
-    selectedPluginId.value = "";
     await refreshPlugins();
-    statusMessage.value = "插件已卸载";
+    if (selectedPluginId.value === pluginId) {
+      selectedPluginId.value = "";
+    }
+    statusMessage.value = `插件 ${plugin.name || plugin.id} 已卸载`;
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : String(error || "卸载失败");
   } finally {
@@ -1020,10 +1076,11 @@ const activeEditor = computed({
 });
 
 const selectedInstalledPlugin = computed(() =>
-  plugins.value.find((item) => item.id === selectedPluginId.value) || null
+  findInstalledPluginById(selectedPluginId.value) || null
 );
 
 const selectedInstalledPluginEnabled = computed(() => selectedInstalledPlugin.value?.enabled === true);
+const hasSelectedInstalledPlugin = computed(() => Boolean(selectedInstalledPlugin.value));
 
 function handleRuntimeMessage(message: unknown): void {
   const payload = toRecord(message);
@@ -1191,8 +1248,10 @@ onUnmounted(() => {
               :class="['panel-item', selectedProjectId === project.id ? 'active' : '']"
               @click="selectProject(project)"
             >
-              <p class="item-title">{{ project.name }}</p>
-              <p class="item-sub">{{ project.pluginId || "示例" }}</p>
+              <div class="panel-item-main">
+                <p class="item-title">{{ project.name }}</p>
+                <p class="item-sub">{{ project.pluginId || "示例" }}</p>
+              </div>
             </li>
             <li
               v-for="project in userProjects"
@@ -1200,8 +1259,19 @@ onUnmounted(() => {
               :class="['panel-item', selectedProjectId === project.id ? 'active' : '']"
               @click="selectProject(project)"
             >
-              <p class="item-title">{{ project.name }}</p>
-              <p class="item-sub">{{ project.pluginId || "未绑定 pluginId" }}</p>
+              <div class="panel-item-main">
+                <p class="item-title">{{ project.name }}</p>
+                <p class="item-sub">{{ project.pluginId || "未绑定 pluginId" }}</p>
+              </div>
+              <button
+                class="panel-item-icon-btn danger"
+                :disabled="busy"
+                :aria-label="`删除项目 ${project.name}`"
+                title="删除项目"
+                @click.stop="handleDeleteProject(project)"
+              >
+                <Trash2 :size="13" aria-hidden="true" />
+              </button>
             </li>
           </ul>
         </section>
@@ -1215,8 +1285,19 @@ onUnmounted(() => {
               :class="['panel-item', selectedPluginId === plugin.id ? 'active' : '']"
               @click="handleLoadFromInstalled(plugin)"
             >
-              <p class="item-title">{{ plugin.name || plugin.id }}</p>
-              <p class="item-sub">{{ plugin.id }}</p>
+              <div class="panel-item-main">
+                <p class="item-title">{{ plugin.name || plugin.id }}</p>
+                <p class="item-sub">{{ plugin.id }}</p>
+              </div>
+              <button
+                class="panel-item-icon-btn danger"
+                :disabled="busy"
+                :aria-label="`卸载插件 ${plugin.name || plugin.id}`"
+                title="卸载插件"
+                @click.stop="handleUnregisterPlugin(plugin)"
+              >
+                <Trash2 :size="13" aria-hidden="true" />
+              </button>
             </li>
             <li
               v-for="plugin in installedUserPlugins"
@@ -1224,8 +1305,19 @@ onUnmounted(() => {
               :class="['panel-item', selectedPluginId === plugin.id ? 'active' : '']"
               @click="handleLoadFromInstalled(plugin)"
             >
-              <p class="item-title">{{ plugin.name || plugin.id }}</p>
-              <p class="item-sub">{{ plugin.id }}</p>
+              <div class="panel-item-main">
+                <p class="item-title">{{ plugin.name || plugin.id }}</p>
+                <p class="item-sub">{{ plugin.id }}</p>
+              </div>
+              <button
+                class="panel-item-icon-btn danger"
+                :disabled="busy"
+                :aria-label="`卸载插件 ${plugin.name || plugin.id}`"
+                title="卸载插件"
+                @click.stop="handleUnregisterPlugin(plugin)"
+              >
+                <Trash2 :size="13" aria-hidden="true" />
+              </button>
             </li>
             <li v-if="installedExamplePlugins.length === 0 && installedUserPlugins.length === 0" class="panel-empty">
               暂无已安装插件
@@ -1243,8 +1335,10 @@ onUnmounted(() => {
               :key="plugin.id"
               class="panel-item builtin"
             >
-              <p class="item-title">{{ plugin.name || plugin.id }}</p>
-              <p class="item-sub">{{ plugin.id }}</p>
+              <div class="panel-item-main">
+                <p class="item-title">{{ plugin.name || plugin.id }}</p>
+                <p class="item-sub">{{ plugin.id }}</p>
+              </div>
             </li>
           </ul>
         </section>
@@ -1386,12 +1480,12 @@ onUnmounted(() => {
             <Save :size="14" />
             保存
           </button>
-          <button class="studio-btn primary" :disabled="busy" @click="handleInstall(!!selectedPluginId)">
+          <button class="studio-btn primary" :disabled="busy" @click="handleInstall(hasSelectedInstalledPlugin)">
             <Zap :size="14" />
-            {{ selectedPluginId ? '热更新' : '安装' }}
+            {{ hasSelectedInstalledPlugin ? '热更新' : '安装' }}
           </button>
           <button
-            v-if="selectedPluginId"
+            v-if="hasSelectedInstalledPlugin"
             class="studio-btn"
             :disabled="busy"
             @click="handleTogglePlugin(!selectedInstalledPluginEnabled)"
@@ -1819,6 +1913,10 @@ onUnmounted(() => {
   background: var(--bg);
   padding: 8px;
   cursor: pointer;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .panel-item.builtin {
@@ -1826,9 +1924,39 @@ onUnmounted(() => {
   opacity: 0.82;
 }
 
+.panel-item-main {
+  min-width: 0;
+  flex: 1;
+}
+
 .panel-item.active {
   border-color: var(--accent);
   background: color-mix(in oklab, var(--accent) 8%, var(--bg));
+}
+
+.panel-item-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.panel-item-icon-btn:hover:not(:disabled) {
+  border-color: #d5a7a7;
+  background: #fff0f0;
+  color: #7f2222;
+}
+
+.panel-item-icon-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .item-title {
