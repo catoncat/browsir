@@ -194,6 +194,13 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
       };
 
       try {
+        // bbloop.* 是基础设施消息（plugin trace / UI mascot / global notice 等），
+        // 仅面板侧消费，不走 applyAfter → runtime.route.after hook 链路。
+        // 否则沙箱插件的 emitPluginHookTrace 会自回环触发死循环。
+        if (type.startsWith("bbloop.")) {
+          return ok({ passthrough: true });
+        }
+
         if (type === "ping") {
           return await applyAfter(
             ok({ source: "service-worker", version: "vnext" }),
