@@ -9,6 +9,7 @@ import {
   Database,
   Cpu,
   Activity,
+  CircleAlert,
   Pencil,
   RotateCcw,
   GitBranch,
@@ -90,6 +91,7 @@ const isFinished = computed(() => props.role !== "assistant_streaming");
 
 const showThinking = ref(false);
 const showSystemSummary = ref(false);
+const showRawToolOutput = ref(false);
 const inlineTextarea = ref<HTMLTextAreaElement | null>(null);
 const pendingActivityViewport = ref<HTMLElement | null>(null);
 const pendingCardStickToBottom = ref(true);
@@ -118,6 +120,78 @@ const toolTextContent = computed(() => {
   if (!isTool.value) return "";
   return toolRender.value.detail;
 });
+const toolOutputText = computed(() => {
+  const rawText = String(toolTextContent.value || "");
+  const trimmed = rawText.trim();
+  if (!trimmed) return "";
+  if (
+    (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+    (trimmed.startsWith("[") && trimmed.endsWith("]"))
+  ) {
+    try {
+      return JSON.stringify(JSON.parse(trimmed), null, 2);
+    } catch {
+      return rawText;
+    }
+  }
+  return rawText;
+});
+
+function escapeHtml(raw: string): string {
+  return String(raw || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function decorateInlineTokens(raw: string): string {
+  return escapeHtml(raw)
+    .replace(/\b(E_[A-Z0-9_]+)\b/g, '<span class="tool-token tool-token-code">$1</span>')
+    .replace(/\b(stdout|stderr|errorCode|error|exitCode)\b/giu, '<span class="tool-token tool-token-keyword">$1</span>');
+}
+
+function resolveLineToneClass(raw: string): string {
+  if (/(失败|error|not found|undefined|denied|exception|不可用|超时)/iu.test(raw)) return "tool-line-error";
+  if (/(成功|完成|ok|passed|verified)/iu.test(raw)) return "tool-line-success";
+  return "tool-line-normal";
+}
+
+function renderToolOutputLine(rawLine: string): string {
+  const line = String(rawLine || "");
+  const trimmed = line.trim();
+  if (!trimmed) return '<span class="tool-line tool-line-empty">&nbsp;</span>';
+
+  if (/^(命令|stdout|stderr|errorCode|error|exitCode)$/iu.test(trimmed)) {
+    return `<span class="tool-line tool-line-section">${escapeHtml(trimmed)}</span>`;
+  }
+
+  const kvMatch = line.match(/^([\u4e00-\u9fa5A-Za-z_][\u4e00-\u9fa5A-Za-z0-9_.-]*)\s*([:=：])\s*(.*)$/u);
+  if (kvMatch) {
+    const [, key, separator, value] = kvMatch;
+    const isStrongKey = /^(error|stderr|errorCode|exitCode|命令)$/iu.test(key);
+    const keyClass = isStrongKey ? "tool-key tool-key-strong" : "tool-key";
+    const valueClass = isStrongKey ? "tool-value tool-value-emphasis" : "tool-value";
+    return [
+      '<span class="tool-line">',
+      `<span class="${keyClass}">${escapeHtml(key)}</span>`,
+      `<span class="tool-sep">${escapeHtml(separator)}</span>`,
+      `<span class="${valueClass}">${decorateInlineTokens(value)}</span>`,
+      "</span>"
+    ].join("");
+  }
+
+  const toneClass = resolveLineToneClass(line);
+  return `<span class="tool-line ${toneClass}">${decorateInlineTokens(line)}</span>`;
+}
+
+const toolOutputHtml = computed(() => {
+  const text = toolOutputText.value;
+  if (!text.trim()) return '<span class="tool-line tool-line-empty">暂无输出</span>';
+  return text.split(/\r?\n/u).map((line) => renderToolOutputLine(line)).join("");
+});
+
 const messageAriaPreview = computed(() => {
   if (isSummarySystemMessage.value) return "历史摘要";
   if (isSystem.value) return "系统消息";
@@ -174,10 +248,10 @@ const toolToggleAriaLabel = computed(() =>
   showThinking.value ? "收起运行详情" : "展开运行详情"
 );
 const pendingToneClass = computed(() =>
-  props.toolPendingStatus === "failed" ? "bg-rose-100/40 dark:bg-rose-900/20" : "bg-ui-surface/45"
+  props.toolPendingStatus === "failed" ? "bg-rose-100/22 dark:bg-rose-900/14" : "bg-ui-surface/45"
 );
 const pendingToneTextClass = computed(() =>
-  props.toolPendingStatus === "failed" ? "text-rose-700/90 dark:text-rose-300/90" : "text-ui-text"
+  props.toolPendingStatus === "failed" ? "text-rose-700/78 dark:text-rose-300/74" : "text-ui-text"
 );
 const pendingCompactLine = computed(() => {
   const action = String(props.toolPendingAction || props.toolName || "tool").trim();
@@ -191,17 +265,38 @@ const pendingCompactLine = computed(() => {
   return clipInlineText(detail ? `${base} · ${detail}` : base);
 });
 const toolToneClass = computed(() => {
-  if (toolRender.value.tone === "error") return "bg-rose-100/40 dark:bg-rose-900/20";
+  if (toolRender.value.tone === "error") return "bg-rose-100/22 dark:bg-rose-900/14";
   if (toolRender.value.tone === "success") return "bg-ui-surface/45";
   return "bg-ui-surface/45";
 });
 const toolToneTextClass = computed(() => {
-  if (toolRender.value.tone === "error") return "text-rose-700/90 dark:text-rose-300/90";
+  if (toolRender.value.tone === "error") return "text-rose-700/78 dark:text-rose-300/74";
   if (toolRender.value.tone === "success") return "text-ui-text";
   return "text-ui-text";
 });
+const toolShellClass = computed(() => {
+  if (toolRender.value.tone === "error") {
+    return "border border-rose-200/55 dark:border-rose-900/35 bg-rose-50/38 dark:bg-rose-950/12 shadow-[0_1px_2px_rgba(190,24,93,0.10)]";
+  }
+  return "border border-ui-border/70 bg-ui-surface/35 shadow-[0_1px_2px_rgba(15,23,42,0.08)]";
+});
+const toolDividerClass = computed(() =>
+  toolRender.value.tone === "error"
+    ? "border-b border-rose-200/60 dark:border-rose-900/40"
+    : "border-b border-ui-border/60"
+);
+const toolOutputSurfaceClass = computed(() =>
+  toolRender.value.tone === "error"
+    ? "bg-rose-50/24 dark:bg-rose-950/10"
+    : "bg-ui-bg/32"
+);
+const toolIconClass = computed(() =>
+  toolRender.value.tone === "error"
+    ? "text-rose-700/78 dark:text-rose-300/74"
+    : "text-ui-text-muted"
+);
 const toolIcon = computed(() => {
-  if (toolRender.value.tone === "error") return X;
+  if (toolRender.value.tone === "error") return CircleAlert;
   if (toolRender.value.kind === "tabs") return Globe;
   if (toolRender.value.kind === "snapshot") return Sparkles;
   if (toolRender.value.kind === "invoke") return Cpu;
@@ -419,7 +514,7 @@ watch(
 <template>
   <div 
     class="flex flex-col animate-in fade-in duration-300 group"
-    :class="isTool || isToolPending ? 'mb-1' : 'mb-2.5'"
+    :class="isTool || isToolPending ? 'mb-1.5' : 'mb-2.5'"
     role="listitem"
     :aria-label="`${isUser ? '用户' : isSystem ? '系统' : isAssistantLike ? '助手' : '工具'}消息: ${messageAriaPreview}...`"
   >
@@ -740,43 +835,91 @@ watch(
       </div>
     </div>
 
-    <!-- Tool/Thinking Message: Collapsible (No buttons) -->
-    <div v-else-if="isTool" class="flex flex-col group/tool" role="group" aria-label="工具调用结果">
-      <div class="rounded-md px-2 py-1.5" :class="toolToneClass">
-        <div class="flex items-center gap-1.5 min-w-0">
-          <div class="h-4.5 w-4.5 shrink-0 rounded-sm bg-ui-bg/80 text-ui-text-muted flex items-center justify-center">
-            <component :is="toolIcon" :size="12" aria-hidden="true" />
-          </div>
-          <p
-            class="min-w-0 flex-1 truncate text-[11px] font-semibold leading-snug"
-            :class="toolToneTextClass"
-            :title="toolRender.subtitle ? `${toolRender.title} · ${toolRender.subtitle}` : toolRender.title"
-          >
-            {{ toolCompactLine }}
-          </p>
-          <button
-            type="button"
-            class="shrink-0 rounded-sm p-1 text-ui-text-muted transition-opacity hover:bg-ui-bg/60 hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-text-muted"
-            :class="showThinking ? 'opacity-100' : 'opacity-0 group-hover/tool:opacity-100 group-focus-within/tool:opacity-100'"
-            :aria-label="toolToggleAriaLabel"
-            :title="toolToggleAriaLabel"
-            :aria-expanded="showThinking"
-            aria-controls="thinking-content"
-            @click="toggleThinking"
-          >
-            <ChevronUp v-if="showThinking" :size="12" aria-hidden="true" />
-            <ChevronDown v-else :size="12" aria-hidden="true" />
-          </button>
-        </div>
-      </div>
+    <!-- Tool Result Message -->
+    <div
+      v-else-if="isTool"
+      class="flex flex-col pr-2 transition-all duration-300 group/tool"
+      role="group"
+      aria-label="工具执行结果"
+      data-testid="tool-message"
+    >
       <div
-        v-if="showThinking"
-        id="thinking-content"
-        class="animate-in slide-in-from-top-1 duration-200"
-        role="region"
-        aria-label="工具详细数据"
+        class="rounded-xl border shadow-sm transition-all duration-300 overflow-hidden"
+        :class="[toolShellClass, toolToneClass]"
       >
-        <pre class="text-[11px] bg-ui-bg/70 p-2 rounded-md overflow-x-auto my-1 font-mono text-ui-text-muted"><code>{{ toolTextContent }}</code></pre>
+        <div class="px-3 py-2.5 flex items-center gap-2.5">
+          <div
+            class="h-6 w-6 shrink-0 rounded-lg flex items-center justify-center shadow-inner"
+            :class="toolIconContainerClass"
+          >
+            <component
+              :is="toolIcon"
+              :size="14"
+              class="transition-transform duration-300 group-hover/tool:scale-110"
+              aria-hidden="true"
+            />
+          </div>
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-[12px] font-bold text-ui-text truncate">{{ toolTitle }}</span>
+              <div class="flex items-center gap-1.5">
+                <button
+                  v-if="toolOutputText"
+                  type="button"
+                  @click="showRawToolOutput = !showRawToolOutput"
+                  class="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-ui-bg/50 border border-ui-border/50 text-[9px] font-bold text-ui-text-muted hover:bg-ui-accent/5 hover:text-ui-accent hover:border-ui-accent/20 transition-all uppercase tracking-tight focus:outline-none"
+                  :aria-expanded="showRawToolOutput"
+                  :title="showRawToolOutput ? '切换回格式化视图' : '查看原始 JSON 输出'"
+                >
+                  <div class="w-1 h-1 rounded-full animate-pulse" :class="toolStatusDotClass"></div>
+                  {{ showRawToolOutput ? 'FORMATTED' : 'RAW JSON' }}
+                </button>
+                <button
+                  type="button"
+                  class="shrink-0 rounded-md p-1 text-ui-text-muted hover:bg-ui-bg/60 hover:text-ui-text focus:outline-none"
+                  :aria-label="toolToggleAriaLabel"
+                  :aria-expanded="showThinking"
+                  @click="toggleThinking"
+                >
+                  <ChevronUp v-if="showThinking" :size="14" aria-hidden="true" />
+                  <ChevronDown v-else :size="14" aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div
+          v-if="showThinking"
+          id="thinking-content"
+          class="animate-in slide-in-from-top-1 duration-200 border-t border-ui-border/20 shadow-inner"
+        >
+          <div v-if="!showRawToolOutput" class="p-3 space-y-3 bg-ui-bg/10">
+            <div
+              v-if="toolSubtitle"
+              class="text-[11px] font-medium leading-relaxed text-ui-text-muted/80 bg-ui-bg/40 px-2 py-1.5 rounded-md border border-ui-border/10"
+            >
+              {{ toolSubtitle }}
+            </div>
+            <div
+              v-if="toolDetail"
+              class="tool-output-viewport max-h-[400px] overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-ui-text/90 rounded-lg bg-ui-bg/40 p-3 border border-ui-border/20 custom-scrollbar"
+              v-html="decorateInlineTokens(toolDetail)"
+            />
+          </div>
+
+          <!-- RAW JSON VIEW -->
+          <div 
+            v-else
+            class="p-3 bg-ui-bg-darker/30"
+          >
+            <div
+              class="whitespace-pre-wrap break-all font-mono text-[10px] leading-relaxed text-ui-text-muted rounded-lg bg-ui-bg-darker p-3 border border-ui-border/50 shadow-inner max-h-[400px] overflow-y-auto custom-scrollbar"
+            >
+              <code class="text-ui-text/80">{{ toolOutputText }}</code>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -806,6 +949,91 @@ watch(
 
 .tool-activity-viewport {
   scrollbar-gutter: stable both-edges;
+}
+
+.tool-output-viewport {
+  max-height: min(18rem, 42vh);
+  overflow: auto;
+  padding: 0.5rem 0.625rem;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  line-height: 1.45;
+  tab-size: 2;
+}
+
+.tool-output-render {
+  font-variant-ligatures: none;
+}
+
+.tool-output-render :deep(.tool-line) {
+  display: block;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+.tool-output-render :deep(.tool-line + .tool-line) {
+  margin-top: 0.14rem;
+}
+
+.tool-output-render :deep(.tool-line-section) {
+  margin-top: 0.5rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  opacity: 0.86;
+}
+
+.tool-output-render :deep(.tool-line-section:first-child) {
+  margin-top: 0;
+}
+
+.tool-output-render :deep(.tool-line-empty) {
+  opacity: 0.48;
+}
+
+.tool-output-render :deep(.tool-line-error) {
+  color: color-mix(in oklab, #be123c 52%, currentColor 48%);
+}
+
+.tool-output-render :deep(.tool-line-success) {
+  color: color-mix(in oklab, #15803d 70%, currentColor 30%);
+}
+
+.tool-output-render :deep(.tool-key) {
+  margin-right: 0.12rem;
+  font-weight: 600;
+  opacity: 0.82;
+}
+
+.tool-output-render :deep(.tool-key-strong) {
+  color: color-mix(in oklab, #be123c 48%, currentColor 52%);
+  opacity: 0.94;
+}
+
+.tool-output-render :deep(.tool-sep) {
+  margin-right: 0.24rem;
+  opacity: 0.58;
+}
+
+.tool-output-render :deep(.tool-value) {
+  opacity: 0.96;
+}
+
+.tool-output-render :deep(.tool-value-emphasis) {
+  opacity: 1;
+}
+
+.tool-output-render :deep(.tool-token) {
+  font-weight: 600;
+}
+
+.tool-output-render :deep(.tool-token-code) {
+  color: color-mix(in oklab, #4f46e5 68%, currentColor 32%);
+}
+
+.tool-output-render :deep(.tool-token-keyword) {
+  opacity: 0.86;
 }
 
 .streaming-ellipsis {

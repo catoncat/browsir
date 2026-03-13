@@ -205,38 +205,42 @@ function formatDetail(raw: string, payload: unknown, parsed: boolean, toolName: 
   if (exitCode !== null) metrics.push(`exitCode=${exitCode}`);
   const durationMs = pickNumberFromRecords(records, "durationMs");
   if (durationMs !== null) metrics.push(`duration=${durationMs}ms`);
+  const bytesRead = pickNumberFromRecords(records, "bytesRead");
+  if (bytesRead !== null) metrics.push(`BR=${bytesRead}B`);
   const bytesWritten = pickNumberFromRecords(records, "bytesWritten");
-  if (bytesWritten !== null) metrics.push(`bytesWritten=${bytesWritten}`);
+  if (bytesWritten !== null) metrics.push(`BW=${bytesWritten}B`);
   const hunks = pickNumberFromRecords(records, "hunks");
   if (hunks !== null) metrics.push(`hunks=${hunks}`);
   const replacements = pickNumberFromRecords(records, "replacements");
   if (replacements !== null) metrics.push(`replacements=${replacements}`);
+  const matches = pickNumberFromRecords(records, "matches");
+  if (matches !== null) metrics.push(`matches=${matches}`);
   const truncated = pickBooleanFromRecords(records, "truncated");
-  if (truncated === true) metrics.push("输出已截断");
+  if (truncated === true) metrics.push("TRUNCATED");
   const verified = pickBooleanFromRecords(records, "verified");
-  if (verified === true) metrics.push("verified=true");
+  if (verified === true) metrics.push("VERIFIED");
   if (verified === false && ["browser_action", "browser_verify"].includes(String(toolName || "").trim().toLowerCase())) {
-    metrics.push("verified=false");
+    metrics.push("NOT_VERIFIED");
   }
   if (metrics.length) sections.push(metrics.join(" · "));
 
-  const verifyReason = sanitizeOutput(pickTextFromRecords(records, ["verifyReason"]), 280);
-  if (verifyReason) sections.push(`verify\n${verifyReason}`);
+  const verifyReason = sanitizeOutput(pickTextFromRecords(records, ["verifyReason"]), 480);
+  if (verifyReason) sections.push(`[VERIFY_REASON]\n${verifyReason}`);
 
-  const errorCode = sanitizeOutput(pickTextFromRecords(records, ["errorCode"]), 120);
-  if (errorCode) sections.push(`errorCode\n${errorCode}`);
-  const errorText = sanitizeOutput(pickTextFromRecords(records, ["error"]), 480);
-  if (errorText) sections.push(`error\n${errorText}`);
+  const errorCode = sanitizeOutput(pickTextFromRecords(records, ["errorCode"]), 180);
+  if (errorCode) sections.push(`[ERROR_CODE] ${errorCode}`);
+  const errorText = sanitizeOutput(pickTextFromRecords(records, ["error", "message", "errorMessage"]), 800);
+  if (errorText) sections.push(`[ERROR_DETAIL]\n${errorText}`);
 
-  const stdout = sanitizeOutput(pickTextFromRecords(records, ["stdout"]), 1200);
-  const stderr = sanitizeOutput(pickTextFromRecords(records, ["stderr"]), 1000);
-  const content = sanitizeOutput(pickTextFromRecords(records, ["content"]), 1200);
-  const textOut = sanitizeOutput(pickTextFromRecords(records, ["text", "preview"]), 1200);
+  const stdout = sanitizeOutput(pickTextFromRecords(records, ["stdout"]), 1800);
+  const stderr = sanitizeOutput(pickTextFromRecords(records, ["stderr"]), 1200);
+  const content = sanitizeOutput(pickTextFromRecords(records, ["content", "data", "body"]), 1800);
+  const textOut = sanitizeOutput(pickTextFromRecords(records, ["text", "preview"]), 1400);
 
-  if (stdout) sections.push(`stdout\n${stdout}`);
-  if (stderr) sections.push(`stderr\n${stderr}`);
-  if (!stdout && !stderr && content) sections.push(`output\n${content}`);
-  if (!stdout && !stderr && !content && textOut) sections.push(`output\n${textOut}`);
+  if (stdout) sections.push(`[STDOUT]\n${stdout}`);
+  if (stderr) sections.push(`[STDERR]\n${stderr}`);
+  if (!stdout && !stderr && content) sections.push(`[OUTPUT]\n${content}`);
+  if (!stdout && !stderr && !content && textOut) sections.push(`[OUTPUT]\n${textOut}`);
 
   if (!sections.length) {
     const scalarSummary = summarizeScalarFields(records);
@@ -437,6 +441,20 @@ function renderDefault(toolName: string, callId: string, payload: JsonRecord, de
   };
 }
 
+function renderIntervention(payload: JsonRecord, detail: string): ToolRenderResult {
+  const reason = toText(payload.reason) || "需要人类介入执行后续动作。";
+  const type = toText(payload.interventionType || asRecord(payload.intervention).type);
+  const status = toText(payload.status);
+  
+  return {
+    kind: "default",
+    tone: status === "pending" ? "neutral" : "success",
+    title: `人类介入请求：${type || "通用"}`,
+    subtitle: reason,
+    detail
+  };
+}
+
 export function resolveToolRender(input: ResolveToolRenderInput): ToolRenderResult {
   const content = String(input.content || "");
   const callId = toText(input.toolCallId);
@@ -448,6 +466,7 @@ export function resolveToolRender(input: ResolveToolRenderInput): ToolRenderResu
   if (toolName === "snapshot") return renderSnapshot(payload, detail);
   if (toolName === "list_tabs") return renderListTabs(payload, detail);
   if (toolName === "open_tab") return renderOpenTab(payload, detail);
+  if (toolName === "request_intervention") return renderIntervention(payload, detail);
   if (toolName === "browser_action" || toolName === "browser_verify") return renderBrowser(payload, detail);
   if (INVOKE_TOOL_NAMES.has(toolName)) {
     return renderInvoke(toolName, callId, payload, detail);
