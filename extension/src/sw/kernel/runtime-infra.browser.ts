@@ -2,6 +2,7 @@ import { defaultPipeline as enrichmentPipeline } from "./snapshot-enricher";
 import {
   createBridgeClient,
 } from "./infra-bridge-client";
+import { createCdpActionExecutor } from "./infra-cdp-action";
 export type { BridgeConfig } from "./infra-bridge-client";
 import {
   snapshotKey,
@@ -1372,6 +1373,13 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     throw new Error(`ref ${ref} not found, take /cdp.snapshot first`);
   }
 
+  const cdpAction = createCdpActionExecutor({
+    sendCdpCommand,
+    ensureDebugger,
+    getSnapshotState,
+    observeByCDP,
+  });
+
   async function executeActionByBackendNode(
     tabId: number,
     input: {
@@ -2472,18 +2480,22 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         if (actionRequiresLease(kind)) {
           ensureLeaseForWrite(tabId, resolveOwnerFromMessage(msg));
         }
-        return ok(await executeRefActionByCDP(tabId, action));
+        return ok(await cdpAction.executeRefActionByCDP(tabId, action));
       }
       if (type === "cdp.execute") {
         const tabId = toValidTabId(msg.tabId);
         if (!tabId) return fail("cdp.execute 需要有效 tabId");
-        return ok(await executeByCDP(tabId, asRecord(msg.action)));
+        return ok(await cdpAction.executeByCDP(tabId, asRecord(msg.action)));
       }
       if (type === "cdp.verify") {
         const tabId = toValidTabId(msg.tabId);
         if (!tabId) return fail("cdp.verify 需要有效 tabId");
         return ok(
-          await verifyByCDP(tabId, asRecord(msg.action), asRecord(msg.result)),
+          await cdpAction.verifyByCDP(
+            tabId,
+            asRecord(msg.action),
+            asRecord(msg.result),
+          ),
         );
       }
       if (type === "cdp.detach") {
