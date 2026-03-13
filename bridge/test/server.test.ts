@@ -49,6 +49,7 @@ function createTestConfig(root: string, port: number, maxConcurrency = 4): Bridg
     defaultTimeoutMs: 10_000,
     maxTimeoutMs: 60_000,
     auditPath: path.join(root, "audit.log"),
+    diagnosticsPath: path.join(root, "diagnostics"),
   };
 }
 
@@ -476,6 +477,111 @@ describe("bridge server", () => {
       await server.stop(true);
       unregisterInvokeToolHandler(canonicalTool);
       unregisterToolContract(canonicalTool);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("diagnostics api supports create list and download", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "bridge-server-diagnostics-"));
+    const port = await getFreePort();
+    const config = createTestConfig(root, port, 2);
+    const server = startBridgeServer({ config });
+    const baseUrl = `http://${config.host}:${server.port}`;
+
+    try {
+      const created = await fetch(`${baseUrl}/api/diagnostics?token=${config.token}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          sessionId: "session-export-demo",
+          title: "导出测试会话",
+          payload: {
+            schemaVersion: "bbl.diagnostic.v3",
+            summary: {
+              running: false,
+            },
+          },
+        }),
+      });
+      expect(created.ok).toBe(true);
+      const createdPayload = (await created.json()) as Record<string, any>;
+      expect(createdPayload.ok).toBe(true);
+      expect(String(createdPayload.item?.sessionId || "")).toBe("session-export-demo");
+      expect(String(createdPayload.downloadUrl || "")).toContain("/api/diagnostics/");
+
+      const listed = await fetch(`${baseUrl}/api/diagnostics?token=${config.token}`);
+      expect(listed.ok).toBe(true);
+      const listedPayload = (await listed.json()) as Record<string, any>;
+      const items = Array.isArray(listedPayload.items) ? listedPayload.items : [];
+      expect(items.length).toBe(1);
+      expect(String(items[0]?.title || "")).toBe("导出测试会话");
+
+      const exportId = String(createdPayload.item?.id || "");
+      const downloaded = await fetch(`${baseUrl}/api/diagnostics/${encodeURIComponent(exportId)}?token=${config.token}`);
+      expect(downloaded.ok).toBe(true);
+      expect(String(downloaded.headers.get("content-type") || "")).toContain("application/json");
+      const downloadedPayload = (await downloaded.json()) as Record<string, any>;
+      expect(String(downloadedPayload.id || "")).toBe(exportId);
+      expect(String(downloadedPayload.payload?.schemaVersion || "")).toBe("bbl.diagnostic.v3");
+    } finally {
+      await server.stop(true);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("debug snapshots api supports create list and download", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "bridge-server-debug-snapshots-"));
+    const port = await getFreePort();
+    const config = createTestConfig(root, port, 2);
+    const server = startBridgeServer({ config });
+    const baseUrl = `http://${config.host}:${server.port}`;
+
+    try {
+      const created = await fetch(`${baseUrl}/api/debug-snapshots?token=${config.token}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          sessionId: "session-debug-demo",
+          title: "模块调试快照",
+          payload: {
+            schemaVersion: "bbl.debug.snapshot.v1",
+            scope: "all",
+            data: {
+              runtime: {
+                summary: {
+                  sessionCount: 1,
+                },
+              },
+            },
+          },
+        }),
+      });
+      expect(created.ok).toBe(true);
+      const createdPayload = (await created.json()) as Record<string, any>;
+      expect(createdPayload.ok).toBe(true);
+      expect(String(createdPayload.item?.sessionId || "")).toBe("session-debug-demo");
+      expect(String(createdPayload.downloadUrl || "")).toContain("/api/debug-snapshots/");
+
+      const listed = await fetch(`${baseUrl}/api/debug-snapshots?token=${config.token}`);
+      expect(listed.ok).toBe(true);
+      const listedPayload = (await listed.json()) as Record<string, any>;
+      const items = Array.isArray(listedPayload.items) ? listedPayload.items : [];
+      expect(items.length).toBe(1);
+      expect(String(items[0]?.title || "")).toBe("模块调试快照");
+
+      const exportId = String(createdPayload.item?.id || "");
+      const downloaded = await fetch(`${baseUrl}/api/debug-snapshots/${encodeURIComponent(exportId)}?token=${config.token}`);
+      expect(downloaded.ok).toBe(true);
+      expect(String(downloaded.headers.get("content-type") || "")).toContain("application/json");
+      const downloadedPayload = (await downloaded.json()) as Record<string, any>;
+      expect(String(downloadedPayload.id || "")).toBe(exportId);
+      expect(String(downloadedPayload.payload?.schemaVersion || "")).toBe("bbl.debug.snapshot.v1");
+    } finally {
+      await server.stop(true);
       await rm(root, { recursive: true, force: true });
     }
   });

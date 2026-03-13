@@ -16,6 +16,7 @@ export interface BridgeConfig {
   defaultTimeoutMs: number;
   maxTimeoutMs: number;
   auditPath: string;
+  diagnosticsPath: string;
 }
 
 function parseIntEnv(name: string, fallback: number): number {
@@ -55,6 +56,9 @@ export function loadConfig(): BridgeConfig {
     maxTimeoutMs: parseIntEnv("BRIDGE_MAX_TIMEOUT_MS", 300_000),
     auditPath:
       process.env.BRIDGE_AUDIT_PATH ?? path.resolve(process.cwd(), `tmp/browser-bridge/audit-${now}.jsonl`),
+    diagnosticsPath:
+      process.env.BRIDGE_DIAGNOSTICS_PATH ??
+      path.resolve(process.cwd(), "tmp/browser-bridge/diagnostics"),
   };
 }
 

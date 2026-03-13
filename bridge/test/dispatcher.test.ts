@@ -24,6 +24,7 @@ function createTestConfig(root: string): BridgeConfig {
     defaultTimeoutMs: 10_000,
     maxTimeoutMs: 60_000,
     auditPath: path.join(root, "audit.log"),
+    diagnosticsPath: path.join(root, "diagnostics"),
   };
 }
 

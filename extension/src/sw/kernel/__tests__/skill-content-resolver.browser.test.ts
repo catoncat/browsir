@@ -24,7 +24,8 @@ describe("skill-content-resolver.browser", () => {
       readText: async ({ location }) => {
         expect(location).toBe("mem://skills/write-doc/SKILL.md");
         return "# SKILL\nFollow workflow.";
-      }
+      },
+      buildPromptAugment: async () => "",
     });
 
     const resolved = await resolver.resolveById("skill.write-doc");
@@ -45,7 +46,8 @@ describe("skill-content-resolver.browser", () => {
     });
 
     const resolver = new SkillContentResolver(registry, {
-      readText: async () => "disabled-skill-content"
+      readText: async () => "disabled-skill-content",
+      buildPromptAugment: async () => "",
     });
 
     await expect(resolver.resolveById("skill.disabled")).rejects.toThrow("skill 未启用");
@@ -54,5 +56,46 @@ describe("skill-content-resolver.browser", () => {
       allowDisabled: true
     });
     expect(resolved.content).toBe("disabled-skill-content");
+  });
+
+  it("appends prompt augmentation into <skill> prompt block", async () => {
+    const registry = new SkillRegistry();
+    await registry.install({
+      id: "skill.with.refs",
+      name: "With Refs",
+      location: "mem://skills/with-refs/SKILL.md",
+      source: "global",
+    });
+
+    const resolver = new SkillContentResolver(registry, {
+      readText: async () => "# SKILL\nRead references as needed.",
+      buildPromptAugment: async ({ skill }) =>
+        `<skill_resources>\nindex for ${skill.id}\n</skill_resources>`,
+    });
+
+    const resolved = await resolver.resolveById("skill.with.refs", {
+      sessionId: "test-session",
+    });
+    expect(resolved.promptBlock).toContain("<skill_resources>");
+    expect(resolved.promptBlock).toContain("index for skill.with.refs");
+    expect(resolved.promptBlock).toContain("# SKILL");
+  });
+
+  it("fails fast when prompt augmenter is not configured", async () => {
+    const registry = new SkillRegistry();
+    await registry.install({
+      id: "skill.no.augmenter",
+      name: "No Augmenter",
+      location: "mem://skills/no-augmenter/SKILL.md",
+      source: "global",
+    });
+
+    const resolver = new SkillContentResolver(registry, {
+      readText: async () => "# SKILL\nNo silent fallback.",
+    });
+
+    await expect(
+      resolver.resolveById("skill.no.augmenter"),
+    ).rejects.toThrow("skill prompt augmenter 未配置");
   });
 });
