@@ -34,7 +34,6 @@ import {
   buildBashExitFailureEnvelope,
   buildSkillScriptSandboxFailureEnvelope,
   buildStepFailureEnvelope,
-  buildToolResponseEnvelope,
   inferSearchElementsFilter,
   normalizeVerifyExpect,
   scoreSearchNode,
@@ -45,20 +44,15 @@ import {
   readContractExecution,
   sanitizeLlmToolDefinitionForProvider,
   normalizeToolArgsForSignature,
-  isNonEmptyToolArgValue,
   normalizeSchemaRequiredList,
   readTopLevelConstraintRequiredSets,
   queryAllTabsForRuntime,
   getActiveTabIdForRuntime,
-  mapVerifyReasonToFailureReason,
   extractLlmConfig,
   readSharedTabIds,
   CAPABILITIES,
-  TOOL_AUTO_RETRY_MAX,
-  BASH_RUNTIME_TOOL_NAMES,
   RUNTIME_EXECUTABLE_TOOL_NAMES,
   DEFAULT_BASH_TIMEOUT_MS,
-  MIN_BASH_TIMEOUT_MS,
   MAX_BASH_TIMEOUT_MS,
   type RuntimeErrorWithMeta,
   type ToolCallItem,
@@ -66,6 +60,12 @@ import {
 } from "./runtime-loop.browser";
 import { nowIso, type JsonRecord } from "./types";
 import { writeSessionMeta } from "./session-store.browser";
+
+// --- Constants moved from runtime-loop.browser.ts (dispatch-only) ---
+
+export const MIN_BASH_TIMEOUT_MS = 200;
+export const TOOL_AUTO_RETRY_MAX = 2;
+export const BASH_RUNTIME_TOOL_NAMES = new Set(["host_bash", "browser_bash"]);
 
 // --- Exported types ---
 
@@ -394,6 +394,47 @@ export function buildSkillPackageRootLocation(location: string): string {
   if (!normalizedLocation) return "";
   const cut = normalizedLocation.lastIndexOf("/");
   return cut >= 0 ? normalizedLocation.slice(0, cut) : normalizedLocation;
+}
+
+// --- Functions moved from runtime-loop.browser.ts (dispatch-only) ---
+
+export function isNonEmptyToolArgValue(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(toRecord(value)).length > 0;
+  return true;
+}
+
+export function buildToolResponseEnvelope(
+  type: string,
+  data: unknown,
+  extra: JsonRecord = {},
+): JsonRecord {
+  return {
+    type,
+    response: { ok: true, data },
+    ...extra,
+  };
+}
+
+export function mapVerifyReasonToFailureReason(
+  rawVerifyReason: unknown,
+): "failed_verify" | "progress_uncertain" {
+  const verifyReason = String(rawVerifyReason || "")
+    .trim()
+    .toLowerCase();
+  if (
+    [
+      "verify_skipped",
+      "verify_policy_off",
+      "verify_not_supported_for_bridge",
+      "verify_missing_tab_id",
+    ].includes(verifyReason)
+  ) {
+    return "progress_uncertain";
+  }
+  return "failed_verify";
 }
 
 // --- Factory deps ---

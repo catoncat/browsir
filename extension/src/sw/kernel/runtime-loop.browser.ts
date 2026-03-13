@@ -89,9 +89,7 @@ const DEFAULT_LLM_TIMEOUT_MS = 120_000;
 const MIN_LLM_TIMEOUT_MS = 1_000;
 const MAX_LLM_TIMEOUT_MS = 300_000;
 export const DEFAULT_BASH_TIMEOUT_MS = 120_000;
-export const MIN_BASH_TIMEOUT_MS = 200;
 export const MAX_BASH_TIMEOUT_MS = 300_000;
-export const TOOL_AUTO_RETRY_MAX = 2;
 const TOOL_AUTO_RETRY_BASE_DELAY_MS = 300;
 const TOOL_AUTO_RETRY_CAP_DELAY_MS = 2_000;
 const DEFAULT_LLM_MAX_RETRY_DELAY_MS = 60_000;
@@ -272,7 +270,6 @@ export const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
   "browser_edit_file",
   ...CANONICAL_BROWSER_TOOL_NAMES,
 ]);
-export const BASH_RUNTIME_TOOL_NAMES = new Set(["host_bash", "browser_bash"]);
 
 const NO_PROGRESS_CONTINUE_BUDGET: Record<NoProgressReason, number> = {
   repeat_signature: 1,
@@ -1362,14 +1359,6 @@ function buildNoProgressEvidenceFingerprint(value: unknown): string {
   return safeStringify(normalizeNoProgressEvidenceValue(value), 1200);
 }
 
-export function isNonEmptyToolArgValue(value: unknown): boolean {
-  if (value === null || value === undefined) return false;
-  if (typeof value === "string") return value.trim().length > 0;
-  if (Array.isArray(value)) return value.length > 0;
-  if (typeof value === "object") return Object.keys(toRecord(value)).length > 0;
-  return true;
-}
-
 function parseToolCallArgs(raw: string): JsonRecord | null {
   const text = String(raw || "").trim();
   if (!text) return null;
@@ -2333,18 +2322,6 @@ function extractRetryDelayHintMs(
   return null;
 }
 
-export function buildToolResponseEnvelope(
-  type: string,
-  data: unknown,
-  extra: JsonRecord = {},
-): JsonRecord {
-  return {
-    type,
-    response: { ok: true, data },
-    ...extra,
-  };
-}
-
 export function extractBashExecOutcome(data: unknown): BashExecOutcome | null {
   const root = toRecord(data);
   const rootData = toRecord(root.data);
@@ -2585,25 +2562,6 @@ function mapToolErrorReasonToTerminalStatus(
   if (reason === "failed_verify") return "failed_verify";
   if (reason === "progress_uncertain") return "progress_uncertain";
   return "failed_execute";
-}
-
-export function mapVerifyReasonToFailureReason(
-  rawVerifyReason: unknown,
-): "failed_verify" | "progress_uncertain" {
-  const verifyReason = String(rawVerifyReason || "")
-    .trim()
-    .toLowerCase();
-  if (
-    [
-      "verify_skipped",
-      "verify_policy_off",
-      "verify_not_supported_for_bridge",
-      "verify_missing_tab_id",
-    ].includes(verifyReason)
-  ) {
-    return "progress_uncertain";
-  }
-  return "failed_verify";
 }
 
 export async function queryAllTabsForRuntime(): Promise<
