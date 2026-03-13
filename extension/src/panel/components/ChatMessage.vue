@@ -91,7 +91,6 @@ const isFinished = computed(() => props.role !== "assistant_streaming");
 
 const showThinking = ref(false);
 const showSystemSummary = ref(false);
-const showRawToolOutput = ref(false);
 const inlineTextarea = ref<HTMLTextAreaElement | null>(null);
 const pendingActivityViewport = ref<HTMLElement | null>(null);
 const pendingCardStickToBottom = ref(true);
@@ -120,22 +119,6 @@ const toolTextContent = computed(() => {
   if (!isTool.value) return "";
   return toolRender.value.detail;
 });
-const toolOutputText = computed(() => {
-  const rawText = String(toolTextContent.value || "");
-  const trimmed = rawText.trim();
-  if (!trimmed) return "";
-  if (
-    (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
-    (trimmed.startsWith("[") && trimmed.endsWith("]"))
-  ) {
-    try {
-      return JSON.stringify(JSON.parse(trimmed), null, 2);
-    } catch {
-      return rawText;
-    }
-  }
-  return rawText;
-});
 
 function escapeHtml(raw: string): string {
   return String(raw || "")
@@ -152,46 +135,6 @@ function decorateInlineTokens(raw: string): string {
     .replace(/\b(stdout|stderr|errorCode|error|exitCode)\b/giu, '<span class="tool-token tool-token-keyword">$1</span>');
 }
 
-function resolveLineToneClass(raw: string): string {
-  if (/(失败|error|not found|undefined|denied|exception|不可用|超时)/iu.test(raw)) return "tool-line-error";
-  if (/(成功|完成|ok|passed|verified)/iu.test(raw)) return "tool-line-success";
-  return "tool-line-normal";
-}
-
-function renderToolOutputLine(rawLine: string): string {
-  const line = String(rawLine || "");
-  const trimmed = line.trim();
-  if (!trimmed) return '<span class="tool-line tool-line-empty">&nbsp;</span>';
-
-  if (/^(命令|stdout|stderr|errorCode|error|exitCode)$/iu.test(trimmed)) {
-    return `<span class="tool-line tool-line-section">${escapeHtml(trimmed)}</span>`;
-  }
-
-  const kvMatch = line.match(/^([\u4e00-\u9fa5A-Za-z_][\u4e00-\u9fa5A-Za-z0-9_.-]*)\s*([:=：])\s*(.*)$/u);
-  if (kvMatch) {
-    const [, key, separator, value] = kvMatch;
-    const isStrongKey = /^(error|stderr|errorCode|exitCode|命令)$/iu.test(key);
-    const keyClass = isStrongKey ? "tool-key tool-key-strong" : "tool-key";
-    const valueClass = isStrongKey ? "tool-value tool-value-emphasis" : "tool-value";
-    return [
-      '<span class="tool-line">',
-      `<span class="${keyClass}">${escapeHtml(key)}</span>`,
-      `<span class="tool-sep">${escapeHtml(separator)}</span>`,
-      `<span class="${valueClass}">${decorateInlineTokens(value)}</span>`,
-      "</span>"
-    ].join("");
-  }
-
-  const toneClass = resolveLineToneClass(line);
-  return `<span class="tool-line ${toneClass}">${decorateInlineTokens(line)}</span>`;
-}
-
-const toolOutputHtml = computed(() => {
-  const text = toolOutputText.value;
-  if (!text.trim()) return '<span class="tool-line tool-line-empty">暂无输出</span>';
-  return text.split(/\r?\n/u).map((line) => renderToolOutputLine(line)).join("");
-});
-
 const toolTitle = computed(() => toolRender.value.title);
 const toolSubtitle = computed(() => toolRender.value.subtitle);
 const toolDetail = computed(() => toolRender.value.detail);
@@ -203,11 +146,6 @@ const toolIconContainerClass = computed(() => {
   if (toolRender.value.kind === "invoke") return "bg-purple-500/10 text-purple-600 dark:text-purple-400";
   if (toolRender.value.kind === "browser") return "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400";
   return "bg-ui-text-muted/10 text-ui-text-muted";
-});
-
-const toolStatusDotClass = computed(() => {
-  if (toolRender.value.tone === "error") return "bg-rose-500";
-  return "bg-emerald-500";
 });
 
 const messageAriaPreview = computed(() => {
@@ -713,7 +651,7 @@ watch(
       <div
         v-if="isAssistant && (props.showCopyAction || props.showRetryAction || props.showForkAction)"
         class="flex items-center gap-1 transition-opacity"
-        :class="(props.retrying || props.forking) ? 'opacity-100' : 'opacity-70 sm:opacity-0 sm:group-hover:opacity-100'"
+        :class="(props.retrying || props.forking) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'"
         role="toolbar"
         aria-label="消息操作"
       >
@@ -882,22 +820,8 @@ watch(
           </div>
           <div class="min-w-0 flex-1">
             <div class="flex items-center justify-between gap-2">
-              <div class="flex items-center gap-1.5 min-w-0 flex-1">
-                <span class="text-[11px] font-bold text-ui-text truncate shrink-0">{{ toolTitleText }}</span>
-                <span v-if="toolSubtitleText" class="text-[10px] text-ui-text-muted/70 truncate border-l border-ui-border/30 pl-1.5">{{ toolSubtitleText }}</span>
-              </div>
+              <span class="text-[11px] font-bold text-ui-text truncate">{{ toolTitleText }}</span>
               <div class="flex items-center gap-1 shrink-0">
-                <button
-                  v-if="toolOutputText"
-                  type="button"
-                  @click="showRawToolOutput = !showRawToolOutput"
-                  class="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-ui-bg/40 border border-ui-border/30 text-[9px] font-bold text-ui-text-muted hover:bg-ui-accent/10 hover:text-ui-accent hover:border-ui-accent/20 transition-all focus:outline-none"
-                  :aria-expanded="showRawToolOutput"
-                  :title="showRawToolOutput ? '切换回格式化视图' : '查看原始 JSON'"
-                >
-                  <div class="w-1 h-1 rounded-full shrink-0" :class="toolStatusDotClass"></div>
-                  <span class="hidden xs:inline">{{ showRawToolOutput ? 'FORMAT' : 'RAW' }}</span>
-                </button>
                 <button
                   type="button"
                   class="rounded-md p-1 text-ui-text-muted hover:bg-ui-bg/60 hover:text-ui-text focus:outline-none"
@@ -910,6 +834,7 @@ watch(
                 </button>
               </div>
             </div>
+            <p v-if="toolSubtitleText" class="text-[10px] text-ui-text-muted/80 truncate mt-0.5 leading-tight">{{ toolSubtitleText }}</p>
           </div>
         </div>
 
@@ -918,24 +843,12 @@ watch(
           id="thinking-content"
           class="animate-in slide-in-from-top-1 duration-200 border-t border-ui-border/10"
         >
-          <div v-if="!showRawToolOutput" class="p-2 space-y-2 bg-ui-bg/5">
+          <div class="p-2 bg-ui-bg/5">
             <div
               v-if="toolDetail"
               class="tool-output-viewport max-h-[320px] overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-snug text-ui-text/90 rounded-lg bg-ui-bg/30 p-2.5 border border-ui-border/15 custom-scrollbar"
               v-html="decorateInlineTokens(toolDetail)"
             />
-          </div>
-
-          <!-- RAW JSON VIEW -->
-          <div 
-            v-else
-            class="p-2 bg-ui-bg-darker/20"
-          >
-            <div
-              class="whitespace-pre-wrap break-all font-mono text-[9px] leading-snug text-ui-text-muted rounded-lg bg-ui-bg-darker p-2.5 border border-ui-border/40 shadow-inner max-h-[320px] overflow-y-auto custom-scrollbar"
-            >
-              <code class="text-ui-text/70">{{ toolOutputText }}</code>
-            </div>
           </div>
         </div>
       </div>
@@ -977,81 +890,6 @@ watch(
   scrollbar-width: thin;
   line-height: 1.45;
   tab-size: 2;
-}
-
-.tool-output-render {
-  font-variant-ligatures: none;
-}
-
-.tool-output-render :deep(.tool-line) {
-  display: block;
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: normal;
-  overflow-wrap: anywhere;
-}
-
-.tool-output-render :deep(.tool-line + .tool-line) {
-  margin-top: 0.14rem;
-}
-
-.tool-output-render :deep(.tool-line-section) {
-  margin-top: 0.5rem;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  opacity: 0.86;
-}
-
-.tool-output-render :deep(.tool-line-section:first-child) {
-  margin-top: 0;
-}
-
-.tool-output-render :deep(.tool-line-empty) {
-  opacity: 0.48;
-}
-
-.tool-output-render :deep(.tool-line-error) {
-  color: color-mix(in oklab, #be123c 52%, currentColor 48%);
-}
-
-.tool-output-render :deep(.tool-line-success) {
-  color: color-mix(in oklab, #15803d 70%, currentColor 30%);
-}
-
-.tool-output-render :deep(.tool-key) {
-  margin-right: 0.12rem;
-  font-weight: 600;
-  opacity: 0.82;
-}
-
-.tool-output-render :deep(.tool-key-strong) {
-  color: color-mix(in oklab, #be123c 48%, currentColor 52%);
-  opacity: 0.94;
-}
-
-.tool-output-render :deep(.tool-sep) {
-  margin-right: 0.24rem;
-  opacity: 0.58;
-}
-
-.tool-output-render :deep(.tool-value) {
-  opacity: 0.96;
-}
-
-.tool-output-render :deep(.tool-value-emphasis) {
-  opacity: 1;
-}
-
-.tool-output-render :deep(.tool-token) {
-  font-weight: 600;
-}
-
-.tool-output-render :deep(.tool-token-code) {
-  color: color-mix(in oklab, #4f46e5 68%, currentColor 32%);
-}
-
-.tool-output-render :deep(.tool-token-keyword) {
-  opacity: 0.86;
 }
 
 .streaming-ellipsis {
