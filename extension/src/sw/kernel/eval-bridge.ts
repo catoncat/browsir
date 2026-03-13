@@ -1,0 +1,135 @@
+/**
+ * eval-bridge.ts
+ *
+ * Service Worker side bridge for executing bash commands in the sandbox page.
+ * Routes messages through the SidePanel (primary) or Offscreen Document (fallback).
+ */
+
+// --- Types ---
+
+export interface VfsFile {
+  path: string;
+  content: string;
+}
+
+export interface SandboxBashInput {
+  command: string;
+  files: VfsFile[];
+  cwd?: string;
+  timeoutMs?: number;
+}
+
+export interface SandboxBashResult {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  vfsDiff: Array<{ op: "add" | "modify" | "delete"; path: string; content?: string }>;
+}
+
+// --- Internal ---
+
+let requestCounter = 0;
+
+function nextId(): string {
+  return `sb-${Date.now()}-${++requestCounter}`;
+}
+
+async function hasSidePanelRelay(): Promise<boolean> {
+  try {
+    // chrome.runtime.getContexts is available in MV3 Chrome 116+
+    if (typeof chrome?.runtime?.getContexts !== "function") return false;
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ["SIDE_PANEL" as any],
+    });
+    return contexts.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureOffscreenRelay(): Promise<void> {
+  try {
+    // Check if offscreen document already exists
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ["OFFSCREEN_DOCUMENT" as any],
+    });
+    if (contexts.length > 0) return;
+
+    await (chrome as any).offscreen.createDocument({
+      url: "sandbox-host.html",
+      reasons: ["WORKERS"],
+      justification: "Host sandbox iframe for plugin code evaluation",
+    });
+  } catch (err) {
+    throw new Error(
+      `Failed to create offscreen document: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+
+// --- Public API ---
+
+/**
+ * Execute a bash command in the sandbox page.
+ * Routes through SidePanel if available, otherwise creates an offscreen document.
+ */
+export async function sandboxBash(input: SandboxBashInput): Promise<SandboxBashResult> {
+  const id = nextId();
+
+  // Ensure at least one relay is available
+  const hasSidePanel = await hasSidePanelRelay();
+  if (!hasSidePanel) {
+    await ensureOffscreenRelay();
+  }
+
+  const message = {
+    type: "sandbox-bash" as const,
+    id,
+    command: input.command,
+    files: input.files,
+    cwd: input.cwd,
+    timeoutMs: input.timeoutMs ?? 120_000,
+  };
+
+  try {
+    const response = await chrome.runtime.sendMessage(message);
+
+    if (!response || typeof response !== "object") {
+      return {
+        ok: false,
+        stdout: "",
+        stderr: "No response from sandbox relay",
+        exitCode: 1,
+        vfsDiff: [],
+      };
+    }
+
+    return {
+      ok: Boolean(response.ok),
+      stdout: String(response.stdout ?? ""),
+      stderr: String(response.stderr ?? ""),
+      exitCode: Number(response.exitCode ?? 1),
+      vfsDiff: Array.isArray(response.vfsDiff) ? response.vfsDiff : [],
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      stdout: "",
+      stderr: `Sandbox bridge error: ${err instanceof Error ? err.message : String(err)}`,
+      exitCode: 1,
+      vfsDiff: [],
+    };
+  }
+}
+
+/**
+ * Reset the sandbox state. Call after SW restarts.
+ */
+export async function sandboxReset(): Promise<void> {
+  try {
+    await chrome.runtime.sendMessage({ type: "sandbox-reset" });
+  } catch {
+    // Relay not available, ignore
+  }
+}

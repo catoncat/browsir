@@ -1,5 +1,6 @@
 import { Sandbox } from "@lifo-sh/core";
 import { kvGet, kvKeys, kvRemove, kvSet } from "../idb-storage";
+import { sandboxBash, type VfsFile } from "../eval-bridge";
 import { SessionRuntimeManager } from "./session-runtime-manager";
 
 type JsonRecord = Record<string, unknown>;
@@ -1006,25 +1007,39 @@ async function bashFrame(args: JsonRecord, sessionId: string): Promise<JsonRecor
       : null;
     const timeoutMs = args.timeoutMs == null ? undefined : Math.max(1000, toInt(args.timeoutMs, 120_000));
     const startedAt = Date.now();
-    const runOptions: { cwd?: string } = {};
-    if (cwdResolved) {
-      runOptions.cwd = cwdResolved.unixPath;
+
+    // Collect VFS files for sandbox page
+    const files = await collectVfsFilesForBridge(sandbox);
+
+    const result = await sandboxBash({
+      command,
+      files,
+      cwd: cwdResolved?.unixPath ?? sandbox.cwd,
+      timeoutMs,
+    });
+
+    // Apply VFS diff back to the SW sandbox
+    for (const diff of result.vfsDiff) {
+      if (diff.op === "delete") {
+        try { await sandbox.fs.rm(diff.path); } catch { /* ignore */ }
+      } else if (diff.content != null) {
+        const dir = diff.path.replace(/\/[^/]+$/, "");
+        if (dir && dir !== "/") {
+          await sandbox.fs.mkdir(dir, { recursive: true });
+        }
+        await sandbox.fs.writeFile(diff.path, diff.content);
+      }
     }
 
-    const { result, timeoutHit } = await runSandboxCommandWithTimeout(
-      sandbox,
-      command,
-      runOptions,
-      timeoutMs
-    );
     const durationMs = Date.now() - startedAt;
-    const exitCode = Number.isFinite(Number(result.exitCode)) ? Number(result.exitCode) : 1;
+    const exitCode = result.exitCode;
+    const timeoutHit = result.stderr.includes("sandbox bash timeout");
     recordCommandFinished(sessionId, rawCommand, durationMs, exitCode, timeoutHit);
     sandboxManager.markDirty(sessionId);
     await checkpointSessionSandbox(sessionId, "bash", { force: true });
 
-    const stdout = String(result.stdout || "");
-    const stderr = String(result.stderr || "");
+    const stdout = result.stdout;
+    const stderr = result.stderr;
     const stdoutBytes = encodeUtf8(stdout).byteLength;
     const stderrBytes = encodeUtf8(stderr).byteLength;
 
@@ -1032,7 +1047,7 @@ async function bashFrame(args: JsonRecord, sessionId: string): Promise<JsonRecor
       cmdId: "bash.exec",
       argv: ["bash", "-lc", rawCommand],
       risk: "high",
-      cwd: unixPathToVirtualUri(sandbox.cwd, sessionId),
+      cwd: unixPathToVirtualUri(cwdResolved?.unixPath ?? sandbox.cwd, sessionId),
       exitCode,
       stdout,
       stderr,
@@ -1044,6 +1059,33 @@ async function bashFrame(args: JsonRecord, sessionId: string): Promise<JsonRecor
       timeoutHit
     };
   });
+}
+
+async function collectVfsFilesForBridge(sandbox: Sandbox): Promise<VfsFile[]> {
+  const files: VfsFile[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    let entries: Array<{ name: string; type: "file" | "directory" }> = [];
+    try {
+      entries = await sandbox.fs.readdir(dir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const name = String(entry.name || "").trim();
+      if (!name) continue;
+      const child = dir === "/" ? `/${name}` : `${dir}/${name}`;
+      if (entry.type === "directory") {
+        await walk(child);
+      } else if (entry.type === "file") {
+        try {
+          const content = String(await sandbox.fs.readFile(child));
+          files.push({ path: child, content });
+        } catch { /* skip unreadable */ }
+      }
+    }
+  };
+  await walk("/");
+  return files;
 }
 
 async function statFrame(args: JsonRecord, sessionId: string): Promise<JsonRecord> {

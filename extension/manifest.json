@@ -45,5 +45,8 @@
   "action": {
     "default_title": "Browser Brain Loop"
   },
+  "sandbox": {
+    "pages": ["eval-sandbox.html"]
+  },
   "minimum_chrome_version": "120"
 }
