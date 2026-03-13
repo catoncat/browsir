@@ -51,6 +51,28 @@ export interface UiToolRenderPayload {
   content: string;
 }
 
+export type UiWidgetSlot = "chat.scene.overlay";
+
+export type UiWidgetCleanup = () => void | Promise<void>;
+
+export interface UiWidgetMountContext {
+  pluginId: string;
+  widgetId: string;
+  slot: UiWidgetSlot;
+  getActiveSessionId(): string | undefined;
+  isActiveSession(sessionId?: string): boolean;
+}
+
+export interface UiWidgetDefinition {
+  id: string;
+  slot: UiWidgetSlot;
+  order?: number;
+  mount(
+    container: HTMLElement,
+    context: UiWidgetMountContext
+  ): void | UiWidgetCleanup | Promise<void | UiWidgetCleanup>;
+}
+
 export interface UiSessionListRenderItem {
   id: string;
   title: string;
@@ -143,6 +165,7 @@ export interface PanelUiPluginApi {
       timeoutMs?: number;
     }
   ): void;
+  registerWidget(definition: UiWidgetDefinition): void;
 }
 
 export type PanelUiPluginFactory = (api: PanelUiPluginApi) => void | Promise<void>;
@@ -160,9 +183,20 @@ interface UiPluginState {
   descriptor: UiExtensionDescriptor;
   enabled: boolean;
   handlers: UiHandlerEntry[];
+  widgets: UiWidgetDefinition[];
   remoteHookCache: Set<string> | null;
   errorCount: number;
   lastError?: string;
+}
+
+interface MountedUiWidgetInstance {
+  instanceId: string;
+  pluginId: string;
+  widgetId: string;
+  slot: UiWidgetSlot;
+  order: number;
+  container: HTMLElement;
+  cleanup?: UiWidgetCleanup;
 }
 
 interface RuntimeResponse<T = unknown> {
@@ -277,10 +311,16 @@ async function invokeRemoteUiHook<K extends UiHookName>(
 export class PanelUiPluginRuntime {
   private readonly states = new Map<string, UiPluginState>();
   private readonly defaultTimeoutMs: number;
+  private readonly getActiveSessionIdFn: () => string | undefined;
+  private readonly hostSlots = new Map<UiWidgetSlot, HTMLElement>();
+  private readonly mountedWidgets = new Map<string, MountedUiWidgetInstance>();
   private handlerOrder = 0;
 
-  constructor(options: { defaultTimeoutMs?: number } = {}) {
+  constructor(options: { defaultTimeoutMs?: number; getActiveSessionId?: () => string | undefined } = {}) {
     this.defaultTimeoutMs = clampTimeout(options.defaultTimeoutMs, 120);
+    this.getActiveSessionIdFn = typeof options.getActiveSessionId === "function"
+      ? options.getActiveSessionId
+      : () => undefined;
   }
 
   listDescriptors(): UiExtensionDescriptor[] {
@@ -295,18 +335,18 @@ export class PanelUiPluginRuntime {
     const nextIds = new Set(nextList.map((item) => item.pluginId));
     for (const pluginId of Array.from(this.states.keys())) {
       if (!nextIds.has(pluginId)) {
-        this.unregister(pluginId);
+        await this.unregister(pluginId);
       }
     }
 
     for (const descriptor of nextList) {
-      this.upsertDescriptor(descriptor);
+      await this.upsertDescriptor(descriptor);
     }
     for (const descriptor of nextList) {
       if (descriptor.enabled) {
         await this.enable(descriptor.pluginId);
       } else {
-        this.disable(descriptor.pluginId);
+        await this.disable(descriptor.pluginId);
       }
     }
   }
@@ -314,10 +354,24 @@ export class PanelUiPluginRuntime {
   async registerDescriptor(input: unknown): Promise<void> {
     const descriptor = normalizeDescriptor(input);
     if (!descriptor) return;
-    this.upsertDescriptor(descriptor);
+    await this.upsertDescriptor(descriptor);
     if (descriptor.enabled) {
       await this.enable(descriptor.pluginId);
     }
+  }
+
+  async attachHostSlot(slot: UiWidgetSlot, host: HTMLElement): Promise<void> {
+    this.assertWidgetSlot(slot);
+    if (!host) return;
+    await this.unmountWidgetsInSlot(slot);
+    this.hostSlots.set(slot, host);
+    await this.mountWidgetsForSlot(slot);
+  }
+
+  async detachHostSlot(slot: UiWidgetSlot): Promise<void> {
+    this.assertWidgetSlot(slot);
+    await this.unmountWidgetsInSlot(slot);
+    this.hostSlots.delete(slot);
   }
 
   async enable(pluginId: string): Promise<void> {
@@ -328,12 +382,14 @@ export class PanelUiPluginRuntime {
     if (isVirtualModuleUrl(state.descriptor.moduleUrl)) {
       state.enabled = true;
       state.handlers = [];
+      state.widgets = [];
       state.remoteHookCache = null;
       state.lastError = undefined;
       return;
     }
 
     const collectedHandlers: UiHandlerEntry[] = [];
+    const collectedWidgets: UiWidgetDefinition[] = [];
     const api: PanelUiPluginApi = {
       on: (hook, handler, options = {}) => {
         if (typeof handler !== "function") return;
@@ -345,36 +401,69 @@ export class PanelUiPluginRuntime {
           order: this.handlerOrder++,
           handler: handler as UiHandlerEntry["handler"]
         });
+      },
+      registerWidget: (definition) => {
+        if (!definition || typeof definition !== "object") return;
+        const widgetId = String(definition.id || "").trim();
+        const slot = this.normalizeWidgetSlot(definition.slot);
+        if (!widgetId || !slot || typeof definition.mount !== "function") return;
+        const nextDefinition: UiWidgetDefinition = {
+          id: widgetId,
+          slot,
+          order: Number.isFinite(Number(definition.order)) ? Math.floor(Number(definition.order)) : 0,
+          mount: definition.mount
+        };
+        const existingIndex = collectedWidgets.findIndex((item) => item.id === widgetId);
+        if (existingIndex >= 0) {
+          collectedWidgets.splice(existingIndex, 1, nextDefinition);
+          return;
+        }
+        collectedWidgets.push(nextDefinition);
       }
     };
 
     try {
+      await this.unmountWidgetsForPlugin(id);
       const setup = await loadPluginFactory(state.descriptor.moduleUrl, state.descriptor.exportName);
       await Promise.resolve(setup(api));
       state.handlers = collectedHandlers;
+      state.widgets = collectedWidgets;
       state.enabled = true;
       state.lastError = undefined;
+      await this.mountWidgetsForPlugin(id);
     } catch (error) {
       state.errorCount += 1;
       state.lastError = error instanceof Error ? error.message : String(error);
       state.handlers = [];
+      state.widgets = [];
       state.enabled = false;
+      await this.unmountWidgetsForPlugin(id);
     }
   }
 
-  disable(pluginId: string): void {
+  async disable(pluginId: string): Promise<void> {
     const id = String(pluginId || "").trim();
     const state = this.states.get(id);
     if (!state) return;
+    await this.unmountWidgetsForPlugin(id);
     state.enabled = false;
     state.handlers = [];
+    state.widgets = [];
     state.remoteHookCache = null;
   }
 
-  unregister(pluginId: string): void {
+  async unregister(pluginId: string): Promise<void> {
     const id = String(pluginId || "").trim();
     if (!id) return;
+    await this.unmountWidgetsForPlugin(id);
     this.states.delete(id);
+  }
+
+  async dispose(): Promise<void> {
+    for (const instanceId of Array.from(this.mountedWidgets.keys())) {
+      await this.unmountWidgetInstance(instanceId);
+    }
+    this.hostSlots.clear();
   }
 
   async runHook<K extends UiHookName>(hook: K, payload: UiHookPayloadMap[K]): Promise<RunHookResult<UiHookPayloadMap[K]>> {
@@ -429,13 +518,14 @@ export class PanelUiPluginRuntime {
     };
   }
 
-  private upsertDescriptor(descriptor: UiExtensionDescriptor): void {
+  private async upsertDescriptor(descriptor: UiExtensionDescriptor): Promise<void> {
     const current = this.states.get(descriptor.pluginId);
     if (!current) {
       this.states.set(descriptor.pluginId, {
         descriptor,
         enabled: false,
         handlers: [],
+        widgets: [],
         remoteHookCache: null,
         errorCount: 0
       });
@@ -447,10 +537,143 @@ export class PanelUiPluginRuntime {
       || current.descriptor.sessionId !== descriptor.sessionId;
     current.descriptor = descriptor;
     if (moduleChanged) {
+      await this.unmountWidgetsForPlugin(descriptor.pluginId);
       current.enabled = false;
       current.handlers = [];
+      current.widgets = [];
       current.remoteHookCache = null;
     }
+  }
+
+  private normalizeWidgetSlot(input: unknown): UiWidgetSlot | null {
+    return String(input || "").trim() === "chat.scene.overlay" ? "chat.scene.overlay" : null;
+  }
+
+  private assertWidgetSlot(slot: UiWidgetSlot): void {
+    if (slot !== "chat.scene.overlay") {
+      throw new Error(`unknown ui widget slot: ${String(slot || "")}`);
+    }
+  }
+
+  private getActiveSessionId(): string | undefined {
+    const sessionId = String(this.getActiveSessionIdFn() || "").trim();
+    return sessionId || undefined;
+  }
+
+  private async mountWidgetsForSlot(slot: UiWidgetSlot): Promise<void> {
+    const host = this.hostSlots.get(slot);
+    if (!host) return;
+    const candidates: Array<{ pluginId: string; widget: UiWidgetDefinition }> = [];
+    for (const [pluginId, state] of this.states.entries()) {
+      if (!state.enabled) continue;
+      for (const widget of state.widgets) {
+        if (widget.slot !== slot) continue;
+        candidates.push({ pluginId, widget });
+      }
+    }
+    candidates.sort((a, b) => {
+      const orderDiff = (Number(a.widget.order) || 0) - (Number(b.widget.order) || 0);
+      if (orderDiff !== 0) return orderDiff;
+      const pluginDiff = a.pluginId.localeCompare(b.pluginId);
+      if (pluginDiff !== 0) return pluginDiff;
+      return a.widget.id.localeCompare(b.widget.id);
+    });
+    for (const item of candidates) {
+      await this.mountWidget(item.pluginId, item.widget, host);
+    }
+  }
+
+  private async mountWidgetsForPlugin(pluginId: string): Promise<void> {
+    const state = this.states.get(pluginId);
+    if (!state || !state.enabled) return;
+    const widgets = [...state.widgets].sort((a, b) => {
+      const orderDiff = (Number(a.order) || 0) - (Number(b.order) || 0);
+      if (orderDiff !== 0) return orderDiff;
+      return a.id.localeCompare(b.id);
+    });
+    for (const widget of widgets) {
+      const host = this.hostSlots.get(widget.slot);
+      if (!host) continue;
+      await this.mountWidget(pluginId, widget, host);
+    }
+  }
+
+  private async mountWidget(pluginId: string, widget: UiWidgetDefinition, host: HTMLElement): Promise<void> {
+    const state = this.states.get(pluginId);
+    if (!state || !state.enabled) return;
+    const instanceId = `${pluginId}:${widget.id}`;
+    if (this.mountedWidgets.has(instanceId)) return;
+    const doc = host.ownerDocument || (typeof document !== "undefined" ? document : null);
+    if (!doc?.createElement) return;
+    const container = doc.createElement("div") as HTMLElement;
+    container.dataset.pluginWidgetInstance = instanceId;
+    container.dataset.pluginId = pluginId;
+    container.dataset.widgetId = widget.id;
+    container.setAttribute("data-plugin-widget-instance", instanceId);
+    container.setAttribute("data-plugin-id", pluginId);
+    container.setAttribute("data-widget-id", widget.id);
+    host.appendChild(container);
+    try {
+      const cleanup = await Promise.resolve(widget.mount(container, {
+        pluginId,
+        widgetId: widget.id,
+        slot: widget.slot,
+        getActiveSessionId: () => this.getActiveSessionId(),
+        isActiveSession: (sessionId?: string) => {
+          const currentSessionId = this.getActiveSessionId();
+          const candidate = String(sessionId || "").trim();
+          if (!candidate) return true;
+          return Boolean(currentSessionId) && currentSessionId === candidate;
+        }
+      }));
+      this.mountedWidgets.set(instanceId, {
+        instanceId,
+        pluginId,
+        widgetId: widget.id,
+        slot: widget.slot,
+        order: Number(widget.order) || 0,
+        container,
+        cleanup: typeof cleanup === "function" ? cleanup : undefined
+      });
+    } catch (error) {
+      container.remove();
+      state.errorCount += 1;
+      state.lastError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  private async unmountWidgetsForPlugin(pluginId: string): Promise<void> {
+    const ids = Array.from(this.mountedWidgets.values())
+      .filter((item) => item.pluginId === pluginId)
+      .map((item) => item.instanceId);
+    for (const instanceId of ids) {
+      await this.unmountWidgetInstance(instanceId);
+    }
+  }
+
+  private async unmountWidgetsInSlot(slot: UiWidgetSlot): Promise<void> {
+    const ids = Array.from(this.mountedWidgets.values())
+      .filter((item) => item.slot === slot)
+      .map((item) => item.instanceId);
+    for (const instanceId of ids) {
+      await this.unmountWidgetInstance(instanceId);
+    }
+  }
+
+  private async unmountWidgetInstance(instanceId: string): Promise<void> {
+    const mounted = this.mountedWidgets.get(instanceId);
+    if (!mounted) return;
+    this.mountedWidgets.delete(instanceId);
+    try {
+      await Promise.resolve(mounted.cleanup?.());
+    } catch (error) {
+      const state = this.states.get(mounted.pluginId);
+      if (state) {
+        state.errorCount += 1;
+        state.lastError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    mounted.container.remove();
   }
 
   private listHandlers(hook: UiHookName): Array<UiHandlerEntry & { pluginId: string }> {
@@ -539,6 +762,8 @@ export class PanelUiPluginRuntime {
   }
 }
 
-export function createPanelUiPluginRuntime(options: { defaultTimeoutMs?: number } = {}): PanelUiPluginRuntime {
+export function createPanelUiPluginRuntime(
+  options: { defaultTimeoutMs?: number; getActiveSessionId?: () => string | undefined } = {}
+): PanelUiPluginRuntime {
   return new PanelUiPluginRuntime(options);
 }

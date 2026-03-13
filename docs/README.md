@@ -23,6 +23,8 @@
    - 下一阶段目标与拆解。
 4. `docs/sandbox-runtime-filesystem-normalization-plan-2026-03-13.md`
    - Browser sandbox runtime 持久化、`/mem` 语义、skills/system prompt/@路径 对齐计划。
+5. `docs/plugin-ui-widget-api-plan-2026-03-14.md`
+   - Panel 插件自带 UI 的 widget API 方案：slot、生命周期、`mission-hud-dog` 迁移与验收口径。
 
 ## 3. 架构与专题参考
 
