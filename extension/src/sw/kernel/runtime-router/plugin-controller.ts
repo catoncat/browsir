@@ -358,6 +358,9 @@ export async function handleBrainPlugin(
       deps.emitPluginRuntimeMessage(runtimeMessage);
     }
     const hookResult = toRecord(executed.hookResult);
+    const registeredHooks = Array.isArray(executed.registeredHooks)
+      ? (executed.registeredHooks as unknown[]).map((h) => String(h || "").trim()).filter(Boolean)
+      : undefined;
     deps.emitPluginHookTrace({
       traceType: "ui_hook",
       pluginId,
@@ -380,6 +383,7 @@ export async function handleBrainPlugin(
           action: "patch",
           patch: toRecord(hookResult.patch),
         },
+        ...(registeredHooks ? { registeredHooks } : {}),
       });
     }
     if (actionName === "block") {
@@ -390,6 +394,7 @@ export async function handleBrainPlugin(
           action: "block",
           reason: String(hookResult.reason || "").trim() || undefined,
         },
+        ...(registeredHooks ? { registeredHooks } : {}),
       });
     }
     return ok({
@@ -398,6 +403,7 @@ export async function handleBrainPlugin(
       hookResult: {
         action: "continue",
       },
+      ...(registeredHooks ? { registeredHooks } : {}),
     });
   }
 

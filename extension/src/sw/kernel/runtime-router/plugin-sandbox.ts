@@ -329,6 +329,7 @@ async function runHookRegistration(registry, hook, handlerId, payload) {
       emit({
         ok: true,
         hookResult,
+        registeredHooks: Object.keys(registry.hooks),
         runtimeMessages: state.runtimeMessages
       });
       return;

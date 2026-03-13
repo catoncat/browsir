@@ -160,6 +160,7 @@ interface UiPluginState {
   descriptor: UiExtensionDescriptor;
   enabled: boolean;
   handlers: UiHandlerEntry[];
+  remoteHookCache: Set<string> | null;
   errorCount: number;
   lastError?: string;
 }
@@ -222,11 +223,16 @@ function isVirtualModuleUrl(moduleUrl: string): boolean {
   return /^mem:\/\//i.test(String(moduleUrl || "").trim());
 }
 
+interface RemoteHookResponse<K extends UiHookName> {
+  result: UiHookResult<UiHookPayloadMap[K]>;
+  registeredHooks?: string[];
+}
+
 async function invokeRemoteUiHook<K extends UiHookName>(
   descriptor: UiExtensionDescriptor,
   hook: K,
   payload: UiHookPayloadMap[K]
-): Promise<UiHookResult<UiHookPayloadMap[K]> | null> {
+): Promise<RemoteHookResponse<K>> {
   const response = (await chrome.runtime.sendMessage({
     type: "brain.plugin.ui_hook.run",
     pluginId: descriptor.pluginId,
@@ -234,26 +240,37 @@ async function invokeRemoteUiHook<K extends UiHookName>(
     payload,
     ...(descriptor.sessionId ? { sessionId: descriptor.sessionId } : {}),
     ...(descriptor.exportName ? { exportName: descriptor.exportName } : {})
-  })) as RuntimeResponse<{ hookResult?: unknown }>;
+  })) as RuntimeResponse<{ hookResult?: unknown; registeredHooks?: unknown }>;
   if (!response?.ok) {
     throw new Error(String(response?.error || "brain.plugin.ui_hook.run failed"));
   }
-  const hookResult = toRecord(toRecord(response.data).hookResult);
+  const data = toRecord(response.data);
+  const hookResult = toRecord(data.hookResult);
+  const registeredHooks = Array.isArray(data.registeredHooks)
+    ? (data.registeredHooks as unknown[]).map((h) => String(h || "").trim()).filter(Boolean)
+    : undefined;
   const action = String(hookResult.action || "").trim();
   if (action === "patch") {
     return {
-      action: "patch",
-      patch: toRecord(hookResult.patch) as Partial<UiHookPayloadMap[K]>
+      result: {
+        action: "patch",
+        patch: toRecord(hookResult.patch) as Partial<UiHookPayloadMap[K]>
+      },
+      registeredHooks
     };
   }
   if (action === "block") {
     return {
-      action: "block",
-      reason: String(hookResult.reason || "").trim() || undefined
+      result: {
+        action: "block",
+        reason: String(hookResult.reason || "").trim() || undefined
+      },
+      registeredHooks
     };
   }
   return {
-    action: "continue"
+    result: { action: "continue" },
+    registeredHooks
   };
 }
 
@@ -311,6 +328,7 @@ export class PanelUiPluginRuntime {
     if (isVirtualModuleUrl(state.descriptor.moduleUrl)) {
       state.enabled = true;
       state.handlers = [];
+      state.remoteHookCache = null;
       state.lastError = undefined;
       return;
     }
@@ -350,6 +368,7 @@ export class PanelUiPluginRuntime {
     if (!state) return;
     state.enabled = false;
     state.handlers = [];
+    state.remoteHookCache = null;
   }
 
   unregister(pluginId: string): void {
@@ -384,12 +403,16 @@ export class PanelUiPluginRuntime {
     for (const descriptor of remoteDescriptors) {
       const state = this.states.get(descriptor.pluginId);
       if (!state || !state.enabled) continue;
+      if (state.remoteHookCache && !state.remoteHookCache.has(hook)) continue;
       try {
-        const result = await this.runWithTimeout(
+        const remote = await this.runWithTimeout(
           invokeRemoteUiHook(descriptor, hook, current),
           this.defaultTimeoutMs
-        );
-        const next = await this.applyHookResult(state, result, current);
+        ) as RemoteHookResponse<K> | null;
+        if (remote?.registeredHooks) {
+          state.remoteHookCache = new Set(remote.registeredHooks);
+        }
+        const next = await this.applyHookResult(state, remote?.result ?? null, current);
         if (next.blocked) {
           return next;
         }
@@ -413,6 +436,7 @@ export class PanelUiPluginRuntime {
         descriptor,
         enabled: false,
         handlers: [],
+        remoteHookCache: null,
         errorCount: 0
       });
       return;
@@ -425,6 +449,7 @@ export class PanelUiPluginRuntime {
     if (moduleChanged) {
       current.enabled = false;
       current.handlers = [];
+      current.remoteHookCache = null;
     }
   }
 
