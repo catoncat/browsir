@@ -626,7 +626,7 @@ onMounted(() => {
           </p>
         </div>
 
-        <div class="grid grid-cols-1 gap-3 lg:grid-cols-3">
+        <div class="grid grid-cols-1 gap-3">
           <label class="space-y-1.5">
             <span
               class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
@@ -811,7 +811,7 @@ onMounted(() => {
             </button>
           </div>
 
-          <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <div class="grid grid-cols-1 gap-2">
             <label class="space-y-1 block">
               <span
                 class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
@@ -848,7 +848,7 @@ onMounted(() => {
             </label>
 
             <template v-if="isCursorHelpWebProvider(profile)">
-              <label class="space-y-1 block sm:col-span-2">
+              <label class="space-y-1 block">
                 <span
                   class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
                   >连接页面</span
@@ -880,7 +880,7 @@ onMounted(() => {
                 </div>
               </label>
 
-              <label class="space-y-1 block sm:col-span-2">
+              <label class="space-y-1 block">
                 <span
                   class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
                   >页面中的模型</span
@@ -914,7 +914,7 @@ onMounted(() => {
 
               <label
                 v-if="getCursorHelpModelOptions(profile).length > 1"
-                class="space-y-1 block sm:col-span-2"
+                class="space-y-1 block"
               >
                 <span
                   class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
@@ -937,7 +937,7 @@ onMounted(() => {
                 </select>
               </label>
 
-              <label v-else class="space-y-1 block sm:col-span-2">
+              <label v-else class="space-y-1 block">
                 <span
                   class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
                   >发送时使用</span
@@ -953,7 +953,7 @@ onMounted(() => {
 
             <label
               v-if="!isCursorHelpWebProvider(profile)"
-              class="space-y-1 block sm:col-span-2"
+              class="space-y-1 block"
             >
               <span
                 class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
@@ -969,7 +969,7 @@ onMounted(() => {
 
             <label
               v-if="!isCursorHelpWebProvider(profile)"
-              class="space-y-1 block sm:col-span-2"
+              class="space-y-1 block"
             >
               <span
                 class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
@@ -1003,7 +1003,7 @@ onMounted(() => {
 
             <label
               v-if="!isCursorHelpWebProvider(profile)"
-              class="space-y-1 block sm:col-span-2"
+              class="space-y-1 block"
             >
               <span
                 class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
@@ -1036,7 +1036,7 @@ onMounted(() => {
                   >收起</span
                 >
               </summary>
-              <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 pt-3">
+              <div class="grid grid-cols-1 gap-2 pt-3">
                 <label class="space-y-1 block">
                   <span
                     class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
@@ -1065,7 +1065,7 @@ onMounted(() => {
                   />
                 </label>
 
-                <label class="space-y-1 block sm:col-span-2">
+                <label class="space-y-1 block">
                   <span
                     class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
                     >最大重试等待 (ms)</span

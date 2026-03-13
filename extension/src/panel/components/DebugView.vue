@@ -197,7 +197,7 @@ onMounted(() => {
           </select>
         </div>
 
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+        <div class="grid grid-cols-2 gap-2.5">
           <div class="rounded border border-ui-border bg-ui-bg p-2.5">
             <div class="text-[10px] uppercase tracking-wider text-ui-text-muted flex items-center gap-1">
               <Server :size="12" /> Bridge

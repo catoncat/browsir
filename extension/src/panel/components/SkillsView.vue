@@ -325,9 +325,9 @@ onMounted(async () => {
       </section>
 
       <section class="space-y-3">
-        <h3 class="text-[11px] font-bold uppercase tracking-[0.1em] text-ui-text-muted">Skill 编辑器（写入 VFS）</h3>
+        <h3 class="text-[11px] font-bold uppercase tracking-[0.1em] text-ui-text-muted">Skill 编辑器（写入 lifo）</h3>
         <p class="text-[11px] text-ui-text-muted">
-          这里会直接把内容写入浏览器虚拟文件系统（mem:// / vfs://），然后自动安装到技能注册表。
+          这里会直接把内容写入浏览器 lifo 虚拟文件系统（mem://），然后自动安装到技能注册表。
         </p>
         <div class="space-y-1.5">
           <label :for="editorLocationId" class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">Location</label>
@@ -339,7 +339,7 @@ onMounted(async () => {
             placeholder="mem://skills/my-skill/SKILL.md"
           />
         </div>
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        <div class="grid grid-cols-1 gap-2">
           <div class="space-y-1.5">
             <label :for="editorSkillIdId" class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">Skill ID</label>
             <input
