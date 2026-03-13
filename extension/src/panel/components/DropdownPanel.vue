@@ -16,7 +16,7 @@ defineExpose({
 <template>
   <div
     ref="rootEl"
-    class="absolute bottom-[calc(100%-8px)] left-4 right-4 z-50 bg-ui-bg border border-ui-border rounded-xl shadow-2xl overflow-hidden animate-in slide-in-from-bottom-2 duration-200"
+    class="absolute bottom-[calc(100%+8px)] left-0 right-0 z-[100] bg-ui-bg border border-ui-border rounded-xl shadow-[0_12px_40px_-12px_rgba(0,0,0,0.3)] overflow-hidden animate-in slide-in-from-bottom-2 duration-200"
     role="listbox"
     :aria-label="props.ariaLabel"
   >

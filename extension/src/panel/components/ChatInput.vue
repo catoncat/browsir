@@ -3,6 +3,7 @@ import { ref, watch, computed, nextTick } from "vue";
 import { Send, Square, Plus, ChevronDown, ChevronUp, X, Globe, Search, Check, Loader2, Wand2 } from "lucide-vue-next";
 import { useTextareaAutosize, onClickOutside } from "@vueuse/core";
 import { useRuntimeStore, type SkillMetadata } from "../stores/runtime";
+import { extractPromptContextRefs, isPathLikeMentionQuery } from "../../shared/context-ref";
 import DropdownPanel from "./DropdownPanel.vue";
 
 interface TabItem {
@@ -50,7 +51,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: "update:modelValue", value: string): void;
-  (e: "send", payload: { text: string; tabIds: number[]; skillIds: string[]; mode: "normal" | "steer" | "followUp" }): void;
+  (e: "send", payload: { text: string; tabIds: number[]; skillIds: string[]; contextRefs: Array<Record<string, unknown>>; mode: "normal" | "steer" | "followUp" }): void;
   (e: "queue-promote", payload: { id: string }): void;
   (e: "stop"): void;
 }>();
@@ -189,12 +190,18 @@ watch(text, (newVal) => {
       mentionFilter.value = "";
       focusedIndex.value = 0;
     } else if (showMentionList.value) {
-      const match = /@(\w*)$/.exec(newVal);
-      if (match) {
-        mentionFilter.value = match[1];
-        focusedIndex.value = 0;
-      } else {
+      const pathMatch = /@([^\s]*)$/.exec(newVal);
+      if (pathMatch && isPathLikeMentionQuery(pathMatch[1] || "")) {
         showMentionList.value = false;
+        mentionFilter.value = "";
+      } else {
+        const match = /@(\w*)$/.exec(newVal);
+        if (match) {
+          mentionFilter.value = match[1];
+          focusedIndex.value = 0;
+        } else {
+          showMentionList.value = false;
+        }
       }
     } else {
       showMentionList.value = false;
@@ -536,10 +543,12 @@ function scrollToFocusedSkill() {
 function handleSubmit(mode: "normal" | "steer" | "followUp") {
   if ((text.value.trim().length === 0 && selectedSkills.value.length === 0) || props.disabled || isStartingRun.value) return;
   const resolvedMode = props.isRunning ? (mode === "normal" ? "steer" : mode) : "normal";
+  const extracted = extractPromptContextRefs(text.value);
   emit("send", {
     text: text.value,
     tabIds: selectedTabs.value.map(t => t.id),
     skillIds: selectedSkills.value.map((item) => item.id),
+    contextRefs: extracted.refs as Array<Record<string, unknown>>,
     mode: resolvedMode
   });
   text.value = "";
@@ -741,103 +750,113 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
       
       <!-- Integrated Sharing Header (Top of Card) -->
       <div
-        v-if="selectedTabs.length > 0"
+        v-if="selectedTabs.length > 0 || selectedSkills.length > 0"
         class="flex flex-col bg-ui-surface/60 border-b border-ui-border/30"
       >
-        <div class="h-8 px-2.5 flex items-center justify-between gap-2">
-          <div class="min-w-0 flex items-center gap-1.5 overflow-hidden">
-            <div class="flex -space-x-1 shrink-0">
-              <div
-                v-for="(tab, i) in selectedTabs.slice(0, 2)"
-                :key="tab.id"
-                class="w-4 h-4 rounded border border-ui-border bg-white flex items-center justify-center overflow-hidden"
-                :style="{ zIndex: 10 - i }"
-              >
-                <img v-if="tab.favIconUrl" :src="tab.favIconUrl" class="w-full h-full object-contain" aria-hidden="true" />
-                <Globe v-else :size="9" aria-hidden="true" />
+        <!-- CONTEXT SUMMARY BAR -->
+        <div class="h-9 px-2.5 flex items-center justify-between gap-2 overflow-hidden">
+          <div class="min-w-0 flex items-center gap-2 overflow-hidden select-none">
+            <!-- TABS ICON GROUP -->
+            <div v-if="selectedTabs.length > 0" class="flex items-center gap-1.5 shrink-0 bg-ui-bg/40 px-1.5 py-0.5 rounded-full border border-ui-border/20">
+              <div class="flex -space-x-1 shrink-0">
+                <div
+                  v-for="(tab, i) in selectedTabs.slice(0, 2)"
+                  :key="tab.id"
+                  class="w-4 h-4 rounded border border-ui-border bg-white flex items-center justify-center overflow-hidden"
+                  :style="{ zIndex: 10 - i }"
+                >
+                  <img v-if="tab.favIconUrl" :src="tab.favIconUrl" class="w-full h-full object-contain" aria-hidden="true" />
+                  <Globe v-else :size="9" aria-hidden="true" />
+                </div>
+                <span
+                  v-if="selectedTabs.length > 2"
+                  class="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-ui-border bg-ui-bg px-1 text-[9px] text-ui-text-muted"
+                >
+                  +{{ selectedTabs.length - 2 }}
+                </span>
               </div>
-              <span
-                v-if="selectedTabs.length > 2"
-                class="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-ui-border bg-ui-bg px-1 text-[9px] text-ui-text-muted"
-              >
-                +{{ selectedTabs.length - 2 }}
+              <span class="truncate text-[10px] font-bold text-ui-text uppercase tracking-tight">
+                {{ selectedTabs.length === 1 ? '1 Tab' : `${selectedTabs.length} Tabs` }}
               </span>
             </div>
-            <span class="truncate text-[11px] font-medium text-ui-text">
-              {{ selectedTabs.length === 1 ? selectedTabs[0].title : `${selectedTabs.length} 个标签页` }}
-            </span>
+
+            <!-- SKILLS ICON GROUP -->
+            <div v-if="selectedSkills.length > 0" class="flex items-center gap-1.5 shrink-0 bg-ui-accent/5 px-1.5 py-0.5 rounded-full border border-ui-accent/10">
+              <Wand2 :size="11" class="text-ui-accent" />
+              <span class="truncate text-[10px] font-bold text-ui-accent uppercase tracking-tight">
+                {{ selectedSkills.length === 1 ? '1 Skill' : `${selectedSkills.length} Skills` }}
+              </span>
+            </div>
           </div>
 
           <div class="flex items-center gap-0.5 shrink-0">
             <button
-              v-if="selectedTabs.length > 1"
               @click="isContextExpanded = !isContextExpanded"
-              class="h-5 w-5 inline-flex items-center justify-center hover:bg-black/5 rounded-md text-ui-text-muted transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent"
+              class="h-6 px-1.5 inline-flex items-center gap-1 hover:bg-black/5 rounded-md text-ui-text-muted transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent"
               :aria-label="isContextExpanded ? '收起详情' : '查看共享详情'"
               :aria-expanded="isContextExpanded"
-              :title="isContextExpanded ? '收起详情' : '管理共享标签页'"
+              :title="isContextExpanded ? '收起详情' : '管理上下文'"
             >
+              <span class="text-[10px] font-medium hidden xs:inline">{{ isContextExpanded ? 'HIDE' : 'MANAGE' }}</span>
               <ChevronDown v-if="!isContextExpanded" :size="11" aria-hidden="true" />
               <ChevronUp v-else :size="11" aria-hidden="true" />
             </button>
             <button
-              @click="selectedTabs = []; isContextExpanded = false"
-              class="h-5 w-5 inline-flex items-center justify-center hover:bg-black/5 rounded-md text-ui-text-muted transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent"
-              aria-label="移除所有共享标签页"
-              title="移除所有共享标签页"
+              @click="selectedTabs = []; selectedSkills = []; isContextExpanded = false"
+              class="h-6 w-6 inline-flex items-center justify-center hover:bg-rose-50 hover:text-rose-500 rounded-md text-ui-text-muted transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-rose-500"
+              aria-label="清除所有上下文"
+              title="清除所有上下文"
             >
-              <X :size="11" aria-hidden="true" />
+              <X :size="12" aria-hidden="true" />
             </button>
           </div>
         </div>
 
-        <div v-if="isContextExpanded" class="px-2.5 pb-2 space-y-1 animate-in slide-in-from-top-1 duration-200" role="list">
-          <div
-            v-for="tab in selectedTabs"
-            :key="tab.id"
-            class="h-7 flex items-center justify-between group/tab bg-white/50 border border-ui-border/50 px-2 rounded-md"
-            role="listitem"
-          >
-            <div class="flex items-center gap-1.5 overflow-hidden">
-              <img v-if="tab.favIconUrl" :src="tab.favIconUrl" class="w-3 h-3 shrink-0 rounded-sm" aria-hidden="true" />
-              <Globe v-else :size="10" class="text-ui-text-muted shrink-0" aria-hidden="true" />
-              <span class="text-[11px] text-ui-text truncate">{{ tab.title }}</span>
+        <!-- EXPANDED MANAGEMENT AREA -->
+        <div v-if="isContextExpanded" class="px-2.5 pb-2.5 space-y-2 animate-in slide-in-from-top-1 duration-200" role="list">
+          <!-- Manage Tabs -->
+          <div v-if="selectedTabs.length > 0" class="space-y-1">
+            <div class="text-[9px] font-bold text-ui-text-muted/60 uppercase tracking-widest px-1">Tabs</div>
+            <div
+              v-for="tab in selectedTabs"
+              :key="tab.id"
+              class="h-7 flex items-center justify-between group/tab bg-white/60 border border-ui-border/40 px-2 rounded-md hover:border-ui-border transition-colors"
+              role="listitem"
+            >
+              <div class="flex items-center gap-2 overflow-hidden">
+                <img v-if="tab.favIconUrl" :src="tab.favIconUrl" class="w-3 h-3 shrink-0 rounded-sm" aria-hidden="true" />
+                <Globe v-else :size="10" class="text-ui-text-muted shrink-0" aria-hidden="true" />
+                <span class="text-[11px] text-ui-text truncate">{{ tab.title }}</span>
+              </div>
+              <button @click="removeTab(tab.id)" class="p-1 text-ui-text-muted hover:text-rose-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-rose-500 rounded-sm" :aria-label="`移除 ${tab.title}`">
+                <X :size="10" aria-hidden="true" />
+              </button>
             </div>
-            <button @click="removeTab(tab.id)" class="p-1 text-ui-text-muted hover:text-red-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-red-500 rounded-sm" :aria-label="`移除 ${tab.title}`">
-              <X :size="10" aria-hidden="true" />
-            </button>
+          </div>
+
+          <!-- Manage Skills -->
+          <div v-if="selectedSkills.length > 0" class="space-y-1">
+            <div class="text-[9px] font-bold text-ui-text-muted/60 uppercase tracking-widest px-1">Skills</div>
+            <div
+              v-for="skill in selectedSkills"
+              :key="skill.id"
+              class="h-7 flex items-center justify-between group/skill bg-ui-accent/[0.03] border border-ui-accent/10 px-2 rounded-md hover:border-ui-accent/20 transition-colors"
+              role="listitem"
+            >
+              <div class="flex items-center gap-2 overflow-hidden">
+                <Wand2 :size="10" class="text-ui-accent shrink-0" aria-hidden="true" />
+                <span class="text-[11px] text-ui-text truncate font-medium">{{ skill.name }}</span>
+              </div>
+              <button @click="removeSkillSelection(skill.id)" class="p-1 text-ui-text-muted hover:text-rose-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-rose-500 rounded-sm" :aria-label="`移除 ${skill.name}`">
+                <X :size="10" aria-hidden="true" />
+              </button>
+            </div>
           </div>
         </div>
       </div>
 
       <!-- Main Input Flow -->
       <div class="flex flex-col">
-        <div
-          v-if="selectedSkills.length > 0"
-          class="flex flex-wrap gap-1.5 px-3 pt-3 pb-2 border-b border-ui-border/30"
-          role="list"
-          aria-label="已选择技能"
-        >
-          <div
-            v-for="skill in selectedSkills"
-            :key="skill.id"
-            class="inline-flex max-w-full items-center gap-1.5 rounded-full border border-ui-border bg-ui-bg px-2 py-1"
-            role="listitem"
-          >
-            <Wand2 :size="11" class="shrink-0 text-ui-accent" aria-hidden="true" />
-            <span class="truncate text-[11px] font-medium text-ui-text">
-              {{ skill.name }}
-            </span>
-            <button
-              type="button"
-              class="shrink-0 rounded-full p-0.5 text-ui-text-muted transition-colors hover:bg-ui-surface hover:text-ui-text focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent"
-              :aria-label="`移除技能 ${skill.name}`"
-              @click="removeSkillSelection(skill.id)"
-            >
-              <X :size="11" aria-hidden="true" />
-            </button>
-          </div>
-        </div>
         <div
           v-if="isRunning && queueItems.length > 0"
           class="flex flex-col bg-ui-surface/70 border-b border-ui-border/30"
