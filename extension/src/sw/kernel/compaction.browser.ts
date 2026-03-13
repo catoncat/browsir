@@ -159,6 +159,9 @@ Summarize the prefix to provide context for the retained suffix:
 
 Be concise. Focus on what's needed to understand the kept suffix.`;
 
+const SUMMARY_MESSAGE_CLIP_LIMIT = 4_000;
+const SUMMARY_TOOL_RESULT_CLIP_LIMIT = 1_600;
+
 function normalizeSummary(text: string): string {
   return String(text || "")
     .split(/\r?\n/)
@@ -359,7 +362,8 @@ function toConversationMessage(entry: SessionEntry): ConversationMessage | null 
 function serializeConversation(messages: ConversationMessage[]): string {
   const parts: string[] = [];
   for (const message of messages) {
-    const content = String(message.content || "").trim();
+    const rawContent = String(message.content || "").trim();
+    const content = clipConversationContentForSummary(rawContent, message.role);
     if (!content) continue;
     if (message.role === "user") {
       parts.push(`[User]: ${content}`);
@@ -376,6 +380,25 @@ function serializeConversation(messages: ConversationMessage[]): string {
     parts.push(`[System]: ${content}`);
   }
   return parts.join("\n\n");
+}
+
+function clipConversationContentForSummary(
+  content: string,
+  role: ConversationMessage["role"]
+): string {
+  const text = String(content || "").trim();
+  if (!text) return "";
+
+  const maxChars =
+    role === "tool" ? SUMMARY_TOOL_RESULT_CLIP_LIMIT : SUMMARY_MESSAGE_CLIP_LIMIT;
+  if (text.length <= maxChars) return text;
+
+  const marker = `\n...[truncated ${text.length - maxChars} chars]...\n`;
+  const keptChars = Math.max(64, maxChars - marker.length);
+  const headChars = Math.max(32, Math.ceil(keptChars * 0.7));
+  const tailChars = Math.max(32, keptChars - headChars);
+
+  return `${text.slice(0, headChars)}${marker}${text.slice(text.length - tailChars)}`;
 }
 
 function createFileOps(): FileOperations {

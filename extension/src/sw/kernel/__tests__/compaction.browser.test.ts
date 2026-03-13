@@ -178,4 +178,36 @@ describe("compaction.browser", () => {
     expect(draft.summary).toBe("existing-summary");
     expect(draft.droppedEntries).toHaveLength(0);
   });
+
+  it("摘要 prompt 会裁剪超长消息，避免把整段历史原文塞给模型", async () => {
+    const longText = [
+      "HEAD-0",
+      ...Array.from({ length: 5000 }, (_, index) => `body-${index}`),
+      "TAIL-4999"
+    ].join("\n");
+    const entries: SessionEntry[] = [
+      message("u1", "user", longText, null),
+      message("a1", "assistant", "收到", "u1"),
+      message("u2", "user", "继续", "a1")
+    ];
+
+    const preparation = prepareCompaction({
+      reason: "threshold",
+      entries,
+      keepRecentTokens: 1,
+      splitTurn: false
+    });
+
+    let promptText = "";
+    await compact(preparation, async (input) => {
+      promptText = input.promptText;
+      return "summary";
+    });
+
+    expect(promptText).toContain("HEAD-0");
+    expect(promptText).toContain("TAIL-4999");
+    expect(promptText).toContain("[truncated ");
+    expect(promptText).not.toContain("body-2500");
+    expect(promptText.length).toBeLessThan(longText.length);
+  });
 });
