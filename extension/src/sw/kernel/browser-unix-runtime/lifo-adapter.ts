@@ -1070,7 +1070,10 @@ async function bashFrame(args: JsonRecord, sessionId: string): Promise<JsonRecor
 
 async function collectVfsFilesForBridge(sandbox: Sandbox): Promise<VfsFile[]> {
   const files: VfsFile[] = [];
+  // LIFO special mounts that are auto-created and read-only; skip them.
+  const skipDirs = new Set(["/proc", "/dev"]);
   const walk = async (dir: string): Promise<void> => {
+    if (skipDirs.has(dir)) return;
     let entries: Array<{ name: string; type: "file" | "directory" }> = [];
     try {
       entries = await sandbox.fs.readdir(dir);

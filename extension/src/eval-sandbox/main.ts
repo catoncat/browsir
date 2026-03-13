@@ -70,11 +70,17 @@ async function writeFilesToSandbox(
   files: VfsFile[]
 ): Promise<void> {
   for (const file of files) {
-    const dir = file.path.replace(/\/[^/]+$/, "");
-    if (dir && dir !== "/") {
-      await sb.fs.mkdir(dir, { recursive: true });
+    // Skip LIFO special mounts (read-only)
+    if (file.path.startsWith("/proc/") || file.path.startsWith("/dev/")) continue;
+    try {
+      const dir = file.path.replace(/\/[^/]+$/, "");
+      if (dir && dir !== "/") {
+        await sb.fs.mkdir(dir, { recursive: true });
+      }
+      await sb.fs.writeFile(file.path, file.content);
+    } catch {
+      // Skip files that can't be written (e.g. special mounts)
     }
-    await sb.fs.writeFile(file.path, file.content);
   }
 }
 
@@ -83,6 +89,8 @@ async function collectFiles(
   dir: string
 ): Promise<Map<string, string>> {
   const result = new Map<string, string>();
+  // Skip LIFO special mounts
+  if (dir === "/proc" || dir === "/dev") return result;
   try {
     const entries = await sb.fs.readdir(dir);
     for (const entry of entries) {
