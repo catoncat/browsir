@@ -11,7 +11,7 @@ import { normalizeProviderConnectionConfig } from "../../shared/llm-provider-con
 
 const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:8787/ws";
 const DEFAULT_BRIDGE_TOKEN = "dev-token-change-me";
-const DEFAULT_BROWSER_RUNTIME_STRATEGY: BrowserRuntimeStrategy = "host-first";
+const DEFAULT_BROWSER_RUNTIME_STRATEGY: BrowserRuntimeStrategy = "browser-first";
 const DEFAULT_LEASE_TTL_MS = 30_000;
 const MAX_LEASE_TTL_MS = 5 * 60_000;
 const DEFAULT_BRIDGE_INVOKE_TIMEOUT_MS = 120_000;

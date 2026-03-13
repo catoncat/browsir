@@ -8,7 +8,7 @@ describe("browser-runtime-strategy", () => {
     expect(normalizeBrowserRuntimeStrategy("browser-first")).toBe("browser-first");
     expect(normalizeBrowserRuntimeStrategy("host-first")).toBe("host-first");
     expect(normalizeBrowserRuntimeStrategy("invalid", "browser-first")).toBe("browser-first");
-    expect(normalizeBrowserRuntimeStrategy(undefined)).toBe("host-first");
+    expect(normalizeBrowserRuntimeStrategy(undefined)).toBe("browser-first");
   });
 
   it("resolves runtime hint with strategy default", () => {

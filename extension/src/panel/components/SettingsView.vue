@@ -104,8 +104,8 @@ onMounted(() => {
               v-model="config.browserRuntimeStrategy"
               class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
             >
-              <option value="host-first">host-first（默认走 browser lifo）</option>
-              <option value="browser-first">browser-first（默认走 lifo sandbox）</option>
+              <option value="browser-first">browser-first（默认走浏览器沙箱）</option>
+              <option value="host-first">host-first（默认走本地 bridge）</option>
             </select>
             <p class="text-[10px] text-ui-text-muted/60 px-0.5">仅影响 browser_* 工具未显式指定 runtime 时的默认路由。</p>
           </div>

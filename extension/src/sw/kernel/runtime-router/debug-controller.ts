@@ -265,7 +265,7 @@ export async function handleBrainDebug(
     return ok({
       bridgeUrl: String(cfg.bridgeUrl || ""),
       browserRuntimeStrategy: String(
-        cfg.browserRuntimeStrategy || "host-first",
+        cfg.browserRuntimeStrategy || "browser-first",
       ),
       llmDefaultProfile,
       llmAuxProfile: String(cfg.llmAuxProfile || ""),

@@ -2708,7 +2708,7 @@ function extractLlmConfig(raw: JsonRecord): BridgeConfig {
     bridgeToken: String(raw.bridgeToken || ""),
     browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
       raw.browserRuntimeStrategy,
-      "host-first",
+      "browser-first",
     ),
     compaction: normalizeCompactionSettings(raw.compaction),
     llmDefaultProfile: String(raw.llmDefaultProfile || "default"),
@@ -5498,7 +5498,7 @@ export function createRuntimeLoopController(
       const cfg = extractLlmConfig(toRecord(cfgRaw));
       const strategy = normalizeBrowserRuntimeStrategy(
         cfg.browserRuntimeStrategy,
-        "host-first",
+        "browser-first",
       );
       const hint = String(raw || "").trim();
       if (hint) {

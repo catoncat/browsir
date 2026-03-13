@@ -341,8 +341,8 @@ function buildConversationTail(messages: unknown, limit = 14): Array<Record<stri
   });
 }
 
-function buildCompactTable(
-  rows: Array<Record<string, unknown>>,
+function buildCompactTable<TRow extends object>(
+  rows: TRow[],
   preferredColumns: string[] = []
 ): CompactTable {
   const columnSet = new Set<string>();
@@ -355,7 +355,7 @@ function buildCompactTable(
   }
 
   for (const row of rows) {
-    for (const key of Object.keys(row)) {
+    for (const key of Object.keys(row as Record<string, unknown>)) {
       if (columnSet.has(key)) continue;
       columnSet.add(key);
       columns.push(key);
@@ -364,7 +364,10 @@ function buildCompactTable(
 
   return {
     columns,
-    rows: rows.map((row) => columns.map((column) => sanitizeValue(row[column])))
+    rows: rows.map((row) => {
+      const record = row as Record<string, unknown>;
+      return columns.map((column) => sanitizeValue(record[column]));
+    })
   };
 }
 

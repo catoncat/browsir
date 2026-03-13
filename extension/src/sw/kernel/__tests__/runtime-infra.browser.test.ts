@@ -239,7 +239,7 @@ describe("runtime infra handler", () => {
     if (!first || first.ok !== true) return;
     const initial = (first.data ?? {}) as Record<string, unknown>;
     expect(String(initial.bridgeUrl || "")).toContain("ws://");
-    expect(String(initial.browserRuntimeStrategy || "")).toBe("host-first");
+    expect(String(initial.browserRuntimeStrategy || "")).toBe("browser-first");
     expect(initial.devAutoReload).toBe(false);
 
     const saved = await infra.handleMessage({

@@ -656,7 +656,7 @@ function normalizeConfig(
     bridgeToken,
     browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
       raw?.browserRuntimeStrategy,
-      "host-first",
+      "browser-first",
     ),
     compaction: normalizeCompactionSettings(raw?.compaction),
     llmDefaultProfile,
@@ -1441,7 +1441,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
           : "";
       const browserRuntimeStrategy = normalizeBrowserRuntimeStrategy(
         config.value.browserRuntimeStrategy,
-        "host-first",
+        "browser-first",
       );
 
       config.value.llmProfiles = llmProfiles;

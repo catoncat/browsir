@@ -4,7 +4,7 @@ const BROWSER_UNIX_RUNTIME_HINTS = new Set(["sandbox", "browser_unix", "lifo"]);
 
 export function normalizeBrowserRuntimeStrategy(
   raw: unknown,
-  fallback: BrowserRuntimeStrategy = "host-first"
+  fallback: BrowserRuntimeStrategy = "browser-first"
 ): BrowserRuntimeStrategy {
   const value = String(raw || "").trim().toLowerCase();
   if (value === "browser-first") return "browser-first";
