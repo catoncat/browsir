@@ -2,6 +2,14 @@ import "./test-setup";
 
 import { describe, expect, it } from "vitest";
 import { BrainOrchestrator } from "../orchestrator.browser";
+import { DEFAULT_COMPACTION_SETTINGS } from "../../../shared/compaction";
+
+const eagerCompaction = {
+  ...DEFAULT_COMPACTION_SETTINGS,
+  contextWindowTokens: 1,
+  reserveTokens: 1,
+  keepRecentTokens: 1,
+};
 
 function mockCompactionSummary(orchestrator: BrainOrchestrator, summary = "mock-compaction-summary"): void {
   orchestrator.onHook("compaction.summary", () => ({
@@ -47,7 +55,7 @@ describe("orchestrator.browser", () => {
   });
 
   it("overflow 不走 retry，走 compaction", async () => {
-    const orchestrator = new BrainOrchestrator({ thresholdTokens: 1 });
+    const orchestrator = new BrainOrchestrator({ compaction: eagerCompaction });
     mockCompactionSummary(orchestrator);
     const events: string[] = [];
     orchestrator.events.subscribe((event) => {
@@ -56,6 +64,11 @@ describe("orchestrator.browser", () => {
 
     const created = await orchestrator.createSession({ title: "overflow-case" });
     await orchestrator.appendUserMessage(created.sessionId, "hello");
+    await orchestrator.sessions.appendMessage({
+      sessionId: created.sessionId,
+      role: "assistant",
+      text: "world",
+    });
 
     const decision = await orchestrator.handleAgentEnd({
       sessionId: created.sessionId,
@@ -283,7 +296,7 @@ describe("orchestrator.browser", () => {
   });
 
   it("compaction.check.before 可阻断 preSendCompactionCheck", async () => {
-    const orchestrator = new BrainOrchestrator({ thresholdTokens: 1 });
+    const orchestrator = new BrainOrchestrator({ compaction: eagerCompaction });
     const created = await orchestrator.createSession({ title: "compaction-check-block" });
     await orchestrator.appendUserMessage(created.sessionId, "hello");
     orchestrator.onHook("compaction.check.before", (payload) => {
@@ -299,7 +312,7 @@ describe("orchestrator.browser", () => {
   });
 
   it("agent_end.after 可改写最终决策", async () => {
-    const orchestrator = new BrainOrchestrator({ thresholdTokens: 1 });
+    const orchestrator = new BrainOrchestrator({ compaction: eagerCompaction });
     mockCompactionSummary(orchestrator);
     const created = await orchestrator.createSession({ title: "agent-end-after-patch" });
     await orchestrator.appendUserMessage(created.sessionId, "hello");

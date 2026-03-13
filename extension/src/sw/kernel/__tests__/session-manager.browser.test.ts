@@ -3,6 +3,7 @@ import "./test-setup";
 import { describe, expect, it } from "vitest";
 import { compact, prepareCompaction } from "../compaction.browser";
 import { BrowserSessionManager } from "../session-manager.browser";
+import { getDB } from "../idb-storage";
 
 describe("session-manager.browser", () => {
   it("可以创建会话并构建上下文", async () => {
@@ -26,7 +27,7 @@ describe("session-manager.browser", () => {
     expect(context.messages[1].role).toBe("assistant");
   });
 
-  it("追加 compaction 后上下文会带 previous summary", async () => {
+  it("追加 compaction 后上下文会带 compaction summary 消息", async () => {
     const manager = new BrowserSessionManager();
     const meta = await manager.createSession({ title: "with-compaction" });
 
@@ -39,8 +40,7 @@ describe("session-manager.browser", () => {
     const preparation = prepareCompaction({
       reason: "threshold",
       entries: before.entries,
-      previousSummary: before.previousSummary,
-      keepTail: 2,
+      keepRecentTokens: 2,
       splitTurn: true
     });
     const draft = await compact(preparation, async () => "mock-compaction-summary");
@@ -48,7 +48,43 @@ describe("session-manager.browser", () => {
     await manager.appendCompaction(meta.header.id, "threshold", draft);
     const after = await manager.buildSessionContext(meta.header.id);
 
-    expect(after.previousSummary.length).toBeGreaterThan(0);
+    expect(after.messages[0]?.role).toBe("compactionSummary");
+    expect(after.messages[0]?.content).toContain("mock-compaction-summary");
     expect(after.messages.some((msg) => msg.role === "system")).toBe(false);
+  });
+
+  it("新建 session 只接受 workingContext，并忽略废弃 cwd 字段", async () => {
+    const manager = new BrowserSessionManager();
+    const created = await manager.createSession({
+      title: "with-working-context",
+      workingContext: {
+        hostCwd: "/Users/demo/project",
+        browserCwd: "mem://",
+        browserUserMount: "/mem",
+      },
+    });
+    expect(created.header.workingContext?.browserCwd).toBe("mem://");
+    expect(created.header.workingContext?.browserUserMount).toBe("/mem");
+    expect(created.header.workingContext?.hostCwd).toBe("/Users/demo/project");
+
+    const db = await getDB();
+    await db.put("sessions", {
+      header: {
+        type: "session",
+        version: 1,
+        id: "obsolete-cwd-session",
+        parentSessionId: null,
+        timestamp: "2024-01-01T00:00:00.000Z",
+        cwd: "/tmp/obsolete-cwd",
+      },
+      leafId: null,
+      entryCount: 0,
+      chunkCount: 1,
+      chunkSize: 999999,
+      updatedAt: "2024-01-01T00:00:00.000Z",
+    });
+    const stored = await manager.getMeta("obsolete-cwd-session");
+    expect(stored?.header.workingContext?.hostCwd).toBeUndefined();
+    expect(stored?.header.workingContext?.browserCwd).toBe("mem://");
   });
 });

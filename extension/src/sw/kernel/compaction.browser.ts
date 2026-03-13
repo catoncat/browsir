@@ -1,13 +1,15 @@
 import { approxTokenCount, type CompactionDraft, type SessionEntry } from "./types";
+import {
+  DEFAULT_COMPACTION_SETTINGS,
+  type CompactionSettings,
+} from "../../shared/compaction";
 
-const DEFAULT_KEEP_TAIL = 30;
-const DEFAULT_RESERVE_TOKENS = 16_384;
+const DEFAULT_SPLIT_TURN = true;
 
 export interface ShouldCompactInput {
   overflow: boolean;
   entries: SessionEntry[];
-  previousSummary: string;
-  thresholdTokens: number;
+  settings: CompactionSettings;
 }
 
 export interface ShouldCompactResult {
@@ -18,7 +20,7 @@ export interface ShouldCompactResult {
 
 export interface FindCutPointInput {
   entries: SessionEntry[];
-  keepTail?: number;
+  keepRecentTokens?: number;
   splitTurn?: boolean;
 }
 
@@ -32,8 +34,6 @@ export interface FindCutPointResult {
 export interface PrepareCompactionInput {
   reason: "overflow" | "threshold" | "manual";
   entries: SessionEntry[];
-  previousSummary: string;
-  keepTail?: number;
   splitTurn?: boolean;
   keepRecentTokens?: number;
   reserveTokens?: number;
@@ -52,6 +52,7 @@ interface FileOperations {
 }
 
 export interface CompactionPreparation extends CompactionDraft {
+  isNoOp: boolean;
   isSplitTurn: boolean;
   messagesToSummarize: ConversationMessage[];
   turnPrefixMessages: ConversationMessage[];
@@ -279,16 +280,57 @@ function findCutPointInRange(
   };
 }
 
-function deriveKeepRecentTokens(entries: SessionEntry[], keepTail?: number, override?: number): number {
+function deriveKeepRecentTokens(override?: number): number {
   const rawOverride = Number(override);
   if (Number.isFinite(rawOverride) && rawOverride > 0) {
     return Math.floor(rawOverride);
   }
+  return DEFAULT_COMPACTION_SETTINGS.keepRecentTokens;
+}
 
-  const tailSize = Math.max(1, Number(keepTail || DEFAULT_KEEP_TAIL));
-  const tailEntries = entries.slice(Math.max(0, entries.length - tailSize));
-  const estimated = tailEntries.reduce((sum, entry) => sum + estimateEntryTokens(entry), 0);
-  return Math.max(1, estimated);
+function getLatestCompactionInfo(entries: SessionEntry[]): {
+  latestCompactionIndex: number;
+  previousSummary: string;
+  firstKeptEntryId: string | null;
+  currentContextEntries: SessionEntry[];
+} {
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const entry = entries[i];
+    if (entry.type !== "compaction") continue;
+    const previousSummary = normalizeSummary(entry.summary);
+    const firstKeptEntryId = entry.firstKeptEntryId;
+    if (!firstKeptEntryId) {
+      return {
+        latestCompactionIndex: i,
+        previousSummary,
+        firstKeptEntryId,
+        currentContextEntries: []
+      };
+    }
+    const firstKeptIndex = entries.findIndex(
+      (candidate) => candidate.id === firstKeptEntryId
+    );
+    return {
+      latestCompactionIndex: i,
+      previousSummary,
+      firstKeptEntryId,
+      currentContextEntries: firstKeptIndex >= 0 ? entries.slice(firstKeptIndex) : []
+    };
+  }
+
+  return {
+    latestCompactionIndex: -1,
+    previousSummary: "",
+    firstKeptEntryId: null,
+    currentContextEntries: entries
+  };
+}
+
+function countContextTokens(previousSummary: string, entries: SessionEntry[]): number {
+  return (
+    approxTokenCount(previousSummary) +
+    approxTokenCount(entries.map((entry) => entryToText(entry)).join("\n"))
+  );
 }
 
 function toConversationMessage(entry: SessionEntry): ConversationMessage | null {
@@ -433,8 +475,21 @@ function buildTurnPrefixPrompt(messages: ConversationMessage[]): string {
 }
 
 export function shouldCompact(input: ShouldCompactInput): ShouldCompactResult {
-  const body = input.entries.map((entry) => entryToText(entry)).join("\n");
-  const tokensBefore = approxTokenCount(input.previousSummary) + approxTokenCount(body);
+  const activeContext = getLatestCompactionInfo(
+    Array.isArray(input.entries) ? input.entries : []
+  );
+  const tokensBefore = countContextTokens(
+    activeContext.previousSummary,
+    activeContext.currentContextEntries
+  );
+
+  if (!input.settings.enabled) {
+    return {
+      shouldCompact: false,
+      reason: null,
+      tokensBefore
+    };
+  }
 
   if (input.overflow) {
     return {
@@ -444,7 +499,10 @@ export function shouldCompact(input: ShouldCompactInput): ShouldCompactResult {
     };
   }
 
-  if (tokensBefore >= input.thresholdTokens) {
+  if (
+    tokensBefore >
+    input.settings.contextWindowTokens - input.settings.reserveTokens
+  ) {
     return {
       shouldCompact: true,
       reason: "threshold",
@@ -469,45 +527,58 @@ export function findCutPoint(input: FindCutPointInput): FindCutPointResult {
       isSplitTurn: false
     };
   }
-  const keepRecentTokens = deriveKeepRecentTokens(entries, input.keepTail);
-  return findCutPointInRange(entries, 0, entries.length, keepRecentTokens, input.splitTurn !== false);
+  const keepRecentTokens = deriveKeepRecentTokens(input.keepRecentTokens);
+  return findCutPointInRange(
+    entries,
+    0,
+    entries.length,
+    keepRecentTokens,
+    input.splitTurn ?? DEFAULT_SPLIT_TURN
+  );
 }
 
 export function prepareCompaction(input: PrepareCompactionInput): CompactionPreparation {
   const entries = Array.isArray(input.entries) ? input.entries : [];
-  const previousSummary = normalizeSummary(input.previousSummary);
-  const reserveTokens = Math.max(128, Math.floor(Number(input.reserveTokens || DEFAULT_RESERVE_TOKENS)));
+  const activeContext = getLatestCompactionInfo(entries);
+  const previousSummary = activeContext.previousSummary;
+  const reserveTokens = Math.max(
+    128,
+    Math.floor(Number(input.reserveTokens || DEFAULT_COMPACTION_SETTINGS.reserveTokens))
+  );
+  const keepRecentTokens = deriveKeepRecentTokens(input.keepRecentTokens);
+  const splitTurn = input.splitTurn ?? DEFAULT_SPLIT_TURN;
+  const tokensBefore = countContextTokens(
+    previousSummary,
+    activeContext.currentContextEntries
+  );
 
-  const tokensBefore = approxTokenCount(previousSummary) + approxTokenCount(entries.map((entry) => entryToText(entry)).join("\n"));
-  if (entries.length === 0) {
+  if (entries.length === 0 || activeContext.latestCompactionIndex === entries.length - 1) {
     return {
       summary: previousSummary,
-      firstKeptEntryId: null,
+      firstKeptEntryId: activeContext.firstKeptEntryId,
       previousSummary,
-      keptEntries: [],
+      keptEntries: entries,
       droppedEntries: [],
       tokensBefore,
-      tokensAfter: approxTokenCount(previousSummary),
+      tokensAfter: tokensBefore,
+      isNoOp: true,
       isSplitTurn: false,
       messagesToSummarize: [],
       turnPrefixMessages: [],
-      keepRecentTokens: deriveKeepRecentTokens(entries, input.keepTail, input.keepRecentTokens),
+      keepRecentTokens,
       reserveTokens
     };
   }
 
-  let prevCompactionIndex = -1;
-  for (let i = entries.length - 1; i >= 0; i -= 1) {
-    if (entries[i].type === "compaction") {
-      prevCompactionIndex = i;
-      break;
-    }
-  }
-
-  const boundaryStart = prevCompactionIndex + 1;
+  const boundaryStart = activeContext.latestCompactionIndex + 1;
   const boundaryEnd = entries.length;
-  const keepRecentTokens = deriveKeepRecentTokens(entries.slice(boundaryStart, boundaryEnd), input.keepTail, input.keepRecentTokens);
-  const cut = findCutPointInRange(entries, boundaryStart, boundaryEnd, keepRecentTokens, input.splitTurn !== false);
+  const cut = findCutPointInRange(
+    entries,
+    boundaryStart,
+    boundaryEnd,
+    keepRecentTokens,
+    splitTurn
+  );
 
   const historyEnd = cut.isSplitTurn ? cut.turnStartIndex : cut.cutIndex;
 
@@ -525,8 +596,27 @@ export function prepareCompaction(input: PrepareCompactionInput): CompactionPrep
     }
   }
 
+  if (messagesToSummarize.length === 0 && turnPrefixMessages.length === 0) {
+    return {
+      summary: previousSummary,
+      firstKeptEntryId: activeContext.firstKeptEntryId,
+      previousSummary,
+      keptEntries: entries,
+      droppedEntries: [],
+      tokensBefore,
+      tokensAfter: tokensBefore,
+      isNoOp: true,
+      isSplitTurn: false,
+      messagesToSummarize,
+      turnPrefixMessages,
+      keepRecentTokens,
+      reserveTokens
+    };
+  }
+
   const droppedEntries = entries.slice(0, cut.cutIndex);
   const keptEntries = entries.slice(cut.cutIndex);
+  const tokensAfter = countContextTokens(previousSummary, keptEntries);
 
   return {
     summary: previousSummary,
@@ -535,7 +625,8 @@ export function prepareCompaction(input: PrepareCompactionInput): CompactionPrep
     keptEntries,
     droppedEntries,
     tokensBefore,
-    tokensAfter: approxTokenCount(previousSummary) + approxTokenCount(keptEntries.map((entry) => entryToText(entry)).join("\n")),
+    tokensAfter,
+    isNoOp: false,
     isSplitTurn: cut.isSplitTurn,
     messagesToSummarize,
     turnPrefixMessages,
@@ -549,7 +640,24 @@ export async function compact(
   generateSummary: CompactionSummaryGenerator,
   customInstructions?: string
 ): Promise<CompactionDraft> {
-  const reserveTokens = Math.max(128, Math.floor(Number(preparation.reserveTokens || DEFAULT_RESERVE_TOKENS)));
+  if (preparation.isNoOp) {
+    return {
+      summary: preparation.summary,
+      firstKeptEntryId: preparation.firstKeptEntryId,
+      previousSummary: preparation.previousSummary,
+      keptEntries: preparation.keptEntries,
+      droppedEntries: preparation.droppedEntries,
+      tokensBefore: preparation.tokensBefore,
+      tokensAfter: preparation.tokensAfter
+    };
+  }
+
+  const reserveTokens = Math.max(
+    128,
+    Math.floor(
+      Number(preparation.reserveTokens || DEFAULT_COMPACTION_SETTINGS.reserveTokens)
+    )
+  );
 
   let summary = "";
   if (preparation.isSplitTurn && preparation.turnPrefixMessages.length > 0) {
@@ -595,7 +703,7 @@ export async function compact(
   const withFileOps = `${String(summary || "")}${formatFileOperations(readFiles, modifiedFiles)}`;
   const normalized = normalizeSummary(withFileOps);
 
-  const tokensAfter = approxTokenCount(normalized) + approxTokenCount(preparation.keptEntries.map((entry) => entryToText(entry)).join("\n"));
+  const tokensAfter = countContextTokens(normalized, preparation.keptEntries);
 
   return {
     summary: normalized,

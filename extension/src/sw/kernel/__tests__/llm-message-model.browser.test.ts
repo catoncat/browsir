@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { buildCompactionSummaryLlmMessage, transformMessagesForLlm } from "../llm-message-model.browser";
+import {
+  convertSessionContextMessagesToLlm,
+  transformMessagesForLlm,
+} from "../llm-message-model.browser";
 
 function asMessages(value: unknown): Array<Record<string, unknown>> {
   return Array.isArray(value) ? (value as Array<Record<string, unknown>>) : [];
@@ -127,11 +130,21 @@ describe("llm-message-model.browser", () => {
     expect(String(out[0]?.content || "")).toBe("继续");
   });
 
-  it("buildCompactionSummaryLlmMessage 按新路径生成 compaction summary 消息", () => {
-    const message = buildCompactionSummaryLlmMessage("line-a\nline-b") as Record<string, unknown>;
-    expect(String(message.role || "")).toBe("user");
-    expect(String(message.content || "")).toContain("<summary>");
-    expect(String(message.content || "")).toContain("line-a");
+  it("compactionSummary 上下文消息会转换成 LLM user summary 消息", () => {
+    const out = asMessages(
+      convertSessionContextMessagesToLlm([
+        {
+          role: "compactionSummary",
+          content: "line-a\nline-b",
+          entryId: "entry-1",
+        },
+      ]),
+    );
+
+    expect(out).toHaveLength(1);
+    expect(String(out[0]?.role || "")).toBe("user");
+    expect(String(out[0]?.content || "")).toContain("<summary>");
+    expect(String(out[0]?.content || "")).toContain("line-a");
   });
 
 });

@@ -10,10 +10,7 @@ import {
 import { SUMMARIZATION_SYSTEM_PROMPT } from "./compaction.browser";
 import {
   buildAssistantContentBlocks,
-  buildCompactionSummaryLlmMessage,
-  convertSessionContextMessagesToLlm,
   transformMessagesForLlm,
-  type SessionContextMessageLike,
 } from "./llm-message-model.browser";
 import { decideProfileEscalation } from "./llm-profile-policy";
 import { DEFAULT_LLM_ROLE, type LlmResolvedRoute } from "./llm-provider";
@@ -35,17 +32,40 @@ import {
 } from "./browser-runtime-strategy";
 import { normalizeSkillCreateRequest } from "./skill-create";
 import {
+  dedupePromptContextRefs,
+  extractPromptContextRefs,
+  formatPromptContextRefSummary,
+  normalizePromptContextRefs,
+  rewritePromptWithContextRefPlaceholders,
+  type PromptContextRefInput,
+} from "../../shared/context-ref";
+import {
   frameMatchesVirtualCapability,
   invokeVirtualFrame,
   isVirtualUri,
   shouldRouteFrameToBrowserVfs,
 } from "./virtual-fs.browser";
+import { createContextRefService } from "./context-ref/context-ref-service.browser";
+import { createFilesystemInspectService } from "./context-ref/filesystem-inspect.browser";
+import {
+  buildAvailableSkillsSystemMessage,
+  buildBrowserAgentSystemPromptBase,
+  buildLlmMessagesFromContext,
+  buildTaskProgressSystemMessage,
+} from "./prompt/prompt-policy.browser";
 import {
   nowIso,
   type SessionEntry,
   type SessionMeta,
   type StreamingBehavior,
 } from "./types";
+import {
+  parseHostedChatTransportEvent,
+  type HostedChatTurnResult,
+  type HostedChatTransportEvent,
+} from "../../shared/cursor-help-web-shared";
+import { normalizeCompactionSettings } from "../../shared/compaction";
+import { getProviderRuntimeKind } from "../../shared/llm-provider-config";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -115,6 +135,7 @@ interface RunStartInput {
   prompt?: string;
   tabIds?: unknown[];
   skillIds?: unknown[];
+  contextRefs?: unknown[];
   autoRun?: boolean;
   streamingBehavior?: StreamingBehavior;
 }
@@ -1118,6 +1139,7 @@ function buildLlmRoutePayload(
   return {
     profile: route.profile,
     provider: route.provider,
+    runtimeKind: route.runtimeKind,
     model: route.llmModel,
     role: route.role,
     fromLegacy: route.fromLegacy,
@@ -1870,6 +1892,16 @@ interface LlmSseStreamResult {
   packetCount: number;
 }
 
+interface HostedChatStreamResult {
+  result: HostedChatTurnResult;
+  rawBody: string;
+  eventCount: number;
+}
+
+function resolveRouteRuntimeKind(route: LlmResolvedRoute): "model_llm" | "hosted_chat" {
+  return route.runtimeKind || getProviderRuntimeKind(route.provider);
+}
+
 function extractDeltaText(delta: JsonRecord): string {
   const content = delta.content;
   if (typeof content === "string") return content;
@@ -1983,6 +2015,139 @@ async function readLlmMessageFromSseStream(
   };
 }
 
+async function readHostedChatTurnFromTransportStream(
+  body: ReadableStream<Uint8Array>,
+  onEvent?: (event: HostedChatTransportEvent) => void,
+): Promise<HostedChatStreamResult> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let eventCount = 0;
+  let resolved: HostedChatTurnResult | null = null;
+  let transportError: { message: string; meta: JsonRecord } | null = null;
+  const rawLines: string[] = [];
+
+  const processLine = (rawLine: string) => {
+    const line = String(rawLine || "").trim();
+    if (!line) return;
+    const event = parseHostedChatTransportEvent(line);
+    if (!event) return;
+    eventCount += 1;
+    rawLines.push(line);
+    if (onEvent) onEvent(event);
+    if (event.type === "hosted_chat.turn_resolved") {
+      resolved = event.result;
+      return;
+    }
+    if (event.type === "hosted_chat.transport_error") {
+      transportError = {
+        message: event.error,
+        meta: toRecord(event.meta),
+      };
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let lineBreak = buffer.indexOf("\n");
+    while (lineBreak >= 0) {
+      const line = buffer.slice(0, lineBreak).replace(/\r$/, "");
+      buffer = buffer.slice(lineBreak + 1);
+      processLine(line);
+      lineBreak = buffer.indexOf("\n");
+    }
+  }
+
+  const tail = buffer + decoder.decode();
+  if (tail.trim()) processLine(tail.replace(/\r$/, ""));
+
+  const latestTransportError = transportError as {
+    message: string;
+    meta: JsonRecord;
+  } | null;
+  if (latestTransportError) {
+    const error = new Error(latestTransportError.message || "网页宿主聊天执行失败") as RuntimeErrorWithMeta;
+    error.code = "E_HOSTED_CHAT_TRANSPORT";
+    error.details = latestTransportError.meta;
+    error.retryable = false;
+    throw error;
+  }
+  if (!resolved) {
+    const error = new Error("网页宿主聊天回合未返回最终结果") as RuntimeErrorWithMeta;
+    error.code = "E_HOSTED_CHAT_NO_TURN_RESULT";
+    error.retryable = false;
+    throw error;
+  }
+
+  return {
+    result: resolved,
+    rawBody: rawLines.join("\n"),
+    eventCount,
+  };
+}
+
+function hostedChatTurnToMessage(result: HostedChatTurnResult): JsonRecord {
+  return {
+    content: result.assistantText,
+    tool_calls: result.toolCalls,
+    finish_reason: result.finishReason,
+    meta: result.meta,
+  };
+}
+
+function buildHostedChatEventPayload(
+  step: number,
+  attempt: number,
+  event: HostedChatTransportEvent,
+): JsonRecord {
+  if (event.type === "hosted_chat.stream_text_delta") {
+    return {
+      step,
+      attempt,
+      textLength: String(event.deltaText || "").length,
+      ...toRecord(event.meta),
+    };
+  }
+  if (event.type === "hosted_chat.tool_call_detected") {
+    return {
+      step,
+      attempt,
+      toolCalls: Array.isArray(event.toolCalls) ? event.toolCalls.length : 0,
+      assistantTextLength: String(event.assistantText || "").length,
+      ...toRecord(event.meta),
+    };
+  }
+  if (event.type === "hosted_chat.turn_resolved") {
+    return {
+      step,
+      attempt,
+      finishReason: event.result.finishReason,
+      toolCalls: Array.isArray(event.result.toolCalls)
+        ? event.result.toolCalls.length
+        : 0,
+      assistantTextLength: String(event.result.assistantText || "").length,
+      ...toRecord(event.result.meta),
+    };
+  }
+  if (event.type === "hosted_chat.transport_error") {
+    return {
+      step,
+      attempt,
+      error: event.error,
+      ...toRecord(event.meta),
+    };
+  }
+  return {
+    step,
+    attempt,
+    stage: event.stage,
+    detail: event.detail || "",
+    ...toRecord(event.meta),
+  };
+}
+
 function parseLlmMessageFromBody(
   rawBody: string,
   contentType: string,
@@ -1999,353 +2164,6 @@ function parseLlmMessageFromBody(
   const payload = toRecord(parsed);
   const choices = Array.isArray(payload.choices) ? payload.choices : [];
   return toRecord(toRecord(choices[0]).message);
-}
-
-function buildSharedTabsContextMessage(sharedTabs: unknown): string {
-  if (!Array.isArray(sharedTabs) || sharedTabs.length === 0) return "";
-  const lines: string[] = [];
-  for (let i = 0; i < sharedTabs.length; i += 1) {
-    const item = toRecord(sharedTabs[i]);
-    const title = String(item.title || "").trim() || "(untitled)";
-    const url = String(item.url || "").trim() || "";
-    const id = Number(item.id);
-    const tabIdPart = Number.isInteger(id) ? ` [id=${id}]` : "";
-    lines.push(
-      `${i + 1}. ${title}${tabIdPart}${url ? `\n   URL: ${url}` : ""}`,
-    );
-  }
-  return [
-    "Shared tabs context (user-selected):",
-    ...lines,
-    "Use this context directly before deciding whether to call get_all_tabs/create_new_tab.",
-    "For browser tasks, do not claim done until browser actions are verified.",
-  ].join("\n");
-}
-
-function escapeXmlAttributeForPrompt(input: unknown): string {
-  return String(input || "")
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function buildAvailableSkillsSystemMessage(skills: SkillMetadata[]): string {
-  const visible = (Array.isArray(skills) ? skills : []).filter(
-    (item) => item && item.enabled && item.disableModelInvocation !== true,
-  );
-  if (!visible.length) return "";
-
-  const sorted = [...visible].sort((a, b) => {
-    const byName = String(a.name || "").localeCompare(String(b.name || ""));
-    if (byName !== 0) return byName;
-    return String(a.id || "").localeCompare(String(b.id || ""));
-  });
-  const limited = sorted.slice(0, MAX_PROMPT_SKILL_ITEMS);
-  const lines = limited.map((skill) => {
-    return `  <skill name="${escapeXmlAttributeForPrompt(skill.name)}" description="${escapeXmlAttributeForPrompt(
-      skill.description,
-    )}" location="${escapeXmlAttributeForPrompt(skill.location)}" source="${escapeXmlAttributeForPrompt(skill.source)}" />`;
-  });
-  if (sorted.length > limited.length) {
-    lines.push(
-      `  <!-- truncated ${sorted.length - limited.length} more skills -->`,
-    );
-  }
-
-  return [
-    "Available skills are instruction resources (not executable sandboxes).",
-    "When a skill is relevant, use browser_read_file (mem://) or host_read_file (host path) to load SKILL.md.",
-    "<available_skills>",
-    ...lines,
-    "</available_skills>",
-  ].join("\n");
-}
-
-const EXTENSION_AGENT_PROMPT_TOOL_ORDER = [
-  "host_read_file",
-  "host_write_file",
-  "host_edit_file",
-  "host_bash",
-  "browser_read_file",
-  "browser_write_file",
-  "browser_edit_file",
-  "browser_bash",
-  "get_all_tabs",
-  "get_current_tab",
-  "create_new_tab",
-  "get_tab_info",
-  "close_tab",
-  "ungroup_tabs",
-  "search_elements",
-  "click",
-  "fill_element_by_uid",
-  "select_option_by_uid",
-  "hover_element_by_uid",
-  "get_editor_value",
-  "press_key",
-  "scroll_page",
-  "navigate_tab",
-  "fill_form",
-  "computer",
-  "get_page_metadata",
-  "scroll_to_element",
-  "highlight_element",
-  "highlight_text_inline",
-  "capture_screenshot",
-  "capture_tab_screenshot",
-  "capture_screenshot_with_highlight",
-  "download_image",
-  "download_chat_images",
-  "list_interventions",
-  "get_intervention_info",
-  "request_intervention",
-  "cancel_intervention",
-  "create_skill",
-  "load_skill",
-  "execute_skill_script",
-  "read_skill_reference",
-  "get_skill_asset",
-  "list_skills",
-  "get_skill_info",
-  "browser_verify",
-] as const;
-
-const EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS: Record<string, string> = {
-  host_read_file: "Read file contents from host filesystem.",
-  host_write_file: "Create or overwrite files on host filesystem.",
-  host_edit_file:
-    "Patch host files with exact replacements (and unified patch where supported).",
-  host_bash: "Execute shell commands on host runtime via bridge bash.exec.",
-  browser_read_file:
-    "Read file contents from browser lifo sandbox FS (mem://).",
-  browser_write_file: "Create or overwrite files on browser virtual FS.",
-  browser_edit_file:
-    "Patch browser virtual files with exact replacements (no unified patch).",
-  browser_bash:
-    "Execute limited virtual-shell commands against browser virtual FS.",
-  get_all_tabs: "List currently open browser tabs.",
-  get_current_tab: "Get the active browser tab context.",
-  create_new_tab: "Open a new browser tab when task flow requires it.",
-  get_tab_info: "Get detailed tab metadata by tabId.",
-  close_tab: "Close a specific tab or current tab.",
-  ungroup_tabs: "Ungroup tab groups in current window.",
-  search_elements:
-    "Capture accessibility-first page snapshot to discover actionable targets. Query should describe user-visible semantics (placeholder/aria/name/text).",
-  click: "Click a specific page element by uid/ref/backendNodeId.",
-  fill_element_by_uid:
-    "Type/fill a specific page element by uid/ref/backendNodeId.",
-  select_option_by_uid:
-    "Select/set value on a selectable page element by uid/ref/backendNodeId.",
-  hover_element_by_uid: "Hover a target element by uid/ref/backendNodeId.",
-  get_editor_value:
-    "Read full value from input/textarea/contenteditable/editor target.",
-  press_key:
-    "Press a keyboard key on active element (e.g. Enter/Escape/ArrowDown).",
-  scroll_page: "Scroll page by deltaY pixels (positive=down, negative=up).",
-  navigate_tab: "Navigate tab to target URL.",
-  fill_form: "Fill multiple form fields in one structured call.",
-  computer:
-    "Coordinate-based browser interaction (click/hover/scroll/key/type/wait/drag).",
-  get_page_metadata:
-    "Read page metadata (title/url/description/keywords/author/og).",
-  scroll_to_element:
-    "Scroll target element into view by uid/ref/backendNodeId (selector is metadata fallback only).",
-  highlight_element: "Highlight element for visual confirmation.",
-  highlight_text_inline: "Highlight matched text under selector scope.",
-  capture_screenshot: "Capture screenshot and return base64 data URL.",
-  capture_tab_screenshot: "Capture screenshot for a specific tab id.",
-  capture_screenshot_with_highlight:
-    "Capture screenshot with optional highlight selector.",
-  download_image: "Download data:image URL to local browser downloads.",
-  download_chat_images: "Batch-download image parts from message payload.",
-  list_interventions: "List available human intervention types.",
-  get_intervention_info: "Read intervention schema/details by type.",
-  request_intervention: "Request a human intervention task.",
-  cancel_intervention: "Cancel a pending intervention request.",
-  create_skill:
-    "Create or update a skill package in mem://skills and register it atomically.",
-  load_skill: "Load skill main content (SKILL.md).",
-  execute_skill_script: "Execute script under a skill package.",
-  read_skill_reference: "Read skill reference doc under references/.",
-  get_skill_asset: "Read skill asset under assets/.",
-  list_skills: "List installed skills.",
-  get_skill_info: "Get detailed skill metadata.",
-  browser_verify:
-    "Assert URL/title/text/selector to confirm the task actually progressed.",
-};
-
-const EXTENSION_AGENT_PROMPT_BASE_GUIDELINES = [
-  "Use tools instead of guessing. Ground decisions in tool outputs.",
-  "For host file tasks, call host_read_file before host_edit_file/host_write_file.",
-  "For virtual file tasks, call browser_read_file before browser_edit_file/browser_write_file.",
-  "When creating/updating skills, prefer create_skill; avoid using browser_bash to scaffold skill files.",
-  "Prefer *_edit_file for surgical changes; use *_write_file for new files or full rewrites.",
-  "For browser tasks, enforce: semantic search -> action -> browser_verify.",
-  "Use user-visible query words in search_elements (placeholder/label/text), avoid implementation-only query text.",
-  "For click/fill/select/hover/get_editor_value/scroll_to/highlight, prefer uid/ref/backendNodeId from latest search_elements; selector cannot be the sole target.",
-  "When goal is typing text, prioritize editable targets only (input/textarea/contenteditable/role=textbox). Avoid label/toolBar/container nodes even if text matches.",
-  "For state-changing actions (click/fill/select/press/navigate/fill_form/computer/download/intervention), include expect whenever success criteria is clear.",
-  "Never claim done when verify failed, verify skipped, or verify has empty checks.",
-  "If fill/type says target is not typable, stop repeating same uid/selector; re-search with typing intent (textbox/input/contenteditable) and switch target.",
-  "Avoid blind repeat: do not run identical search_elements query+selector multiple times without strategy change.",
-  "Avoid blind click: never click toggle-like controls before reading current state label/count.",
-  "For toggle-like controls (like/follow/bookmark), read current label/state first to avoid accidental flip.",
-  "If browser_verify fails, do not claim done; re-observe and retry with updated target or expectation.",
-  "Do not invent selectors, URLs, tab state, or command output; re-observe when uncertain.",
-  "Do not use legacy runtime hints when split tools are available. Choose explicit host_* or browser_* tools.",
-  "When tab context is ambiguous, query get_current_tab/get_all_tabs before acting.",
-  "Be concise. Show key file paths, tab context, and blockers clearly.",
-];
-
-function buildBrowserAgentSystemPrompt(
-  config: BridgeConfig,
-  toolDefinitions: ToolDefinition[] = [],
-): string {
-  const overridePrompt = String(config.llmSystemPromptCustom || "");
-  if (overridePrompt.trim()) {
-    return overridePrompt;
-  }
-
-  const dynamicToolLines = (
-    Array.isArray(toolDefinitions) ? toolDefinitions : []
-  )
-    .map((def) => {
-      const fn = toRecord(def.function);
-      const name = String(fn.name || "").trim();
-      if (!name) return "";
-      const description =
-        String(fn.description || "").trim() || "Use when needed.";
-      return `- ${name}: ${description}`;
-    })
-    .filter(Boolean);
-  const tools =
-    dynamicToolLines.length > 0
-      ? dynamicToolLines.join("\n")
-      : EXTENSION_AGENT_PROMPT_TOOL_ORDER.map(
-          (name) =>
-            `- ${name}: ${EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS[name] || "Use when needed."}`,
-        ).join("\n");
-  const guidelines = EXTENSION_AGENT_PROMPT_BASE_GUIDELINES.map(
-    (line) => `- ${line}`,
-  ).join("\n");
-  return [
-    "You are an expert coding assistant operating inside Browser Brain Loop, a browser-extension agent harness.",
-    "You help users by reading files, executing commands, editing code, writing files, and operating browser tabs.",
-    "",
-    "Environment:",
-    "- Planner + loop engine run in Chrome extension sidepanel/service worker.",
-    "- Local WebSocket bridge is execution-only (file/shell proxy), not task planner.",
-    "- You can operate live browser tabs via browser tools.",
-    "",
-    "Available tools:",
-    tools,
-    "",
-    "Guidelines:",
-    guidelines,
-    "",
-    "Runtime: Browser extension agent (Chrome MV3).",
-  ].join("\n");
-}
-
-function buildTaskProgressSystemMessage(input: {
-  llmStep: number;
-  maxLoopSteps: number;
-  toolStep: number;
-  retryAttempt: number;
-  retryMaxAttempts: number;
-}): string {
-  const llmStep = Math.max(1, Number(input.llmStep || 1));
-  const maxLoopSteps = Math.max(1, Number(input.maxLoopSteps || 1));
-  const toolStep = Math.max(0, Number(input.toolStep || 0));
-  const retryAttempt = Math.max(0, Number(input.retryAttempt || 0));
-  const retryMaxAttempts = Math.max(0, Number(input.retryMaxAttempts || 0));
-  return [
-    "Task progress (brief):",
-    `- loop_step: ${llmStep}/${maxLoopSteps}`,
-    `- tool_steps_done: ${toolStep}`,
-    `- retry_state: ${retryAttempt}/${retryMaxAttempts}`,
-    "- Keep moving toward the same user goal; avoid repeating already completed steps.",
-  ].join("\n");
-}
-
-function buildLlmMessagesFromContext(
-  config: BridgeConfig,
-  meta: SessionMeta | null,
-  contextMessages: SessionContextMessageLike[],
-  previousSummary = "",
-  availableSkillsPrompt = "",
-  toolDefinitions: ToolDefinition[] = [],
-): JsonRecord[] {
-  const out: JsonRecord[] = [];
-  out.push({
-    role: "system",
-    content: buildBrowserAgentSystemPrompt(config, toolDefinitions),
-  });
-  out.push({
-    role: "system",
-    content: [
-      "Tool retry policy:",
-      "1) For transient tool errors (retryable=true), retry the same goal with adjusted parameters.",
-      "2) host_bash/browser_bash support optional timeoutMs (milliseconds). Increase timeoutMs when timeout-related failures happen.",
-      "3) For non-retryable errors, stop retrying and explain the blocker clearly.",
-      "4) A short task progress note will be provided each round via system message.",
-      "5) For browser tasks, prefer actions grounded in observed page state and tool results.",
-      "6) Do not invent site selectors/URLs; re-observe when uncertain.",
-      "7) Prefer explicit split tools: host_* for host execution, browser_* for virtual-fs execution.",
-      "8) Temporary policy: do NOT run tests (e.g., bun test/pnpm test/npm test/pytest/go test) unless the user explicitly requests tests.",
-    ].join("\n"),
-  });
-  const metadata = toRecord(meta?.header?.metadata);
-  const sharedTabsContext = buildSharedTabsContextMessage(metadata.sharedTabs);
-  if (sharedTabsContext) {
-    out.push({
-      role: "system",
-      content: sharedTabsContext,
-    });
-  }
-  if (availableSkillsPrompt) {
-    out.push({
-      role: "system",
-      content: availableSkillsPrompt,
-    });
-  }
-
-  const failures =
-    typeof getActionFailures === "function"
-      ? getActionFailures(String(meta?.header?.sessionId || ""))
-      : new Map<string, number>();
-  if (failures.size > 0) {
-    const lines = ["Detected repetitive interaction failures for:"];
-    for (const entry of Array.from(failures.entries())) {
-      const [uid, count] = entry;
-      if (count >= 2) {
-        lines.push(
-          `- element ${uid}: ${count} failures (verification failed).`,
-        );
-      }
-    }
-    if (lines.length > 1) {
-      lines.push(
-        "STRATEGY HINT: The current interaction path for these elements is not progressing the page state. DO NOT repeat the same action on these UIDs. Try a different anchor (child/parent), or use coordinate-based 'computer' tool, or re-search with a different query.",
-      );
-      out.push({
-        role: "system",
-        content: lines.join("\n"),
-      });
-    }
-  }
-
-  const summaryMessage = buildCompactionSummaryLlmMessage(previousSummary);
-  if (summaryMessage) out.push(summaryMessage);
-
-  out.push(...convertSessionContextMessagesToLlm(contextMessages));
-
-  if (out.filter((item) => String(item.role || "") !== "system").length === 0) {
-    out.push({ role: "user", content: "继续当前任务。" });
-  }
-
-  return out;
 }
 
 function applyLatestUserPromptOverride(
@@ -2653,6 +2471,66 @@ function buildBashExitFailureEnvelope(
   };
 }
 
+function buildSkillScriptSandboxFailureEnvelope(input: {
+  invoke: ExecuteStepResult;
+  outcome: BashExecOutcome;
+  location: string;
+  scriptPath: string;
+  command: string;
+  cwd?: string;
+}): JsonRecord {
+  const stderrLine = clipText(
+    String(input.outcome.stderr || "")
+      .split(/\r?\n/)
+      .find((line) => String(line || "").trim().length > 0) || "",
+    240,
+  );
+  const missingRuntime =
+    /^([a-zA-Z0-9._+-]+):\s*(?:command not found|not found)\b/i.exec(
+      stderrLine,
+    )?.[1] || "";
+
+  if (missingRuntime) {
+    return {
+      ...attachFailureProtocol(
+        "execute_skill_script",
+        {
+          error: `当前 browser runtime 不支持技能脚本解释器: ${missingRuntime}`,
+          errorCode: "E_TOOL_UNSUPPORTED",
+          errorReason: "failed_execute",
+          retryable: false,
+          retryHint:
+            "为 browser sandbox 提供对应解释器，或改用现有内置工具/host 工具完成同等动作。",
+          details: {
+            location: input.location,
+            scriptPath: input.scriptPath,
+            cwd: input.cwd || null,
+            command: clipText(input.command, 1_200),
+            exitCode: input.outcome.exitCode,
+            stdout: clipText(input.outcome.stdout, 1_200),
+            stderr: clipText(input.outcome.stderr, 1_200),
+            missingRuntime,
+          },
+        },
+        {
+          phase: "execute",
+          category: "missing_target",
+          resumeStrategy: "replan",
+        },
+      ),
+      modeUsed: input.invoke.modeUsed,
+      providerId: input.invoke.providerId || undefined,
+      fallbackFrom: input.invoke.fallbackFrom || undefined,
+    };
+  }
+
+  return buildBashExitFailureEnvelope(
+    "execute_skill_script",
+    input.invoke,
+    input.outcome,
+  );
+}
+
 function buildStepFailureEnvelope(
   toolName: string,
   out: ExecuteStepResult,
@@ -2832,6 +2710,7 @@ function extractLlmConfig(raw: JsonRecord): BridgeConfig {
       raw.browserRuntimeStrategy,
       "host-first",
     ),
+    compaction: normalizeCompactionSettings(raw.compaction),
     llmDefaultProfile: String(raw.llmDefaultProfile || "default"),
     llmAuxProfile: String(raw.llmAuxProfile || ""),
     llmFallbackProfile: String(raw.llmFallbackProfile || ""),
@@ -2863,7 +2742,7 @@ function extractLlmConfig(raw: JsonRecord): BridgeConfig {
       MIN_LLM_MAX_RETRY_DELAY_MS,
       MAX_LLM_MAX_RETRY_DELAY_MS,
     ),
-    devAutoReload: raw.devAutoReload !== false,
+    devAutoReload: raw.devAutoReload === true,
     devReloadIntervalMs: Number(raw.devReloadIntervalMs || 1500),
   };
 }
@@ -3012,7 +2891,6 @@ async function requestCompactionSummaryFromLlm(input: {
     max_tokens: normalizeIntInRange(input.maxTokens, 2048, 128, 32768),
     temperature: 0.2,
     stream: false,
-    reasoning: "high",
   };
   const totalAttempts = Math.max(1, llmRetryMaxAttempts + 1);
 
@@ -3247,6 +3125,50 @@ export function createRuntimeLoopController(
   infra: RuntimeInfraHandler,
 ): RuntimeLoopController {
   const llmProviders = orchestrator.getLlmProviderRegistry();
+  const filesystemInspect = createFilesystemInspectService({
+    invokeHostTool: async (frame) =>
+      toRecord(
+        await callInfra(infra, {
+          type: "bridge.invoke",
+          payload: frame,
+        }),
+      ),
+    invokeBrowserTool: async (frame) => toRecord(await invokeVirtualFrame(frame)),
+  });
+  const contextRefService = createContextRefService({
+    inspect: filesystemInspect,
+    readText: async (params) => {
+      const result = await executeStep({
+        sessionId: params.sessionId,
+        capability: CAPABILITIES.fsRead,
+        action: "invoke",
+        args: {
+          frame: {
+            tool: "read",
+            args: {
+              path: params.path,
+              runtime: params.runtime,
+              ...(params.cwd ? { cwd: params.cwd } : {}),
+              ...(params.offset !== undefined ? { offset: params.offset } : {}),
+              ...(params.limit !== undefined ? { limit: params.limit } : {}),
+            },
+          },
+        },
+        verifyPolicy: "off",
+      });
+      if (!result.ok) {
+        throw new Error(result.error || `上下文文件读取失败: ${params.path}`);
+      }
+      const payload = toRecord(toRecord(result.data).response);
+      const data = toRecord(payload.data);
+      return {
+        path: String(data.path || params.path),
+        content: String(data.content || ""),
+        size: Math.max(0, Number(data.size || 0)),
+        truncated: data.truncated === true,
+      };
+    },
+  });
 
   orchestrator.onHook(
     "compaction.summary",
@@ -4515,6 +4437,80 @@ export function createRuntimeLoopController(
     return extractSkillReadContent(result.data);
   });
 
+  function toBrowserUserDisplayPath(location: string): string {
+    const normalized = String(location || "").trim();
+    if (!normalized) return "";
+    if (!isVirtualUri(normalized)) return normalized;
+    const rest = normalized.slice("mem://".length).replace(/^\/+/, "");
+    return rest ? `/mem/${rest}` : "/mem";
+  }
+
+  function buildSkillReferenceDirectoryRef(
+    skill: SkillMetadata,
+  ): PromptContextRefInput | null {
+    const location = buildSkillChildLocation(skill.location, "references");
+    if (!location) return null;
+    const idSeed = String(skill.id || skill.name || "skill")
+      .trim()
+      .replace(/[^a-zA-Z0-9._-]/g, "_");
+    if (isVirtualUri(location)) {
+      return {
+        id: `skill_ref_${idSeed}`,
+        raw: `@${toBrowserUserDisplayPath(location)}`,
+        displayPath: toBrowserUserDisplayPath(location),
+        source: "skill_reference",
+        syntax: "browser_mount",
+        runtimeHint: "browser",
+        locator: location,
+      };
+    }
+    return {
+      id: `skill_ref_${idSeed}`,
+      raw: `@${location}`,
+      displayPath: location,
+      source: "skill_reference",
+      syntax: location.startsWith("~") ? "host_home" : "host_absolute",
+      runtimeHint: "host",
+      locator: location,
+    };
+  }
+
+  orchestrator.setSkillPromptAugmenter(async (input) => {
+    const sessionId = String(input.sessionId || "").trim();
+    if (!sessionId) return "";
+    const referencesDirRef = buildSkillReferenceDirectoryRef(input.skill);
+    if (!referencesDirRef) return "";
+    const resolvedRefs = await contextRefService.resolveContextRefs({
+      sessionId,
+      sessionMeta: null,
+      refs: [referencesDirRef],
+    });
+    const invalidFailure = resolvedRefs
+      .filter((item) => item.kind === "invalid")
+      .map((item) => String(item.error || `上下文引用失败: ${item.displayPath}`))
+      .join("\n");
+    if (invalidFailure) {
+      throw new Error(invalidFailure);
+    }
+    const availableRefs = resolvedRefs.filter((item) => item.kind !== "missing");
+    if (availableRefs.length === 0) return "";
+    const materializedRefs = await contextRefService.materializeContextRefs({
+      sessionId,
+      refs: availableRefs,
+    });
+    const contextPrefix = contextRefService.buildContextPromptPrefix({
+      refs: availableRefs,
+      materialized: materializedRefs,
+    });
+    if (!contextPrefix) return "";
+    return [
+      "<skill_resources>",
+      "以下是该 skill package 内可按需读取的本地 references 索引；仅在需要时再调用 read_skill_reference 读取具体文件。",
+      contextPrefix,
+      "</skill_resources>",
+    ].join("\n");
+  });
+
   async function invokeBridgeFrameWithRetry(
     sessionId: string,
     toolName: string,
@@ -5175,6 +5171,13 @@ export function createRuntimeLoopController(
     const base =
       cut >= 0 ? normalizedLocation.slice(0, cut) : normalizedLocation;
     return `${base}/${normalizedRelative}`;
+  }
+
+  function buildSkillPackageRootLocation(location: string): string {
+    const normalizedLocation = String(location || "").trim();
+    if (!normalizedLocation) return "";
+    const cut = normalizedLocation.lastIndexOf("/");
+    return cut >= 0 ? normalizedLocation.slice(0, cut) : normalizedLocation;
   }
 
   async function resolveSkillByName(
@@ -7238,29 +7241,10 @@ export function createRuntimeLoopController(
           skill.location,
           normalizedScript,
         );
-        if (isVirtualUri(location)) {
-          const source = await readTextByLocation(plan.sessionId, location);
-          return attachFailureProtocol(
-            "execute_skill_script",
-            {
-              error: "当前脚本位于虚拟文件系统，无法直接在本地 shell 执行",
-              errorCode: "E_TOOL_UNSUPPORTED",
-              errorReason: "failed_execute",
-              retryable: false,
-              retryHint:
-                "Move script to host path or execute equivalent steps via host_bash/host_read_file.",
-              details: {
-                location,
-                sourcePreview: clipText(source, 1200),
-              },
-            },
-            {
-              phase: "execute",
-              category: "missing_target",
-              resumeStrategy: "replan",
-            },
-          );
-        }
+        const runtimeHint = isVirtualUri(location) ? "browser" : "local";
+        const skillRootLocation = buildSkillPackageRootLocation(skill.location);
+        const skillRuntimeCwd =
+          skillRootLocation || (runtimeHint === "browser" ? "mem://" : "");
 
         const argPayload =
           plan.scriptArgs === undefined
@@ -7290,7 +7274,8 @@ export function createRuntimeLoopController(
               args: {
                 cmdId: "bash.exec",
                 args: [command],
-                runtime: "local",
+                runtime: runtimeHint,
+                ...(skillRuntimeCwd ? { cwd: skillRuntimeCwd } : {}),
               },
             },
           },
@@ -7309,6 +7294,24 @@ export function createRuntimeLoopController(
             },
           );
         }
+        const outcome = extractBashExecOutcome(out.data);
+        if (outcome && outcome.exitCode !== null && outcome.exitCode !== 0) {
+          if (runtimeHint === "browser") {
+            return buildSkillScriptSandboxFailureEnvelope({
+              invoke: out,
+              outcome,
+              location,
+              scriptPath: normalizedScript,
+              command,
+              cwd: skillRuntimeCwd || undefined,
+            });
+          }
+          return buildBashExitFailureEnvelope(
+            "execute_skill_script",
+            out,
+            outcome,
+          );
+        }
         return buildToolResponseEnvelope("execute_skill_script", {
           success: true,
           executed: true,
@@ -7318,6 +7321,8 @@ export function createRuntimeLoopController(
           },
           scriptPath: normalizedScript,
           location,
+          runtime: runtimeHint,
+          cwd: skillRuntimeCwd || null,
           command,
           result: out.data,
         });
@@ -7710,7 +7715,7 @@ export function createRuntimeLoopController(
               returnByValue: true,
             },
           });
-          results.push(toRecord(toRecord(out).result).value || {});
+          results.push(toRecord(toRecord(toRecord(out).result).value));
           await delay(60);
         }
         return buildToolResponseEnvelope("download_chat_images", {
@@ -8454,6 +8459,56 @@ export function createRuntimeLoopController(
       });
   }
 
+  async function buildResolvedSystemPrompt(input: {
+    config: BridgeConfig;
+    sessionId: string;
+    sessionMeta: SessionMeta | null;
+    toolDefinitions?: ToolDefinition[];
+  }): Promise<string> {
+    const toolDefinitions = Array.isArray(input.toolDefinitions)
+      ? input.toolDefinitions
+      : [];
+    const overridePrompt = String(input.config.llmSystemPromptCustom || "");
+    if (!overridePrompt.trim()) {
+      return buildBrowserAgentSystemPromptBase(toolDefinitions);
+    }
+
+    const parsedRefs = extractPromptContextRefs(overridePrompt, "system_prompt");
+    if (parsedRefs.refs.length === 0) {
+      return overridePrompt;
+    }
+
+    const resolvedRefs = await contextRefService.resolveContextRefs({
+      sessionId: input.sessionId,
+      sessionMeta: input.sessionMeta,
+      refs: parsedRefs.refs,
+    });
+    const failureMessage =
+      contextRefService.buildContextRefFailureMessage(resolvedRefs);
+    if (failureMessage) {
+      throw new Error(failureMessage);
+    }
+
+    const materializedRefs = await contextRefService.materializeContextRefs({
+      sessionId: input.sessionId,
+      refs: resolvedRefs,
+    });
+    const contextPrefix = contextRefService.buildContextPromptPrefix({
+      refs: resolvedRefs,
+      materialized: materializedRefs,
+    });
+    const promptBody = rewritePromptWithContextRefPlaceholders(
+      overridePrompt,
+      resolvedRefs,
+    );
+    return [
+      contextPrefix,
+      `<system_prompt>\n${promptBody || "请结合以上 system prompt 上下文约束执行。"}\n</system_prompt>`,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
   async function requestLlmWithRetry(
     input: LlmRequestInput,
   ): Promise<JsonRecord> {
@@ -8484,8 +8539,9 @@ export function createRuntimeLoopController(
           provider: route.provider,
           profile: route.profile,
         },
-      );
+        );
     }
+    const isHostedChatRoute = resolveRouteRuntimeKind(route) === "hosted_chat";
     let lastError: unknown = null;
     const configuredMaxAttempts = Number(
       orchestrator.getRunState(sessionId).retry.maxAttempts ?? MAX_LLM_RETRIES,
@@ -8582,6 +8638,9 @@ export function createRuntimeLoopController(
           model: String(requestPayload.model || llmModel),
           profile: route.profile,
           provider: route.provider,
+          source: isHostedChatRoute
+            ? "hosted_chat_transport"
+            : "llm_provider",
           ...summarizeLlmRequestPayload(requestPayload),
         });
 
@@ -8637,8 +8696,28 @@ export function createRuntimeLoopController(
         }
 
         let message: JsonRecord;
+        let hostedTurnResult: HostedChatTurnResult | null = null;
         const lowerType = contentType.toLowerCase();
-        if (resp.body && lowerType.includes("text/event-stream")) {
+        if (isHostedChatRoute && resp.body) {
+          const hosted = await readHostedChatTurnFromTransportStream(
+            resp.body,
+            (event) => {
+              orchestrator.events.emit(
+                event.type,
+                sessionId,
+                buildHostedChatEventPayload(step, attempt, event),
+              );
+            },
+          );
+          rawBody = hosted.rawBody;
+          hostedTurnResult = hosted.result;
+          message = {
+            content: hosted.result.assistantText,
+            tool_calls: hosted.result.toolCalls,
+            hosted_chat_meta: hosted.result.meta,
+            finish_reason: hosted.result.finishReason,
+          };
+        } else if (resp.body && lowerType.includes("text/event-stream")) {
           orchestrator.events.emit("llm.stream.start", sessionId, {
             step,
             attempt,
@@ -8706,6 +8785,17 @@ export function createRuntimeLoopController(
           );
         }
         message = afterResponse.value.response;
+        if (isHostedChatRoute && hostedTurnResult) {
+          hostedTurnResult = {
+            assistantText: parseLlmContent(message),
+            toolCalls: normalizeToolCalls(message.tool_calls),
+            finishReason:
+              String(message.finish_reason || "") === "tool_calls"
+                ? "tool_calls"
+                : hostedTurnResult.finishReason,
+            meta: toRecord(message.hosted_chat_meta),
+          };
+        }
 
         const state = orchestrator.getRunState(sessionId);
         if (state.retry.active) {
@@ -8801,6 +8891,7 @@ export function createRuntimeLoopController(
 
     const cfgRaw = await callInfra(infra, { type: "config.get" });
     const config = extractLlmConfig(cfgRaw);
+    orchestrator.updateCompactionSettings(config.compaction);
     const maxLoopSteps = normalizeIntInRange(config.maxSteps, 100, 1, 500);
     const sessionMeta = await orchestrator.sessions.getMeta(sessionId);
     const routePrefs = readSessionLlmRoutePrefs(sessionMeta);
@@ -9038,14 +9129,25 @@ export function createRuntimeLoopController(
       } catch {
         availableSkillsPrompt = "";
       }
+      const actionFailures = getActionFailures(sessionId);
+      const llmToolDefinitions = listRuntimeLlmToolDefinitions("all");
+      const systemPrompt = await buildResolvedSystemPrompt({
+        config,
+        sessionId,
+        sessionMeta: meta,
+        toolDefinitions: llmToolDefinitions,
+      });
       const messages = applyLatestUserPromptOverride(
-        buildLlmMessagesFromContext(
-          config,
+        await buildLlmMessagesFromContext(
+          systemPrompt,
           meta,
           context.messages,
-          context.previousSummary,
           availableSkillsPrompt,
-          listRuntimeLlmToolDefinitions("all"),
+          {
+            sessionId,
+            filesystemInspect,
+            actionFailures,
+          },
         ),
         prompt,
       );
@@ -9072,30 +9174,40 @@ export function createRuntimeLoopController(
         for (const steer of dequeuedSteers) {
           const steerRawText = String(steer.text || "").trim();
           const steerSkillIds = normalizeExplicitSkillIds(steer.skillIds);
-          if (!steerRawText && steerSkillIds.length === 0) continue;
-          const steerPromptWithSelectedSkills =
-            await expandExplicitSelectedSkillsPrompt(
-              sessionId,
-              steerRawText,
-              steerSkillIds,
-            );
-          const steerExpandedText = await expandSkillSlashPrompt(
+          const steerContextRefs = normalizeExplicitContextRefs(steer.contextRefs);
+          if (
+            !steerRawText &&
+            steerSkillIds.length === 0 &&
+            steerContextRefs.length === 0
+          ) continue;
+          const sessionMeta = await orchestrator.sessions.getMeta(sessionId);
+          const steerPromptPayload = await buildPromptExecutionPayload({
             sessionId,
-            steerPromptWithSelectedSkills,
-          );
+            sessionMeta,
+            rawPrompt: steerRawText,
+            skillIds: steerSkillIds,
+            contextRefs: steerContextRefs,
+          });
           const steerStoredText =
-            steerRawText || formatSkillSelectionSummary(steerSkillIds);
-          await orchestrator.appendUserMessage(sessionId, steerStoredText);
+            steerPromptPayload.storedText ||
+            steerRawText ||
+            formatSkillSelectionSummary(steerSkillIds) ||
+            formatPromptContextRefSummary(steerContextRefs) ||
+            "附带上下文引用";
+          await orchestrator.appendUserMessage(sessionId, steerStoredText, {
+            metadata: steerPromptPayload.metadata,
+          });
           await orchestrator.preSendCompactionCheck(sessionId);
           messages.push({
             role: "user",
-            content: steerExpandedText,
+            content: steerPromptPayload.llmText,
           });
           const runtimeAfterDequeue = orchestrator.getRunState(sessionId);
           orchestrator.events.emit("message.dequeued", sessionId, {
             behavior: "steer",
             id: steer.id,
             text: clipText(steerStoredText, 3000),
+            contextRefCount: steerPromptPayload.contextRefCount,
             total: runtimeAfterDequeue.queue.total,
             steer: runtimeAfterDequeue.queue.steer,
             followUp: runtimeAfterDequeue.queue.followUp,
@@ -9103,6 +9215,7 @@ export function createRuntimeLoopController(
           orchestrator.events.emit("input.steer", sessionId, {
             text: clipText(steerStoredText, 3000),
             id: steer.id,
+            contextRefCount: steerPromptPayload.contextRefCount,
           });
         }
 
@@ -9249,6 +9362,10 @@ export function createRuntimeLoopController(
           step: llmStep,
           toolCalls: toolCalls.length,
           hasText: !!assistantText,
+          source:
+            resolveRouteRuntimeKind(activeRoute) === "hosted_chat"
+              ? "hosted_chat_transport"
+              : "llm_provider",
         });
 
         messages.push({
@@ -9753,6 +9870,7 @@ export function createRuntimeLoopController(
             sessionId,
             prompt: nextSteer.text,
             skillIds: nextSteer.skillIds,
+            contextRefs: nextSteer.contextRefs,
             autoRun: true,
           }).catch((error) => {
             orchestrator.events.emit("loop_internal_error", sessionId, {
@@ -9787,6 +9905,7 @@ export function createRuntimeLoopController(
             sessionId,
             prompt: nextFollowUp.text,
             skillIds: nextFollowUp.skillIds,
+            contextRefs: nextFollowUp.contextRefs,
             autoRun: true,
           }).catch((error) => {
             orchestrator.events.emit("loop_internal_error", sessionId, {
@@ -9902,6 +10021,14 @@ export function createRuntimeLoopController(
     return skillIds.map((id) => `[skill:${id}]`).join(" ");
   }
 
+  function normalizeExplicitContextRefs(input: unknown): PromptContextRefInput[] {
+    return dedupePromptContextRefs(
+      normalizePromptContextRefs(input).filter(
+        (item) => item.source !== "prompt_parser",
+      ),
+    );
+  }
+
   function buildSkillCommandPrompt(input: {
     promptBlock: string;
     argsText: string;
@@ -9971,6 +10098,84 @@ export function createRuntimeLoopController(
     });
   }
 
+  async function buildPromptExecutionPayload(input: {
+    sessionId: string;
+    sessionMeta: SessionMeta | null;
+    rawPrompt: string;
+    skillIds: string[];
+    contextRefs: PromptContextRefInput[];
+  }): Promise<{
+    storedText: string;
+    llmText: string;
+    metadata: Record<string, unknown> | undefined;
+    contextRefCount: number;
+  }> {
+    const parsedRefs = extractPromptContextRefs(input.rawPrompt, "prompt_parser");
+    const mergedRefs = dedupePromptContextRefs([
+      ...input.contextRefs,
+      ...parsedRefs.refs,
+    ]);
+    const resolvedRefs = await contextRefService.resolveContextRefs({
+      sessionId: input.sessionId,
+      sessionMeta: input.sessionMeta,
+      refs: mergedRefs,
+    });
+    const failureMessage =
+      contextRefService.buildContextRefFailureMessage(resolvedRefs);
+    if (failureMessage) {
+      throw new Error(failureMessage);
+    }
+    const materializedRefs = await contextRefService.materializeContextRefs({
+      sessionId: input.sessionId,
+      refs: resolvedRefs,
+    });
+    const promptWithRefPlaceholders = rewritePromptWithContextRefPlaceholders(
+      input.rawPrompt,
+      resolvedRefs,
+    );
+    const promptWithSelectedSkills = await expandExplicitSelectedSkillsPrompt(
+      input.sessionId,
+      promptWithRefPlaceholders,
+      input.skillIds,
+    );
+    const promptForModel = await expandSkillSlashPrompt(
+      input.sessionId,
+      promptWithSelectedSkills,
+    );
+    const contextPrefix = contextRefService.buildContextPromptPrefix({
+      refs: resolvedRefs,
+      materialized: materializedRefs,
+    });
+    const llmPromptBody = String(promptForModel || "").trim();
+    const llmText = contextPrefix
+      ? [
+          contextPrefix,
+          `<user_prompt>\n${llmPromptBody || "请结合以上引用上下文继续当前任务。"}\n</user_prompt>`,
+        ].join("\n\n")
+      : llmPromptBody;
+    const storedText =
+      input.rawPrompt ||
+      formatSkillSelectionSummary(input.skillIds) ||
+      formatPromptContextRefSummary(mergedRefs) ||
+      "";
+    const metadata =
+      contextPrefix || llmText !== storedText
+        ? {
+            llmText,
+            contextRefs: contextRefService.toMetadataRows({
+              refs: resolvedRefs,
+              materialized: materializedRefs,
+            }),
+          }
+        : undefined;
+    return {
+      storedText,
+      llmText,
+      metadata,
+      contextRefCount: resolvedRefs.length,
+    };
+  }
+
   async function startLoopIfNeeded(
     sessionId: string,
     prompt: string,
@@ -10037,23 +10242,32 @@ export function createRuntimeLoopController(
 
     const rawPrompt = String(input.prompt || "").trim();
     const explicitSkillIds = normalizeExplicitSkillIds(input.skillIds);
-    if (!rawPrompt && explicitSkillIds.length === 0) {
+    const explicitContextRefs = normalizeExplicitContextRefs(input.contextRefs);
+    if (
+      !rawPrompt &&
+      explicitSkillIds.length === 0 &&
+      explicitContextRefs.length === 0
+    ) {
       return {
         sessionId,
         runtime: orchestrator.getRunState(sessionId),
       };
     }
-    const promptWithSelectedSkills = await expandExplicitSelectedSkillsPrompt(
+    const sessionMeta = await orchestrator.sessions.getMeta(sessionId);
+    const promptPayload = await buildPromptExecutionPayload({
       sessionId,
+      sessionMeta,
       rawPrompt,
-      explicitSkillIds,
-    );
-    const promptForModel = await expandSkillSlashPrompt(
-      sessionId,
-      promptWithSelectedSkills,
-    );
+      skillIds: explicitSkillIds,
+      contextRefs: explicitContextRefs,
+    });
+    const promptForModel = promptPayload.llmText;
     const storedPrompt =
-      rawPrompt || formatSkillSelectionSummary(explicitSkillIds);
+      promptPayload.storedText ||
+      rawPrompt ||
+      formatSkillSelectionSummary(explicitSkillIds) ||
+      formatPromptContextRefSummary(explicitContextRefs) ||
+      "附带上下文引用";
 
     const behavior = normalizeStreamingBehavior(input.streamingBehavior);
     const state = orchestrator.getRunState(sessionId);
@@ -10069,11 +10283,13 @@ export function createRuntimeLoopController(
         rawPrompt,
         {
           skillIds: explicitSkillIds,
+          contextRefs: explicitContextRefs,
         },
       );
       orchestrator.events.emit("message.queued", sessionId, {
         behavior,
         text: clipText(storedPrompt, 3000),
+        contextRefCount: promptPayload.contextRefCount,
         total: queuedRuntime.queue.total,
         steer: queuedRuntime.queue.steer,
         followUp: queuedRuntime.queue.followUp,
@@ -10090,9 +10306,12 @@ export function createRuntimeLoopController(
       };
     }
 
-    await orchestrator.appendUserMessage(sessionId, storedPrompt);
+    await orchestrator.appendUserMessage(sessionId, storedPrompt, {
+      metadata: promptPayload.metadata,
+    });
     orchestrator.events.emit("input.user", sessionId, {
       text: clipText(storedPrompt, 3000),
+      contextRefCount: promptPayload.contextRefCount,
     });
 
     if (input.autoRun === false) {
@@ -10159,10 +10378,12 @@ export function createRuntimeLoopController(
     async getSystemPromptPreview(): Promise<string> {
       const cfgRaw = await callInfra(infra, { type: "config.get" });
       const cfg = extractLlmConfig(cfgRaw);
-      return buildBrowserAgentSystemPrompt(
-        cfg,
-        listRuntimeLlmToolDefinitions("all"),
-      );
+      return await buildResolvedSystemPrompt({
+        config: cfg,
+        sessionId: "system-prompt-preview",
+        sessionMeta: null,
+        toolDefinitions: listRuntimeLlmToolDefinitions("all"),
+      });
     },
   };
 }

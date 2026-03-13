@@ -4,6 +4,10 @@ import {
   normalizeBrowserRuntimeStrategy,
   type BrowserRuntimeStrategy,
 } from "../../sw/kernel/browser-runtime-strategy";
+import {
+  normalizeCompactionSettings,
+  type CompactionSettings,
+} from "../../shared/compaction";
 import { normalizeProviderConnectionConfig } from "../../shared/llm-provider-config";
 
 interface RuntimeResponse<T = any> {
@@ -95,6 +99,7 @@ interface PanelConfig {
   bridgeUrl: string;
   bridgeToken: string;
   browserRuntimeStrategy: BrowserRuntimeStrategy;
+  compaction: CompactionSettings;
   llmDefaultProfile: string;
   llmAuxProfile: string;
   llmFallbackProfile: string;
@@ -653,6 +658,7 @@ function normalizeConfig(
       raw?.browserRuntimeStrategy,
       "host-first",
     ),
+    compaction: normalizeCompactionSettings(raw?.compaction),
     llmDefaultProfile,
     llmAuxProfile:
       auxProfile &&
@@ -679,7 +685,7 @@ function normalizeConfig(
     llmTimeoutMs,
     llmRetryMaxAttempts,
     llmMaxRetryDelayMs,
-    devAutoReload: raw?.devAutoReload !== false,
+    devAutoReload: raw?.devAutoReload === true,
     devReloadIntervalMs: toIntInRange(
       raw?.devReloadIntervalMs,
       1500,
@@ -731,6 +737,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
       llmDefaultProfile: "default",
       llmAuxProfile: "",
       llmFallbackProfile: "",
+      compaction: normalizeCompactionSettings(undefined),
       llmSystemPromptCustom: "",
       autoTitleInterval: 10,
       bridgeInvokeTimeoutMs: 120000,
@@ -814,6 +821,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
       newSession?: boolean;
       tabIds?: number[];
       skillIds?: string[];
+      contextRefs?: Array<Record<string, unknown>>;
       streamingBehavior?: "steer" | "followUp";
     } = {},
   ) {
@@ -827,13 +835,18 @@ export const useRuntimeStore = defineStore("runtime", () => {
           ),
         )
       : [];
-    if (!text && skillIds.length === 0) return;
     const useCurrentSession = !options.newSession && !!activeSessionId.value;
     const tabIds = Array.isArray(options.tabIds)
       ? options.tabIds
           .filter((id) => Number.isInteger(id))
           .map((id) => Number(id))
       : [];
+    const contextRefs = Array.isArray(options.contextRefs)
+      ? options.contextRefs
+          .filter((item) => item && typeof item === "object")
+          .map((item) => ({ ...(item as Record<string, unknown>) }))
+      : [];
+    if (!text && skillIds.length === 0 && contextRefs.length === 0) return;
     const result = await sendMessage<{
       sessionId: string;
       runtime: RuntimeStateView;
@@ -842,6 +855,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
       prompt: text,
       tabIds,
       ...(skillIds.length > 0 ? { skillIds } : {}),
+      ...(contextRefs.length > 0 ? { contextRefs } : {}),
       streamingBehavior: options.streamingBehavior,
     });
     runtime.value = normalizeRuntimeState(result.runtime);
@@ -1014,57 +1028,6 @@ export const useRuntimeStore = defineStore("runtime", () => {
   async function listPlugins(): Promise<PluginListResult> {
     const out = await sendMessage<Record<string, unknown>>("brain.plugin.list");
     return normalizePluginListResult(out);
-  }
-
-  async function registerPlugin(
-    plugin: Record<string, unknown>,
-    options: { replace?: boolean; enable?: boolean } = {},
-  ): Promise<PluginRegisterResult> {
-    const payload: Record<string, unknown> = {
-      plugin,
-    };
-    if (options.replace === true) payload.replace = true;
-    if (options.enable === false) payload.enable = false;
-    const out = await sendMessage<Record<string, unknown>>(
-      "brain.plugin.register",
-      payload,
-    );
-    return normalizePluginRegisterResult(out);
-  }
-
-  async function registerPluginExtension(
-    input: {
-      manifest: Record<string, unknown>;
-      moduleUrl?: string;
-      modulePath?: string;
-      module?: string;
-      exportName?: string;
-      plugin?: Record<string, unknown>;
-    },
-    options: { replace?: boolean; enable?: boolean } = {},
-  ): Promise<PluginRegisterResult> {
-    const payload: Record<string, unknown> = {
-      manifest: {
-        ...toRecord(input.manifest),
-      },
-    };
-    if (typeof input.moduleUrl === "string" && input.moduleUrl.trim())
-      payload.moduleUrl = input.moduleUrl.trim();
-    if (typeof input.modulePath === "string" && input.modulePath.trim())
-      payload.modulePath = input.modulePath.trim();
-    if (typeof input.module === "string" && input.module.trim())
-      payload.module = input.module.trim();
-    if (typeof input.exportName === "string" && input.exportName.trim())
-      payload.exportName = input.exportName.trim();
-    if (input.plugin && typeof input.plugin === "object")
-      payload.plugin = toRecord(input.plugin);
-    if (options.replace === true) payload.replace = true;
-    if (options.enable === false) payload.enable = false;
-    const out = await sendMessage<Record<string, unknown>>(
-      "brain.plugin.register_extension",
-      payload,
-    );
-    return normalizePluginRegisterResult(out);
   }
 
   async function enablePlugin(pluginId: string): Promise<PluginRegisterResult> {
@@ -1486,12 +1449,16 @@ export const useRuntimeStore = defineStore("runtime", () => {
       config.value.llmAuxProfile = llmAuxProfile;
       config.value.llmFallbackProfile = llmFallbackProfile;
       config.value.browserRuntimeStrategy = browserRuntimeStrategy;
+      config.value.compaction = normalizeCompactionSettings(
+        config.value.compaction,
+      );
 
       await sendMessage("config.save", {
         payload: {
           bridgeUrl: config.value.bridgeUrl.trim(),
           bridgeToken: config.value.bridgeToken,
           browserRuntimeStrategy,
+          compaction: config.value.compaction,
           llmDefaultProfile,
           llmAuxProfile,
           llmFallbackProfile,
@@ -1553,8 +1520,6 @@ export const useRuntimeStore = defineStore("runtime", () => {
     discoverSkills,
     runSkill,
     listPlugins,
-    registerPlugin,
-    registerPluginExtension,
     installPlugin,
     validatePluginPackage,
     enablePlugin,

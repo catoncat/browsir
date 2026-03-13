@@ -9,6 +9,7 @@ import { registerRuntimeRouter } from "../runtime-router";
 import { invokeVirtualFrame } from "../virtual-fs.browser";
 import type { LlmResolvedRoute } from "../llm-provider";
 import { readTraceChunk } from "../session-store.browser";
+import { serializeHostedChatTransportEvent } from "../../../shared/cursor-help-web-shared";
 
 type RuntimeListener = (
   message: unknown,
@@ -112,6 +113,7 @@ function createDummyRoute(
   return {
     profile: "default",
     provider: "openai_compatible",
+    runtimeKind: "model_llm",
     llmBase: "https://example.ai/v1",
     llmKey: "sk-demo",
     llmModel: "gpt-test",
@@ -371,8 +373,7 @@ describe("runtime-router.browser", () => {
     const preparation = prepareCompaction({
       reason: "threshold",
       entries: beforeCompaction.entries,
-      previousSummary: beforeCompaction.previousSummary,
-      keepTail: 2,
+      keepRecentTokens: 2,
       splitTurn: true,
     });
     const draft = await compact(
@@ -400,7 +401,10 @@ describe("runtime-router.browser", () => {
       sourceSessionId,
       sourceLeafAssistant.id,
     );
-    expect(sourceContextAtLeaf.previousSummary.length).toBeGreaterThan(0);
+    expect(sourceContextAtLeaf.messages[0]?.role).toBe("compactionSummary");
+    expect(sourceContextAtLeaf.messages[0]?.content).toContain(
+      "mock-compaction-summary",
+    );
     expect(
       sourceContextAtLeaf.messages.some((msg) => msg.role === "system"),
     ).toBe(false);
@@ -420,9 +424,6 @@ describe("runtime-router.browser", () => {
 
     const forkContext =
       await orchestrator.sessions.buildSessionContext(forkedSessionId);
-    expect(forkContext.previousSummary).toBe(
-      sourceContextAtLeaf.previousSummary,
-    );
     expect(
       forkContext.messages.map((msg) => `${msg.role}:${msg.content}`),
     ).toEqual(
@@ -4952,6 +4953,112 @@ describe("runtime-router.browser", () => {
     expect(typeof llmReqPayload.lastUserSnippet).toBe("string");
   });
 
+  it("hosted chat transport 应发出 hosted 阶段事件且不复用 llm.stream", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    orchestrator.registerLlmProvider(
+      {
+        id: "cursor_help_web",
+        resolveRequestUrl() {
+          return "browser-brain-loop://hosted-chat/test";
+        },
+        async send() {
+          return new Response(
+            [
+              serializeHostedChatTransportEvent({
+                type: "hosted_chat.debug",
+                requestId: "hosted-turn-1",
+                stage: "request_started",
+                detail: "started",
+              }),
+              serializeHostedChatTransportEvent({
+                type: "hosted_chat.stream_text_delta",
+                requestId: "hosted-turn-1",
+                deltaText: "hosted answer",
+              }),
+              serializeHostedChatTransportEvent({
+                type: "hosted_chat.turn_resolved",
+                requestId: "hosted-turn-1",
+                result: {
+                  assistantText: "hosted answer",
+                  toolCalls: [],
+                  finishReason: "stop",
+                  meta: {},
+                },
+              }),
+            ].join(""),
+            {
+              status: 200,
+              headers: {
+                "content-type":
+                  "application/x-browser-brain-loop-hosted-chat+jsonl",
+              },
+            },
+          );
+        },
+      },
+      { replace: true },
+    );
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmDefaultProfile: "cursor-help",
+        llmProfiles: [
+          {
+            id: "cursor-help",
+            provider: "cursor_help_web",
+            llmApiBase: "",
+            llmApiKey: "",
+            llmModel: "auto",
+            role: "worker",
+            llmTimeoutMs: 120000,
+            llmRetryMaxAttempts: 0,
+            llmMaxRetryDelayMs: 0,
+            providerOptions: {
+              targetSite: "cursor_help",
+            },
+          },
+        ],
+      },
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "测试 hosted chat transport",
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId);
+    const eventTypes = stream.map((item) => String(item.type || ""));
+    expect(eventTypes).toContain("hosted_chat.debug");
+    expect(eventTypes).toContain("hosted_chat.stream_text_delta");
+    expect(eventTypes).toContain("hosted_chat.turn_resolved");
+    expect(eventTypes).not.toContain("llm.stream.start");
+    expect(eventTypes).not.toContain("llm.stream.delta");
+    expect(eventTypes).not.toContain("llm.stream.end");
+
+    const llmReq =
+      stream.find((item) => String(item.type || "") === "llm.request") || {};
+    const llmReqPayload = ((llmReq as Record<string, unknown>).payload ||
+      {}) as Record<string, unknown>;
+    expect(String(llmReqPayload.source || "")).toBe("hosted_chat_transport");
+
+    const parsed =
+      stream.find((item) => String(item.type || "") === "llm.response.parsed") ||
+      {};
+    const parsedPayload = ((parsed as Record<string, unknown>).payload ||
+      {}) as Record<string, unknown>;
+    expect(String(parsedPayload.source || "")).toBe("hosted_chat_transport");
+    expect(Number(parsedPayload.toolCalls || 0)).toBe(0);
+    expect(parsedPayload.hasText).toBe(true);
+  });
+
   it("缺少 LLM 配置时应以 failed_execute 结束而非 done", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -6052,7 +6159,9 @@ describe("runtime-router.browser", () => {
     await waitForLoopDone(sessionId);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(capturedBody).toBeTruthy();
-    expect(capturedBody?.temperature).toBe(0.91);
+    expect(
+      (capturedBody as Record<string, unknown> | null)?.temperature,
+    ).toBe(0.91);
     expect(afterResponseContent).toBe("llm-hook-patch-ok");
   });
 
@@ -7526,6 +7635,24 @@ describe("runtime-router.browser", () => {
     ).toBe(true);
   });
 
+  it("brain.plugin.register should reject removed legacy route", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const registered = await invokeRuntime({
+      type: "brain.plugin.register",
+      plugin: {
+        manifest: {
+          id: "plugin.legacy.route",
+          name: "plugin-legacy-route",
+          version: "1.0.0",
+        },
+      },
+    });
+    expect(registered.ok).toBe(false);
+    expect(String(registered.error || "")).toContain("已移除");
+  });
+
   it("supports brain.plugin lifecycle routes with hook + llm provider", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -7542,32 +7669,52 @@ describe("runtime-router.browser", () => {
     );
 
     const registered = await invokeRuntime({
-      type: "brain.plugin.register",
-      plugin: {
-        manifest: {
-          id: "plugin.route.lifecycle",
-          name: "plugin-route-lifecycle",
-          version: "1.0.0",
-          permissions: {
-            hooks: ["tool.after_result"],
-            llmProviders: ["route.proxy"],
-          },
+      type: "brain.plugin.register_extension",
+      manifest: {
+        id: "plugin.route.lifecycle",
+        name: "plugin-route-lifecycle",
+        version: "1.0.0",
+        permissions: {
+          hooks: ["tool.after_result"],
+          llmProviders: ["route.proxy"],
         },
-        hooks: {
-          "tool.after_result": () => ({
+      },
+      setup(pi: Record<string, unknown>) {
+        (pi as Record<string, (hook: string, handler: () => unknown) => void>).on(
+          "tool.after_result",
+          () => ({
             action: "patch",
             patch: {
               result: { source: "plugin" },
             },
           }),
-        },
-        llmProviders: [
-          {
-            id: "route.proxy",
-            transport: "openai_compatible",
-            baseUrl: "https://proxy.example.com/v1",
+        );
+        (
+          pi as Record<
+            string,
+            (
+              id: string,
+              provider: Record<string, unknown>,
+            ) => void
+          >
+        ).registerProvider("route.proxy", {
+          resolveRequestUrl() {
+            return "https://proxy.example.com/v1/chat/completions";
           },
-        ],
+          async send(input: Record<string, unknown>) {
+            return new Response(
+              JSON.stringify({
+                requestUrl: String(input.requestUrl || ""),
+              }),
+              {
+                status: 200,
+                headers: {
+                  "content-type": "application/json",
+                },
+              },
+            );
+          },
+        });
       },
     });
     expect(registered.ok).toBe(true);
@@ -7595,6 +7742,16 @@ describe("runtime-router.browser", () => {
         (item) => String(item.id || "") === "plugin.route.lifecycle",
       ),
     ).toBe(true);
+
+    const persistedSource = await invokeVirtualFrame({
+      sessionId,
+      tool: "read",
+      args: {
+        path: "mem://plugins/plugin.route.lifecycle/index.js",
+        runtime: "sandbox",
+      },
+    });
+    expect(String(persistedSource.content || "")).toContain("registerPlugin");
 
     const patched = await invokeRuntime({
       type: "brain.step.execute",
@@ -7654,6 +7811,7 @@ describe("runtime-router.browser", () => {
     const removed = await invokeRuntime({
       type: "brain.plugin.unregister",
       pluginId: "plugin.route.lifecycle",
+      sessionId,
     });
     expect(removed.ok).toBe(true);
     const removedData = (removed.data || {}) as Record<string, unknown>;
@@ -7665,70 +7823,87 @@ describe("runtime-router.browser", () => {
         (item) => String(item.id || "") === "route.proxy",
       ),
     ).toBe(false);
+    await expect(
+      invokeVirtualFrame({
+        sessionId,
+        tool: "read",
+        args: {
+          path: "mem://plugins/plugin.route.lifecycle/index.js",
+          runtime: "sandbox",
+        },
+      }),
+    ).rejects.toThrow("virtual file not found");
   });
 
-  it("brain.plugin.register should persist function capability provider + llm provider across runtime reload", async () => {
+  it("brain.plugin.register_extension should persist setup capability provider + llm provider across runtime reload", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
 
     const pluginId = "plugin.route.register.reload";
     const registered = await invokeRuntime({
-      type: "brain.plugin.register",
-      plugin: {
-        manifest: {
-          id: pluginId,
-          name: "plugin-route-register-reload",
-          version: "1.0.0",
-          permissions: {
-            capabilities: ["fs.read"],
-            llmProviders: ["route.proxy"],
-          },
+      type: "brain.plugin.register_extension",
+      manifest: {
+        id: pluginId,
+        name: "plugin-route-register-reload",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["fs.read"],
+          llmProviders: ["route.proxy"],
         },
-        providers: {
-          capabilities: {
-            "fs.read": {
-              id: "plugin.route.register.reload.fs-read",
-              mode: "script",
-              priority: 90,
-              canHandle: (input: Record<string, unknown>) => {
-                const args =
-                  input.args && typeof input.args === "object"
-                    ? (input.args as Record<string, unknown>)
-                    : {};
-                const frame =
-                  args.frame && typeof args.frame === "object"
-                    ? (args.frame as Record<string, unknown>)
-                    : {};
-                return String(frame.tool || "") === "read";
-              },
-              invoke: async (input: Record<string, unknown>) => {
-                const args =
-                  input.args && typeof input.args === "object"
-                    ? (input.args as Record<string, unknown>)
-                    : {};
-                const frame =
-                  args.frame && typeof args.frame === "object"
-                    ? (args.frame as Record<string, unknown>)
-                    : {};
-                const frameArgs =
-                  frame.args && typeof frame.args === "object"
-                    ? (frame.args as Record<string, unknown>)
-                    : {};
-                return {
-                  source: "plugin-capability",
-                  path: String(frameArgs.path || ""),
-                };
-              },
-            },
+      },
+      setup(pi: any) {
+        pi.registerCapabilityProvider("fs.read", {
+          id: "plugin.route.register.reload.fs-read",
+          mode: "script",
+          priority: 90,
+          canHandle(input: Record<string, unknown>) {
+            const args =
+              input.args && typeof input.args === "object"
+                ? (input.args as Record<string, unknown>)
+                : {};
+            const frame =
+              args.frame && typeof args.frame === "object"
+                ? (args.frame as Record<string, unknown>)
+                : {};
+            return String(frame.tool || "") === "read";
           },
-        },
-        llmProviders: [
-          {
-            id: "route.proxy",
-            transport: "openai_compatible",
-            baseUrl: "https://proxy.example.com/v1",
+          async invoke(input: Record<string, unknown>) {
+            const args =
+              input.args && typeof input.args === "object"
+                ? (input.args as Record<string, unknown>)
+                : {};
+            const frame =
+              args.frame && typeof args.frame === "object"
+                ? (args.frame as Record<string, unknown>)
+                : {};
+            const frameArgs =
+              frame.args && typeof frame.args === "object"
+                ? (frame.args as Record<string, unknown>)
+                : {};
+            return {
+              source: "plugin-capability",
+              path: String(frameArgs.path || ""),
+            };
           },
-        ],
+        });
+        pi.registerProvider("route.proxy", {
+          resolveRequestUrl() {
+            return "https://proxy.example.com/v1/chat/completions";
+          },
+          async send(input: Record<string, unknown>) {
+            return new Response(
+              JSON.stringify({
+                requestUrl: String(input.requestUrl || ""),
+              }),
+              {
+                status: 200,
+                headers: {
+                  "content-type": "application/json",
+                },
+              },
+            );
+          },
+        });
       },
     });
     expect(registered.ok).toBe(true);
@@ -7843,106 +8018,100 @@ describe("runtime-router.browser", () => {
     ).toBe("mem://plugins/reload-check.txt");
   });
 
-  it("brain.plugin.register should persist getter + set/url/typed-array function plugins across reload", async () => {
+  it("brain.plugin.register_extension should persist getter + set/url/typed-array setup providers across reload", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
 
     const pluginId = "plugin.route.structured.values";
     const registered = await invokeRuntime({
-      type: "brain.plugin.register",
-      plugin: {
-        manifest: {
-          id: pluginId,
-          name: "plugin-route-structured-values",
-          version: "1.0.0",
-          permissions: {
-            capabilities: ["fs.read"],
-            llmProviders: ["route.structured"],
-          },
+      type: "brain.plugin.register_extension",
+      manifest: {
+        id: pluginId,
+        name: "plugin-route-structured-values",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["fs.read"],
+          llmProviders: ["route.structured"],
         },
-        providers: {
-          capabilities: {
-            "fs.read": {
-              get id() {
-                return "plugin.route.structured.values.fs-read";
-              },
-              get mode() {
-                return "script";
-              },
-              matcher: new Set(["read"]),
-              origin: new URL("https://assets.example.com/root/"),
-              bytes: new Uint8Array([1, 2, 3]),
-              canHandle(input: Record<string, unknown>) {
-                const args =
-                  input.args && typeof input.args === "object"
-                    ? (input.args as Record<string, unknown>)
-                    : {};
-                const frame =
-                  args.frame && typeof args.frame === "object"
-                    ? (args.frame as Record<string, unknown>)
-                    : {};
-                return this.matcher.has(String(frame.tool || ""));
-              },
-              invoke(input: Record<string, unknown>) {
-                const args =
-                  input.args && typeof input.args === "object"
-                    ? (input.args as Record<string, unknown>)
-                    : {};
-                const frame =
-                  args.frame && typeof args.frame === "object"
-                    ? (args.frame as Record<string, unknown>)
-                    : {};
-                const frameArgs =
-                  frame.args && typeof frame.args === "object"
-                    ? (frame.args as Record<string, unknown>)
-                    : {};
-                return {
-                  source: "plugin-structured",
-                  providerId: this.id,
-                  matcherSize: this.matcher.size,
-                  origin: this.origin.toString(),
-                  bytes: Array.from(this.bytes),
-                  path: String(frameArgs.path || ""),
-                };
-              },
-            },
+      },
+      setup(pi: any) {
+        pi.registerCapabilityProvider("fs.read", {
+          get id() {
+            return "plugin.route.structured.values.fs-read";
           },
-        },
-        llmProviders: [
-          {
-            get id() {
-              return "route.structured";
-            },
-            base: new URL("https://proxy.example.com/v1/"),
-            get __bblStaticRequestUrl() {
-              return "https://proxy.example.com/v1/chat/completions";
-            },
-            markers: new Map([
-              ["x-plugin", "structured"],
-              ["x-kind", "function"],
-            ]),
-            bytes: new Uint8Array([7, 8, 9]),
-            resolveRequestUrl() {
-              return this.__bblStaticRequestUrl;
-            },
-            async send(input: Record<string, unknown>) {
-              return new Response(
-                JSON.stringify({
-                  requestUrl: String(input.requestUrl || ""),
-                  plugin: this.markers.get("x-plugin") || "",
-                  base: this.base.toString(),
-                  bytes: Array.from(this.bytes),
-                }),
-                {
-                  status: 200,
-                  headers: {
-                    "content-type": "application/json",
-                  },
+          get mode() {
+            return "script";
+          },
+          matcher: new Set(["read"]),
+          origin: new URL("https://assets.example.com/root/"),
+          bytes: new Uint8Array([1, 2, 3]),
+          canHandle(input: Record<string, unknown>) {
+            const args =
+              input.args && typeof input.args === "object"
+                ? (input.args as Record<string, unknown>)
+                : {};
+            const frame =
+              args.frame && typeof args.frame === "object"
+                ? (args.frame as Record<string, unknown>)
+                : {};
+            return this.matcher.has(String(frame.tool || ""));
+          },
+          invoke(input: Record<string, unknown>) {
+            const args =
+              input.args && typeof input.args === "object"
+                ? (input.args as Record<string, unknown>)
+                : {};
+            const frame =
+              args.frame && typeof args.frame === "object"
+                ? (args.frame as Record<string, unknown>)
+                : {};
+            const frameArgs =
+              frame.args && typeof frame.args === "object"
+                ? (frame.args as Record<string, unknown>)
+                : {};
+            return {
+              source: "plugin-structured",
+              providerId: this.id,
+              matcherSize: this.matcher.size,
+              origin: this.origin.toString(),
+              bytes: Array.from(this.bytes),
+              path: String(frameArgs.path || ""),
+            };
+          },
+        });
+        pi.registerProvider("route.structured", {
+          get id() {
+            return "route.structured";
+          },
+          base: new URL("https://proxy.example.com/v1/"),
+          get __bblStaticRequestUrl() {
+            return "https://proxy.example.com/v1/chat/completions";
+          },
+          markers: new Map([
+            ["x-plugin", "structured"],
+            ["x-kind", "function"],
+          ]),
+          bytes: new Uint8Array([7, 8, 9]),
+          resolveRequestUrl() {
+            return this.__bblStaticRequestUrl;
+          },
+          async send(input: Record<string, unknown>) {
+            return new Response(
+              JSON.stringify({
+                requestUrl: String(input.requestUrl || ""),
+                plugin: this.markers.get("x-plugin") || "",
+                base: this.base.toString(),
+                bytes: Array.from(this.bytes),
+              }),
+              {
+                status: 200,
+                headers: {
+                  "content-type": "application/json",
                 },
-              );
-            },
+              },
+            );
           },
-        ],
+        });
       },
     });
     expect(registered.ok).toBe(true);
@@ -8031,36 +8200,32 @@ describe("runtime-router.browser", () => {
     });
   });
 
-  it("brain.plugin.register should reject function plugins that capture outer variables", async () => {
+  it("brain.plugin.register_extension should reject setup functions that capture outer variables", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
 
     const pluginId = "plugin.route.free-variable.reject";
     const capturedSecret = "should-not-leak";
     const registered = await invokeRuntime({
-      type: "brain.plugin.register",
-      plugin: {
-        manifest: {
-          id: pluginId,
-          name: "plugin-route-free-variable-reject",
-          version: "1.0.0",
-          permissions: {
-            capabilities: ["fs.read"],
-          },
+      type: "brain.plugin.register_extension",
+      manifest: {
+        id: pluginId,
+        name: "plugin-route-free-variable-reject",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["fs.read"],
         },
-        providers: {
-          capabilities: {
-            "fs.read": {
-              id: "plugin.route.free-variable.reject.fs-read",
-              mode: "script",
-              invoke() {
-                return {
-                  leaked: capturedSecret,
-                };
-              },
-            },
+      },
+      setup(pi: any) {
+        pi.registerCapabilityProvider("fs.read", {
+          id: "plugin.route.free-variable.reject.fs-read",
+          mode: "script",
+          invoke() {
+            return {
+              leaked: capturedSecret,
+            };
           },
-        },
+        });
       },
     });
     expect(registered.ok).toBe(false);
@@ -8088,7 +8253,7 @@ describe("runtime-router.browser", () => {
     ).toBe(false);
   });
 
-  it("brain.plugin.register should persist class instance providers with prototype and hidden properties across reload", async () => {
+  it("brain.plugin.register_extension should persist class instance setup providers with prototype and hidden properties across reload", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
 
@@ -8164,21 +8329,17 @@ describe("runtime-router.browser", () => {
 
     const pluginId = "plugin.route.class-instance";
     const registered = await invokeRuntime({
-      type: "brain.plugin.register",
-      plugin: {
-        manifest: {
-          id: pluginId,
-          name: "plugin-route-class-instance",
-          version: "1.0.0",
-          permissions: {
-            capabilities: ["fs.read"],
-          },
+      type: "brain.plugin.register_extension",
+      manifest: {
+        id: pluginId,
+        name: "plugin-route-class-instance",
+        version: "1.0.0",
+        permissions: {
+          capabilities: ["fs.read"],
         },
-        providers: {
-          capabilities: {
-            "fs.read": new ClassFsReadProvider(),
-          },
-        },
+      },
+      setup(pi: any) {
+        pi.registerCapabilityProvider("fs.read", new ClassFsReadProvider());
       },
     });
     expect(registered.ok).toBe(true);
@@ -8620,14 +8781,9 @@ describe("runtime-router.browser", () => {
     const installed = await invokeRuntime({
       type: "brain.plugin.install",
       package: {
-        plugin: {
-          manifest: {
-            name: "missing-id",
-            version: "1.0.0",
-          },
-          hooks: {
-            "tool.after_result": () => ({ action: "continue" }),
-          },
+        manifest: {
+          name: "missing-id",
+          version: "1.0.0",
         },
       },
     });
@@ -8668,6 +8824,16 @@ describe("runtime-router.browser", () => {
           String(item.name || "") === "index.module" && item.ok === true,
       ),
     ).toBe(true);
+
+    const validateMaterialized = await invokeVirtualFrame({
+      sessionId: "plugin-studio",
+      tool: "stat",
+      args: {
+        path: "mem://plugins/plugin.route.validate.inline.index/index.js",
+        runtime: "sandbox",
+      },
+    });
+    expect(String(validateMaterialized.type || "")).toBe("missing");
   });
 
   it("brain.plugin.validate should fail when no index/ui module declared", async () => {
@@ -8891,24 +9057,35 @@ describe("runtime-router.browser", () => {
     expect(baseProvider).toBeDefined();
 
     const registered = await invokeRuntime({
-      type: "brain.plugin.register",
-      plugin: {
-        manifest: {
-          id: "plugin.route.provider.restore",
-          name: "plugin-route-provider-restore",
-          version: "1.0.0",
-          permissions: {
-            llmProviders: ["openai_compatible"],
-            replaceLlmProviders: true,
-          },
+      type: "brain.plugin.register_extension",
+      manifest: {
+        id: "plugin.route.provider.restore",
+        name: "plugin-route-provider-restore",
+        version: "1.0.0",
+        permissions: {
+          llmProviders: ["openai_compatible"],
+          replaceLlmProviders: true,
         },
-        llmProviders: [
-          {
-            id: "openai_compatible",
-            transport: "openai_compatible",
-            baseUrl: "https://proxy.example.com/v1",
+      },
+      setup(pi: any) {
+        pi.registerProvider("openai_compatible", {
+          resolveRequestUrl() {
+            return "https://proxy.example.com/v1/chat/completions";
           },
-        ],
+          async send(input: Record<string, unknown>) {
+            return new Response(
+              JSON.stringify({
+                requestUrl: String(input.requestUrl || ""),
+              }),
+              {
+                status: 200,
+                headers: {
+                  "content-type": "application/json",
+                },
+              },
+            );
+          },
+        });
       },
     });
     expect(registered.ok).toBe(true);
@@ -8930,6 +9107,17 @@ describe("runtime-router.browser", () => {
   it("supports brain.skill lifecycle routes", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
+
+    await invokeVirtualFrame({
+      sessionId: "skill-lifecycle",
+      tool: "write",
+      args: {
+        path: "mem://skills/pi-align/SKILL.md",
+        content: "# PI Align\n\nalign runtime behavior with PI\n",
+        mode: "overwrite",
+        runtime: "sandbox",
+      },
+    });
 
     const installed = await invokeRuntime({
       type: "brain.skill.install",
@@ -8992,6 +9180,20 @@ describe("runtime-router.browser", () => {
     expect(uninstalled.ok).toBe(true);
     const uninstalledData = (uninstalled.data || {}) as Record<string, unknown>;
     expect(Boolean(uninstalledData.removed)).toBe(true);
+    expect(String(uninstalledData.removedPath || "")).toBe(
+      "mem://skills/pi-align",
+    );
+
+    await expect(
+      invokeVirtualFrame({
+        sessionId: "skill-lifecycle",
+        tool: "read",
+        args: {
+          path: "mem://skills/pi-align/SKILL.md",
+          runtime: "sandbox",
+        },
+      }),
+    ).rejects.toThrow("virtual file not found");
 
     const listedAfterUninstall = await invokeRuntime({
       type: "brain.skill.list",
@@ -9073,9 +9275,98 @@ describe("runtime-router.browser", () => {
     );
   });
 
+  it("brain.skill.create should rollback staged files when install fails", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "seed duplicate create skill context",
+      autoRun: false,
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    const original = await invokeRuntime({
+      type: "brain.skill.create",
+      sessionId,
+      skill: {
+        id: "rollback-skill",
+        name: "Rollback Skill",
+        description: "first version",
+        content: "# Rollback Skill\n\noriginal-content\n",
+      },
+    });
+    expect(original.ok).toBe(true);
+
+    const failed = await invokeRuntime({
+      type: "brain.skill.create",
+      sessionId,
+      skill: {
+        id: "rollback-skill",
+        name: "Rollback Skill",
+        description: "second version",
+        content: "# Rollback Skill\n\nnew-content\n",
+        replace: false,
+      },
+    });
+    expect(failed.ok).toBe(false);
+    expect(String(failed.error || "")).toContain("skill already exists");
+
+    const read = await invokeVirtualFrame({
+      sessionId,
+      tool: "read",
+      args: {
+        path: "mem://skills/rollback-skill/SKILL.md",
+        runtime: "sandbox",
+      },
+    });
+    expect(String(read.content || "")).toContain("original-content");
+
+    const listed = await invokeRuntime({
+      type: "brain.skill.list",
+    });
+    expect(listed.ok).toBe(true);
+    const listedSkills = Array.isArray(
+      (listed.data as Record<string, unknown>)?.skills,
+    )
+      ? ((listed.data as Record<string, unknown>).skills as unknown[] as Array<
+          Record<string, unknown>
+        >)
+      : [];
+    const rollbackSkill = listedSkills.find(
+      (item) => String(item.id || "") === "rollback-skill",
+    );
+    expect(String(rollbackSkill?.description || "")).toBe("first version");
+  });
+
   it("brain.skill.resolve should read content through fs.read capability", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
+
+    await invokeVirtualFrame({
+      sessionId: "skill-resolve-seed",
+      tool: "write",
+      args: {
+        path: "mem://skills/resolve-demo/SKILL.md",
+        content: "# SKILL\nNeed extra details? Read `references/playbook.md`.",
+        mode: "overwrite",
+        runtime: "sandbox",
+      },
+    });
+    await invokeVirtualFrame({
+      sessionId: "skill-resolve-seed",
+      tool: "write",
+      args: {
+        path: "mem://skills/resolve-demo/references/playbook.md",
+        content: "Detailed playbook body that should stay lazy.",
+        mode: "overwrite",
+        runtime: "sandbox",
+      },
+    });
 
     orchestrator.registerCapabilityProvider(
       "fs.read",
@@ -9083,9 +9374,19 @@ describe("runtime-router.browser", () => {
         id: "test.skill.resolve.fs.read",
         mode: "script",
         priority: 90,
-        invoke: async (input) => ({
-          content: `# SKILL\nloaded from ${String(input.args?.path || "")}`,
-        }),
+        invoke: async (input) => {
+          const result = await invokeVirtualFrame({
+            sessionId: String(input.sessionId || "default"),
+            tool: "read",
+            args: {
+              path: String(input.args?.path || ""),
+              runtime: "sandbox",
+            },
+          });
+          return {
+            content: String(result.content || ""),
+          };
+        },
       },
       { replace: true },
     );
@@ -9121,10 +9422,18 @@ describe("runtime-router.browser", () => {
     const resolvedData = (resolved.data || {}) as Record<string, unknown>;
     expect(String(resolvedData.skillId || "")).toBe("skill.resolve.demo");
     expect(String(resolvedData.content || "")).toContain(
-      "mem://skills/resolve-demo/SKILL.md",
+      "Read `references/playbook.md`",
     );
     expect(String(resolvedData.promptBlock || "")).toContain(
       '<skill id="skill.resolve.demo"',
+    );
+    expect(String(resolvedData.promptBlock || "")).toContain("<skill_resources>");
+    expect(String(resolvedData.promptBlock || "")).toContain(
+      'path="/mem/skills/resolve-demo/references"',
+    );
+    expect(String(resolvedData.promptBlock || "")).toContain("- file playbook.md");
+    expect(String(resolvedData.promptBlock || "")).not.toContain(
+      "Detailed playbook body that should stay lazy.",
     );
   });
 

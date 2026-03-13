@@ -8,6 +8,7 @@ import {
   type SessionIndex
 } from "./session-store.browser";
 import {
+  normalizeSessionWorkingContext,
   nowIso,
   randomId,
   type CompactionDraft,
@@ -23,7 +24,7 @@ import {
 export interface CreateSessionInput {
   id?: string;
   parentSessionId?: string | null;
-  cwd?: string;
+  workingContext?: SessionHeader["workingContext"];
   title?: string;
   model?: string;
   metadata?: Record<string, unknown>;
@@ -82,7 +83,7 @@ export class BrowserSessionManager {
       id: input.id ?? randomId("session"),
       parentSessionId: input.parentSessionId ?? null,
       timestamp: nowIso(),
-      cwd: input.cwd,
+      workingContext: normalizeSessionWorkingContext(input.workingContext),
       title: input.title,
       model: input.model,
       metadata: input.metadata
@@ -225,18 +226,19 @@ export class BrowserSessionManager {
     const meta = await this.ensureSession(sessionId);
     const branch = await this.getBranch(sessionId, leafId);
 
-    let previousSummary = "";
+    let latestCompaction: CompactionEntry | null = null;
     let firstKeptEntryId: string | null = null;
 
     for (let i = branch.length - 1; i >= 0; i -= 1) {
       const entry = branch[i];
       if (entry.type !== "compaction") continue;
-      previousSummary = entry.summary;
+      latestCompaction = entry;
       firstKeptEntryId = entry.firstKeptEntryId;
       break;
     }
 
     const postCompactionEntries = (() => {
+      if (latestCompaction && !firstKeptEntryId) return [];
       if (!firstKeptEntryId) return branch;
       const idx = branch.findIndex((entry) => entry.id === firstKeptEntryId);
       if (idx < 0) return [];
@@ -244,11 +246,22 @@ export class BrowserSessionManager {
     })();
 
     const messages = [] as SessionContext["messages"];
+    if (latestCompaction) {
+      messages.push({
+        role: "compactionSummary",
+        content: latestCompaction.summary,
+        entryId: latestCompaction.id
+      });
+    }
     for (const entry of postCompactionEntries) {
       if (entry.type !== "message") continue;
       messages.push({
         role: entry.role,
         content: entry.text,
+        llmContent:
+          typeof entry.metadata?.llmText === "string"
+            ? entry.metadata.llmText
+            : undefined,
         entryId: entry.id,
         toolName: entry.toolName,
         toolCallId: entry.toolCallId
@@ -259,7 +272,6 @@ export class BrowserSessionManager {
       sessionId,
       leafId: leafId === undefined ? meta.leafId : leafId,
       entries: branch,
-      previousSummary,
       messages
     };
   }

@@ -3,13 +3,14 @@ import "./test-setup";
 import { describe, expect, it } from "vitest";
 import { resolveLlmRoute } from "../llm-profile-resolver";
 import type { BridgeConfig } from "../runtime-infra.browser";
-import { CURSOR_HELP_WEB_API_KEY, CURSOR_HELP_WEB_BASE_URL } from "../../../shared/llm-provider-config";
+import { DEFAULT_COMPACTION_SETTINGS } from "../../../shared/compaction";
 
 function baseConfig(): BridgeConfig {
   return {
     bridgeUrl: "ws://127.0.0.1:8787/ws",
     bridgeToken: "dev-token",
     browserRuntimeStrategy: "host-first",
+    compaction: DEFAULT_COMPACTION_SETTINGS,
     llmDefaultProfile: "cursor-help",
     llmProfiles: [],
     maxSteps: 10,
@@ -24,7 +25,7 @@ function baseConfig(): BridgeConfig {
 }
 
 describe("llm-profile-resolver cursor_help_web", () => {
-  it("rejects cursor_help_web profiles that bypass core base/key config", () => {
+  it("accepts cursor_help_web profiles without base/key pseudo config", () => {
     const config = baseConfig();
     config.llmProfiles = [
       {
@@ -45,37 +46,12 @@ describe("llm-profile-resolver cursor_help_web", () => {
     ];
 
     const result = resolveLlmRoute({ config });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.reason).toBe("missing_llm_config");
-  });
-
-  it("accepts normalized cursor_help_web provider config", () => {
-    const config = baseConfig();
-    config.llmProfiles = [
-      {
-        id: "cursor-help",
-        provider: "cursor_help_web",
-        llmApiBase: CURSOR_HELP_WEB_BASE_URL,
-        llmApiKey: CURSOR_HELP_WEB_API_KEY,
-        llmModel: "auto",
-        providerOptions: {
-          targetTabId: 88,
-          targetSite: "cursor_help"
-        },
-        role: "worker",
-        llmTimeoutMs: 120000,
-        llmRetryMaxAttempts: 2,
-        llmMaxRetryDelayMs: 60000
-      }
-    ];
-
-    const result = resolveLlmRoute({ config });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.route.provider).toBe("cursor_help_web");
-    expect(result.route.llmBase).toBe(CURSOR_HELP_WEB_BASE_URL);
-    expect(result.route.llmKey).toBe(CURSOR_HELP_WEB_API_KEY);
+    expect(result.route.runtimeKind).toBe("hosted_chat");
+    expect(result.route.llmBase).toBe("");
+    expect(result.route.llmKey).toBe("");
     expect(result.route.providerOptions).toMatchObject({
       targetTabId: 88,
       targetSite: "cursor_help"

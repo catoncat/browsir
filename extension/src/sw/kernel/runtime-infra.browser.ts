@@ -3,6 +3,10 @@ import {
   type BrowserRuntimeStrategy,
 } from "./browser-runtime-strategy";
 import { defaultPipeline as enrichmentPipeline } from "./snapshot-enricher";
+import {
+  normalizeCompactionSettings,
+  type CompactionSettings,
+} from "../../shared/compaction";
 import { normalizeProviderConnectionConfig } from "../../shared/llm-provider-config";
 
 const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:8787/ws";
@@ -29,6 +33,7 @@ export interface BridgeConfig {
   bridgeUrl: string;
   bridgeToken: string;
   browserRuntimeStrategy: BrowserRuntimeStrategy;
+  compaction: CompactionSettings;
   llmDefaultProfile?: string;
   llmAuxProfile?: string;
   llmFallbackProfile?: string;
@@ -727,6 +732,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       "bridgeUrl",
       "bridgeToken",
       "browserRuntimeStrategy",
+      "compaction",
       "llmDefaultProfile",
       "llmAuxProfile",
       "llmFallbackProfile",
@@ -752,6 +758,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         data.browserRuntimeStrategy,
         DEFAULT_BROWSER_RUNTIME_STRATEGY,
       ),
+      compaction: normalizeCompactionSettings(data.compaction),
       llmDefaultProfile,
       llmAuxProfile: normalizeOptionalProfileId(
         data.llmAuxProfile,
@@ -794,7 +801,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         0,
         MAX_LLM_MAX_RETRY_DELAY_MS,
       ),
-      devAutoReload: data.devAutoReload !== false,
+      devAutoReload: data.devAutoReload === true,
       devReloadIntervalMs: Number.isFinite(Number(data.devReloadIntervalMs))
         ? Number(data.devReloadIntervalMs)
         : 1500,
@@ -825,6 +832,10 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
         source.browserRuntimeStrategy,
         current.browserRuntimeStrategy || DEFAULT_BROWSER_RUNTIME_STRATEGY,
+      ),
+      compaction: normalizeCompactionSettings(
+        source.compaction ?? current.compaction,
+        current.compaction,
       ),
       llmDefaultProfile,
       llmAuxProfile: normalizeOptionalProfileId(
@@ -880,7 +891,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       devAutoReload:
         source.devAutoReload === undefined
           ? current.devAutoReload
-          : source.devAutoReload !== false,
+          : source.devAutoReload === true,
       devReloadIntervalMs: Math.max(
         500,
         Number(
@@ -1248,7 +1259,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
 
       Promise.resolve()
         .then(() =>
-          chrome.debugger.sendCommand({ tabId }, method, params as object),
+          chrome.debugger.sendCommand({ tabId }, method, asRecord(params)),
         )
         .then((value) => {
           finish(null, value as T);

@@ -43,6 +43,7 @@ export type LlmMessage = LlmAssistantMessage | LlmContextMessage;
 export interface SessionContextMessageLike {
   role: string;
   content: string;
+  llmContent?: string;
   entryId?: string;
   toolName?: string;
   toolCallId?: string;
@@ -57,13 +58,8 @@ const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point wa
 const COMPACTION_SUMMARY_SUFFIX = `
 </summary>`;
 
-export function buildCompactionSummaryLlmMessage(previousSummary: string): JsonRecord | null {
-  const summary = String(previousSummary || "").trim();
-  if (!summary) return null;
-  return {
-    role: "user",
-    content: `${COMPACTION_SUMMARY_PREFIX}${summary}${COMPACTION_SUMMARY_SUFFIX}`
-  };
+function toCompactionSummaryText(summary: string): string {
+  return `${COMPACTION_SUMMARY_PREFIX}${summary}${COMPACTION_SUMMARY_SUFFIX}`;
 }
 
 function toRecord(value: unknown): JsonRecord {
@@ -314,7 +310,7 @@ function normalizeIncomingMessage(raw: unknown, index: number): LlmMessage | nul
   }
   return {
     role: "assistant",
-    content
+    content: buildAssistantContentBlocks(content)
   };
 }
 
@@ -510,8 +506,16 @@ export function convertSessionContextMessagesToLlm(messages: SessionContextMessa
   for (let i = 0; i < messages.length; i += 1) {
     const item = messages[i];
     const role = String(item.role || "").trim().toLowerCase();
-    const content = String(item.content || "");
+    const content = String(item.llmContent ?? item.content ?? "");
     if (!content.trim()) continue;
+
+    if (role === "compactionsummary") {
+      out.push({
+        role: "user",
+        content: toCompactionSummaryText(content)
+      });
+      continue;
+    }
 
     if (role === "tool") {
       const toolCallId = String(item.toolCallId || "").trim();

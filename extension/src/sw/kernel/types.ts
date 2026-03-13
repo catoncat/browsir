@@ -1,4 +1,7 @@
+import type { PromptContextRefInput } from "../../shared/context-ref";
+
 export const SESSION_SCHEMA_VERSION = 1;
+export type JsonRecord = Record<string, unknown>;
 
 export type SessionEntryType =
   | "message"
@@ -13,13 +16,47 @@ export type SessionEntryType =
 
 export type SessionMessageRole = "system" | "user" | "assistant" | "tool";
 
+export interface SessionWorkingContext {
+  hostCwd?: string;
+  browserCwd: "mem://";
+  browserUserMount: "/mem";
+}
+
+export const DEFAULT_SESSION_WORKING_CONTEXT: Pick<
+  SessionWorkingContext,
+  "browserCwd" | "browserUserMount"
+> = {
+  browserCwd: "mem://",
+  browserUserMount: "/mem",
+};
+
+function normalizeHostCwd(value: unknown): string | undefined {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text || undefined;
+}
+
+export function normalizeSessionWorkingContext(
+  value: unknown,
+): SessionWorkingContext {
+  const row =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
+  return {
+    ...DEFAULT_SESSION_WORKING_CONTEXT,
+    ...(normalizeHostCwd(row.hostCwd)
+      ? { hostCwd: normalizeHostCwd(row.hostCwd) }
+      : {}),
+  };
+}
+
 export interface SessionHeader {
   type: "session";
   version: 1;
   id: string;
   parentSessionId: string | null;
   timestamp: string;
-  cwd?: string;
+  workingContext?: SessionWorkingContext;
   title?: string;
   model?: string;
   metadata?: Record<string, unknown>;
@@ -115,9 +152,12 @@ export interface SessionMeta {
   updatedAt: string;
 }
 
+export type SessionContextMessageRole = SessionMessageRole | "compactionSummary";
+
 export interface SessionContextMessage {
-  role: SessionMessageRole;
+  role: SessionContextMessageRole;
   content: string;
+  llmContent?: string;
   entryId: string;
   toolName?: string;
   toolCallId?: string;
@@ -127,7 +167,6 @@ export interface SessionContext {
   sessionId: string;
   leafId: string | null;
   entries: SessionEntry[];
-  previousSummary: string;
   messages: SessionContextMessage[];
 }
 
@@ -156,6 +195,7 @@ export interface QueuedRuntimePrompt {
   behavior: StreamingBehavior;
   text: string;
   skillIds?: string[];
+  contextRefs?: PromptContextRefInput[];
   timestamp: string;
 }
 
@@ -175,12 +215,12 @@ export interface RunState {
   queue: RunQueueState;
 }
 
-export interface StepTraceRecord {
+export interface StepTraceRecord extends JsonRecord {
   id: string;
   sessionId: string;
   type: string;
   timestamp: string;
-  payload: Record<string, unknown>;
+  payload: JsonRecord;
 }
 
 export type ExecuteMode = "script" | "cdp" | "bridge";
@@ -199,6 +239,7 @@ export interface ExecuteStepResult {
   ok: boolean;
   modeUsed: ExecuteMode;
   capabilityUsed?: ExecuteCapability;
+  providerId?: string;
   fallbackFrom?: ExecuteMode;
   verified: boolean;
   verifyReason?: string;

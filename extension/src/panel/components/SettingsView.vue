@@ -13,6 +13,10 @@ const systemPromptCustomId = "settings-system-prompt-custom";
 const maxStepsId = "settings-max-steps";
 const autoTitleIntervalId = "settings-auto-title-interval";
 const browserRuntimeStrategyId = "settings-browser-runtime-strategy";
+const compactionEnabledId = "settings-compaction-enabled";
+const compactionContextWindowId = "settings-compaction-context-window";
+const compactionReserveId = "settings-compaction-reserve";
+const compactionKeepRecentId = "settings-compaction-keep-recent";
 const bridgeUrlId = "settings-bridge-url";
 const bridgeTokenId = "settings-bridge-token";
 const showBridgeToken = ref(false);
@@ -104,6 +108,51 @@ onMounted(() => {
               <option value="browser-first">browser-first（默认走 lifo sandbox）</option>
             </select>
             <p class="text-[10px] text-ui-text-muted/60 px-0.5">仅影响 browser_* 工具未显式指定 runtime 时的默认路由。</p>
+          </div>
+          <div class="space-y-2">
+            <div class="flex items-center justify-between gap-3 rounded-sm border border-ui-border bg-ui-surface px-3 py-2.5">
+              <div class="space-y-0.5">
+                <label :for="compactionEnabledId" class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">Context Compaction</label>
+                <p class="text-[10px] text-ui-text-muted/60">控制长对话的上下文压缩。</p>
+              </div>
+              <input
+                :id="compactionEnabledId"
+                v-model="config.compaction.enabled"
+                type="checkbox"
+                class="h-4 w-4 rounded border-ui-border bg-ui-bg text-ui-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+              />
+            </div>
+            <div class="space-y-1.5">
+              <label :for="compactionContextWindowId" class="block text-[11px] font-bold text-ui-text-muted/80 ml-0.5 uppercase tracking-tighter">Context Window Tokens</label>
+              <input
+                :id="compactionContextWindowId"
+                v-model.number="config.compaction.contextWindowTokens"
+                type="number"
+                min="1"
+                class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+              />
+            </div>
+            <div class="space-y-1.5">
+              <label :for="compactionReserveId" class="block text-[11px] font-bold text-ui-text-muted/80 ml-0.5 uppercase tracking-tighter">Reserve Tokens</label>
+              <input
+                :id="compactionReserveId"
+                v-model.number="config.compaction.reserveTokens"
+                type="number"
+                min="1"
+                class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+              />
+            </div>
+            <div class="space-y-1.5">
+              <label :for="compactionKeepRecentId" class="block text-[11px] font-bold text-ui-text-muted/80 ml-0.5 uppercase tracking-tighter">Keep Recent Tokens</label>
+              <input
+                :id="compactionKeepRecentId"
+                v-model.number="config.compaction.keepRecentTokens"
+                type="number"
+                min="1"
+                class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+              />
+              <p class="text-[10px] text-ui-text-muted/60 px-0.5">保留最近工作区间，其余部分合并进摘要。</p>
+            </div>
           </div>
         </div>
       </section>

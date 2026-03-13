@@ -4,6 +4,7 @@ import { HookRunner, type HookHandler, type HookHandlerOptions } from "./hook-ru
 import type { OrchestratorHookMap } from "./orchestrator-hooks";
 import { BrowserSessionManager } from "./session-manager.browser";
 import { appendTraceChunk, readTraceChunk } from "./session-store.browser";
+import type { PromptContextRefInput } from "../../shared/context-ref";
 import {
   CapabilityPolicyRegistry,
   type CapabilityExecutionPolicy,
@@ -26,9 +27,11 @@ import { ToolProviderRegistry, type RegisterProviderOptions, type StepToolProvid
 import { PluginRuntime, type AgentPluginDefinition, type PluginRuntimeView } from "./plugin-runtime";
 import {
   SkillContentResolver,
+  type SkillPromptAugmenter,
   type ResolveSkillContentOptions,
   type ResolvedSkillContent,
-  type SkillContentReader
+  type SkillContentReader,
+  type SkillResolverDebugView
 } from "./skill-content-resolver";
 import { SkillRegistry, type SkillInstallInput, type SkillMetadata } from "./skill-registry";
 import {
@@ -42,24 +45,27 @@ import { createOpenAiCompatibleLlmProvider } from "./llm-openai-compatible-provi
 import { createCursorHelpWebProvider } from "./web-chat-executor.browser";
 import { DEFAULT_LLM_PROVIDER_ID, type LlmProviderAdapter } from "./llm-provider";
 import { LlmProviderRegistry, type RegisterLlmProviderOptions } from "./llm-provider-registry";
+import {
+  normalizeCompactionSettings,
+  type CompactionSettings,
+} from "../../shared/compaction";
 
 export type { ExecuteCapability, ExecuteMode, ExecuteStepInput, ExecuteStepResult } from "./types";
 export type { CapabilityExecutionPolicy, RegisterCapabilityPolicyOptions } from "./capability-policy";
 export type { RegisterToolContractOptions, ToolContract, ToolContractView, ToolDefinition } from "./tool-contract-registry";
 export type { SkillMetadata, SkillInstallInput } from "./skill-registry";
-export type { SkillContentReader, ResolvedSkillContent, ResolveSkillContentOptions } from "./skill-content-resolver";
+export type { SkillContentReader, SkillPromptAugmenter, ResolvedSkillContent, ResolveSkillContentOptions, SkillResolverDebugView } from "./skill-content-resolver";
 
 export interface OrchestratorOptions {
   retryMaxAttempts?: number;
   retryBaseDelayMs?: number;
   retryCapDelayMs?: number;
-  thresholdTokens?: number;
-  keepTail?: number;
-  splitTurn?: boolean;
+  compaction?: CompactionSettings;
   traceChunkSize?: number;
   verifyAdapter?: (input: ExecuteStepInput, result: unknown) => Promise<{ verified: boolean; reason?: string }>;
   skillRegistry?: SkillRegistry;
   skillContentReader?: SkillContentReader;
+  skillPromptAugmenter?: SkillPromptAugmenter;
 }
 
 export interface AgentEndInput {
@@ -89,6 +95,13 @@ export interface RuntimeView {
     total: number;
     items: QueuedRuntimePrompt[];
   };
+}
+
+export interface KernelDebugState {
+  liveRunStateSessionIds: string[];
+  cachedStepStreamSessionIds: string[];
+  pendingTraceWriteSessionIds: string[];
+  blockedTraceSessionIds: string[];
 }
 
 function toPositiveInt(value: unknown, fallback: number): number {
@@ -134,11 +147,9 @@ export class BrainOrchestrator {
     retryMaxAttempts: number;
     retryBaseDelayMs: number;
     retryCapDelayMs: number;
-    thresholdTokens: number;
-    keepTail: number;
-    splitTurn: boolean;
     traceChunkSize: number;
   };
+  private compactionSettings: CompactionSettings;
   private readonly verifyAdapter?: (input: ExecuteStepInput, result: unknown) => Promise<{ verified: boolean; reason?: string }>;
   private readonly hooks = new HookRunner<OrchestratorHookMap>();
   private readonly toolProviders = new ToolProviderRegistry();
@@ -206,15 +217,14 @@ export class BrainOrchestrator {
       retryMaxAttempts: options.retryMaxAttempts ?? 2,
       retryBaseDelayMs: options.retryBaseDelayMs ?? 500,
       retryCapDelayMs: options.retryCapDelayMs ?? 5000,
-      thresholdTokens: options.thresholdTokens ?? 1800,
-      keepTail: options.keepTail ?? 30,
-      splitTurn: options.splitTurn ?? true,
       traceChunkSize: toPositiveInt(options.traceChunkSize, 80)
     };
+    this.compactionSettings = normalizeCompactionSettings(options.compaction);
     this.verifyAdapter = options.verifyAdapter;
     this.skills = options.skillRegistry ?? new SkillRegistry();
     this.skillResolver = new SkillContentResolver(this.skills, {
-      readText: options.skillContentReader
+      readText: options.skillContentReader,
+      buildPromptAugment: options.skillPromptAugmenter,
     });
     this.llmProviders.register(createOpenAiCompatibleLlmProvider(DEFAULT_LLM_PROVIDER_ID), {
       replace: true
@@ -278,6 +288,10 @@ export class BrainOrchestrator {
 
   getLlmProviderRegistry(): LlmProviderRegistry {
     return this.llmProviders;
+  }
+
+  updateCompactionSettings(settings: CompactionSettings): void {
+    this.compactionSettings = normalizeCompactionSettings(settings);
   }
 
   getToolProvider(mode: ExecuteMode): StepToolProvider | undefined {
@@ -375,6 +389,10 @@ export class BrainOrchestrator {
     this.skillResolver.setReader(readText);
   }
 
+  setSkillPromptAugmenter(buildPromptAugment: SkillPromptAugmenter): void {
+    this.skillResolver.setPromptAugmenter(buildPromptAugment);
+  }
+
   async listSkills(): Promise<SkillMetadata[]> {
     return this.skills.list();
   }
@@ -401,6 +419,10 @@ export class BrainOrchestrator {
 
   async resolveSkillContent(skillId: string, options: ResolveSkillContentOptions = {}): Promise<ResolvedSkillContent> {
     return this.skillResolver.resolveById(skillId, options);
+  }
+
+  getSkillResolverDebugView(): SkillResolverDebugView {
+    return this.skillResolver.getDebugView();
   }
 
   onHook<K extends keyof OrchestratorHookMap & string>(
@@ -462,11 +484,18 @@ export class BrainOrchestrator {
     return { sessionId: meta.header.id };
   }
 
-  async appendUserMessage(sessionId: string, text: string): Promise<void> {
+  async appendUserMessage(
+    sessionId: string,
+    text: string,
+    options: {
+      metadata?: Record<string, unknown>;
+    } = {},
+  ): Promise<void> {
     await this.sessions.appendMessage({
       sessionId,
       role: "user",
-      text
+      text,
+      metadata: options.metadata,
     });
   }
 
@@ -566,19 +595,23 @@ export class BrainOrchestrator {
     sessionId: string,
     behavior: StreamingBehavior,
     text: string,
-    options: { skillIds?: string[] } = {}
+    options: { skillIds?: string[]; contextRefs?: PromptContextRefInput[] } = {}
   ): RuntimeView {
     const normalizedText = String(text || "").trim();
     const skillIds = Array.isArray(options.skillIds)
       ? Array.from(new Set(options.skillIds.map((id) => String(id || "").trim()).filter((id) => id.length > 0)))
       : [];
-    if (!normalizedText && skillIds.length === 0) return this.getRunState(sessionId);
+    const contextRefs = Array.isArray(options.contextRefs)
+      ? options.contextRefs.filter((item) => item && typeof item === "object")
+      : [];
+    if (!normalizedText && skillIds.length === 0 && contextRefs.length === 0) return this.getRunState(sessionId);
     const state = this.ensureRunState(sessionId);
     const item: QueuedRuntimePrompt = {
       id: randomId("queued_prompt"),
       behavior,
       text: normalizedText,
       ...(skillIds.length > 0 ? { skillIds } : {}),
+      ...(contextRefs.length > 0 ? { contextRefs } : {}),
       timestamp: nowIso()
     };
     if (behavior === "steer") {
@@ -884,8 +917,7 @@ export class BrainOrchestrator {
     const decision = shouldCompact({
       overflow: false,
       entries: context.entries,
-      previousSummary: context.previousSummary,
-      thresholdTokens: this.options.thresholdTokens
+      settings: this.compactionSettings
     });
 
     const afterCheck = await this.hooks.run("compaction.check.after", {
@@ -898,8 +930,7 @@ export class BrainOrchestrator {
     const finalCheck = afterCheck.value;
 
     if (!finalCheck.shouldCompact || finalCheck.reason !== "threshold") return false;
-    await this.runCompaction(sessionId, "threshold", false);
-    return true;
+    return await this.runCompaction(sessionId, "threshold", false);
   }
 
   // 对照点：pi-mono/packages/coding-agent/src/core/agent-session.ts:2083 retry 判定优先于 compaction
@@ -985,8 +1016,7 @@ export class BrainOrchestrator {
     const compactDecision = shouldCompact({
       overflow: Boolean(nextInput.overflow),
       entries: context.entries,
-      previousSummary: context.previousSummary,
-      thresholdTokens: this.options.thresholdTokens
+      settings: this.compactionSettings
     });
 
     const afterCheck = await this.hooks.run("compaction.check.after", {
@@ -1008,14 +1038,16 @@ export class BrainOrchestrator {
 
     if (finalCompact.shouldCompact && finalCompact.reason) {
       const willRetry = finalCompact.reason === "overflow";
-      await this.runCompaction(sessionId, finalCompact.reason, willRetry);
-      const decision: AgentEndDecision = {
-        action: "continue",
-        reason: `compaction_${finalCompact.reason}`,
-        sessionId
-      };
-      const afterHook = await this.hooks.run("agent_end.after", { input: nextInput, decision });
-      return afterHook.blocked ? decision : afterHook.value.decision;
+      const compacted = await this.runCompaction(sessionId, finalCompact.reason, willRetry);
+      if (compacted) {
+        const decision: AgentEndDecision = {
+          action: "continue",
+          reason: `compaction_${finalCompact.reason}`,
+          sessionId
+        };
+        const afterHook = await this.hooks.run("agent_end.after", { input: nextInput, decision });
+        return afterHook.blocked ? decision : afterHook.value.decision;
+      }
     }
 
     const decision: AgentEndDecision = {
@@ -1074,13 +1106,34 @@ export class BrainOrchestrator {
     this.runStateBySession.clear();
   }
 
-  private async runCompaction(sessionId: string, reason: "overflow" | "threshold", willRetry: boolean): Promise<void> {
+  getKernelDebugState(): KernelDebugState {
+    return {
+      liveRunStateSessionIds: [...this.runStateBySession.keys()].sort((a, b) =>
+        a.localeCompare(b)
+      ),
+      cachedStepStreamSessionIds: [...this.streamBySession.keys()].sort((a, b) =>
+        a.localeCompare(b)
+      ),
+      pendingTraceWriteSessionIds: [...this.traceWriteTailBySession.keys()].sort((a, b) =>
+        a.localeCompare(b)
+      ),
+      blockedTraceSessionIds: [...this.blockedTraceSessions.keys()].sort((a, b) =>
+        a.localeCompare(b)
+      )
+    };
+  }
+
+  private async runCompaction(
+    sessionId: string,
+    reason: "overflow" | "threshold",
+    willRetry: boolean
+  ): Promise<boolean> {
     const beforeHook = await this.hooks.run("compaction.before", {
       sessionId,
       reason,
       willRetry
     });
-    if (beforeHook.blocked) return;
+    if (beforeHook.blocked) return false;
     const nextReason = beforeHook.value.reason;
     const nextWillRetry = beforeHook.value.willRetry;
     this.setCompacting(sessionId, true);
@@ -1095,10 +1148,23 @@ export class BrainOrchestrator {
       const preparation = prepareCompaction({
         reason: nextReason,
         entries: context.entries,
-        previousSummary: context.previousSummary,
-        keepTail: this.options.keepTail,
-        splitTurn: this.options.splitTurn
+        keepRecentTokens: this.compactionSettings.keepRecentTokens,
+        reserveTokens: this.compactionSettings.reserveTokens
       });
+      if (preparation.isNoOp) {
+        this.events.emit("auto_compaction_end", sessionId, {
+          reason: nextReason,
+          success: true,
+          willRetry: nextWillRetry,
+          noOp: true
+        });
+        await this.hooks.run("compaction.after", {
+          sessionId,
+          reason: nextReason,
+          willRetry: nextWillRetry
+        });
+        return false;
+      }
       const draft = await compact(preparation, async (summaryRequest) => {
         const summaryHook = await this.hooks.run("compaction.summary", {
           sessionId,
@@ -1144,6 +1210,7 @@ export class BrainOrchestrator {
         reason: nextReason,
         willRetry: nextWillRetry
       });
+      return true;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.events.emit("auto_compaction_end", sessionId, {

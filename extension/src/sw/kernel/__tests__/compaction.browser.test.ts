@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { compact, findCutPoint, prepareCompaction, shouldCompact } from "../compaction.browser";
 import type { SessionEntry } from "../types";
+import { DEFAULT_COMPACTION_SETTINGS } from "../../../shared/compaction";
 
 function message(id: string, role: "user" | "assistant", text: string, parentId: string | null): SessionEntry {
   return {
@@ -30,6 +31,33 @@ function toolMessage(
   };
 }
 
+function compactionEntry(
+  id: string,
+  summary: string,
+  firstKeptEntryId: string | null,
+  parentId: string | null
+): SessionEntry {
+  return {
+    id,
+    type: "compaction",
+    reason: "threshold",
+    summary,
+    firstKeptEntryId,
+    previousSummary: "",
+    tokensBefore: 100,
+    tokensAfter: 40,
+    parentId,
+    timestamp: new Date().toISOString()
+  };
+}
+
+const eagerCompactionSettings = {
+  ...DEFAULT_COMPACTION_SETTINGS,
+  contextWindowTokens: 1,
+  reserveTokens: 1,
+  keepRecentTokens: 2
+};
+
 describe("compaction.browser", () => {
   it("overflow 时必须触发 compaction", () => {
     const entries = [
@@ -39,8 +67,7 @@ describe("compaction.browser", () => {
     const result = shouldCompact({
       overflow: true,
       entries,
-      previousSummary: "",
-      thresholdTokens: 999999
+      settings: eagerCompactionSettings
     });
     expect(result.shouldCompact).toBe(true);
     expect(result.reason).toBe("overflow");
@@ -48,12 +75,12 @@ describe("compaction.browser", () => {
 
   it("split-turn 会把 cut 对齐到用户消息", () => {
     const entries = [
-      message("u1", "user", "q1", null),
-      message("a1", "assistant", "a1", "u1"),
-      message("u2", "user", "q2", "a1"),
-      message("a2", "assistant", "a2", "u2")
+      message("u1", "user", "first", null),
+      message("a1", "assistant", "answer1", "u1"),
+      message("u2", "user", "second", "a1"),
+      message("a2", "assistant", "answer2", "u2")
     ];
-    const cut = findCutPoint({ entries, keepTail: 2, splitTurn: true });
+    const cut = findCutPoint({ entries, keepRecentTokens: 8, splitTurn: true });
     expect(cut.firstKeptEntryId).toBe("u2");
   });
 
@@ -67,12 +94,11 @@ describe("compaction.browser", () => {
     const draft = prepareCompaction({
       reason: "threshold",
       entries,
-      previousSummary: "old-summary",
-      keepTail: 2,
+      keepRecentTokens: 8,
       splitTurn: true
     });
 
-    expect(draft.previousSummary).toContain("old-summary");
+    expect(draft.previousSummary).toBe("");
     expect(draft.keptEntries.length).toBeGreaterThan(0);
     expect(draft.droppedEntries.length).toBeGreaterThan(0);
     expect(draft.firstKeptEntryId).toBe("u2");
@@ -82,6 +108,7 @@ describe("compaction.browser", () => {
 
   it("compact 通过 summary generator 生成最终摘要", async () => {
     const entries = [
+      compactionEntry("c1", "old-summary", "u1", null),
       message("u1", "user", "first", null),
       message("a1", "assistant", "answer1", "u1"),
       message("u2", "user", "second", "a1"),
@@ -90,8 +117,7 @@ describe("compaction.browser", () => {
     const preparation = prepareCompaction({
       reason: "threshold",
       entries,
-      previousSummary: "old-summary",
-      keepTail: 1,
+      keepRecentTokens: 1,
       splitTurn: true
     });
     const draft = await compact(preparation, async (input) => {
@@ -115,8 +141,7 @@ describe("compaction.browser", () => {
     const preparation = prepareCompaction({
       reason: "threshold",
       entries,
-      previousSummary: "",
-      keepTail: 1,
+      keepRecentTokens: 1,
       splitTurn: false
     });
     const draft = await compact(preparation, async () => "summary");
@@ -125,5 +150,32 @@ describe("compaction.browser", () => {
     expect(draft.summary).toContain("/tmp/a.txt");
     expect(draft.summary).toContain("<modified-files>");
     expect(draft.summary).toContain("mem://note.md");
+  });
+
+  it("空 compaction 直接 no-op，不会触发摘要请求", async () => {
+    const entries: SessionEntry[] = [
+      compactionEntry("c1", "existing-summary", "u2", null),
+      message("u1", "user", "old", null),
+      message("a1", "assistant", "old-answer", "u1"),
+      message("u2", "user", "recent", "a1"),
+      message("a2", "assistant", "recent-answer", "u2")
+    ];
+    const preparation = prepareCompaction({
+      reason: "threshold",
+      entries,
+      keepRecentTokens: 9999,
+      splitTurn: true
+    });
+
+    let called = false;
+    const draft = await compact(preparation, async () => {
+      called = true;
+      return "should-not-run";
+    });
+
+    expect(preparation.isNoOp).toBe(true);
+    expect(called).toBe(false);
+    expect(draft.summary).toBe("existing-summary");
+    expect(draft.droppedEntries).toHaveLength(0);
   });
 });

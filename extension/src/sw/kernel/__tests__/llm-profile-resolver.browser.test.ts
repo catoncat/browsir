@@ -3,6 +3,7 @@ import "./test-setup";
 import { describe, expect, it } from "vitest";
 import { resolveLlmRoute } from "../llm-profile-resolver";
 import type { BridgeConfig } from "../runtime-infra.browser";
+import { DEFAULT_COMPACTION_SETTINGS } from "../../../shared/compaction";
 
 type TestBridgeConfig = BridgeConfig & {
   llmProfiles?: unknown;
@@ -13,6 +14,7 @@ function baseConfig(): TestBridgeConfig {
     bridgeUrl: "ws://127.0.0.1:8787/ws",
     bridgeToken: "dev-token",
     browserRuntimeStrategy: "host-first",
+    compaction: DEFAULT_COMPACTION_SETTINGS,
     llmDefaultProfile: "default",
     maxSteps: 100,
     autoTitleInterval: 10,
