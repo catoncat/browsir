@@ -6351,6 +6351,174 @@ describe("runtime-router.browser", () => {
     );
   });
 
+  it("brain.run.start 会解析自定义 system prompt 中的 @/mem 路径", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    await invokeVirtualFrame({
+      sessionId: "ctxref-seed",
+      tool: "write",
+      args: {
+        path: "mem://skills/system-prompt/README.md",
+        content: "System prompt context demo",
+        mode: "overwrite",
+        runtime: "sandbox",
+      },
+    });
+
+    const capturedBodies: Array<Record<string, unknown>> = [];
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (_input, init) => {
+        const bodyText = String(init?.body || "");
+        const body = (JSON.parse(bodyText || "{}") || {}) as Record<
+          string,
+          unknown
+        >;
+        capturedBodies.push(body);
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "system-prompt-ctxref-ok",
+                },
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
+        llmSystemPromptCustom:
+          "请先阅读 @/mem/skills/system-prompt/README.md，并严格遵守其中约束。",
+      },
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "检查项目并修复一个 bug",
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    expect(fetchSpy).toHaveBeenCalled();
+    const runBody = capturedBodies.find((item) => item.stream === true) || {};
+    const runMessages = Array.isArray(runBody.messages)
+      ? (runBody.messages as Array<Record<string, unknown>>)
+      : [];
+    const systemText = runMessages
+      .filter((item) => String(item.role || "") === "system")
+      .map((item) => String(item.content || ""))
+      .join("\n");
+
+    expect(systemText).toContain("<context_index>");
+    expect(systemText).toContain("<system_prompt>");
+    expect(systemText).toContain("System prompt context demo");
+    expect(systemText).toContain("[ref:ctx_");
+    expect(systemText).toContain('path="/mem/skills/system-prompt/README.md"');
+    expect(systemText).not.toContain(
+      "You are an expert coding assistant operating inside Browser Brain Loop",
+    );
+  });
+
+  it("brain.run.start 在自定义 system prompt 缺少 hostCwd 时应显式失败", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const capturedBodies: Array<Record<string, unknown>> = [];
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (_input, init) => {
+        const bodyText = String(init?.body || "");
+        const body = (JSON.parse(bodyText || "{}") || {}) as Record<
+          string,
+          unknown
+        >;
+        capturedBodies.push(body);
+        if (body.stream === true) {
+          throw new Error("streaming llm request should not be called");
+        }
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "title-ok",
+                },
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
+        llmSystemPromptCustom: "请优先遵守 @./RULES.md",
+      },
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "hi",
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(capturedBodies.some((item) => item.stream === true)).toBe(false);
+
+    const conversation = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId,
+    });
+    expect(conversation.ok).toBe(true);
+    const messages = Array.isArray(
+      (
+        (conversation.data as Record<string, unknown>)
+          ?.conversationView as Record<string, unknown>
+      )?.messages,
+    )
+      ? ((
+          (conversation.data as Record<string, unknown>)
+            .conversationView as Record<string, unknown>
+        ).messages as unknown[] as Array<Record<string, unknown>>)
+      : [];
+    const assistantText = messages
+      .filter((item) => String(item.role || "") === "assistant")
+      .map((item) => String(item.content || ""))
+      .join("\n");
+    expect(assistantText).toContain("执行失败");
+    expect(assistantText).toContain("hostCwd");
+  });
+
   it("brain.run.start 支持 /skill:<id> 显式展开并注入 skill block + args", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -6570,6 +6738,121 @@ describe("runtime-router.browser", () => {
       .map((item) => String(item.content || ""))
       .pop();
     expect(String(lastUserText || "")).toBe(userPrompt);
+  });
+
+  it("brain.run.start 支持通过 @/mem 路径附带上下文引用，并保留原始用户消息", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    await invokeVirtualFrame({
+      sessionId: "ctxref-seed",
+      tool: "write",
+      args: {
+        path: "mem://skills/context-ref/README.md",
+        content: "Brain Loop context ref demo",
+        mode: "overwrite",
+        runtime: "sandbox",
+      },
+    });
+
+    const capturedBodies: Array<Record<string, unknown>> = [];
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (_input, init) => {
+        const bodyText = String(init?.body || "");
+        const body = (JSON.parse(bodyText || "{}") || {}) as Record<
+          string,
+          unknown
+        >;
+        capturedBodies.push(body);
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "ctxref-ok",
+                },
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        ...buildWorkerLlmConfig({ model: "gpt-test" }),
+      },
+    });
+    expect(saved.ok).toBe(true);
+
+    const userPrompt = "请总结 @/mem/skills/context-ref/README.md 的内容";
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: userPrompt,
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    expect(fetchSpy).toHaveBeenCalled();
+    const runBody = capturedBodies.find((item) => item.stream === true) || {};
+    const runMessages = Array.isArray(runBody.messages)
+      ? (runBody.messages as Array<Record<string, unknown>>)
+      : [];
+    const userText = runMessages
+      .filter((item) => String(item.role || "") === "user")
+      .map((item) => String(item.content || ""))
+      .join("\n");
+    expect(userText).toContain("<context_index>");
+    expect(userText).toContain('<context_ref id="');
+    expect(userText).toContain("Brain Loop context ref demo");
+    expect(userText).toContain("[ref:ctx_");
+    expect(userText).not.toContain("@/mem/skills/context-ref/README.md");
+
+    const conversation = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId,
+    });
+    expect(conversation.ok).toBe(true);
+    const messages = Array.isArray(
+      (
+        (conversation.data as Record<string, unknown>)
+          ?.conversationView as Record<string, unknown>
+      )?.messages,
+    )
+      ? ((
+          (conversation.data as Record<string, unknown>)
+            .conversationView as Record<string, unknown>
+        ).messages as unknown[] as Array<Record<string, unknown>>)
+      : [];
+    const lastUserText = messages
+      .filter((item) => String(item.role || "") === "user")
+      .map((item) => String(item.content || ""))
+      .pop();
+    expect(String(lastUserText || "")).toBe(userPrompt);
+  });
+
+  it("brain.run.start 在缺少 hostCwd 时 @./ 相对路径应显式失败", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "请查看 @./README.md",
+      autoRun: false,
+    });
+    expect(started.ok).toBe(false);
+    expect(String(started.error || "")).toContain("hostCwd");
   });
 
   it("supports brain.debug.plugins view", async () => {
@@ -7407,7 +7690,7 @@ describe("runtime-router.browser", () => {
               id: "plugin.route.register.reload.fs-read",
               mode: "script",
               priority: 90,
-              canHandle: (input) => {
+              canHandle: (input: Record<string, unknown>) => {
                 const args =
                   input.args && typeof input.args === "object"
                     ? (input.args as Record<string, unknown>)
@@ -7418,7 +7701,7 @@ describe("runtime-router.browser", () => {
                     : {};
                 return String(frame.tool || "") === "read";
               },
-              invoke: async (input) => {
+              invoke: async (input: Record<string, unknown>) => {
                 const args =
                   input.args && typeof input.args === "object"
                     ? (input.args as Record<string, unknown>)
@@ -7589,7 +7872,7 @@ describe("runtime-router.browser", () => {
               matcher: new Set(["read"]),
               origin: new URL("https://assets.example.com/root/"),
               bytes: new Uint8Array([1, 2, 3]),
-              canHandle(input) {
+              canHandle(input: Record<string, unknown>) {
                 const args =
                   input.args && typeof input.args === "object"
                     ? (input.args as Record<string, unknown>)
@@ -7600,7 +7883,7 @@ describe("runtime-router.browser", () => {
                     : {};
                 return this.matcher.has(String(frame.tool || ""));
               },
-              invoke(input) {
+              invoke(input: Record<string, unknown>) {
                 const args =
                   input.args && typeof input.args === "object"
                     ? (input.args as Record<string, unknown>)
@@ -7642,7 +7925,7 @@ describe("runtime-router.browser", () => {
             resolveRequestUrl() {
               return this.__bblStaticRequestUrl;
             },
-            async send(input) {
+            async send(input: Record<string, unknown>) {
               return new Response(
                 JSON.stringify({
                   requestUrl: String(input.requestUrl || ""),
@@ -7746,6 +8029,63 @@ describe("runtime-router.browser", () => {
       base: "https://proxy.example.com/v1/",
       bytes: [7, 8, 9],
     });
+  });
+
+  it("brain.plugin.register should reject function plugins that capture outer variables", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const pluginId = "plugin.route.free-variable.reject";
+    const capturedSecret = "should-not-leak";
+    const registered = await invokeRuntime({
+      type: "brain.plugin.register",
+      plugin: {
+        manifest: {
+          id: pluginId,
+          name: "plugin-route-free-variable-reject",
+          version: "1.0.0",
+          permissions: {
+            capabilities: ["fs.read"],
+          },
+        },
+        providers: {
+          capabilities: {
+            "fs.read": {
+              id: "plugin.route.free-variable.reject.fs-read",
+              mode: "script",
+              invoke() {
+                return {
+                  leaked: capturedSecret,
+                };
+              },
+            },
+          },
+        },
+      },
+    });
+    expect(registered.ok).toBe(false);
+    expect(String(registered.error || "")).toContain("capturedSecret");
+
+    const listed = await invokeRuntime({ type: "brain.plugin.list" });
+    expect(listed.ok).toBe(true);
+    const listedPlugins = Array.isArray(
+      (listed.data as Record<string, unknown>)?.plugins,
+    )
+      ? ((listed.data as Record<string, unknown>).plugins as Array<
+          Record<string, unknown>
+        >)
+      : [];
+    expect(
+      listedPlugins.some((item) => String(item.id || "") === pluginId),
+    ).toBe(false);
+
+    const rawRegistry = await kvGet("brain.plugin.registry:v1");
+    const registry = Array.isArray(rawRegistry)
+      ? (rawRegistry as Array<Record<string, unknown>>)
+      : [];
+    expect(
+      registry.some((item) => String(item.pluginId || "") === pluginId),
+    ).toBe(false);
   });
 
   it("supports brain.plugin.register_extension with PI-style default export module", async () => {
