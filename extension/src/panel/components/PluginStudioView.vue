@@ -120,11 +120,12 @@ function pushLog(target: RuntimeLogItem[], item: Omit<RuntimeLogItem, "id" | "ts
 }
 
 function defaultPluginJson(): string {
+  const suffix = Math.random().toString(36).slice(2, 8);
   return JSON.stringify(
     {
       manifest: {
-        id: "plugin.example.hello",
-        name: "hello-plugin",
+        id: `plugin.user.my-plugin-${suffix}`,
+        name: "my-plugin",
         version: "1.0.0",
         permissions: {
           hooks: ["runtime.route.after"],
@@ -436,7 +437,6 @@ async function loadExampleProjects(): Promise<StudioProject[]> {
     id: "example.hello",
     name: "示例：Hello Plugin",
     category: "example",
-    pluginId: "plugin.example.hello",
     updatedAt: nowIso(),
     files: {
       pluginJson: defaultPluginJson(),
@@ -846,11 +846,12 @@ function handleSaveProject(): void {
 }
 
 async function handleUnregisterPlugin(): Promise<void> {
-  const pluginId = String(selectedPluginId.value || "").trim();
-  if (!pluginId) {
+  const plugin = selectedInstalledPlugin.value;
+  if (!plugin) {
     errorMessage.value = "请先选择一个已安装插件";
     return;
   }
+  const pluginId = plugin.id;
   if (pluginId.startsWith(BUILTIN_PLUGIN_ID_PREFIX)) {
     errorMessage.value = "内置插件不允许卸载";
     return;
@@ -1399,7 +1400,7 @@ onUnmounted(() => {
             {{ selectedInstalledPluginEnabled ? '禁用' : '启用' }}
           </button>
           <button
-            v-if="selectedPluginId && !selectedPluginId.startsWith('runtime.builtin.plugin.')"
+            v-if="selectedInstalledPlugin && !selectedInstalledPlugin.id.startsWith('runtime.builtin.plugin.')"
             class="studio-btn danger"
             :disabled="busy"
             @click="handleUnregisterPlugin"
