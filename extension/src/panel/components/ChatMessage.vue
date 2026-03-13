@@ -262,6 +262,9 @@ const toolCompactLine = computed(() => {
   return clipInlineText(tail ? `${head} · ${tail}` : head);
 });
 
+const toolTitleText = computed(() => normalizeToolHeadline(toolRender.value.title));
+const toolSubtitleText = computed(() => normalizeToolSubtitle(toolRender.value.subtitle));
+
 const toolToggleAriaLabel = computed(() =>
   showThinking.value ? "收起运行详情" : "展开运行详情"
 );
@@ -865,42 +868,45 @@ watch(
         class="rounded-xl border shadow-sm transition-all duration-300 overflow-hidden"
         :class="[toolShellClass, toolToneClass]"
       >
-        <div class="px-3 py-2.5 flex items-center gap-2.5">
+        <div class="px-2.5 py-2 flex items-center gap-2">
           <div
-            class="h-6 w-6 shrink-0 rounded-lg flex items-center justify-center shadow-inner"
+            class="h-5 w-5 shrink-0 rounded-md flex items-center justify-center shadow-inner"
             :class="toolIconContainerClass"
           >
             <component
               :is="toolIcon"
-              :size="14"
+              :size="12"
               class="transition-transform duration-300 group-hover/tool:scale-110"
               aria-hidden="true"
             />
           </div>
           <div class="min-w-0 flex-1">
             <div class="flex items-center justify-between gap-2">
-              <span class="text-[12px] font-bold text-ui-text truncate">{{ toolTitle }}</span>
-              <div class="flex items-center gap-1.5">
+              <div class="flex items-center gap-1.5 min-w-0 flex-1">
+                <span class="text-[11px] font-bold text-ui-text truncate shrink-0">{{ toolTitleText }}</span>
+                <span v-if="toolSubtitleText" class="text-[10px] text-ui-text-muted/70 truncate border-l border-ui-border/30 pl-1.5">{{ toolSubtitleText }}</span>
+              </div>
+              <div class="flex items-center gap-1 shrink-0">
                 <button
                   v-if="toolOutputText"
                   type="button"
                   @click="showRawToolOutput = !showRawToolOutput"
-                  class="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-ui-bg/50 border border-ui-border/50 text-[9px] font-bold text-ui-text-muted hover:bg-ui-accent/5 hover:text-ui-accent hover:border-ui-accent/20 transition-all uppercase tracking-tight focus:outline-none"
+                  class="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-ui-bg/40 border border-ui-border/30 text-[9px] font-bold text-ui-text-muted hover:bg-ui-accent/10 hover:text-ui-accent hover:border-ui-accent/20 transition-all focus:outline-none"
                   :aria-expanded="showRawToolOutput"
-                  :title="showRawToolOutput ? '切换回格式化视图' : '查看原始 JSON 输出'"
+                  :title="showRawToolOutput ? '切换回格式化视图' : '查看原始 JSON'"
                 >
-                  <div class="w-1 h-1 rounded-full animate-pulse" :class="toolStatusDotClass"></div>
-                  {{ showRawToolOutput ? 'FORMATTED' : 'RAW JSON' }}
+                  <div class="w-1 h-1 rounded-full shrink-0" :class="toolStatusDotClass"></div>
+                  <span class="hidden xs:inline">{{ showRawToolOutput ? 'FORMAT' : 'RAW' }}</span>
                 </button>
                 <button
                   type="button"
-                  class="shrink-0 rounded-md p-1 text-ui-text-muted hover:bg-ui-bg/60 hover:text-ui-text focus:outline-none"
+                  class="rounded-md p-1 text-ui-text-muted hover:bg-ui-bg/60 hover:text-ui-text focus:outline-none"
                   :aria-label="toolToggleAriaLabel"
                   :aria-expanded="showThinking"
                   @click="toggleThinking"
                 >
-                  <ChevronUp v-if="showThinking" :size="14" aria-hidden="true" />
-                  <ChevronDown v-else :size="14" aria-hidden="true" />
+                  <ChevronUp v-if="showThinking" :size="12" aria-hidden="true" />
+                  <ChevronDown v-else :size="12" aria-hidden="true" />
                 </button>
               </div>
             </div>
@@ -910,18 +916,12 @@ watch(
         <div
           v-if="showThinking"
           id="thinking-content"
-          class="animate-in slide-in-from-top-1 duration-200 border-t border-ui-border/20 shadow-inner"
+          class="animate-in slide-in-from-top-1 duration-200 border-t border-ui-border/10"
         >
-          <div v-if="!showRawToolOutput" class="p-3 space-y-3 bg-ui-bg/10">
-            <div
-              v-if="toolSubtitle"
-              class="text-[11px] font-medium leading-relaxed text-ui-text-muted/80 bg-ui-bg/40 px-2 py-1.5 rounded-md border border-ui-border/10"
-            >
-              {{ toolSubtitle }}
-            </div>
+          <div v-if="!showRawToolOutput" class="p-2 space-y-2 bg-ui-bg/5">
             <div
               v-if="toolDetail"
-              class="tool-output-viewport max-h-[400px] overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-ui-text/90 rounded-lg bg-ui-bg/40 p-3 border border-ui-border/20 custom-scrollbar"
+              class="tool-output-viewport max-h-[320px] overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-snug text-ui-text/90 rounded-lg bg-ui-bg/30 p-2.5 border border-ui-border/15 custom-scrollbar"
               v-html="decorateInlineTokens(toolDetail)"
             />
           </div>
@@ -929,12 +929,12 @@ watch(
           <!-- RAW JSON VIEW -->
           <div 
             v-else
-            class="p-3 bg-ui-bg-darker/30"
+            class="p-2 bg-ui-bg-darker/20"
           >
             <div
-              class="whitespace-pre-wrap break-all font-mono text-[10px] leading-relaxed text-ui-text-muted rounded-lg bg-ui-bg-darker p-3 border border-ui-border/50 shadow-inner max-h-[400px] overflow-y-auto custom-scrollbar"
+              class="whitespace-pre-wrap break-all font-mono text-[9px] leading-snug text-ui-text-muted rounded-lg bg-ui-bg-darker p-2.5 border border-ui-border/40 shadow-inner max-h-[320px] overflow-y-auto custom-scrollbar"
             >
-              <code class="text-ui-text/80">{{ toolOutputText }}</code>
+              <code class="text-ui-text/70">{{ toolOutputText }}</code>
             </div>
           </div>
         </div>
