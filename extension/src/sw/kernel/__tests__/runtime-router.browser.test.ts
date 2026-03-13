@@ -8088,6 +8088,143 @@ describe("runtime-router.browser", () => {
     ).toBe(false);
   });
 
+  it("brain.plugin.register should persist class instance providers with prototype and hidden properties across reload", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    class ClassFsReadProvider {
+      id = "plugin.route.class-instance.fs-read";
+      mode = "script" as const;
+
+      constructor() {
+        Object.defineProperty(this, "hiddenLabel", {
+          value: "stealth-class-provider",
+          enumerable: false,
+          configurable: true,
+          writable: true,
+        });
+        Object.defineProperty(this, "tag", {
+          enumerable: false,
+          configurable: true,
+          get() {
+            return `${this.hiddenLabel}:tag`;
+          },
+        });
+        (
+          this as unknown as Record<symbol, unknown>
+        )[Symbol.for("plugin.secret")] = "symbolic-secret";
+      }
+
+      canHandle(input: Record<string, unknown>) {
+        const args =
+          input.args && typeof input.args === "object"
+            ? (input.args as Record<string, unknown>)
+            : {};
+        const frame =
+          args.frame && typeof args.frame === "object"
+            ? (args.frame as Record<string, unknown>)
+            : {};
+        return String(frame.tool || "") === "read";
+      }
+
+      describe() {
+        return `${this.hiddenLabel}:prototype-method`;
+      }
+
+      invoke(input: Record<string, unknown>) {
+        const args =
+          input.args && typeof input.args === "object"
+            ? (input.args as Record<string, unknown>)
+            : {};
+        const frame =
+          args.frame && typeof args.frame === "object"
+            ? (args.frame as Record<string, unknown>)
+            : {};
+        const frameArgs =
+          frame.args && typeof frame.args === "object"
+            ? (frame.args as Record<string, unknown>)
+            : {};
+        const symbolValue = (
+          this as unknown as Record<symbol, unknown>
+        )[Symbol.for("plugin.secret")];
+        return {
+          source: "plugin-class-instance",
+          providerId: this.id,
+          hiddenLabel: this.hiddenLabel,
+          tag: this.tag,
+          description: this.describe(),
+          symbolValue: String(symbolValue || ""),
+          path: String(frameArgs.path || ""),
+        };
+      }
+
+      declare hiddenLabel: string;
+      declare tag: string;
+    }
+
+    const pluginId = "plugin.route.class-instance";
+    const registered = await invokeRuntime({
+      type: "brain.plugin.register",
+      plugin: {
+        manifest: {
+          id: pluginId,
+          name: "plugin-route-class-instance",
+          version: "1.0.0",
+          permissions: {
+            capabilities: ["fs.read"],
+          },
+        },
+        providers: {
+          capabilities: {
+            "fs.read": new ClassFsReadProvider(),
+          },
+        },
+      },
+    });
+    expect(registered.ok).toBe(true);
+
+    runtimeListeners = [];
+    resetRuntimeOnMessageMock();
+
+    const reloadedOrchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(reloadedOrchestrator);
+
+    const { sessionId } = await reloadedOrchestrator.createSession({
+      title: "plugin-class-instance-after",
+    });
+    const routedRead = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.read",
+      action: "invoke",
+      args: {
+        frame: {
+          tool: "read",
+          args: {
+            path: "mem://plugins/class-instance.txt",
+            runtime: "sandbox",
+          },
+        },
+      },
+      verifyPolicy: "off",
+    });
+    expect(routedRead.ok).toBe(true);
+    expect(
+      ((routedRead.data as Record<string, unknown>)?.data || {}) as Record<
+        string,
+        unknown
+      >,
+    ).toEqual({
+      source: "plugin-class-instance",
+      providerId: "plugin.route.class-instance.fs-read",
+      hiddenLabel: "stealth-class-provider",
+      tag: "stealth-class-provider:tag",
+      description: "stealth-class-provider:prototype-method",
+      symbolValue: "symbolic-secret",
+      path: "mem://plugins/class-instance.txt",
+    });
+  });
+
   it("supports brain.plugin.register_extension with PI-style default export module", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);

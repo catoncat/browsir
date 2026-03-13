@@ -1253,12 +1253,13 @@ async function loadExtensionFactoryFromVirtualModule(input: {
   };
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
+function isSerializableObjectRecord(
+  value: unknown,
+): value is Record<PropertyKey, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
   }
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
+  return Object.prototype.toString.call(value) === "[object Object]";
 }
 
 interface PersistableAstNode {
@@ -1356,6 +1357,29 @@ const PERSISTABLE_FUNCTION_GLOBAL_IDENTIFIERS = new Set<string>([
   "AggregateError",
   "Intl",
 ]);
+
+const WELL_KNOWN_SYMBOL_SOURCES = [
+  ["Symbol.asyncIterator", Symbol.asyncIterator],
+  ["Symbol.hasInstance", Symbol.hasInstance],
+  ["Symbol.isConcatSpreadable", Symbol.isConcatSpreadable],
+  ["Symbol.iterator", Symbol.iterator],
+  ["Symbol.match", Symbol.match],
+  ["Symbol.matchAll", Symbol.matchAll],
+  ["Symbol.replace", Symbol.replace],
+  ["Symbol.search", Symbol.search],
+  ["Symbol.species", Symbol.species],
+  ["Symbol.split", Symbol.split],
+  ["Symbol.toPrimitive", Symbol.toPrimitive],
+  ["Symbol.toStringTag", Symbol.toStringTag],
+  ["Symbol.unscopables", Symbol.unscopables],
+] as const;
+
+const WELL_KNOWN_SYMBOL_SOURCE_BY_VALUE = new Map<symbol, string>(
+  WELL_KNOWN_SYMBOL_SOURCES.map(([source, symbolValue]) => [
+    symbolValue,
+    source,
+  ]),
+);
 
 function isPersistableAstNode(value: unknown): value is PersistableAstNode {
   return (
@@ -2035,72 +2059,133 @@ function serializeAccessorFunctionToModuleSource(
   return normalizeFunctionModuleSource(value, path);
 }
 
-function serializePlainObjectToModuleSource(
-  value: Record<string, unknown>,
+function describeSerializablePropertyKey(key: PropertyKey): string {
+  if (typeof key === "symbol") {
+    const wellKnown = WELL_KNOWN_SYMBOL_SOURCE_BY_VALUE.get(key);
+    if (wellKnown) return wellKnown;
+    const globalKey = Symbol.keyFor(key);
+    if (globalKey) return `Symbol.for(${JSON.stringify(globalKey)})`;
+    return `Symbol(${JSON.stringify(key.description || "")})`;
+  }
+  return JSON.stringify(String(key));
+}
+
+function serializeSymbolToModuleSource(value: symbol, path: string): string {
+  const wellKnown = WELL_KNOWN_SYMBOL_SOURCE_BY_VALUE.get(value);
+  if (wellKnown) return wellKnown;
+  const globalKey = Symbol.keyFor(value);
+  if (globalKey) return `Symbol.for(${JSON.stringify(globalKey)})`;
+  throw new Error(
+    `${path} 含不支持的 Symbol 值: ${describeSerializablePropertyKey(value)}。仅支持 Symbol.for() 或 well-known symbol`,
+  );
+}
+
+function serializePropertyKeyToModuleSource(
+  key: PropertyKey,
+  path: string,
+): string {
+  if (typeof key === "symbol") {
+    return serializeSymbolToModuleSource(key, path);
+  }
+  return JSON.stringify(String(key));
+}
+
+function serializePropertyDescriptorToModuleSource(
+  descriptor: PropertyDescriptor,
   path: string,
   seen: WeakSet<object>,
 ): string {
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const keys = Object.keys(descriptors).filter(
-    (key) => descriptors[key]?.enumerable === true,
-  );
-  const hasAccessor = keys.some((key) => {
-    const descriptor = descriptors[key];
-    return !!descriptor && (descriptor.get || descriptor.set);
-  });
-  if (!hasAccessor) {
-    return `{${keys
-      .map((key) => {
-        const descriptor = descriptors[key];
-        return `${JSON.stringify(key)}: ${serializeValueToModuleSource(
-          descriptor?.value,
-          `${path}.${key}`,
-          seen,
-        )}`;
-      })
-      .join(", ")}}`;
+  const parts = [
+    `enumerable: ${descriptor.enumerable === true ? "true" : "false"}`,
+    `configurable: ${descriptor.configurable === true ? "true" : "false"}`,
+  ];
+  if ("value" in descriptor || descriptor.writable !== undefined) {
+    parts.push(`writable: ${descriptor.writable === true ? "true" : "false"}`);
+    parts.push(
+      `value: ${serializeValueToModuleSource(descriptor.value, path, seen)}`,
+    );
+    return `{ ${parts.join(", ")} }`;
   }
+  if (typeof descriptor.get === "function") {
+    parts.push(
+      `get: ${serializeAccessorFunctionToModuleSource(
+        descriptor.get,
+        "get",
+        `${path}.get`,
+      )}`,
+    );
+  }
+  if (typeof descriptor.set === "function") {
+    parts.push(
+      `set: ${serializeAccessorFunctionToModuleSource(
+        descriptor.set,
+        "set",
+        `${path}.set`,
+      )}`,
+    );
+  }
+  return `{ ${parts.join(", ")} }`;
+}
 
-  const lines = ["(() => {", "  const obj = {};"];
-  for (const key of keys) {
-    const descriptor = descriptors[key];
-    if (!descriptor) continue;
-    if (descriptor.get || descriptor.set) {
-      const descriptorParts = [
-        `enumerable: ${descriptor.enumerable === false ? "false" : "true"}`,
-        `configurable: ${descriptor.configurable === false ? "false" : "true"}`,
-      ];
-      if (typeof descriptor.get === "function") {
-        descriptorParts.push(
-          `get: ${serializeAccessorFunctionToModuleSource(
-            descriptor.get,
-            "get",
-            `${path}.${key}`,
-          )}`,
-        );
-      }
-      if (typeof descriptor.set === "function") {
-        descriptorParts.push(
-          `set: ${serializeAccessorFunctionToModuleSource(
-            descriptor.set,
-            "set",
-            `${path}.${key}`,
-          )}`,
-        );
-      }
-      lines.push(
-        `  Object.defineProperty(obj, ${JSON.stringify(
-          key,
-        )}, { ${descriptorParts.join(", ")} });`,
-      );
+function serializeObjectPrototypeToModuleSource(
+  value: unknown,
+  path: string,
+  seen: WeakSet<object>,
+): string {
+  if (value === null) return "null";
+  if (value === Object.prototype) return "Object.prototype";
+  if (value === Function.prototype) return "Function.prototype";
+  if (value === Array.prototype) return "Array.prototype";
+  if (value === Map.prototype) return "Map.prototype";
+  if (value === Set.prototype) return "Set.prototype";
+  if (value === Date.prototype) return "Date.prototype";
+  if (value === RegExp.prototype) return "RegExp.prototype";
+  if (value === URL.prototype) return "URL.prototype";
+  if (!isSerializableObjectRecord(value)) {
+    throw new Error(
+      `${path} 含不支持的原型类型: ${describePluginModuleValue(value)}`,
+    );
+  }
+  return serializeObjectRecordToModuleSource(value, path, seen, {
+    omitConstructorProperty: true,
+  });
+}
+
+function serializeObjectRecordToModuleSource(
+  value: Record<PropertyKey, unknown>,
+  path: string,
+  seen: WeakSet<object>,
+  options: {
+    omitConstructorProperty?: boolean;
+  } = {},
+): string {
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const ownKeys = Reflect.ownKeys(descriptors);
+  const prototypeSource = serializeObjectPrototypeToModuleSource(
+    Object.getPrototypeOf(value),
+    `${path}.__proto__`,
+    seen,
+  );
+  const lines = [
+    "(() => {",
+    `  const obj = Object.create(${prototypeSource});`,
+  ];
+  for (const key of ownKeys) {
+    if (options.omitConstructorProperty === true && key === "constructor") {
       continue;
     }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor) continue;
+    const keyLabel = describeSerializablePropertyKey(key);
     lines.push(
-      `  obj[${JSON.stringify(key)}] = ${serializeValueToModuleSource(
-        descriptor.value,
-        `${path}.${key}`,
+      `  Object.defineProperty(obj, ${serializePropertyKeyToModuleSource(
+        key,
+        `${path}.${keyLabel}`,
+      )}, ${serializePropertyDescriptorToModuleSource(
+        descriptor,
+        `${path}.${keyLabel}`,
         seen,
-      )};`,
+      )});`,
     );
   }
   lines.push("  return obj;", "})()");
@@ -2123,6 +2208,9 @@ function serializeValueToModuleSource(
   }
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "bigint") return `${value}n`;
+  if (typeof value === "symbol") {
+    return serializeSymbolToModuleSource(value, path);
+  }
   if (typeof value === "function") {
     return normalizeFunctionModuleSource(
       value as (...args: any[]) => unknown,
@@ -2204,7 +2292,7 @@ function serializeValueToModuleSource(
   if (value instanceof RegExp) {
     return value.toString();
   }
-  if (!isPlainObject(value)) {
+  if (!isSerializableObjectRecord(value)) {
     throw new Error(
       `${path} 含不支持的值类型: ${describePluginModuleValue(value)}`,
     );
@@ -2214,7 +2302,7 @@ function serializeValueToModuleSource(
   }
   seen.add(value);
   try {
-    return serializePlainObjectToModuleSource(value, path, seen);
+    return serializeObjectRecordToModuleSource(value, path, seen);
   } finally {
     seen.delete(value);
   }
