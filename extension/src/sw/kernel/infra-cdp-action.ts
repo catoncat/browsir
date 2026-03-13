@@ -676,24 +676,14 @@ export function createCdpActionExecutor(deps: CdpActionDeps): CdpActionExecutor 
         });
 
         if (kind === "type" || kind === "fill") {
-          // Native Input Injection via CDP
-          // This mimics hardware-level typing which React/Lexical/Draft.js cannot ignore
-          await sendCdpCommand(tabId, "Input.insertText", { text: value });
-
-          // Dispatch a generic 'input' event via JS as a final nudge for state sync
-          await sendCdpCommand(tabId, "Runtime.callFunctionOn", {
-            objectId: backendResult.objectId, // We'll need to return this from executeActionByBackendNode
-            functionDeclaration:
-              "function() { this.dispatchEvent(new Event('input', { bubbles: true })); }",
-            awaitPromise: true,
-          }).catch(() => {});
-
           return {
-            ok: true,
-            typed: value.length,
-            via: "cdp-native-input",
-            url: backendResult.url,
-            title: backendResult.title,
+            tabId,
+            kind,
+            uid: ref || undefined,
+            ref: ref || undefined,
+            selector: selector || undefined,
+            backendNodeId,
+            result: backendResult,
           };
         }
         return {
