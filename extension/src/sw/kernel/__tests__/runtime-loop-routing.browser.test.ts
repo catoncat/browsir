@@ -1,7 +1,7 @@
 import "./test-setup";
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { getDB } from "../idb-storage";
+import { resetLifoAdapterForTest } from "../browser-unix-runtime/lifo-adapter";
 import { BrainOrchestrator } from "../orchestrator.browser";
 import { createRuntimeLoopController } from "../runtime-loop.browser";
 import type { RuntimeInfraHandler, RuntimeInfraResult } from "../runtime-infra.browser";
@@ -57,14 +57,9 @@ function createMockInfra() {
   return { infra, calls };
 }
 
-async function clearKvStore() {
-  const db = await getDB();
-  await db.clear("kv");
-}
-
 describe("runtime-loop routing (bridge vs browser-vfs)", () => {
   beforeEach(async () => {
-    await clearKvStore();
+    await resetLifoAdapterForTest();
   });
 
   it("routes mem:// file operations to browser vfs by default", async () => {

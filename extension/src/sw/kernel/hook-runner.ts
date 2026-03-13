@@ -5,9 +5,9 @@ export type HookAction<TPayload extends HookPayload> =
   | { action: "patch"; patch: Partial<TPayload> }
   | { action: "block"; reason: string };
 
-export type HookHandler<TPayload extends HookPayload> =
-  | ((payload: TPayload) => HookAction<TPayload> | void)
-  | ((payload: TPayload) => Promise<HookAction<TPayload> | void>);
+export type HookHandler<TPayload extends HookPayload> = (
+  payload: TPayload,
+) => HookAction<TPayload> | void | Promise<HookAction<TPayload> | void>;
 
 export interface HookHandlerOptions {
   id?: string;

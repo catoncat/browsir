@@ -2,10 +2,6 @@ import "./test-setup";
 
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { createRuntimeInfraHandler } from "../runtime-infra.browser";
-import {
-  CURSOR_HELP_WEB_API_KEY,
-  CURSOR_HELP_WEB_BASE_URL,
-} from "../../../shared/llm-provider-config";
 
 class FakeWebSocket {
   static readonly CONNECTING = 0;
@@ -244,6 +240,7 @@ describe("runtime infra handler", () => {
     const initial = (first.data ?? {}) as Record<string, unknown>;
     expect(String(initial.bridgeUrl || "")).toContain("ws://");
     expect(String(initial.browserRuntimeStrategy || "")).toBe("host-first");
+    expect(initial.devAutoReload).toBe(false);
 
     const saved = await infra.handleMessage({
       type: "config.save",
@@ -258,6 +255,7 @@ describe("runtime infra handler", () => {
         llmTimeoutMs: 175000,
         llmRetryMaxAttempts: 4,
         llmMaxRetryDelayMs: 45000,
+        devAutoReload: true,
       },
     });
     expect(saved?.ok).toBe(true);
@@ -281,6 +279,7 @@ describe("runtime infra handler", () => {
     expect(updated.llmTimeoutMs).toBe(175000);
     expect(updated.llmRetryMaxAttempts).toBe(4);
     expect(updated.llmMaxRetryDelayMs).toBe(45000);
+    expect(updated.devAutoReload).toBe(true);
 
     const invalidSaved = await infra.handleMessage({
       type: "config.save",
@@ -299,7 +298,7 @@ describe("runtime infra handler", () => {
     expect(afterInvalidData.browserRuntimeStrategy).toBe("browser-first");
   });
 
-  it("normalizes cursor_help_web profiles during config.save", async () => {
+  it("clears cursor_help_web base/key fields during config.save", async () => {
     const infra = createRuntimeInfraHandler();
 
     const saved = await infra.handleMessage({
@@ -330,8 +329,8 @@ describe("runtime infra handler", () => {
     const profile = Array.isArray(data.llmProfiles)
       ? (data.llmProfiles[0] as Record<string, unknown>)
       : {};
-    expect(String(profile.llmApiBase || "")).toBe(CURSOR_HELP_WEB_BASE_URL);
-    expect(String(profile.llmApiKey || "")).toBe(CURSOR_HELP_WEB_API_KEY);
+    expect(String(profile.llmApiBase || "")).toBe("");
+    expect(String(profile.llmApiKey || "")).toBe("");
   });
 
   it("supports lease acquire/heartbeat/release contract", async () => {

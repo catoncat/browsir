@@ -1,4 +1,10 @@
-import { nowIso, type SessionEntry, type SessionHeader, type SessionMeta } from "./types";
+import {
+  nowIso,
+  normalizeSessionWorkingContext,
+  type SessionEntry,
+  type SessionHeader,
+  type SessionMeta,
+} from "./types";
 import { getDB, kvGet, kvKeys, kvSet, kvRemove } from "./idb-storage";
 
 export const SESSION_INDEX_KEY = "session:index";
@@ -82,6 +88,34 @@ function normalizeSessionIndex(raw: unknown): SessionIndex {
   };
 }
 
+function normalizeSessionHeader(
+  raw: unknown,
+  fallbackHeader?: SessionHeader,
+): SessionHeader | null {
+  const headerRaw = isRecord(raw) ? raw : fallbackHeader;
+  if (!headerRaw || headerRaw.type !== "session") return null;
+
+  const headerSource = headerRaw as SessionHeader;
+  const header: SessionHeader = {
+    ...headerSource,
+    type: "session",
+    version: 1,
+    id: String(headerSource.id || "").trim(),
+    parentSessionId:
+      headerSource.parentSessionId == null
+        ? null
+        : String(headerSource.parentSessionId || "").trim() || null,
+    timestamp: normalizeIso(headerSource.timestamp, nowIso()),
+    workingContext: normalizeSessionWorkingContext(
+      (headerSource as unknown as Record<string, unknown>).workingContext,
+    ),
+    ...(typeof headerSource.title === "string" ? { title: headerSource.title } : {}),
+    ...(typeof headerSource.model === "string" ? { model: headerSource.model } : {}),
+    ...(isRecord(headerSource.metadata) ? { metadata: headerSource.metadata } : {}),
+  };
+  return header.id ? header : null;
+}
+
 function normalizeSessionMeta(raw: unknown, fallbackHeader?: SessionHeader): SessionMeta | null {
   if (!isRecord(raw)) {
     if (!fallbackHeader) return null;
@@ -95,10 +129,12 @@ function normalizeSessionMeta(raw: unknown, fallbackHeader?: SessionHeader): Ses
     };
   }
 
-  const headerRaw = isRecord(raw.header) ? raw.header : fallbackHeader;
-  if (!headerRaw || headerRaw.type !== "session") return null;
-
-  const header = headerRaw as SessionHeader;
+  const header = normalizeSessionHeader(
+    isRecord(raw.header) ? raw.header : undefined,
+    fallbackHeader,
+  );
+  if (!header) return null;
+  if (!header.id) return null;
   return {
     header,
     leafId: typeof raw.leafId === "string" ? raw.leafId : null,
@@ -170,7 +206,7 @@ export async function removeSessionIndexEntry(sessionId: string, at = nowIso()):
 
 export async function initSessionStorage(header: SessionHeader, options: InitSessionOptions = {}): Promise<SessionMeta> {
   const meta: SessionMeta = {
-    header,
+    header: normalizeSessionHeader(header, header) || header,
     leafId: options.leafId ?? null,
     entryCount: 0,
     chunkCount: 1,

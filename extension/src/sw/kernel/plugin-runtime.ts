@@ -265,37 +265,41 @@ export class PluginRuntime {
         const entries = normalizeHookEntries(raw as PluginHookEntries<keyof OrchestratorHookMap & string>);
         for (const [idx, item] of entries.entries()) {
           const entry = toHookEntry(item);
-          const unregister = this.host.onHook(
-            hook as keyof OrchestratorHookMap & string,
-            async (payload) => {
-              const hookName = String(hook || "").trim();
-              state.usageTotalCalls += 1;
-              state.usageLastUsedAt = new Date().toISOString();
-              if (hookName) {
-                state.usageHookCalls[hookName] = (state.usageHookCalls[hookName] || 0) + 1;
-              }
-              const timeoutResult = { __bblTimeout: true as const };
-              const timer = new Promise<typeof timeoutResult>((resolve) =>
-                setTimeout(() => resolve(timeoutResult), timeoutMs)
-              );
-              try {
-                const result = await Promise.race([Promise.resolve(entry.handler(payload)), timer]);
-                if (result && typeof result === "object" && (result as { __bblTimeout?: boolean }).__bblTimeout === true) {
-                  state.usageTotalTimeouts += 1;
-                  state.usageTotalErrors += 1;
-                  state.lastError = `plugin hook timeout: ${hookName || "unknown"}`;
-                  state.errorCount += 1;
-                  return { action: "continue" };
-                }
-                if (!result) return { action: "continue" };
-                return result;
-              } catch (error) {
+          const hookName = hook as keyof OrchestratorHookMap & string;
+          const hookHandler = (async (
+            payload: OrchestratorHookMap[keyof OrchestratorHookMap & string],
+          ) => {
+            const hookLabel = String(hook || "").trim();
+            state.usageTotalCalls += 1;
+            state.usageLastUsedAt = new Date().toISOString();
+            if (hookLabel) {
+              state.usageHookCalls[hookLabel] = (state.usageHookCalls[hookLabel] || 0) + 1;
+            }
+            const timeoutResult = { __bblTimeout: true as const };
+            const timer = new Promise<typeof timeoutResult>((resolve) =>
+              setTimeout(() => resolve(timeoutResult), timeoutMs)
+            );
+            try {
+              const result = await Promise.race([Promise.resolve(entry.handler(payload)), timer]);
+              if (result && typeof result === "object" && (result as { __bblTimeout?: boolean }).__bblTimeout === true) {
+                state.usageTotalTimeouts += 1;
                 state.usageTotalErrors += 1;
-                state.lastError = error instanceof Error ? error.message : String(error);
+                state.lastError = `plugin hook timeout: ${hookLabel || "unknown"}`;
                 state.errorCount += 1;
-                return { action: "continue" };
+                return { action: "continue" as const };
               }
-            },
+              if (!result) return { action: "continue" as const };
+              return result;
+            } catch (error) {
+              state.usageTotalErrors += 1;
+              state.lastError = error instanceof Error ? error.message : String(error);
+              state.errorCount += 1;
+              return { action: "continue" as const };
+            }
+          }) as HookHandler<OrchestratorHookMap[keyof OrchestratorHookMap & string]>;
+          const unregister = this.host.onHook(
+            hookName,
+            hookHandler,
             {
               ...entry.options,
               // Hook id 总是挂插件命名空间，避免跨插件冲突卸载。

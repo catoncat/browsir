@@ -21,6 +21,8 @@
    - 本轮重构状态摘要。
 3. `docs/goal-plan-next-phase-2026-02-25.md`
    - 下一阶段目标与拆解。
+4. `docs/sandbox-runtime-filesystem-normalization-plan-2026-03-13.md`
+   - Browser sandbox runtime 持久化、`/mem` 语义、skills/system prompt/@路径 对齐计划。
 
 ## 3. 架构与专题参考
 

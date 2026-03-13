@@ -191,9 +191,10 @@ export class ToolProviderRegistry {
         };
       } catch (error) {
         const err = error instanceof Error ? error : new Error(String(error));
-        const withMeta = err as Error & { modeUsed?: ExecuteMode; capabilityUsed?: ExecuteCapability };
+        const withMeta = err as Error & { modeUsed?: ExecuteMode; capabilityUsed?: ExecuteCapability; providerId?: string };
         withMeta.modeUsed = modeUsed;
         withMeta.capabilityUsed = capability;
+        withMeta.providerId = capabilityProvider.id;
         throw withMeta;
       }
     }
@@ -202,10 +203,18 @@ export class ToolProviderRegistry {
     if (!provider) {
       throw new Error(`${mode} adapter 未配置`);
     }
-    return {
-      data: await provider.invoke({ ...input, mode }),
-      modeUsed: provider.mode || mode,
-      providerId: provider.id
-    };
+    try {
+      return {
+        data: await provider.invoke({ ...input, mode }),
+        modeUsed: provider.mode || mode,
+        providerId: provider.id
+      };
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      const withMeta = err as Error & { modeUsed?: ExecuteMode; providerId?: string };
+      withMeta.modeUsed = provider.mode || mode;
+      withMeta.providerId = provider.id;
+      throw withMeta;
+    }
   }
 }

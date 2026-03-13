@@ -195,10 +195,11 @@ describe("tool-provider-registry.browser", () => {
       thrown = error;
     }
 
-    const runtimeError = thrown as Error & { modeUsed?: string; capabilityUsed?: string };
+    const runtimeError = thrown as Error & { modeUsed?: string; capabilityUsed?: string; providerId?: string };
     expect(runtimeError).toBeInstanceOf(Error);
     expect(runtimeError.message).toContain("verify failed");
     expect(runtimeError.modeUsed).toBe("cdp");
     expect(runtimeError.capabilityUsed).toBe("browser.verify");
+    expect(runtimeError.providerId).toBe("provider.verify");
   });
 });

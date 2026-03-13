@@ -57,6 +57,12 @@ const TARGET_ANY_OF = [
   { required: ["selector"] }
 ];
 
+const TARGET_ANY_OF_ELEMENT_REF = [
+  { required: ["uid"] },
+  { required: ["ref"] },
+  { required: ["backendNodeId"] }
+];
+
 const FILE_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "host_bash",
@@ -77,7 +83,7 @@ const FILE_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "browser_bash",
     description:
-      "Execute command in browser virtual runtime (limited command set over mem:// or vfs:// virtual files).",
+      "Execute command in browser virtual runtime (lifo sandbox over mem:// virtual files).",
     parameters: {
       type: "object",
       properties: {
@@ -107,11 +113,11 @@ const FILE_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "browser_read_file",
     description:
-      "Read text file from browser virtual filesystem. Path should use mem:// or vfs://.",
+      "Read text file from browser virtual filesystem (lifo sandbox). Path should use mem://.",
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string", description: "Virtual file path (mem:// or vfs://)." },
+        path: { type: "string", description: "Virtual file path (mem://)." },
         offset: { type: "number" },
         limit: { type: "number" }
       },
@@ -139,7 +145,7 @@ const FILE_TOOL_CONTRACTS: ToolContract[] = [
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string", description: "Virtual destination path (mem:// or vfs://)." },
+        path: { type: "string", description: "Virtual destination path (mem://)." },
         content: { type: "string", description: "Text content to write." },
         mode: { type: "string", enum: ["overwrite", "append", "create"] }
       },
@@ -176,7 +182,7 @@ const FILE_TOOL_CONTRACTS: ToolContract[] = [
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string", description: "Virtual target file path (mem:// or vfs://)." },
+        path: { type: "string", description: "Virtual target file path (mem://)." },
         edits: {
           type: "array",
           items: {
@@ -285,14 +291,14 @@ const BROWSER_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "click",
     description:
-      "Click target element from latest snapshot. Preconditions: must provide uid/ref/backendNodeId/selector. If E_REF_REQUIRED, call search_elements again.",
+      "Click target element from latest snapshot. Preconditions: must provide uid/ref/backendNodeId (selector can only be fallback metadata, not sole target). If E_REF_REQUIRED, call search_elements again.",
     parameters: {
       type: "object",
       properties: {
         ...TARGET_PROPERTIES,
         dblClick: { type: "boolean", description: "Double click instead of single click." }
       },
-      anyOf: TARGET_ANY_OF,
+      anyOf: TARGET_ANY_OF_ELEMENT_REF,
       required: []
     }
   },
@@ -306,7 +312,7 @@ const BROWSER_TOOL_CONTRACTS: ToolContract[] = [
         ...TARGET_PROPERTIES,
         value: { type: "string", description: "Text value to input." }
       },
-      anyOf: TARGET_ANY_OF,
+      anyOf: TARGET_ANY_OF_ELEMENT_REF,
       required: ["value"]
     }
   },
@@ -320,7 +326,7 @@ const BROWSER_TOOL_CONTRACTS: ToolContract[] = [
         ...TARGET_PROPERTIES,
         value: { type: "string", description: "Option value." }
       },
-      anyOf: TARGET_ANY_OF,
+      anyOf: TARGET_ANY_OF_ELEMENT_REF,
       required: ["value"]
     }
   },
@@ -333,7 +339,7 @@ const BROWSER_TOOL_CONTRACTS: ToolContract[] = [
       properties: {
         ...TARGET_PROPERTIES
       },
-      anyOf: TARGET_ANY_OF,
+      anyOf: TARGET_ANY_OF_ELEMENT_REF,
       required: []
     }
   },
@@ -346,7 +352,7 @@ const BROWSER_TOOL_CONTRACTS: ToolContract[] = [
       properties: {
         ...TARGET_PROPERTIES
       },
-      anyOf: TARGET_ANY_OF,
+      anyOf: TARGET_ANY_OF_ELEMENT_REF,
       required: []
     }
   },
@@ -515,7 +521,7 @@ const BROWSER_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "scroll_to_element",
     description:
-      "Scroll target element into view. Preconditions: provide selector or uid/ref/backendNodeId from search_elements.",
+      "Scroll target element into view. Preconditions: provide uid/ref/backendNodeId from search_elements (selector can only be fallback metadata, not sole target).",
     parameters: {
       type: "object",
       properties: {
@@ -524,7 +530,7 @@ const BROWSER_TOOL_CONTRACTS: ToolContract[] = [
         block: { type: "string", enum: ["start", "center", "end", "nearest"] },
         inline: { type: "string", enum: ["start", "center", "end", "nearest"] }
       },
-      anyOf: TARGET_ANY_OF,
+      anyOf: TARGET_ANY_OF_ELEMENT_REF,
       required: []
     }
   },
@@ -710,6 +716,49 @@ const BROWSER_TOOL_CONTRACTS: ToolContract[] = [
         id: { type: "string", description: "Optional intervention request id." }
       },
       required: []
+    }
+  },
+  {
+    name: "create_skill",
+    description:
+      "Create or update a skill package in mem://skills and register it atomically. Prefer this over browser_bash for skill scaffolding.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Skill display name." },
+        id: { type: "string", description: "Optional skill id. Defaults from name." },
+        description: { type: "string", description: "Skill description (required)." },
+        content: { type: "string", description: "Main SKILL.md body content (without frontmatter)." },
+        root: { type: "string", description: "Skill root path. Defaults to mem://skills." },
+        source: { type: "string", description: "Skill source tag. Defaults to project." },
+        enabled: { type: "boolean", description: "Whether skill should be enabled after creation." },
+        disableModelInvocation: {
+          type: "boolean",
+          description: "When true, hide from auto skill prompt and allow only explicit invocation."
+        },
+        replace: { type: "boolean", description: "Whether existing skill with same id should be replaced. Default true." },
+        scripts: {
+          type: "object",
+          description: "Map of scripts/<file> => content.",
+          additionalProperties: { type: "string" }
+        },
+        references: {
+          type: "object",
+          description: "Map of references/<file> => content.",
+          additionalProperties: { type: "string" }
+        },
+        assets: {
+          type: "object",
+          description: "Map of assets/<file> => content.",
+          additionalProperties: { type: "string" }
+        },
+        files: {
+          type: "object",
+          description: "Additional relative file map under skill directory (cannot overwrite SKILL.md).",
+          additionalProperties: { type: "string" }
+        }
+      },
+      required: ["name", "description"]
     }
   },
   {

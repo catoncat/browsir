@@ -195,10 +195,11 @@ describe("runtime-router interruption boundary", () => {
 
     const originalSetRunning = orchestrator.setRunning.bind(orchestrator);
     vi.spyOn(orchestrator, "setRunning").mockImplementation((sessionId: string, running: boolean) => {
-      originalSetRunning(sessionId, running);
+      const next = originalSetRunning(sessionId, running);
       if (running) {
         orchestrator.stop(sessionId);
       }
+      return next;
     });
 
     const started = await invokeRuntime({
