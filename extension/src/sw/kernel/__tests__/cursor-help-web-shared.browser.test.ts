@@ -124,4 +124,24 @@ await mcp.call("search_docs", {"q":"runtime router"})
     expect(parsed?.toolCalls[0]?.function.name).toBe("search_docs");
     expect(parsed?.toolCalls[0]?.function.arguments).toBe(JSON.stringify({ q: "runtime router" }));
   });
+
+  it("repairs common unescaped quotes inside JSON string values", () => {
+    const parsed = parseToolProtocolFromText(`
+[TM_TOOL_CALL_START:fill1]
+await mcp.call("fill_element_by_uid", {"tabId":543592833,"uid":"bn-2383","value":"你理解"痛苦"、"美"、"死亡"这些概念时有什么不同？","forceFocus":true})
+[TM_TOOL_CALL_END:fill1]
+`);
+
+    expect(parsed).not.toBeNull();
+    expect(parsed?.toolCalls).toHaveLength(1);
+    expect(parsed?.toolCalls[0]?.function.name).toBe("fill_element_by_uid");
+    expect(parsed?.toolCalls[0]?.function.arguments).toBe(
+      JSON.stringify({
+        tabId: 543592833,
+        uid: "bn-2383",
+        value: '你理解"痛苦"、"美"、"死亡"这些概念时有什么不同？',
+        forceFocus: true,
+      }),
+    );
+  });
 });

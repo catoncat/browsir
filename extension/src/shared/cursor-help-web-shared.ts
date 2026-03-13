@@ -86,6 +86,72 @@ function extractToolCalls(rawMessage: JsonRecord): WebToolCall[] {
   );
 }
 
+function findNextNonWhitespace(text: string, start: number): string {
+  for (let i = start; i < text.length; i += 1) {
+    const char = text[i];
+    if (!char || /\s/.test(char)) continue;
+    return char;
+  }
+  return "";
+}
+
+function repairMalformedJsonStringQuotes(raw: string): string {
+  const source = String(raw || "");
+  if (!source) return source;
+  let out = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i];
+    if (!inString) {
+      out += char;
+      if (char === "\"") {
+        inString = true;
+        escaped = false;
+      }
+      continue;
+    }
+
+    if (escaped) {
+      out += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      out += char;
+      escaped = true;
+      continue;
+    }
+
+    if (char === "\"") {
+      const next = findNextNonWhitespace(source, i + 1);
+      const shouldClose =
+        !next || next === ":" || next === "," || next === "}" || next === "]";
+      if (shouldClose) {
+        out += char;
+        inString = false;
+      } else {
+        out += "\\\"";
+      }
+      continue;
+    }
+
+    out += char;
+  }
+
+  return out;
+}
+
+function parseToolProtocolArgs(rawArgs: string): unknown {
+  try {
+    return JSON.parse(rawArgs);
+  } catch {
+    return JSON.parse(repairMalformedJsonStringQuotes(rawArgs));
+  }
+}
+
 function formatToolDefinition(raw: unknown): string | null {
   const item = toRecord(raw);
   const fn = toRecord(item.function);
@@ -190,6 +256,7 @@ export function buildCursorHelpCompiledPrompt(
     "Rules:",
     "- Output only one await mcp.call(...) inside each START/END pair.",
     "- The second argument must be valid JSON.",
+    "- Escape any double quotes inside JSON string values with \\\".",
     "- If no tool is needed, answer normally.",
     normalizedToolChoice === "required"
       ? "- At least one tool call is required before you give a final answer."
@@ -233,7 +300,7 @@ export function parseToolProtocolFromText(source: unknown): ParsedToolProtocol |
     const rawArgs = String(invokeMatch[3] || "").trim();
     if (!toolName || !rawArgs) continue;
     try {
-      const parsedArgs = JSON.parse(rawArgs);
+      const parsedArgs = parseToolProtocolArgs(rawArgs);
       toolCalls.push({
         id: callId || `tool_${toolCalls.length + 1}`,
         type: "function",

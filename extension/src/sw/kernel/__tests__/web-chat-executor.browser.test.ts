@@ -204,6 +204,61 @@ describe("web-chat-executor.browser", () => {
     expect(text).toContain('"finish_reason":"tool_calls"');
   });
 
+  it("repairs malformed JSON in tool protocol and still emits tool_calls", async () => {
+    const provider = createCursorHelpWebProvider();
+    const response = await provider.send({
+      sessionId: "session-2-json-repair",
+      step: 1,
+      route: createRoute(),
+      signal: new AbortController().signal,
+      payload: {
+        stream: true,
+        messages: [{ role: "user", content: "继续填写输入框" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "fill_element_by_uid",
+              description: "Fill an element by uid",
+              parameters: {
+                type: "object",
+                properties: {
+                  tabId: { type: "number" },
+                  uid: { type: "string" },
+                  value: { type: "string" },
+                  forceFocus: { type: "boolean" },
+                },
+              },
+            },
+          },
+        ],
+        tool_choice: "auto",
+      },
+    });
+
+    const requestId = getLastExecuteRequestId();
+    expect(requestId).not.toBe("");
+
+    const textPromise = readResponseText(response);
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      requestId,
+      transportType: "request_started",
+    });
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      requestId,
+      transportType: "sse_line",
+      line: 'data: {"type":"text-delta","delta":"[TM_TOOL_CALL_START:fill1]\\nawait mcp.call(\\"fill_element_by_uid\\", {\\"tabId\\":543592833,\\"uid\\":\\"bn-2383\\",\\"value\\":\\"你理解\\"痛苦\\"、\\"美\\"、\\"死亡\\"这些概念时有什么不同？\\",\\"forceFocus\\":true})\\n[TM_TOOL_CALL_END:fill1]"}',
+    });
+
+    const text = await textPromise;
+    expect(text).toContain('"tool_calls"');
+    expect(text).toContain('"name":"fill_element_by_uid"');
+    expect(text).toContain('\\"uid\\":\\"bn-2383\\"');
+    expect(text).toContain('"finish_reason":"tool_calls"');
+  });
+
   it("withholds provisional text when the turn resolves to tool_calls", async () => {
     const provider = createCursorHelpWebProvider();
     const response = await provider.send({
