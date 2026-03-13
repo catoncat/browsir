@@ -2544,10 +2544,10 @@ async function refreshBridgeConnectionStatus() {
 async function handleRuntimeMessage(message: unknown) {
   const msgType = String(toRecord(message).type || "").trim();
 
-  // bbloop.plugin.trace 是 hook 执行的 trace 日志，若走 ui.runtime.event hook
-  // 会触发沙箱 UI hook → emitPluginHookTrace → 新 trace → 再次进入此处 → 死循环。
-  // 跳过 hook 管线，仅由 PluginStudioView 的 onRuntimeMessage 直接消费。
-  if (msgType === "bbloop.plugin.trace") return;
+  // 基础设施消息跳过 ui.runtime.event hook 管线，避免沙箱 UI hook 自回环死循环：
+  // - bbloop.plugin.trace: hook trace 日志（PluginStudioView 直接消费）
+  // - sandbox-*: eval-bridge sandbox 执行中继消息
+  if (msgType === "bbloop.plugin.trace" || msgType.startsWith("sandbox-")) return;
 
   const runtimeHook = await panelUiRuntime.runHook("ui.runtime.event", {
     type: msgType,
