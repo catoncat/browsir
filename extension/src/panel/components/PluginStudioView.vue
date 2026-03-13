@@ -11,6 +11,7 @@ import {
   Zap,
   Play,
   Pause,
+  Trash2,
   FileJson2,
   FileCode2,
   Radio,
@@ -122,7 +123,7 @@ function defaultPluginJson(): string {
   return JSON.stringify(
     {
       manifest: {
-        id: "plugin.user.hello",
+        id: "plugin.example.hello",
         name: "hello-plugin",
         version: "1.0.0",
         permissions: {
@@ -435,7 +436,7 @@ async function loadExampleProjects(): Promise<StudioProject[]> {
     id: "example.hello",
     name: "示例：Hello Plugin",
     category: "example",
-    pluginId: "plugin.user.hello",
+    pluginId: "plugin.example.hello",
     updatedAt: nowIso(),
     files: {
       pluginJson: defaultPluginJson(),
@@ -841,6 +842,33 @@ function handleSaveProject(): void {
     statusMessage.value = "项目已保存";
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : String(error || "保存失败");
+  }
+}
+
+async function handleUnregisterPlugin(): Promise<void> {
+  const pluginId = String(selectedPluginId.value || "").trim();
+  if (!pluginId) {
+    errorMessage.value = "请先选择一个已安装插件";
+    return;
+  }
+  if (pluginId.startsWith(BUILTIN_PLUGIN_ID_PREFIX)) {
+    errorMessage.value = "内置插件不允许卸载";
+    return;
+  }
+  const confirmed = globalThis.confirm(`确认卸载插件 ${pluginId}？`);
+  if (!confirmed) return;
+  busy.value = true;
+  errorMessage.value = "";
+  statusMessage.value = "";
+  try {
+    await store.unregisterPlugin(pluginId);
+    selectedPluginId.value = "";
+    await refreshPlugins();
+    statusMessage.value = "插件已卸载";
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : String(error || "卸载失败");
+  } finally {
+    busy.value = false;
   }
 }
 
@@ -1369,6 +1397,15 @@ onUnmounted(() => {
           >
             <component :is="selectedInstalledPluginEnabled ? Pause : Play" :size="14" />
             {{ selectedInstalledPluginEnabled ? '禁用' : '启用' }}
+          </button>
+          <button
+            v-if="selectedPluginId && !selectedPluginId.startsWith('runtime.builtin.plugin.')"
+            class="studio-btn danger"
+            :disabled="busy"
+            @click="handleUnregisterPlugin"
+          >
+            <Trash2 :size="14" />
+            卸载
           </button>
         </div>
 

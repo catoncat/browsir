@@ -24,6 +24,17 @@ const userPlugins = computed(() =>
   })
 );
 
+const examplePlugins = computed(() =>
+  plugins.value.filter((p) => {
+    const id = String(p.id || "").trim();
+    return id.startsWith(EXAMPLE_PLUGIN_ID_PREFIX);
+  })
+);
+
+function isExamplePlugin(plugin: PluginMetadata): boolean {
+  return String(plugin.id || "").trim().startsWith(EXAMPLE_PLUGIN_ID_PREFIX);
+}
+
 function setPageError(error: unknown) {
   pageError.value = error instanceof Error ? error.message : String(error || "未知错误");
 }
@@ -285,6 +296,44 @@ onMounted(async () => {
       </section>
 
       <p v-if="pageError" class="rounded border border-rose-200 bg-rose-50 px-3 py-2 text-[12px] text-rose-700">{{ pageError }}</p>
+
+      <section v-if="examplePlugins.length > 0" class="space-y-3">
+        <h3 class="text-[11px] font-bold uppercase tracking-[0.1em] text-ui-text-muted">示例插件</h3>
+        <ul class="space-y-2">
+          <li v-for="plugin in examplePlugins" :key="plugin.id" class="rounded-md border border-ui-border bg-ui-surface/20 px-3 py-2 space-y-2">
+            <div class="flex items-center gap-2">
+              <div class="min-w-0">
+                <p class="text-[13px] font-semibold text-ui-text truncate">{{ plugin.name || plugin.id }}</p>
+                <p class="text-[11px] text-ui-text-muted">{{ plugin.id }} · v{{ plugin.version }}</p>
+              </div>
+              <span
+                class="ml-auto rounded px-2 py-0.5 text-[10px] font-semibold"
+                :class="plugin.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-ui-border/40 text-ui-text-muted'"
+              >
+                {{ plugin.enabled ? "enabled" : "disabled" }}
+              </span>
+            </div>
+            <div class="flex items-center gap-2">
+              <button
+                class="px-2.5 py-1.5 rounded-sm bg-ui-bg border border-ui-border text-[12px] hover:bg-ui-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50"
+                :disabled="actionPluginId === plugin.id"
+                @click="handleToggle(plugin)"
+              >
+                <Power :size="13" class="inline-block mr-1" />
+                {{ plugin.enabled ? "禁用" : "启用" }}
+              </button>
+              <button
+                class="px-2.5 py-1.5 rounded-sm bg-ui-bg border border-ui-border text-[12px] hover:bg-ui-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50"
+                :disabled="actionPluginId === plugin.id"
+                @click="handleUnregister(plugin)"
+              >
+                <Trash2 :size="13" class="inline-block mr-1" />
+                卸载
+              </button>
+            </div>
+          </li>
+        </ul>
+      </section>
     </div>
   </div>
 </template>
