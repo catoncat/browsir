@@ -98,6 +98,14 @@ import {
   refreshSessionTitleAuto,
 } from "./loop-session-title";
 import {
+  buildObserveProgressVerify,
+  shouldVerifyStep,
+  shouldAcquireLease,
+  isToolCallRequiringBrowserProof,
+  didToolProvideBrowserProof,
+  mapToolErrorReasonToTerminalStatus,
+} from "./loop-browser-proof";
+import {
   buildFocusEscalationToolCall,
   parseToolCallArgs,
   buildToolFailurePayload,
@@ -420,64 +428,6 @@ function extractTabIdsFromPrompt(prompt: string): number[] {
   return ids;
 }
 
-function buildObserveProgressVerify(
-  beforeObserve: unknown,
-  afterObserve: unknown,
-): JsonRecord {
-  const beforePage = toRecord(toRecord(beforeObserve).page);
-  const afterPage = toRecord(toRecord(afterObserve).page);
-
-  const urlChanged =
-    String(beforePage.url || "") !== String(afterPage.url || "");
-  const titleChanged =
-    String(beforePage.title || "") !== String(afterPage.title || "");
-  const textDiff = Math.abs(
-    Number(afterPage.textLength || 0) - Number(beforePage.textLength || 0),
-  );
-  const nodeDiff = Math.abs(
-    Number(afterPage.nodeCount || 0) - Number(beforePage.nodeCount || 0),
-  );
-
-  const textLengthChanged = textDiff >= 1; // Any text change is progress
-  const nodeCountChanged = nodeDiff > 10; // Ignore tiny background noise
-
-  const checks = [
-    {
-      name: "urlChanged",
-      pass: urlChanged,
-      before: beforePage.url || "",
-      after: afterPage.url || "",
-    },
-    {
-      name: "titleChanged",
-      pass: titleChanged,
-      before: beforePage.title || "",
-      after: afterPage.title || "",
-    },
-    {
-      name: "textLengthChanged",
-      pass: textLengthChanged,
-      before: Number(beforePage.textLength || 0),
-      after: Number(afterPage.textLength || 0),
-    },
-    {
-      name: "nodeCountChanged",
-      pass: nodeCountChanged,
-      before: Number(beforePage.nodeCount || 0),
-      after: Number(afterPage.nodeCount || 0),
-    },
-  ];
-
-  // Logic: Navigation or significant content structure change
-  const ok =
-    urlChanged || titleChanged || (textLengthChanged && nodeCountChanged);
-
-  return {
-    ok,
-    checks,
-    observation: afterObserve,
-  };
-}
 
 const NO_PROGRESS_VOLATILE_EVIDENCE_KEYS = new Set([
   "backendNodeId",
@@ -554,61 +504,6 @@ function applyLatestUserPromptOverride(
       content: promptText,
     },
   ];
-}
-
-function shouldVerifyStep(action: string, verifyPolicy: unknown): boolean {
-  const policy = String(verifyPolicy || "on_critical");
-  if (policy === "off") return false;
-  if (policy === "always") return true;
-  const critical = [
-    "click",
-    "type",
-    "fill",
-    "press",
-    "scroll",
-    "select",
-    "navigate",
-    "action",
-  ];
-  return critical.includes(
-    String(action || "")
-      .trim()
-      .toLowerCase(),
-  );
-}
-
-function actionRequiresLease(kind: string): boolean {
-  return [
-    "click",
-    "type",
-    "fill",
-    "press",
-    "scroll",
-    "select",
-    "navigate",
-    "hover",
-  ].includes(kind);
-}
-
-function shouldAcquireLease(
-  kind: string,
-  policy: CapabilityExecutionPolicy,
-): boolean {
-  const leasePolicy = policy.leasePolicy || "auto";
-  if (leasePolicy === "none") return false;
-  if (leasePolicy === "required") return true;
-  return actionRequiresLease(kind);
-}
-
-function mapToolErrorReasonToTerminalStatus(
-  rawReason: unknown,
-): "failed_execute" | "failed_verify" | "progress_uncertain" {
-  const reason = String(rawReason || "")
-    .trim()
-    .toLowerCase();
-  if (reason === "failed_verify") return "failed_verify";
-  if (reason === "progress_uncertain") return "progress_uncertain";
-  return "failed_execute";
 }
 
 async function requestCompactionSummaryFromLlm(input: {
