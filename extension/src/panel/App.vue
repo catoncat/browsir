@@ -3,6 +3,7 @@ import { useIntervalFn } from "@vueuse/core";
 import { storeToRefs } from "pinia";
 import { computed, onMounted, onUnmounted, ref, nextTick, watch } from "vue";
 import { useRuntimeStore } from "./stores/runtime";
+import { useChatStore } from "./stores/chat-store";
 import { useMessageActions, type PanelMessageLike, type PendingRegenerateState } from "./utils/message-actions";
 import { publishDebugLinkToBridge } from "./utils/debug-link";
 import {
@@ -31,7 +32,9 @@ import { Loader2, Plus, Settings, Activity, History, MoreVertical, FileText, Dow
 import { onClickOutside } from "@vueuse/core";
 
 const store = useRuntimeStore();
-const { loading, error, sessions, activeSessionId, messages, runtime, isRegeneratingTitle, config } = storeToRefs(store);
+const chatStore = useChatStore();
+const { loading, error, config } = storeToRefs(store);
+const { sessions, activeSessionId, messages, runtime, isRegeneratingTitle } = storeToRefs(chatStore);
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -227,7 +230,7 @@ async function regenerateFromAssistantWithScene(
   options: { mode?: "fork" | "retry"; setActive?: boolean } = {}
 ) {
   const startedAt = Date.now();
-  const result = await store.regenerateFromAssistantEntry(entryId, {
+  const result = await chatStore.regenerateFromAssistantEntry(entryId, {
     mode: options.mode,
     setActive: false
   });
@@ -495,7 +498,7 @@ async function playForkSceneSwitch(targetSessionId: string) {
     if (isForkSceneStale(token)) return;
 
     forkScenePhase.value = "swap";
-    await store.loadConversation(normalizedTargetSessionId, { setActive: true });
+    await chatStore.loadConversation(normalizedTargetSessionId, { setActive: true });
     if (isForkSceneStale(token)) return;
 
     triggerForkSessionHighlight();
@@ -2438,7 +2441,7 @@ async function handleEditSubmit(payload: { entryId: string; content: string; rol
     strategy: "insert"
   };
   try {
-    const result = await store.editUserMessageAndRerun(entryId, content, { setActive: false });
+    const result = await chatStore.editUserMessageAndRerun(entryId, content, { setActive: false });
     const latestUserEntryId = findLatestUserEntryId(messages.value);
     const sourceEntryId = String(result.activeSourceEntryId || entryId || "").trim();
     const anchorEntryId = latestUserEntryId || sourceEntryId;
@@ -2554,13 +2557,13 @@ async function handleRuntimeMessage(message: unknown) {
   if (eventSessionId === activeSessionId.value) {
     applyRuntimeEventToolRun(payload.event);
     void runSafely(
-      () => store.loadConversation(eventSessionId, { setActive: false }),
+      () => chatStore.loadConversation(eventSessionId, { setActive: false }),
       "刷新会话失败"
     );
     return;
   }
 
-  void runSafely(() => store.refreshSessions(), "刷新会话列表失败");
+  void runSafely(() => chatStore.refreshSessions(), "刷新会话列表失败");
 }
 
 const onRuntimeMessage = (message: unknown) => {
@@ -2599,7 +2602,7 @@ useIntervalFn(() => {
   void runSafely(
     async () => {
       await Promise.all([
-        store.loadConversation(activeSessionId.value, { setActive: false }),
+        chatStore.loadConversation(activeSessionId.value, { setActive: false }),
         syncActiveToolRun(activeSessionId.value)
       ]);
     },
@@ -2618,7 +2621,7 @@ async function handleCreateSession() {
   }
   creatingSession.value = true;
   createSessionTask = runSafely(async () => {
-    await store.createSession();
+    await chatStore.createSession();
     listOpen.value = false;
   }, "新建会话失败").finally(() => {
     creatingSession.value = false;
@@ -2629,7 +2632,7 @@ async function handleCreateSession() {
 
 async function handleSelectSession(id: string) {
   await runSafely(async () => {
-    await store.loadConversation(id, { setActive: true });
+    await chatStore.loadConversation(id, { setActive: true });
     listOpen.value = false;
   }, "切换会话失败");
 }
@@ -2639,26 +2642,26 @@ async function handleJumpToForkSourceSession() {
   if (!sourceId) return;
   await runSafely(async () => {
     if (!sessions.value.some((item) => item.id === sourceId)) {
-      await store.refreshSessions();
+      await chatStore.refreshSessions();
     }
     await playForkSceneSwitch(sourceId);
   }, "跳转分叉来源失败");
 }
 
 async function handleDeleteSession(id: string) {
-  await runSafely(() => store.deleteSession(id), "删除会话失败");
+  await runSafely(() => chatStore.deleteSession(id), "删除会话失败");
 }
 
 async function handleUpdateSessionTitle(id: string, title: string) {
-  await runSafely(() => store.updateSessionTitle(id, title), "重命名失败");
+  await runSafely(() => chatStore.updateSessionTitle(id, title), "重命名失败");
 }
 
 async function handleRefreshSession(id: string) {
-  await runSafely(() => store.refreshSessionTitle(id), "刷新标题失败");
+  await runSafely(() => chatStore.refreshSessionTitle(id), "刷新标题失败");
 }
 
 async function handleStopRun() {
-  await runSafely(() => store.runAction("brain.run.stop"), "停止任务失败");
+  await runSafely(() => chatStore.runAction("brain.run.stop"), "停止任务失败");
 }
 
 async function handlePromoteQueuedPromptToSteer(queuedPromptId: string) {
@@ -2668,7 +2671,7 @@ async function handlePromoteQueuedPromptToSteer(queuedPromptId: string) {
   if (isQueuedPromptPromoting(id)) return;
   setQueuedPromptPromoting(id, true);
   try {
-    await store.promoteQueuedPromptToSteer(id);
+    await chatStore.promoteQueuedPromptToSteer(id);
   } catch (err) {
     setErrorMessage(err, "直接插入失败");
   } finally {
@@ -2708,7 +2711,7 @@ async function handleSend(payload: { text: string; tabIds: number[]; skillIds: s
     if (shouldExpectRunStart) {
       startRunPending.value = true;
     }
-    await store.sendPrompt(text, {
+    await chatStore.sendPrompt(text, {
       newSession: isNew,
       tabIds: sendInput.tabIds,
       skillIds: sendInput.skillIds,

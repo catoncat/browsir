@@ -3,13 +3,16 @@ import { useIntervalFn } from "@vueuse/core";
 import { storeToRefs } from "pinia";
 import { computed, onMounted, ref, watch } from "vue";
 import { useRuntimeStore } from "../stores/runtime";
+import { useChatStore } from "../stores/chat-store";
 import { collectDiagnostics, publishDiagnosticsToBridge } from "../utils/diagnostics";
 import { publishDebugSnapshotToBridge } from "../utils/debug-snapshot";
 import { Server, Radio, Activity, RefreshCw, ArrowLeft, Copy, Check, Clock3, Upload } from "lucide-vue-next";
 
 const emit = defineEmits(["close"]);
 const store = useRuntimeStore();
-const { health, sessions, activeSessionId, config } = storeToRefs(store);
+const chatStoreRef = useChatStore();
+const { health, config } = storeToRefs(store);
+const { sessions, activeSessionId } = storeToRefs(chatStoreRef);
 
 const dialogRef = ref<HTMLElement | null>(null);
 const loading = ref(false);
@@ -83,7 +86,7 @@ async function refreshReport(silent = false) {
   if (!silent) loading.value = true;
   error.value = "";
   try {
-    await Promise.all([store.refreshHealth(), store.refreshSessions()]);
+    await Promise.all([store.refreshHealth(), chatStoreRef.refreshSessions()]);
     syncSelectedSession();
     const { payload, text } = await collectDiagnostics({
       sessionId: currentSessionId.value || undefined,
