@@ -16,7 +16,7 @@ write_scope:
   - extension/src/panel/types.ts
   - extension/src/panel/composables/use-tool-pending-state.ts
   - extension/src/panel/composables/use-runtime-message-bus.ts
-  - extension/src/panel/composables/use-panel-ui-runtime.ts
+  - extension/src/panel/composables/use-ui-render-pipeline.ts
   - extension/src/panel/composables/use-conversation-actions.ts
 acceptance_ref: docs/architecture-evolution-plan-2026-03-14.md
 tags: [slice, panel, chat-view, controller, composable, architecture, phase2]
@@ -54,7 +54,7 @@ tags: [slice, panel, chat-view, controller, composable, architecture, phase2]
 
 1. `use-tool-pending-state.ts`（从 `ChatView.vue` 抽运行态状态机）
 2. `use-runtime-message-bus.ts`（抽 runtime/bridge event wiring + polling）
-3. `use-panel-ui-runtime.ts`（抽 panel UI plugin runtime / render hook）
+3. `use-ui-render-pipeline.ts`（优先复用既有 composable，承接 panel UI plugin runtime / render hook）
 4. `use-conversation-actions.ts`（抽 send/export/debug/fork 等动作）
 
 > `shell-context.ts` 不再是第一阶段硬约束；只有当 props/emits 或注入边界真的成为阻碍时再引入。
@@ -66,7 +66,7 @@ tags: [slice, panel, chat-view, controller, composable, architecture, phase2]
 - `extension/src/panel/types.ts`
 - `extension/src/panel/composables/use-tool-pending-state.ts`（推荐新建）
 - `extension/src/panel/composables/use-runtime-message-bus.ts`（推荐新建）
-- `extension/src/panel/composables/use-panel-ui-runtime.ts`（推荐新建）
+- `extension/src/panel/composables/use-ui-render-pipeline.ts`（优先复用/扩展）
 - `extension/src/panel/composables/use-conversation-actions.ts`（推荐新建）
 
 ## 泳道

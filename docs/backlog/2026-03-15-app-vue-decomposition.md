@@ -56,7 +56,7 @@ tags: [panel, refactor, vue, composables, chat-view, follow-up]
 1. **若 `use-tool-pending-state.ts` 继续膨胀**
    - 候选拆分：`useToolRunStream()` / `useLlmStreamingState()` / `useToolPendingCardModel()`
 
-2. **若 `use-panel-ui-runtime.ts` 继续膨胀**
+2. **若 `use-ui-render-pipeline.ts` 继续膨胀**
    - 候选拆分：notice / lifecycle / render-payload-normalizer 三层
 
 3. **若 `use-runtime-message-bus.ts` 继续膨胀**
