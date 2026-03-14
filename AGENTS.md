@@ -4,7 +4,7 @@ Browser Brain Loop：浏览器侧 AI Agent 系统。大脑（Kernel Engine + Loo
 
 **架构铁律：大脑永远在浏览器侧，本地 WS 只做执行代理，不做任务决策。**
 
-Kernel 引擎（31 个模块）聚合在 `BrainOrchestrator` 单例中，详见 [docs/kernel-architecture.md](docs/kernel-architecture.md)。
+Kernel 引擎（50 个模块）聚合在 `BrainOrchestrator` 单例中，详见 [docs/kernel-architecture.md](docs/kernel-architecture.md)。
 
 ## 项目级系统提示词约束（Legacy/Fallback）
 
@@ -121,7 +121,7 @@ browser-brain-loop/
 │   │   │   ├── components/        # Vue 组件（Chat/Settings/Plugins/Skills/...）
 │   │   │   ├── stores/            # Pinia stores
 │   │   │   └── utils/             # UI 工具函数
-│   │   └── sw/kernel/             # Kernel 引擎（31 模块）→ docs/kernel-architecture.md
+│   │   └── sw/kernel/             # Kernel 引擎（50 模块）→ docs/kernel-architecture.md
 │   │       ├── orchestrator.browser.ts    # BrainOrchestrator 单例
 │   │       ├── runtime-loop.browser.ts    # LLM loop 引擎
 │   │       ├── runtime-router.ts          # SW 消息路由

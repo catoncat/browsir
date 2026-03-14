@@ -434,6 +434,12 @@ skills 不被这套机制取代，但会复用它。
 
 `@路径` 功能的正确落点不是继续加进现有 God module，而是顺手把边界修回来。
 
+> **实施进度**（2026-03-15 更新）：
+> - 11.1 Runtime Loop 拆分：**部分完成** — 提取了 10 个 `loop-*.ts` 纯函数模块（browser-proof, progress-guard, failure-protocol, llm-route, llm-stream, session-title, tool-dispatch, tool-display, shared-types, shared-utils），保留 `createRuntimeLoopController()` facade。prompt policy / context-ref 独立模块尚未拆出。
+> - 11.2 Runtime Router 拆分：**未开始**
+> - 11.3 SidePanel 拆分：**未开始**
+> - 11.4 Store 拆分：**已完成** — `runtime.ts`（37 行 bootstrap-only）+ `chat-store.ts` + `config-store.ts` + `skill-store.ts` + `plugin-store.ts` + `store-helpers.ts` + `send-message.ts`
+
 ### 11.1 Runtime Loop 拆分
 
 当前 `runtime-loop.browser.ts` 承担了过多职责。目标拆分为：

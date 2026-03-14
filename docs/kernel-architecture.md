@@ -2,7 +2,7 @@
 
 Browser Brain Loop Kernel 是运行在 Chrome Extension Service Worker 中的 AI Agent 引擎核心，由 `BrainOrchestrator` 单例聚合以下 6 大子系统。
 
-源码位置：`extension/src/sw/kernel/`（31 个模块 + 25 个测试文件）
+源码位置：`extension/src/sw/kernel/`（50 个模块 + 40 个测试文件）
 
 ---
 
@@ -308,3 +308,32 @@ type BrowserRuntimeStrategy = "browser-first" | "host-first";
 | **Snapshot Enricher** | `snapshot-enricher.ts` | A11y snapshot 后处理：hierarchy/intent/session-context 三阶段 enrichment |
 | **Extension API** | `extension-api.ts` | 外部扩展 Builder 模式注册 API |
 | **IDB Storage** | `idb-storage.ts` | IndexedDB 初始化 + 通用 KV 存储 |
+| **Storage Reset** | `storage-reset.browser.ts` | session store 重置 + index 初始化 |
+| **Infra Bridge Client** | `infra-bridge-client.ts` | WS Bridge 连接客户端封装 |
+| **Infra CDP Action** | `infra-cdp-action.ts` | CDP 动作执行：click/fill/select/hover 等 |
+| **Infra Snapshot Helpers** | `infra-snapshot-helpers.ts` | snapshot 辅助：AXTree 解析、ref 解析 |
+| **Dispatch Plan Executor** | `dispatch-plan-executor.ts` | subagent dispatch plan 执行 |
+| **Eval Bridge** | `eval-bridge.ts` | SidePanel/Offscreen JS eval 桥接 |
+| **Web Chat Executor** | `web-chat-executor.browser.ts` | 嵌入式 web chat transport 执行器（cursor-help 等） |
+| **Persistable AST Analyzer** | `persistable-ast-analyzer.ts` | AST 分析：检测插件脚本可持久化性 |
+| **Plugin Materializer** | `plugin-materializer.ts` | 插件物化：从持久化数据还原插件实例 |
+| **Plugin Module Serializer** | `plugin-module-serializer.ts` | 插件模块序列化/反序列化 |
+
+---
+
+## 10. Loop 提取模块
+
+从 `runtime-loop.browser.ts` 提取的纯函数模块，所有函数均为无副作用、可独立测试的纯函数。
+
+| 文件 | 职责 |
+|------|------|
+| `loop-shared-types.ts` | Loop 共享类型：`NoProgressReason`、`NO_PROGRESS_CONTINUE_BUDGET`、终止状态枚举 |
+| `loop-shared-utils.ts` | Loop 共享工具函数：`clipText`、`safeStringify` |
+| `loop-browser-proof.ts` | 浏览器证明：`shouldVerifyStep`、`buildObserveProgressVerify`、`actionRequiresLease`、`isToolCallRequiringBrowserProof`、`didToolProvideBrowserProof`、`mapToolErrorReasonToTerminalStatus` |
+| `loop-progress-guard.ts` | No-progress 检测：`calculateActionSignature`、`isNoProgress`、`updateProgressBudget`、`normalizeNoProgressEvidenceValue`、`buildNoProgressEvidenceFingerprint`、`buildNoProgressScopeKey`、`resolveNoProgressDecision` |
+| `loop-failure-protocol.ts` | 失败协议：失败分类、重试决策、终止状态映射 |
+| `loop-llm-route.ts` | LLM 路由辅助：session route prefs 读取、failure signature 归一化、retry delay hints 提取 |
+| `loop-llm-stream.ts` | LLM 流解析：SSE body 解析、hosted chat transport 读取 |
+| `loop-session-title.ts` | 会话标题：`refreshSessionTitleAuto`、LLM 消息文本提取、标题规范化 |
+| `loop-tool-dispatch.ts` | 工具调度辅助：tool call 路由和参数解析 |
+| `loop-tool-display.ts` | 工具展示辅助：forceFocus 添加、成功/失败 payload 构建 |
