@@ -1,11 +1,11 @@
 ---
 id: ISSUE-005
 title: Runtime Loop browser proof / lease / verify 抽离
-status: open
+status: done
 priority: p0
 source: next-development-master-plan-2026-03-14 + slice breakdown
 created: 2026-03-14
-assignee: unassigned
+assignee: agent
 kind: slice
 epic: EPIC-2026-03-14-NEXT-PHASE
 parallel_group: kernel-loop
@@ -42,4 +42,16 @@ tags: [slice, kernel, runtime-loop, browser-proof, verify]
 - `runtime-loop.browser.ts` 不再内联 browser proof / lease 决策逻辑
 - 新模块有纯函数测试与至少一个回归测试
 - 不保留旧实现副本
+
+## 工作总结
+
+**完成内容**：
+- `loop-browser-proof.ts` 已由 ISSUE-004 agent 创建，包含全部 7 个导出函数
+- 删除 `runtime-loop.browser.ts` 中 5 个重复函数定义（buildObserveProgressVerify, shouldVerifyStep, actionRequiresLease, shouldAcquireLease, mapToolErrorReasonToTerminalStatus），解决 TS2440 冲突
+- 新增 `loop-browser-proof.browser.test.ts`：25 个纯函数测试覆盖全部 7 个导出函数
+- 验收条件全部满足 ✅
+
+**Commits**：
+- `4292a75` — 修正 import 路径 + 删除重复函数定义
+- `8170860` — 添加 25 个单元测试
 
