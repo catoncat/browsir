@@ -332,6 +332,7 @@ let panelNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 let llmStreamingDeltaBuffer = "";
 let stableMessagesBuildToken = 0;
 const pendingStepLogBuffer = new Map<number, string[]>();
+const reportedPanelUiPluginFailures = new Set<string>();
 
 const USER_FORK_MIN_VISIBLE_MS = 620;
 const USER_FORK_SCENE_PREPARE_MS = 140;
@@ -1751,6 +1752,7 @@ watch(activeSessionId, (nextSessionId, previousSessionId) => {
   }
   const nextId = String(nextSessionId || "").trim();
   const prevId = String(previousSessionId || "").trim();
+  void panelUiRuntime.notifyActiveSessionChanged(nextId || undefined, prevId || undefined);
   void panelUiRuntime.runHook("ui.session.changed", {
     sessionId: nextId,
     previousSessionId: prevId,
@@ -1939,6 +1941,24 @@ async function showActionNoticeWithPlugins(input: unknown) {
   }, duration);
 }
 
+async function reportPanelUiPluginLoadFailures() {
+  const failures = panelUiRuntime.listLoadFailures();
+  let shouldNotify = false;
+  for (const failure of failures) {
+    const signature = `${failure.pluginId}:${failure.moduleUrl}:${failure.error}`;
+    if (reportedPanelUiPluginFailures.has(signature)) continue;
+    reportedPanelUiPluginFailures.add(signature);
+    shouldNotify = true;
+    console.error("[panel-ui-plugin] load failure", failure);
+  }
+  if (!shouldNotify) return;
+  await showActionNoticeWithPlugins({
+    type: "error",
+    message: "插件界面加载失败，已自动停用",
+    source: "panel.ui_plugin_runtime"
+  });
+}
+
 function normalizeUiExtensionDescriptor(input: unknown): UiExtensionDescriptor | null {
   const row = toRecord(input);
   const pluginId = String(row.pluginId || "").trim();
@@ -1963,6 +1983,7 @@ async function hydratePanelUiPlugins() {
   }
   const list = Array.isArray(response.data?.uiExtensions) ? response.data?.uiExtensions : [];
   await panelUiRuntime.hydrate(list);
+  await reportPanelUiPluginLoadFailures();
   bumpUiRenderEpoch();
 }
 
@@ -1971,6 +1992,7 @@ async function applyUiExtensionLifecycleMessage(type: string, payload: unknown):
   if (!descriptor) return false;
   if (type === "brain.plugin.ui_extension.registered") {
     await panelUiRuntime.registerDescriptor(descriptor);
+    await reportPanelUiPluginLoadFailures();
     bumpUiRenderEpoch();
     return true;
   }
@@ -1980,6 +2002,7 @@ async function applyUiExtensionLifecycleMessage(type: string, payload: unknown):
       enabled: true
     });
     await panelUiRuntime.enable(descriptor.pluginId);
+    await reportPanelUiPluginLoadFailures();
     bumpUiRenderEpoch();
     return true;
   }

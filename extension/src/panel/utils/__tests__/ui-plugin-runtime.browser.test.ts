@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPanelUiPluginRuntime } from "../ui-plugin-runtime";
 
 const widgetModuleUrl = new URL("./fixtures/ui-widget-plugin.ts", import.meta.url).href;
+const missionHudDogWidgetModuleUrl = new URL("../../../../plugins/example-mission-hud-dog/ui.js", import.meta.url).href;
 
 class FakeElement {
   tagName: string;
@@ -78,23 +79,44 @@ function createFakeDocument() {
   };
 }
 
-describe("panel ui plugin runtime remote mem hooks", () => {
-  beforeEach(() => {
-    const sendMessage = vi.fn().mockResolvedValue({
-      ok: true,
-      data: {
-        hookResult: {
-          action: "patch",
-          patch: {
-            message: "发送成功!"
-          }
+function createChromeRuntimeMock() {
+  const sendMessage = vi.fn().mockResolvedValue({
+    ok: true,
+    data: {
+      hookResult: {
+        action: "patch",
+        patch: {
+          message: "发送成功!"
         }
       }
-    });
-    (globalThis as Record<string, unknown>).chrome = {
-      runtime: {
-        sendMessage
+    }
+  });
+  const listeners = new Set<(message: unknown) => void>();
+  return {
+    sendMessage,
+    onMessage: {
+      addListener(listener: (message: unknown) => void) {
+        listeners.add(listener);
+      },
+      removeListener(listener: (message: unknown) => void) {
+        listeners.delete(listener);
       }
+    },
+    emitMessage(message: unknown) {
+      for (const listener of listeners) {
+        listener(message);
+      }
+    }
+  };
+}
+
+describe("panel ui plugin runtime remote mem hooks", () => {
+  let chromeRuntime: ReturnType<typeof createChromeRuntimeMock>;
+
+  beforeEach(() => {
+    chromeRuntime = createChromeRuntimeMock();
+    (globalThis as Record<string, unknown>).chrome = {
+      runtime: chromeRuntime
     };
     (globalThis as Record<string, unknown>).document = createFakeDocument();
   });
@@ -163,6 +185,112 @@ describe("panel ui plugin runtime remote mem hooks", () => {
     expect(
       host.querySelector('[data-plugin-widget-instance="plugin.test.ui.widget:widget.test"]')
     ).toBeNull();
+
+    await runtime.dispose();
+    host.remove();
+  });
+
+  it("captures load failures for broken file-backed ui plugins", async () => {
+    const runtime = createPanelUiPluginRuntime({ defaultTimeoutMs: 120 });
+
+    await runtime.hydrate([
+      {
+        pluginId: "plugin.test.ui.broken",
+        moduleUrl: "data:text/javascript,export default 42",
+        exportName: "default",
+        enabled: true
+      }
+    ]);
+
+    expect(runtime.listLoadFailures()).toEqual([
+      expect.objectContaining({
+        pluginId: "plugin.test.ui.broken",
+        moduleUrl: "data:text/javascript,export default 42",
+        exportName: "default"
+      })
+    ]);
+  });
+
+  it("allows mission-hud-dog messages before active session hydrates and hides on session switch", async () => {
+    let activeSessionId = "";
+    const runtime = createPanelUiPluginRuntime({
+      defaultTimeoutMs: 120,
+      getActiveSessionId: () => activeSessionId || undefined
+    });
+    const host = document.createElement("div") as unknown as FakeElement;
+    document.body.appendChild(host as unknown as FakeElement);
+
+    await runtime.attachHostSlot("chat.scene.overlay", host);
+    await runtime.hydrate([
+      {
+        pluginId: "plugin.example.ui.mission-hud.dog",
+        moduleUrl: missionHudDogWidgetModuleUrl,
+        exportName: "default",
+        enabled: true
+      }
+    ]);
+
+    const mounted = host.querySelector(
+      '[data-plugin-widget-instance="plugin.example.ui.mission-hud.dog:mission-hud-dog"]'
+    ) as unknown as FakeElement | null;
+    expect(mounted).toBeTruthy();
+
+    const root = mounted?.children[0] || null;
+    expect(root?.dataset.visible).toBe("false");
+
+    chromeRuntime.emitMessage({
+      type: "bbloop.ui.mascot",
+      payload: {
+        phase: "thinking",
+        message: "汪！我先闻闻线索，马上开始。",
+        sessionId: "session-before-hydrate"
+      }
+    });
+
+    expect(root?.dataset.visible).toBe("true");
+
+    activeSessionId = "session-next";
+    await runtime.notifyActiveSessionChanged(activeSessionId, "session-before-hydrate");
+    expect(root?.dataset.visible).toBe("false");
+
+    await runtime.dispose();
+    host.remove();
+  });
+
+  it("blocks mission-hud-dog messages from another active session", async () => {
+    const runtime = createPanelUiPluginRuntime({
+      defaultTimeoutMs: 120,
+      getActiveSessionId: () => "session-active"
+    });
+    const host = document.createElement("div") as unknown as FakeElement;
+    document.body.appendChild(host as unknown as FakeElement);
+
+    await runtime.attachHostSlot("chat.scene.overlay", host);
+    await runtime.hydrate([
+      {
+        pluginId: "plugin.example.ui.mission-hud.dog",
+        moduleUrl: missionHudDogWidgetModuleUrl,
+        exportName: "default",
+        enabled: true
+      }
+    ]);
+
+    const mounted = host.querySelector(
+      '[data-plugin-widget-instance="plugin.example.ui.mission-hud.dog:mission-hud-dog"]'
+    ) as unknown as FakeElement | null;
+    const root = mounted?.children[0] || null;
+    expect(root?.dataset.visible).toBe("false");
+
+    chromeRuntime.emitMessage({
+      type: "bbloop.ui.mascot",
+      payload: {
+        phase: "tool",
+        message: "我去执行工具。",
+        sessionId: "session-other"
+      }
+    });
+
+    expect(root?.dataset.visible).toBe("false");
 
     await runtime.dispose();
     host.remove();

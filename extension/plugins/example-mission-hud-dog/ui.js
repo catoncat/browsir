@@ -244,6 +244,14 @@ export default function registerMissionHudDogUi(ui) {
         root.dataset.visible = "false";
       };
 
+      const reset = () => {
+        clearHideTimer();
+        hide();
+        root.dataset.phase = "thinking";
+        phase.textContent = phaseLabel("thinking");
+        text.textContent = "汪，我已就位。";
+      };
+
       const show = (payload) => {
         const next = normalizePayload(payload);
         if (!next) return;
@@ -266,9 +274,15 @@ export default function registerMissionHudDogUi(ui) {
       };
 
       chrome.runtime.onMessage.addListener(onMessage);
+      const stopWatchingSession = typeof context?.onActiveSessionChanged === "function"
+        ? context.onActiveSessionChanged(() => {
+            reset();
+          })
+        : null;
 
       return () => {
         clearHideTimer();
+        stopWatchingSession?.();
         chrome.runtime.onMessage.removeListener(onMessage);
         root.remove();
       };

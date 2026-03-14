@@ -55,12 +55,22 @@ export type UiWidgetSlot = "chat.scene.overlay";
 
 export type UiWidgetCleanup = () => void | Promise<void>;
 
+export interface UiActiveSessionChangePayload {
+  sessionId?: string;
+  previousSessionId?: string;
+}
+
+export type UiActiveSessionChangeListener = (
+  payload: UiActiveSessionChangePayload
+) => void | Promise<void>;
+
 export interface UiWidgetMountContext {
   pluginId: string;
   widgetId: string;
   slot: UiWidgetSlot;
   getActiveSessionId(): string | undefined;
   isActiveSession(sessionId?: string): boolean;
+  onActiveSessionChanged(listener: UiActiveSessionChangeListener): UiWidgetCleanup;
 }
 
 export interface UiWidgetDefinition {
@@ -196,6 +206,7 @@ interface MountedUiWidgetInstance {
   slot: UiWidgetSlot;
   order: number;
   container: HTMLElement;
+  sessionListeners: Set<UiActiveSessionChangeListener>;
   cleanup?: UiWidgetCleanup;
 }
 
@@ -209,6 +220,13 @@ interface RunHookResult<T> {
   blocked: boolean;
   reason?: string;
   value: T;
+}
+
+export interface UiPluginLoadFailure {
+  pluginId: string;
+  moduleUrl: string;
+  exportName: string;
+  error: string;
 }
 
 function toRecord(value: unknown): Record<string, unknown> {
@@ -330,6 +348,22 @@ export class PanelUiPluginRuntime {
     }));
   }
 
+  listLoadFailures(): UiPluginLoadFailure[] {
+    const out: UiPluginLoadFailure[] = [];
+    for (const [pluginId, state] of this.states.entries()) {
+      const error = String(state.lastError || "").trim();
+      if (!error) continue;
+      out.push({
+        pluginId,
+        moduleUrl: state.descriptor.moduleUrl,
+        exportName: state.descriptor.exportName,
+        error
+      });
+    }
+    out.sort((a, b) => a.pluginId.localeCompare(b.pluginId));
+    return out;
+  }
+
   async hydrate(input: unknown[]): Promise<void> {
     const nextList = Array.isArray(input) ? input.map((item) => normalizeDescriptor(item)).filter(Boolean) as UiExtensionDescriptor[] : [];
     const nextIds = new Set(nextList.map((item) => item.pluginId));
@@ -438,6 +472,7 @@ export class PanelUiPluginRuntime {
       state.widgets = [];
       state.enabled = false;
       await this.unmountWidgetsForPlugin(id);
+      this.reportPluginError(id, state.descriptor.moduleUrl, "ui plugin enable failed", error);
     }
   }
 
@@ -450,6 +485,7 @@ export class PanelUiPluginRuntime {
     state.handlers = [];
     state.widgets = [];
     state.remoteHookCache = null;
+    state.lastError = undefined;
   }
 
   async unregister(pluginId: string): Promise<void> {
@@ -464,6 +500,31 @@ export class PanelUiPluginRuntime {
       await this.unmountWidgetInstance(instanceId);
     }
     this.hostSlots.clear();
+  }
+
+  async notifyActiveSessionChanged(sessionId?: string, previousSessionId?: string): Promise<void> {
+    const payload: UiActiveSessionChangePayload = {
+      sessionId: String(sessionId || "").trim() || undefined,
+      previousSessionId: String(previousSessionId || "").trim() || undefined
+    };
+    for (const mounted of this.mountedWidgets.values()) {
+      for (const listener of mounted.sessionListeners) {
+        try {
+          await Promise.resolve(listener(payload));
+        } catch (error) {
+          const state = this.states.get(mounted.pluginId);
+          if (!state) continue;
+          state.errorCount += 1;
+          state.lastError = error instanceof Error ? error.message : String(error);
+          this.reportPluginError(
+            mounted.pluginId,
+            state.descriptor.moduleUrl,
+            "ui widget active session listener failed",
+            error
+          );
+        }
+      }
+    }
   }
 
   async runHook<K extends UiHookName>(hook: K, payload: UiHookPayloadMap[K]): Promise<RunHookResult<UiHookPayloadMap[K]>> {
@@ -613,6 +674,7 @@ export class PanelUiPluginRuntime {
     container.setAttribute("data-plugin-id", pluginId);
     container.setAttribute("data-widget-id", widget.id);
     host.appendChild(container);
+    const sessionListeners = new Set<UiActiveSessionChangeListener>();
     try {
       const cleanup = await Promise.resolve(widget.mount(container, {
         pluginId,
@@ -623,7 +685,15 @@ export class PanelUiPluginRuntime {
           const currentSessionId = this.getActiveSessionId();
           const candidate = String(sessionId || "").trim();
           if (!candidate) return true;
-          return Boolean(currentSessionId) && currentSessionId === candidate;
+          if (!currentSessionId) return true;
+          return currentSessionId === candidate;
+        },
+        onActiveSessionChanged: (listener) => {
+          if (typeof listener !== "function") return () => undefined;
+          sessionListeners.add(listener);
+          return () => {
+            sessionListeners.delete(listener);
+          };
         }
       }));
       this.mountedWidgets.set(instanceId, {
@@ -633,12 +703,14 @@ export class PanelUiPluginRuntime {
         slot: widget.slot,
         order: Number(widget.order) || 0,
         container,
+        sessionListeners,
         cleanup: typeof cleanup === "function" ? cleanup : undefined
       });
     } catch (error) {
       container.remove();
       state.errorCount += 1;
       state.lastError = error instanceof Error ? error.message : String(error);
+      this.reportPluginError(pluginId, state.descriptor.moduleUrl, "ui widget mount failed", error);
     }
   }
 
@@ -664,6 +736,7 @@ export class PanelUiPluginRuntime {
     const mounted = this.mountedWidgets.get(instanceId);
     if (!mounted) return;
     this.mountedWidgets.delete(instanceId);
+    mounted.sessionListeners.clear();
     try {
       await Promise.resolve(mounted.cleanup?.());
     } catch (error) {
@@ -758,6 +831,20 @@ export class PanelUiPluginRuntime {
           reject(error);
         }
       );
+    });
+  }
+
+  private reportPluginError(
+    pluginId: string,
+    moduleUrl: string,
+    label: string,
+    error: unknown
+  ): void {
+    const message = error instanceof Error ? error.message : String(error || "unknown error");
+    console.error(`[panel-ui-plugin] ${label}`, {
+      pluginId,
+      moduleUrl,
+      error: message
     });
   }
 }

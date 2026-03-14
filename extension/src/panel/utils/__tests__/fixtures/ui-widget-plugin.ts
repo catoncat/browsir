@@ -5,6 +5,7 @@ export default function registerUiWidgetPlugin(ui: {
     order?: number;
     mount(container: HTMLElement, context: {
       getActiveSessionId(): string | undefined;
+      onActiveSessionChanged(listener: (payload: { sessionId?: string; previousSessionId?: string }) => void): () => void;
     }): () => void;
   }): void;
 }) {
