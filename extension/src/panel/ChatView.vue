@@ -5,7 +5,7 @@ import { computed, onMounted, onUnmounted, ref, nextTick, watch } from "vue";
 import { useRuntimeStore } from "./stores/runtime";
 import { useChatStore } from "./stores/chat-store";
 import { useConfigStore } from "./stores/config-store";
-import { useMessageActions, type PanelMessageLike, type PendingRegenerateState } from "./utils/message-actions";
+import { useMessageActions } from "./utils/message-actions";
 import { publishDebugLinkToBridge } from "./utils/debug-link";
 import type {
   ViewMode,
@@ -47,6 +47,7 @@ import {
 } from "./utils/ui-plugin-runtime";
 
 import { useForkScene } from "./composables/use-fork-scene";
+import { useMessageEditing } from "./composables/use-message-editing";
 import ChatMessage from "./components/ChatMessage.vue";
 import StreamingDraftContainer from "./components/StreamingDraftContainer.vue";
 import ChatInput from "./components/ChatInput.vue";
@@ -200,11 +201,6 @@ const {
   regenerateFromAssistantEntry: regenerateFromAssistantWithScene
 });
 
-const editingUserEntryId = ref("");
-const editingUserDraft = ref("");
-const editingUserSubmitting = ref(false);
-const userPendingRegenerate = ref<PendingRegenerateState | null>(null);
-const userForkingEntryId = ref("");
 const startRunPending = ref(false);
 const {
   forkScenePhase,
@@ -223,6 +219,28 @@ const {
   cleanup: cleanupForkScene,
 } = useForkScene({
   loadSession: (id) => chatStore.loadConversation(id, { setActive: true }),
+});
+const {
+  editingUserEntryId,
+  editingUserDraft,
+  editingUserSubmitting,
+  userPendingRegenerate,
+  userForkingEntryId,
+  resetEditingState,
+  findLatestUserEntryId,
+  canEditUserMessage,
+  handleEditMessage,
+  handleEditDraftChange,
+  handleEditCancel,
+  handleEditSubmit,
+} = useMessageEditing({
+  messages,
+  loading,
+  editUserMessageAndRerun: (entryId, content, opts) =>
+    chatStore.editUserMessageAndRerun(entryId, content, opts),
+  switchForkSession: switchForkSessionWithScene,
+  cancelForkScene: () => { bumpForkSceneToken(); resetForkSceneState(); },
+  onError: setErrorMessage,
 });
 const activeRunHint = ref<RuntimeProgressHint | null>(null);
 const runViewState = ref<RunViewState>({
@@ -372,25 +390,6 @@ const finalAssistantStreamingPhase = computed({
     runPhase.value = isRunActive.value ? "llm" : "idle";
   }
 });
-
-function resetEditingState() {
-  editingUserEntryId.value = "";
-  editingUserDraft.value = "";
-  editingUserSubmitting.value = false;
-  userForkingEntryId.value = "";
-}
-
-function findLatestUserEntryId(items: PanelMessageLike[]) {
-  for (let i = items.length - 1; i >= 0; i -= 1) {
-    const candidate = items[i];
-    if (candidate?.role !== "user") continue;
-    const entryId = String(candidate?.entryId || "").trim();
-    if (!entryId) continue;
-    if (!String(candidate?.content || "").trim()) continue;
-    return entryId;
-  }
-  return "";
-}
 
 function pushRecentRuntimeEvent(source: "brain" | "bridge", event: unknown) {
   const row = toRecord(event);
@@ -2017,88 +2016,6 @@ async function rebuildChatInputRenderState() {
     return;
   }
   chatInputRenderState.value = normalizeUiChatInputRenderPayload(hook.value, fallback);
-}
-
-function canEditUserMessage(message: PanelMessageLike) {
-  if (message?.role !== "user") return false;
-  return String(message?.content || "").trim().length > 0;
-}
-
-async function handleEditMessage(payload: { entryId: string; content: string; role: string }) {
-  if (payload?.role !== "user") return;
-  if (loading.value || editingUserSubmitting.value) return;
-  const content = String(payload?.content || "").trim();
-  if (!content) return;
-  editingUserEntryId.value = String(payload?.entryId || "").trim();
-  editingUserDraft.value = String(payload?.content || "");
-}
-
-function handleEditDraftChange(payload: { entryId: string; content: string }) {
-  if (editingUserSubmitting.value) return;
-  const entryId = String(payload?.entryId || "").trim();
-  if (!entryId || editingUserEntryId.value !== entryId) return;
-  editingUserDraft.value = String(payload?.content || "");
-}
-
-function handleEditCancel(payload: { entryId: string }) {
-  if (editingUserSubmitting.value) return;
-  const entryId = String(payload?.entryId || "").trim();
-  if (!entryId || editingUserEntryId.value !== entryId) return;
-  resetEditingState();
-}
-
-async function handleEditSubmit(payload: { entryId: string; content: string; role: string }) {
-  if (payload?.role !== "user") return;
-  if (loading.value || editingUserSubmitting.value) return;
-  const entryId = String(payload?.entryId || "").trim();
-  if (!entryId || editingUserEntryId.value !== entryId) return;
-  const content = String(payload?.content || "").trim();
-  if (!content) return;
-
-  const startedAt = Date.now();
-  editingUserSubmitting.value = true;
-  const latestUserEntryIdBeforeSubmit = findLatestUserEntryId(messages.value);
-  const predictedMode: "retry" | "fork" = latestUserEntryIdBeforeSubmit === entryId ? "retry" : "fork";
-  if (predictedMode === "fork") {
-    userForkingEntryId.value = entryId;
-  }
-  userPendingRegenerate.value = {
-    mode: predictedMode,
-    sourceEntryId: entryId,
-    insertAfterUserEntryId: entryId,
-    strategy: "insert"
-  };
-  try {
-    const result = await chatStore.editUserMessageAndRerun(entryId, content, { setActive: false });
-    const latestUserEntryId = findLatestUserEntryId(messages.value);
-    const sourceEntryId = String(result.activeSourceEntryId || entryId || "").trim();
-    const anchorEntryId = latestUserEntryId || sourceEntryId;
-    userPendingRegenerate.value = anchorEntryId
-      ? {
-          mode: result.mode,
-          sourceEntryId,
-          insertAfterUserEntryId: anchorEntryId,
-          strategy: "insert"
-        }
-      : null;
-
-    if (result.mode === "fork") {
-      await switchForkSessionWithScene(result.sessionId, { startedAt });
-    }
-
-    resetEditingState();
-  } catch (err) {
-    userPendingRegenerate.value = null;
-    bumpForkSceneToken();
-    resetForkSceneState();
-    setErrorMessage(err, "编辑并重跑失败");
-    console.error(err);
-  } finally {
-    editingUserSubmitting.value = false;
-    if (!editingUserEntryId.value) {
-      userForkingEntryId.value = "";
-    }
-  }
 }
 
 async function refreshBridgeConnectionStatus() {
