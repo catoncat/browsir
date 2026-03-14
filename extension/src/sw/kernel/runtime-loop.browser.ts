@@ -13,7 +13,7 @@ import {
   transformMessagesForLlm,
 } from "./llm-message-model.browser";
 import { decideProfileEscalation } from "./llm-profile-policy";
-import { DEFAULT_LLM_ROLE, type LlmResolvedRoute } from "./llm-provider";
+import { type LlmResolvedRoute } from "./llm-provider";
 import { LlmProviderRegistry } from "./llm-provider-registry";
 import { resolveLlmRoute } from "./llm-profile-resolver";
 import { writeSessionMeta } from "./session-store.browser";
@@ -60,12 +60,9 @@ import {
   type StreamingBehavior,
 } from "./types";
 import {
-  parseHostedChatTransportEvent,
   type HostedChatTurnResult,
-  type HostedChatTransportEvent,
 } from "../../shared/cursor-help-web-shared";
 import { normalizeCompactionSettings } from "../../shared/compaction";
-import { getProviderRuntimeKind } from "../../shared/llm-provider-config";
 import {
   createToolDispatcher,
   createRuntimeError,
@@ -76,6 +73,31 @@ import {
   buildSkillPackageRootLocation,
   type ToolDispatchDeps,
 } from "./loop-tool-dispatch";
+import {
+  buildLlmFailureSignature,
+  buildLlmRoutePayload,
+  computeRetryDelayMs,
+  extractRetryDelayHintMs,
+  isRetryableLlmStatus,
+  readSessionLlmRoutePrefs,
+  resolveAuxiliaryLlmRoute,
+  resolvePrimaryLlmRoute,
+  withSessionLlmRouteMeta,
+} from "./loop-llm-route";
+import {
+  buildHostedChatEventPayload,
+  hostedChatTurnToMessage,
+  parseLlmMessageFromBody,
+  readHostedChatTurnFromTransportStream,
+  readLlmMessageFromSseStream,
+  resolveRouteRuntimeKind,
+} from "./loop-llm-stream";
+import {
+  buildFocusEscalationToolCall,
+  parseToolCallArgs,
+  buildToolFailurePayload,
+  buildToolSuccessPayload,
+} from "./loop-tool-display";
 
 // ── Re-exports from shared modules (preserve public API) ────────────
 export {
@@ -154,6 +176,7 @@ export {
   buildBashExitFailureEnvelope,
   buildSkillScriptSandboxFailureEnvelope,
   buildStepFailureEnvelope,
+  normalizeFailureReason,
 } from "./loop-failure-protocol";
 
 // ── Imports from shared modules (used within this file) ─────────────
@@ -216,18 +239,9 @@ import {
   callInfra,
   extractLlmConfig,
   delay,
-  safeJsonParse,
 } from "./loop-shared-utils";
 import {
-  attachFailureProtocol,
-  extractBashExecOutcome,
-  buildBashExitFailureEnvelope,
-  buildSkillScriptSandboxFailureEnvelope,
-  buildStepFailureEnvelope,
-  isRetryableToolErrorCode,
-  shouldAutoReplayToolCall,
-  computeToolRetryDelayMs,
-  buildToolRetryHint,
+  normalizeFailureReason,
 } from "./loop-failure-protocol";
 
 type JsonRecord = Record<string, unknown>;
@@ -451,71 +465,6 @@ function withSessionTitleMeta(
   };
 }
 
-interface SessionLlmRoutePrefs {
-  profile?: string;
-  role?: string;
-}
-
-function readSessionLlmRoutePrefs(
-  meta: SessionMeta | null,
-): SessionLlmRoutePrefs {
-  const metadata = toRecord(meta?.header?.metadata);
-  const profile = String(metadata.llmProfile || "").trim();
-  const role = String(metadata.llmRole || "").trim();
-  return {
-    profile: profile || undefined,
-    role: role || undefined,
-  };
-}
-
-function withSessionLlmRouteMeta(
-  meta: SessionMeta,
-  route: LlmResolvedRoute,
-): SessionMeta {
-  const metadata = {
-    ...toRecord(meta.header.metadata),
-    llmResolvedProfile: route.profile,
-    llmResolvedProvider: route.provider,
-    llmResolvedModel: route.llmModel,
-    llmResolvedRole: route.role,
-    llmResolvedEscalationPolicy: route.escalationPolicy,
-  };
-  return {
-    ...meta,
-    header: {
-      ...meta.header,
-      metadata,
-    },
-    updatedAt: nowIso(),
-  };
-}
-
-function buildLlmRoutePayload(
-  route: LlmResolvedRoute,
-  extra: JsonRecord = {},
-): JsonRecord {
-  return {
-    profile: route.profile,
-    provider: route.provider,
-    runtimeKind: route.runtimeKind,
-    model: route.llmModel,
-    role: route.role,
-    fromLegacy: route.fromLegacy,
-    ...extra,
-  };
-}
-
-function buildLlmFailureSignature(error: unknown): string {
-  const err = asRuntimeErrorWithMeta(error);
-  const code = normalizeErrorCode(err.code);
-  const status = Number(err.status || 0);
-  const msg = String(err.message || "")
-    .trim()
-    .toLowerCase()
-    .slice(0, 180);
-  return `${code || "E_UNKNOWN"}|${status || 0}|${msg}`;
-}
-
 function parseLlmContent(message: unknown): string {
   const payload = toRecord(message);
   if (typeof payload.content === "string") return payload.content;
@@ -647,647 +596,6 @@ function buildNoProgressEvidenceFingerprint(value: unknown): string {
   return safeStringify(normalizeNoProgressEvidenceValue(value), 1200);
 }
 
-function parseToolCallArgs(raw: string): JsonRecord | null {
-  const text = String(raw || "").trim();
-  if (!text) return null;
-  const parsed = safeJsonParse(text);
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-    return null;
-  return parsed as JsonRecord;
-}
-
-function stringifyToolCallArgs(args: JsonRecord): string {
-  try {
-    return JSON.stringify(args);
-  } catch {
-    return "{}";
-  }
-}
-
-function buildFocusEscalationToolCall(
-  toolCall: ToolCallItem,
-): ToolCallItem | null {
-  const normalized = String(toolCall.function.name || "")
-    .trim()
-    .toLowerCase();
-  if (
-    ![
-      "click",
-      "fill_element_by_uid",
-      "select_option_by_uid",
-      "hover_element_by_uid",
-      "press_key",
-      "scroll_page",
-      "navigate_tab",
-      "scroll_to_element",
-      "highlight_element",
-      "highlight_text_inline",
-      "fill_form",
-    ].includes(normalized)
-  ) {
-    return null;
-  }
-  const args = parseToolCallArgs(toolCall.function.arguments || "");
-  if (!args) return null;
-  const nextArgs: JsonRecord = {
-    ...args,
-    forceFocus: true,
-  };
-  const nestedAction = toRecord(nextArgs.action);
-  if (Object.keys(nestedAction).length > 0) {
-    nextArgs.action = {
-      ...nestedAction,
-      forceFocus: true,
-    };
-  }
-  return {
-    ...toolCall,
-    function: {
-      ...toolCall.function,
-      arguments: stringifyToolCallArgs(nextArgs),
-    },
-  };
-}
-
-function summarizeToolTarget(
-  toolName: string,
-  args: JsonRecord | null,
-  rawArgs: string,
-): string {
-  const normalized = String(toolName || "")
-    .trim()
-    .toLowerCase();
-  const raw = String(rawArgs || "").trim();
-  const pick = (key: string) => String(args?.[key] || "").trim();
-
-  if (["host_bash", "browser_bash"].includes(normalized)) {
-    const command = pick("command") || raw;
-    return command ? `命令：${clipText(command, 220)}` : "";
-  }
-  if (normalized === "create_new_tab") {
-    const url = pick("url");
-    return url ? `目标：${clipText(url, 220)}` : "";
-  }
-  if (normalized === "get_tab_info") {
-    const tabId = pick("tabId");
-    return tabId
-      ? `读取标签页详情 · tabId=${clipText(tabId, 80)}`
-      : "读取标签页详情";
-  }
-  if (normalized === "close_tab") {
-    const tabId = pick("tabId");
-    return tabId
-      ? `关闭标签页 · tabId=${clipText(tabId, 80)}`
-      : "关闭当前标签页";
-  }
-  if (normalized === "ungroup_tabs") {
-    return "取消标签页分组";
-  }
-  if (
-    [
-      "host_read_file",
-      "browser_read_file",
-      "host_write_file",
-      "browser_write_file",
-      "host_edit_file",
-      "browser_edit_file",
-    ].includes(normalized)
-  ) {
-    const path = pick("path");
-    return path ? `路径：${clipText(path, 220)}` : "";
-  }
-  if (normalized === "search_elements") {
-    const query = pick("query");
-    const selector = pick("selector");
-    if (query && selector)
-      return `元素检索：${clipText(query, 120)} · 作用域：${clipText(selector, 120)}`;
-    if (query) return `元素检索：${clipText(query, 120)}`;
-    if (selector) return `元素检索作用域：${clipText(selector, 120)}`;
-    return "元素检索";
-  }
-  if (normalized === "click") {
-    const target = pick("uid") || pick("ref") || pick("selector");
-    return target ? `点击 · ${clipText(target, 180)}` : "点击";
-  }
-  if (normalized === "fill_element_by_uid") {
-    const target = pick("uid") || pick("ref") || pick("selector");
-    return target ? `填写 · ${clipText(target, 180)}` : "填写";
-  }
-  if (normalized === "select_option_by_uid") {
-    const target = pick("uid") || pick("ref") || pick("selector");
-    const value = pick("value");
-    if (target && value)
-      return `选择选项 · ${clipText(target, 120)} = ${clipText(value, 120)}`;
-    return target ? `选择选项 · ${clipText(target, 180)}` : "选择选项";
-  }
-  if (normalized === "hover_element_by_uid") {
-    const target = pick("uid") || pick("ref") || pick("selector");
-    return target ? `悬停 · ${clipText(target, 180)}` : "悬停元素";
-  }
-  if (normalized === "get_editor_value") {
-    const target = pick("uid") || pick("ref") || pick("selector");
-    return target
-      ? `读取编辑器内容 · ${clipText(target, 180)}`
-      : "读取编辑器内容";
-  }
-  if (normalized === "press_key") {
-    const key = pick("key") || pick("value");
-    return key ? `按键 · ${clipText(key, 120)}` : "按键";
-  }
-  if (normalized === "scroll_page") {
-    const delta = pick("deltaY") || pick("value");
-    return delta ? `滚动页面 · ${clipText(delta, 120)}` : "滚动页面";
-  }
-  if (normalized === "navigate_tab") {
-    const url = pick("url");
-    return url ? `导航 · ${clipText(url, 220)}` : "导航";
-  }
-  if (normalized === "fill_form") {
-    const elements = Array.isArray(args?.elements) ? args?.elements : [];
-    return `批量填表：${elements.length} 项`;
-  }
-  if (normalized === "computer") {
-    const action = pick("action");
-    return action ? `视觉操作 · ${clipText(action, 120)}` : "视觉操作";
-  }
-  if (normalized === "get_page_metadata") return "读取页面元信息";
-  if (normalized === "scroll_to_element") {
-    const target = pick("uid") || pick("ref") || pick("selector");
-    return target ? `滚动到元素 · ${clipText(target, 180)}` : "滚动到元素";
-  }
-  if (normalized === "highlight_element") {
-    const target = pick("uid") || pick("ref") || pick("selector");
-    return target ? `高亮元素 · ${clipText(target, 180)}` : "高亮元素";
-  }
-  if (normalized === "highlight_text_inline") {
-    const selector = pick("selector");
-    const text = pick("searchText");
-    if (selector && text)
-      return `高亮文本 · ${clipText(text, 120)} @ ${clipText(selector, 120)}`;
-    return "高亮文本";
-  }
-  if (normalized === "capture_screenshot") return "截图";
-  if (normalized === "capture_tab_screenshot") {
-    const tabId = pick("tabId");
-    return tabId ? `标签页截图 · tabId=${clipText(tabId, 80)}` : "标签页截图";
-  }
-  if (normalized === "capture_screenshot_with_highlight") {
-    const selector = pick("selector");
-    return selector ? `高亮截图 · ${clipText(selector, 120)}` : "高亮截图";
-  }
-  if (normalized === "download_image") {
-    const filename = pick("filename");
-    return filename ? `下载图片 · ${clipText(filename, 160)}` : "下载图片";
-  }
-  if (normalized === "download_chat_images") return "批量下载聊天图片";
-  if (normalized === "list_interventions") return "读取可用人工干预";
-  if (normalized === "get_intervention_info") {
-    const type = pick("type");
-    return type ? `读取干预详情 · ${clipText(type, 120)}` : "读取干预详情";
-  }
-  if (normalized === "request_intervention") {
-    const type = pick("type");
-    return type ? `请求人工干预 · ${clipText(type, 120)}` : "请求人工干预";
-  }
-  if (normalized === "cancel_intervention") {
-    const id = pick("id");
-    return id ? `取消干预 · ${clipText(id, 160)}` : "取消干预";
-  }
-  if (normalized === "create_skill") {
-    const name = pick("name") || pick("id");
-    return name ? `创建技能 · ${clipText(name, 160)}` : "创建技能";
-  }
-  if (normalized === "load_skill") {
-    const name = pick("name");
-    return name ? `加载技能 · ${clipText(name, 160)}` : "加载技能";
-  }
-  if (normalized === "execute_skill_script") {
-    const name = pick("skillName");
-    const scriptPath = pick("scriptPath");
-    if (name && scriptPath)
-      return `执行技能脚本 · ${clipText(name, 120)}:${clipText(scriptPath, 120)}`;
-    return "执行技能脚本";
-  }
-  if (normalized === "read_skill_reference") {
-    const name = pick("skillName");
-    const refPath = pick("refPath");
-    if (name && refPath)
-      return `读取技能参考 · ${clipText(name, 120)}:${clipText(refPath, 120)}`;
-    return "读取技能参考";
-  }
-  if (normalized === "get_skill_asset") {
-    const name = pick("skillName");
-    const assetPath = pick("assetPath");
-    if (name && assetPath)
-      return `读取技能资产 · ${clipText(name, 120)}:${clipText(assetPath, 120)}`;
-    return "读取技能资产";
-  }
-  if (normalized === "list_skills") return "读取技能列表";
-  if (normalized === "get_skill_info") {
-    const name = pick("skillName");
-    return name ? `读取技能详情 · ${clipText(name, 160)}` : "读取技能详情";
-  }
-  if (normalized === "browser_verify") return "页面验证";
-  if (normalized === "get_all_tabs") return "读取标签页列表";
-  if (normalized === "get_current_tab") return "读取当前标签页";
-  if (raw) return `参数：${clipText(raw, 220)}`;
-  return "";
-}
-
-function buildToolFailurePayload(
-  toolCall: ToolCallItem,
-  result: JsonRecord,
-): JsonRecord {
-  const toolName = String(toolCall.function.name || "").trim();
-  const rawArgs = String(toolCall.function.arguments || "").trim();
-  const args = parseToolCallArgs(rawArgs);
-  const target = summarizeToolTarget(toolName, args, rawArgs);
-  const errorCode = normalizeErrorCode(result.errorCode);
-  const retryable =
-    result.retryable === true || isRetryableToolErrorCode(toolName, errorCode);
-  return {
-    error: String(result.error || "工具执行失败"),
-    errorReason: String(result.errorReason || "failed_execute"),
-    errorCode: errorCode || undefined,
-    retryable,
-    retryHint: String(
-      result.retryHint || buildToolRetryHint(toolName, errorCode),
-    ),
-    tool: toolName,
-    target,
-    args: args || null,
-    rawArgs: args ? undefined : clipText(rawArgs, 1200),
-    details: result.details || null,
-    modeUsed: String(result.modeUsed || "") || undefined,
-    providerId: String(result.providerId || "") || undefined,
-    fallbackFrom: String(result.fallbackFrom || "") || undefined,
-    failureClass: result.failureClass || undefined,
-    modeEscalation: result.modeEscalation || undefined,
-    resume: result.resume || undefined,
-    stepRef: result.stepRef || undefined,
-  };
-}
-
-function buildToolSuccessPayload(
-  toolCall: ToolCallItem,
-  data: unknown,
-  meta: {
-    modeUsed?: unknown;
-    providerId?: unknown;
-    fallbackFrom?: unknown;
-  } = {},
-): JsonRecord {
-  const toolName = String(toolCall.function.name || "").trim();
-  const rawArgs = String(toolCall.function.arguments || "").trim();
-  const args = parseToolCallArgs(rawArgs);
-  const target = summarizeToolTarget(toolName, args, rawArgs);
-  const base =
-    data && typeof data === "object" && !Array.isArray(data)
-      ? ({ ...(data as JsonRecord) } as JsonRecord)
-      : { data };
-  return {
-    ...base,
-    tool: toolName,
-    target,
-    args: args || null,
-    modeUsed: String(meta.modeUsed || "") || undefined,
-    providerId: String(meta.providerId || "") || undefined,
-    fallbackFrom: String(meta.fallbackFrom || "") || undefined,
-  };
-}
-
-function parseLlmMessageFromSse(rawBody: string): JsonRecord {
-  const lines = String(rawBody || "").split(/\r?\n/);
-  const toolByIndex = new Map<number, ToolCallItem>();
-  let text = "";
-
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line.startsWith("data:")) continue;
-    const data = line.slice(5).trim();
-    if (!data || data === "[DONE]") continue;
-    const parsed = safeJsonParse(data);
-    const packet = toRecord(parsed);
-    const choices = Array.isArray(packet.choices) ? packet.choices : [];
-    for (const choice of choices) {
-      const row = toRecord(choice);
-      const delta = toRecord(row.delta || row.message);
-      if (typeof delta.content === "string") {
-        text += delta.content;
-      }
-      const toolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
-      for (const rawCall of toolCalls) {
-        const call = toRecord(rawCall);
-        const idx = Number.isInteger(call.index) ? Number(call.index) : 0;
-        const prev = toolByIndex.get(idx) || {
-          id: "",
-          type: "function",
-          function: { name: "", arguments: "" },
-        };
-        if (typeof call.id === "string" && call.id) prev.id = call.id;
-        const fn = toRecord(call.function);
-        if (typeof fn.name === "string" && fn.name) {
-          prev.function.name = prev.function.name
-            ? `${prev.function.name}${fn.name}`
-            : fn.name;
-        }
-        if (typeof fn.arguments === "string" && fn.arguments) {
-          prev.function.arguments = `${prev.function.arguments || ""}${fn.arguments}`;
-        }
-        toolByIndex.set(idx, prev);
-      }
-    }
-  }
-
-  return {
-    content: text,
-    tool_calls: Array.from(toolByIndex.keys())
-      .sort((a, b) => a - b)
-      .map((idx) => toolByIndex.get(idx))
-      .filter((item): item is ToolCallItem => Boolean(item)),
-  };
-}
-
-interface LlmSseStreamResult {
-  message: JsonRecord;
-  rawBody: string;
-  packetCount: number;
-}
-
-interface HostedChatStreamResult {
-  result: HostedChatTurnResult;
-  rawBody: string;
-  eventCount: number;
-}
-
-function resolveRouteRuntimeKind(route: LlmResolvedRoute): "model_llm" | "hosted_chat" {
-  return route.runtimeKind || getProviderRuntimeKind(route.provider);
-}
-
-function extractDeltaText(delta: JsonRecord): string {
-  const content = delta.content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-
-  let out = "";
-  for (const item of content) {
-    const row = toRecord(item);
-    const text = row.text;
-    if (typeof text === "string") {
-      out += text;
-      continue;
-    }
-    const nested = row.content;
-    if (typeof nested === "string") out += nested;
-  }
-  return out;
-}
-
-function appendDeltaToolCalls(
-  toolByIndex: Map<number, ToolCallItem>,
-  delta: JsonRecord,
-): void {
-  const toolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
-  for (const rawCall of toolCalls) {
-    const call = toRecord(rawCall);
-    const idx = Number.isInteger(call.index) ? Number(call.index) : 0;
-    const prev = toolByIndex.get(idx) || {
-      id: "",
-      type: "function" as const,
-      function: { name: "", arguments: "" },
-    };
-    if (typeof call.id === "string" && call.id) prev.id = call.id;
-    const fn = toRecord(call.function);
-    if (typeof fn.name === "string" && fn.name) {
-      prev.function.name = prev.function.name
-        ? `${prev.function.name}${fn.name}`
-        : fn.name;
-    }
-    if (typeof fn.arguments === "string" && fn.arguments) {
-      prev.function.arguments = `${prev.function.arguments || ""}${fn.arguments}`;
-    }
-    toolByIndex.set(idx, prev);
-  }
-}
-
-async function readLlmMessageFromSseStream(
-  body: ReadableStream<Uint8Array>,
-  onDeltaText?: (chunk: string) => void,
-): Promise<LlmSseStreamResult> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let text = "";
-  let packetCount = 0;
-  const rawPackets: string[] = [];
-  const toolByIndex = new Map<number, ToolCallItem>();
-
-  const processLine = (rawLine: string) => {
-    const line = String(rawLine || "").trim();
-    if (!line.startsWith("data:")) return;
-    const data = line.slice(5).trim();
-    if (!data) return;
-    rawPackets.push(`data: ${data}`);
-    if (data === "[DONE]") return;
-
-    const parsed = safeJsonParse(data);
-    const packet = toRecord(parsed);
-    packetCount += 1;
-    const choices = Array.isArray(packet.choices) ? packet.choices : [];
-    for (const choice of choices) {
-      const row = toRecord(choice);
-      const delta = toRecord(row.delta || row.message);
-      const textChunk = extractDeltaText(delta);
-      if (textChunk) {
-        text += textChunk;
-        if (onDeltaText) onDeltaText(textChunk);
-      }
-      appendDeltaToolCalls(toolByIndex, delta);
-    }
-  };
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let lineBreak = buffer.indexOf("\n");
-    while (lineBreak >= 0) {
-      const line = buffer.slice(0, lineBreak).replace(/\r$/, "");
-      buffer = buffer.slice(lineBreak + 1);
-      processLine(line);
-      lineBreak = buffer.indexOf("\n");
-    }
-  }
-
-  const tail = buffer + decoder.decode();
-  if (tail.trim()) processLine(tail.replace(/\r$/, ""));
-
-  const message: JsonRecord = {
-    content: text,
-    tool_calls: Array.from(toolByIndex.keys())
-      .sort((a, b) => a - b)
-      .map((idx) => toolByIndex.get(idx))
-      .filter((item): item is ToolCallItem => Boolean(item)),
-  };
-
-  return {
-    message,
-    rawBody: rawPackets.join("\n"),
-    packetCount,
-  };
-}
-
-async function readHostedChatTurnFromTransportStream(
-  body: ReadableStream<Uint8Array>,
-  onEvent?: (event: HostedChatTransportEvent) => void,
-): Promise<HostedChatStreamResult> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let eventCount = 0;
-  let resolved: HostedChatTurnResult | null = null;
-  let transportError: { message: string; meta: JsonRecord } | null = null;
-  const rawLines: string[] = [];
-
-  const processLine = (rawLine: string) => {
-    const line = String(rawLine || "").trim();
-    if (!line) return;
-    const event = parseHostedChatTransportEvent(line);
-    if (!event) return;
-    eventCount += 1;
-    rawLines.push(line);
-    if (onEvent) onEvent(event);
-    if (event.type === "hosted_chat.turn_resolved") {
-      resolved = event.result;
-      return;
-    }
-    if (event.type === "hosted_chat.transport_error") {
-      transportError = {
-        message: event.error,
-        meta: toRecord(event.meta),
-      };
-    }
-  };
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let lineBreak = buffer.indexOf("\n");
-    while (lineBreak >= 0) {
-      const line = buffer.slice(0, lineBreak).replace(/\r$/, "");
-      buffer = buffer.slice(lineBreak + 1);
-      processLine(line);
-      lineBreak = buffer.indexOf("\n");
-    }
-  }
-
-  const tail = buffer + decoder.decode();
-  if (tail.trim()) processLine(tail.replace(/\r$/, ""));
-
-  const latestTransportError = transportError as {
-    message: string;
-    meta: JsonRecord;
-  } | null;
-  if (latestTransportError) {
-    const error = new Error(latestTransportError.message || "网页宿主聊天执行失败") as RuntimeErrorWithMeta;
-    error.code = "E_HOSTED_CHAT_TRANSPORT";
-    error.details = latestTransportError.meta;
-    error.retryable = false;
-    throw error;
-  }
-  if (!resolved) {
-    const error = new Error("网页宿主聊天回合未返回最终结果") as RuntimeErrorWithMeta;
-    error.code = "E_HOSTED_CHAT_NO_TURN_RESULT";
-    error.retryable = false;
-    throw error;
-  }
-
-  return {
-    result: resolved,
-    rawBody: rawLines.join("\n"),
-    eventCount,
-  };
-}
-
-function hostedChatTurnToMessage(result: HostedChatTurnResult): JsonRecord {
-  return {
-    content: result.assistantText,
-    tool_calls: result.toolCalls,
-    finish_reason: result.finishReason,
-    meta: result.meta,
-  };
-}
-
-function buildHostedChatEventPayload(
-  step: number,
-  attempt: number,
-  event: HostedChatTransportEvent,
-): JsonRecord {
-  if (event.type === "hosted_chat.stream_text_delta") {
-    return {
-      step,
-      attempt,
-      textLength: String(event.deltaText || "").length,
-      ...toRecord(event.meta),
-    };
-  }
-  if (event.type === "hosted_chat.tool_call_detected") {
-    return {
-      step,
-      attempt,
-      toolCalls: Array.isArray(event.toolCalls) ? event.toolCalls.length : 0,
-      assistantTextLength: String(event.assistantText || "").length,
-      ...toRecord(event.meta),
-    };
-  }
-  if (event.type === "hosted_chat.turn_resolved") {
-    return {
-      step,
-      attempt,
-      finishReason: event.result.finishReason,
-      toolCalls: Array.isArray(event.result.toolCalls)
-        ? event.result.toolCalls.length
-        : 0,
-      assistantTextLength: String(event.result.assistantText || "").length,
-      ...toRecord(event.result.meta),
-    };
-  }
-  if (event.type === "hosted_chat.transport_error") {
-    return {
-      step,
-      attempt,
-      error: event.error,
-      ...toRecord(event.meta),
-    };
-  }
-  return {
-    step,
-    attempt,
-    stage: event.stage,
-    detail: event.detail || "",
-    ...toRecord(event.meta),
-  };
-}
-
-function parseLlmMessageFromBody(
-  rawBody: string,
-  contentType: string,
-): JsonRecord {
-  const body = String(rawBody || "");
-  const lowerType = String(contentType || "").toLowerCase();
-  if (
-    lowerType.includes("text/event-stream") ||
-    body.trim().startsWith("data:")
-  ) {
-    return parseLlmMessageFromSse(body);
-  }
-  const parsed = safeJsonParse(body);
-  const payload = toRecord(parsed);
-  const choices = Array.isArray(payload.choices) ? payload.choices : [];
-  return toRecord(toRecord(choices[0]).message);
-}
-
 function applyLatestUserPromptOverride(
   messages: JsonRecord[],
   prompt: string,
@@ -1358,89 +666,6 @@ function shouldAcquireLease(
   return actionRequiresLease(kind);
 }
 
-function isRetryableLlmStatus(status: number): boolean {
-  return [408, 409, 429, 500, 502, 503, 504].includes(Number(status || 0));
-}
-
-function computeRetryDelayMs(attempt: number): number {
-  const base = 500;
-  const cap = 4000;
-  const next = base * 2 ** Math.max(0, attempt - 1);
-  return Math.min(cap, next);
-}
-
-function parseRetryAfterHeaderValue(raw: string): number | null {
-  const value = String(raw || "").trim();
-  if (!value) return null;
-  const sec = Number(value);
-  if (Number.isFinite(sec) && sec > 0) return Math.ceil(sec * 1000);
-  const ts = new Date(value).getTime();
-  if (!Number.isFinite(ts)) return null;
-  const delta = ts - Date.now();
-  if (delta <= 0) return null;
-  return Math.ceil(delta);
-}
-
-function extractRetryDelayHintMs(
-  rawBody: string,
-  resp: Response,
-): number | null {
-  const retryAfter = parseRetryAfterHeaderValue(
-    String(resp.headers.get("retry-after") || ""),
-  );
-  if (retryAfter !== null) return retryAfter;
-
-  const xRateLimitReset = String(
-    resp.headers.get("x-ratelimit-reset") || "",
-  ).trim();
-  if (xRateLimitReset) {
-    const sec = Number.parseInt(xRateLimitReset, 10);
-    if (Number.isFinite(sec)) {
-      const delta = sec * 1000 - Date.now();
-      if (delta > 0) return Math.ceil(delta);
-    }
-  }
-
-  const xRateLimitResetAfter = String(
-    resp.headers.get("x-ratelimit-reset-after") || "",
-  ).trim();
-  if (xRateLimitResetAfter) {
-    const sec = Number(xRateLimitResetAfter);
-    if (Number.isFinite(sec) && sec > 0) return Math.ceil(sec * 1000);
-  }
-
-  const text = String(rawBody || "");
-  const retryDelayField = /"retryDelay"\s*:\s*"([\d.]+)s"/i.exec(text);
-  if (retryDelayField) {
-    const sec = Number(retryDelayField[1]);
-    if (Number.isFinite(sec) && sec > 0) return Math.ceil(sec * 1000);
-  }
-
-  const resetAfter = /reset after (?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s/i.exec(
-    text,
-  );
-  if (resetAfter) {
-    const hours = resetAfter[1] ? Number.parseInt(resetAfter[1], 10) : 0;
-    const minutes = resetAfter[2] ? Number.parseInt(resetAfter[2], 10) : 0;
-    const seconds = Number(resetAfter[3]);
-    if (Number.isFinite(seconds) && seconds > 0) {
-      return Math.ceil(((hours * 60 + minutes) * 60 + seconds) * 1000);
-    }
-  }
-
-  const retryIn = /retry in (\d+(?:\.\d+)?)\s*(ms|s)/i.exec(text);
-  if (retryIn) {
-    const amount = Number(retryIn[1]);
-    if (Number.isFinite(amount) && amount > 0) {
-      return Math.ceil(
-        retryIn[2].toLowerCase() === "ms" ? amount : amount * 1000,
-      );
-    }
-  }
-
-  return null;
-}
-
 function mapToolErrorReasonToTerminalStatus(
   rawReason: unknown,
 ): "failed_execute" | "failed_verify" | "progress_uncertain" {
@@ -1450,33 +675,6 @@ function mapToolErrorReasonToTerminalStatus(
   if (reason === "failed_verify") return "failed_verify";
   if (reason === "progress_uncertain") return "progress_uncertain";
   return "failed_execute";
-}
-
-function resolveAuxiliaryLlmRoute(config: BridgeConfig) {
-  const auxProfile = String(config.llmAuxProfile || "").trim();
-  const profile =
-    auxProfile ||
-    String(config.llmDefaultProfile || "default").trim() ||
-    "default";
-  return resolveLlmRoute({
-    config,
-    profile,
-    role: DEFAULT_LLM_ROLE,
-    escalationPolicy: "disabled",
-  });
-}
-
-function resolvePrimaryLlmRoute(
-  config: BridgeConfig,
-  routePrefs: SessionLlmRoutePrefs,
-) {
-  const hasExplicitProfile = Boolean(String(routePrefs.profile || "").trim());
-  return resolveLlmRoute({
-    config,
-    profile: routePrefs.profile,
-    role: routePrefs.role,
-    escalationPolicy: hasExplicitProfile ? "disabled" : undefined,
-  });
 }
 
 async function requestSessionTitleFromLlm(input: {
@@ -1665,7 +863,21 @@ async function requestCompactionSummaryFromLlm(input: {
       const status = response.status;
       const ok = response.ok;
       const contentType = String(response.headers.get("content-type") || "");
-      const rawBody = await response.text();
+      const isHostedChat =
+        resolveRouteRuntimeKind(route) === "hosted_chat";
+
+      let rawBody: string;
+      let hostedMessage: JsonRecord | null = null;
+
+      if (ok && isHostedChat && response.body) {
+        const hosted =
+          await readHostedChatTurnFromTransportStream(response.body);
+        rawBody = hosted.rawBody;
+        hostedMessage = { content: hosted.result.assistantText };
+      } else {
+        rawBody = await response.text();
+      }
+
       const retryDelayHintMs = ok
         ? null
         : extractRetryDelayHintMs(rawBody, response);
@@ -1703,7 +915,8 @@ async function requestCompactionSummaryFromLlm(input: {
         throw err;
       }
 
-      const message = parseLlmMessageFromBody(rawBody, contentType);
+      const message =
+        hostedMessage ?? parseLlmMessageFromBody(rawBody, contentType);
       const afterResponse = await input.orchestrator.runHook(
         "llm.after_response",
         {
