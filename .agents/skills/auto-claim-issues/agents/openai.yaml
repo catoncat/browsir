@@ -1,0 +1,7 @@
+interface:
+  display_name: "Auto Claim Issues"
+  short_description: "自动认领 browser-brain-loop backlog issue / slice"
+  default_prompt: "Use $auto-claim-issues to claim the next eligible backlog issue or a specific ISSUE-xxx, respecting depends_on and write_scope conflicts."
+policy:
+  allow_implicit_invocation: true
+
