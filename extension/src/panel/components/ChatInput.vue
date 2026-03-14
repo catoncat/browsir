@@ -541,11 +541,12 @@ function scrollToFocusedSkill() {
 }
 
 function handleSubmit(mode: "normal" | "steer" | "followUp") {
-  if ((text.value.trim().length === 0 && selectedSkills.value.length === 0) || props.disabled || isStartingRun.value) return;
+  const extracted = extractPromptContextRefs(text.value, "composer_mention");
+  const hasContent = extracted.cleanedText.trim().length > 0 || selectedSkills.value.length > 0 || extracted.refs.length > 0;
+  if (!hasContent || props.disabled || isStartingRun.value) return;
   const resolvedMode = props.isRunning ? (mode === "normal" ? "steer" : mode) : "normal";
-  const extracted = extractPromptContextRefs(text.value);
   emit("send", {
-    text: text.value,
+    text: extracted.cleanedText,
     tabIds: selectedTabs.value.map(t => t.id),
     skillIds: selectedSkills.value.map((item) => item.id),
     contextRefs: extracted.refs as Array<Record<string, unknown>>,
