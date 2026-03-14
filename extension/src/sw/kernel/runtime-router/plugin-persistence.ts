@@ -5,6 +5,13 @@ import exampleMissionHudDogPluginPackage from "../../../../plugins/example-missi
 
 const PLUGIN_REGISTRY_STORAGE_KEY = "brain.plugin.registry:v1";
 const PLUGIN_EXAMPLE_SEED_STORAGE_KEY = "brain.plugin.seed.examples:v1";
+const PLUGIN_EXAMPLE_SEED_VERSION = 2;
+const MISSION_HUD_DOG_PLUGIN_ID = "plugin.example.ui.mission-hud.dog";
+const LEGACY_MISSION_HUD_DOG_UI_JS = `// mission-hud-dog 主要通过 runtime message 驱动 UI（bbloop.ui.mascot）
+// 当前不需要额外 ui hook。你可在这里加自定义渲染逻辑。
+module.exports = function registerMissionHudDogUi(_ui) {
+  return;
+};`;
 
 export type PersistedPluginKind = "builtin_state" | "extension";
 
@@ -66,6 +73,47 @@ function normalizePersistedPluginRecord(
     updatedAt,
     source: clonedSource as Record<string, unknown>,
   };
+}
+
+function normalizeSourceText(input: unknown): string {
+  return String(input || "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isLegacyMissionHudDogStudioSource(source: Record<string, unknown>): boolean {
+  const uiJs = normalizeSourceText(source.uiJs);
+  if (!uiJs) return false;
+  return uiJs === normalizeSourceText(LEGACY_MISSION_HUD_DOG_UI_JS);
+}
+
+function migrateLegacyExampleRecord(
+  record: PersistedPluginRecord,
+): PersistedPluginRecord {
+  if (record.kind !== "extension" || !record.source) return record;
+  if (record.pluginId !== MISSION_HUD_DOG_PLUGIN_ID) return record;
+  if (!isLegacyMissionHudDogStudioSource(record.source)) return record;
+  const nextSource = clonePersistableRecord(exampleMissionHudDogPluginPackage);
+  if (!nextSource || typeof nextSource !== "object") return record;
+  return {
+    ...record,
+    updatedAt: nowIso(),
+    source: nextSource as Record<string, unknown>,
+  };
+}
+
+function migrateLegacyExampleRecords(
+  list: PersistedPluginRecord[],
+): { list: PersistedPluginRecord[]; changed: boolean } {
+  let changed = false;
+  const next = list.map((record) => {
+    const migrated = migrateLegacyExampleRecord(record);
+    if (migrated !== record) {
+      changed = true;
+    }
+    return migrated;
+  });
+  return { list: next, changed };
 }
 
 export async function readPersistedPluginRecords(): Promise<
@@ -179,33 +227,46 @@ function defaultExamplePluginSources(): Array<Record<string, unknown>> {
 }
 
 export async function seedDefaultExamplePluginRecords(): Promise<void> {
-  const seeded = await kvGet(PLUGIN_EXAMPLE_SEED_STORAGE_KEY);
-  if (seeded) return;
   let list = await readPersistedPluginRecords();
-  const knownIds = new Set(list.map((item) => item.pluginId));
+  const seeded = toRecord(await kvGet(PLUGIN_EXAMPLE_SEED_STORAGE_KEY));
+  const seededVersion = Number(seeded.version || 0);
   let changed = false;
-  for (const source of defaultExamplePluginSources()) {
-    const pluginId = String(toRecord(source.manifest).id || "").trim();
-    if (!pluginId || knownIds.has(pluginId)) continue;
-    list = [
-      ...list,
-      {
-        pluginId,
-        kind: "extension",
-        enabled: true,
-        createdAt: nowIso(),
-        updatedAt: nowIso(),
-        source,
-      },
-    ];
-    knownIds.add(pluginId);
-    changed = true;
+
+  if (seededVersion < PLUGIN_EXAMPLE_SEED_VERSION) {
+    const migrated = migrateLegacyExampleRecords(list);
+    list = migrated.list;
+    if (migrated.changed) {
+      changed = true;
+    }
   }
+
+  if (seededVersion <= 0) {
+    const knownIds = new Set(list.map((item) => item.pluginId));
+    for (const source of defaultExamplePluginSources()) {
+      const pluginId = String(toRecord(source.manifest).id || "").trim();
+      if (!pluginId || knownIds.has(pluginId)) continue;
+      list = [
+        ...list,
+        {
+          pluginId,
+          kind: "extension",
+          enabled: true,
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+          source,
+        },
+      ];
+      knownIds.add(pluginId);
+      changed = true;
+    }
+  }
+
   if (changed) {
     await writePersistedPluginRecords(list);
   }
+
   await kvSet(PLUGIN_EXAMPLE_SEED_STORAGE_KEY, {
-    version: 1,
+    version: PLUGIN_EXAMPLE_SEED_VERSION,
     seededAt: nowIso(),
   });
 }
