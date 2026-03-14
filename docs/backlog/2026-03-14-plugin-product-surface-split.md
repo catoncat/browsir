@@ -63,3 +63,25 @@ claimed_at: "2026-03-14T09:24:28.645Z"
 **验证**：
 - `cd extension && bunx tsc --noEmit`
 - `cd extension && bun run build`
+
+### 2026-03-14 19:02 CST
+
+**补充修复**：
+- 为 `PluginStudioView` 的项目列表补上可聚焦按钮语义、`ArrowUp/ArrowDown/Home/End` 键盘导航和缺失的 icon button `aria-label`
+- 收紧 Studio 日志边界，移除“全部插件”视图，未绑定 `pluginId` 的项目不再退化成全局日志面
+- 把 `PluginsView` 中的 `Plugin Studio` 入口上移到头部与内容首屏，并统一插件状态文案为中文，减少“用户面 / 开发面”混杂感
+
+**结果**：
+- `PluginStudioView` 现在满足本仓库对核心列表键盘导航与 icon button 可访问性的基本要求
+- Studio 更明确只围绕当前项目工作，不再重新暴露跨插件总控面
+- 用户进入插件页后可以更快发现 `Plugin Studio`
+
+**验证**：
+- `cd extension && bun run build`
+- `cd extension && bunx tsc --noEmit` 仍被仓库现有问题阻塞：`src/sw/kernel/loop-progress-guard.ts` 缺少 `./platform-types`
+
+## 相关 commits
+
+### 2026-03-14 19:02 CST
+
+- 未提交

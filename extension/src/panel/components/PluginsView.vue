@@ -177,7 +177,15 @@ onMounted(async () => {
       </button>
       <h2 class="ml-2 font-bold text-[14px] text-ui-text tracking-tight">插件</h2>
       <button
-        class="ml-auto p-2 hover:bg-ui-surface rounded-sm transition-colors text-ui-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50"
+        class="ml-auto inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-sm text-[12px] font-semibold text-ui-accent hover:bg-ui-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+        aria-label="打开 Plugin Studio"
+        @click="handleOpenStandaloneStudio"
+      >
+        <Code2 :size="14" aria-hidden="true" />
+        <span>Plugin Studio</span>
+      </button>
+      <button
+        class="p-2 hover:bg-ui-surface rounded-sm transition-colors text-ui-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50"
         :disabled="loading"
         aria-label="刷新插件列表"
         @click="refreshPlugins"
@@ -187,10 +195,28 @@ onMounted(async () => {
     </header>
 
     <div class="flex-1 overflow-y-auto p-4 space-y-6">
+      <section class="space-y-3 rounded-md border border-ui-border bg-ui-surface/20 px-3 py-3">
+        <div class="space-y-1">
+          <h3 class="text-[11px] font-bold uppercase tracking-[0.1em] text-ui-text-muted">开发插件</h3>
+          <p class="text-[12px] leading-5 text-ui-text-muted">
+            创建、编辑、热更新和调试插件请使用独立的 Plugin Studio。
+            这里专注用户侧的启用、禁用和卸载。
+          </p>
+        </div>
+        <button
+          class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-ui-accent/10 border border-ui-accent/30 text-[12px] font-semibold text-ui-accent hover:bg-ui-accent/20 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+          aria-label="打开 Plugin Studio"
+          @click="handleOpenStandaloneStudio"
+        >
+          <Code2 :size="14" aria-hidden="true" />
+          打开 Plugin Studio
+        </button>
+      </section>
+
       <section class="space-y-3">
         <h3 class="text-[11px] font-bold uppercase tracking-[0.1em] text-ui-text-muted">已安装插件</h3>
         <div v-if="userPlugins.length === 0" class="rounded-md border border-ui-border bg-ui-surface/20 px-3 py-2 text-[12px] text-ui-text-muted">
-          暂无用户插件。可前往<button class="text-ui-accent underline mx-0.5" @click="handleOpenStandaloneStudio">开发工作台</button>创建或安装插件。
+          暂无用户插件。可前往<button class="text-ui-accent underline mx-0.5" @click="handleOpenStandaloneStudio">Plugin Studio</button>创建或安装插件。
         </div>
         <ul v-else class="space-y-2">
           <li v-for="plugin in userPlugins" :key="plugin.id" class="rounded-md border border-ui-border bg-ui-surface/20 px-3 py-2 space-y-2">
@@ -203,7 +229,7 @@ onMounted(async () => {
                 class="ml-auto rounded px-2 py-0.5 text-[10px] font-semibold"
                 :class="plugin.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-ui-border/40 text-ui-text-muted'"
               >
-                {{ plugin.enabled ? "enabled" : "disabled" }}
+                {{ plugin.enabled ? "已启用" : "已停用" }}
               </span>
             </div>
             <div class="flex flex-wrap gap-1.5">
@@ -257,7 +283,7 @@ onMounted(async () => {
                 class="ml-auto rounded px-2 py-0.5 text-[10px] font-semibold"
                 :class="plugin.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-ui-border/40 text-ui-text-muted'"
               >
-                {{ plugin.enabled ? "enabled" : "disabled" }}
+                {{ plugin.enabled ? "已启用" : "已停用" }}
               </span>
             </div>
             <div class="flex items-center gap-2">
@@ -282,23 +308,6 @@ onMounted(async () => {
         </ul>
       </section>
 
-      <section class="space-y-3 rounded-md border border-ui-border bg-ui-surface/20 px-3 py-3">
-        <div class="space-y-1">
-          <h3 class="text-[11px] font-bold uppercase tracking-[0.1em] text-ui-text-muted">开发插件</h3>
-          <p class="text-[12px] leading-5 text-ui-text-muted">
-            创建、编辑、热更新和调试插件请使用独立的 Plugin Studio。
-            这里保留用户侧的启用、禁用和卸载。
-          </p>
-        </div>
-        <button
-          class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-ui-accent/10 border border-ui-accent/30 text-[12px] font-semibold text-ui-accent hover:bg-ui-accent/20 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-          aria-label="打开 Plugin Studio"
-          @click="handleOpenStandaloneStudio"
-        >
-          <Code2 :size="14" aria-hidden="true" />
-          打开 Plugin Studio
-        </button>
-      </section>
     </div>
   </div>
 </template>

@@ -74,7 +74,6 @@ const selectedProjectId = ref("");
 const selectedPluginId = ref("");
 const activeFile = ref<StudioFileName>("plugin.json");
 const rightPanelMode = ref<"logs" | "docs">("docs");
-const logScope = ref<"selected" | "all">("selected");
 const logKeyword = ref("");
 const logErrorsOnly = ref(false);
 const selectedLogTags = ref<string[]>([]);
@@ -92,6 +91,7 @@ const runtimeLogs = ref<RuntimeLogItem[]>([]);
 const brainLogs = ref<RuntimeLogItem[]>([]);
 const triggerLogs = ref<RuntimeLogItem[]>([]);
 const hookTraceLogs = ref<RuntimeLogItem[]>([]);
+const projectButtonRefs = new Map<string, HTMLButtonElement>();
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -430,6 +430,14 @@ function selectProject(project: StudioProject): void {
   syncSelectedPluginForProject(project);
   applyEditorFiles(project.files);
   writeSelectedProjectToStorage(project.id);
+}
+
+function setProjectButtonRef(projectId: string, el: Element | null): void {
+  if (el instanceof HTMLButtonElement) {
+    projectButtonRefs.set(projectId, el);
+    return;
+  }
+  projectButtonRefs.delete(projectId);
 }
 
 function parsePluginJson(): Record<string, unknown> {
@@ -819,6 +827,9 @@ function handleInsertSnippet(snippet: string): void {
 
 const exampleProjects = computed(() => projects.value.filter((item) => item.category === "example"));
 const userProjects = computed(() => projects.value.filter((item) => item.category === "user"));
+const orderedProjectIds = computed(() =>
+  [...exampleProjects.value, ...userProjects.value].map((item) => item.id)
+);
 const selectedProject = computed(() => getSelectedProject());
 
 const activeEditor = computed({
@@ -870,12 +881,52 @@ const runtimeBindingDetail = computed(() => {
   return "先在 plugin.json 中声明 manifest.id，再保存或安装，Studio 才能建立运行态绑定。";
 });
 const logSelectedPluginId = computed(() => {
-  if (logScope.value === "all") return "";
   const installedId = String(selectedInstalledPlugin.value?.id || "").trim();
   if (installedId) return installedId;
-  const projectId = selectedProjectPluginId.value;
-  return projectId;
+  return selectedProjectPluginId.value;
 });
+
+function focusProjectByOffset(currentId: string, offset: number): void {
+  const ids = orderedProjectIds.value;
+  const currentIndex = ids.indexOf(String(currentId || "").trim());
+  if (currentIndex < 0) return;
+  const nextIndex = Math.min(
+    Math.max(currentIndex + offset, 0),
+    Math.max(ids.length - 1, 0),
+  );
+  const nextId = ids[nextIndex];
+  if (!nextId) return;
+  projectButtonRefs.get(nextId)?.focus();
+}
+
+function focusProjectEdge(edge: "first" | "last"): void {
+  const ids = orderedProjectIds.value;
+  const nextId = edge === "first" ? ids[0] : ids[ids.length - 1];
+  if (!nextId) return;
+  projectButtonRefs.get(nextId)?.focus();
+}
+
+function handleProjectKeydown(event: KeyboardEvent, projectId: string): void {
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    focusProjectByOffset(projectId, 1);
+    return;
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    focusProjectByOffset(projectId, -1);
+    return;
+  }
+  if (event.key === "Home") {
+    event.preventDefault();
+    focusProjectEdge("first");
+    return;
+  }
+  if (event.key === "End") {
+    event.preventDefault();
+    focusProjectEdge("last");
+  }
+}
 
 function isLogChannelEnabled(channel: RuntimeLogItem["channel"]): boolean {
   return selectedLogChannels.value.includes(channel);
@@ -901,7 +952,6 @@ function toggleLogTag(tag: string): void {
 }
 
 function clearLogFilters(): void {
-  logScope.value = "selected";
   logKeyword.value = "";
   logErrorsOnly.value = false;
   selectedLogTags.value = [];
@@ -910,7 +960,7 @@ function clearLogFilters(): void {
 
 function matchesSelectedPluginLog(item: RuntimeLogItem): boolean {
   const pluginId = String(logSelectedPluginId.value || "").trim();
-  if (!pluginId) return true;
+  if (!pluginId) return false;
   const direct = String(item.pluginId || "").trim();
   if (direct) return direct === pluginId;
   return item.searchText.includes(pluginId.toLowerCase());
@@ -979,7 +1029,7 @@ function buildStudioLogExportPayload(): Record<string, unknown> {
     selectedPluginId: String(logSelectedPluginId.value || "").trim() || undefined,
     selectedProjectId: String(selectedProjectId.value || "").trim() || undefined,
     filters: {
-      scope: logScope.value,
+      scope: "selected",
       keyword: String(logKeyword.value || "").trim() || undefined,
       errorsOnly: logErrorsOnly.value,
       tags: [...selectedLogTags.value],
@@ -1279,33 +1329,60 @@ onUnmounted(() => {
         <section class="studio-panel">
           <div class="panel-header">
             <p class="panel-title">项目</p>
-            <button class="panel-action-btn" title="新建项目" :disabled="busy" @click="handleCreateProject">
+            <button
+              class="panel-action-btn"
+              title="新建项目"
+              aria-label="新建项目"
+              :disabled="busy"
+              @click="handleCreateProject"
+            >
               <Plus :size="13" />
             </button>
           </div>
-          <ul class="panel-list">
+          <ul class="panel-list" role="list" aria-label="插件项目列表">
             <li
               v-for="project in exampleProjects"
               :key="project.id"
+              role="listitem"
               :class="['panel-item', selectedProjectId === project.id ? 'active' : '']"
-              @click="selectProject(project)"
             >
-              <div class="panel-item-main">
-                <p class="item-title">{{ project.name }}</p>
-                <p class="item-sub">{{ project.pluginId || "示例" }}</p>
-              </div>
+              <button
+                :ref="(el) => setProjectButtonRef(project.id, el)"
+                type="button"
+                class="panel-item-button"
+                :aria-label="`选择项目 ${project.name}`"
+                :aria-current="selectedProjectId === project.id ? 'true' : undefined"
+                @click="selectProject(project)"
+                @keydown="handleProjectKeydown($event, project.id)"
+              >
+                <div class="panel-item-main">
+                  <p class="item-title">{{ project.name }}</p>
+                  <p class="item-sub">{{ project.pluginId || "示例" }}</p>
+                </div>
+              </button>
             </li>
             <li
               v-for="project in userProjects"
               :key="project.id"
+              role="listitem"
               :class="['panel-item', selectedProjectId === project.id ? 'active' : '']"
-              @click="selectProject(project)"
             >
-              <div class="panel-item-main">
-                <p class="item-title">{{ project.name }}</p>
-                <p class="item-sub">{{ project.pluginId || "未绑定 pluginId" }}</p>
-              </div>
               <button
+                :ref="(el) => setProjectButtonRef(project.id, el)"
+                type="button"
+                class="panel-item-button"
+                :aria-label="`选择项目 ${project.name}`"
+                :aria-current="selectedProjectId === project.id ? 'true' : undefined"
+                @click="selectProject(project)"
+                @keydown="handleProjectKeydown($event, project.id)"
+              >
+                <div class="panel-item-main">
+                  <p class="item-title">{{ project.name }}</p>
+                  <p class="item-sub">{{ project.pluginId || "未绑定 pluginId" }}</p>
+                </div>
+              </button>
+              <button
+                type="button"
                 class="panel-item-icon-btn danger"
                 :disabled="busy"
                 :aria-label="`删除项目 ${project.name}`"
@@ -1425,34 +1502,27 @@ onUnmounted(() => {
             <div class="log-sections-actions">
               <button
                 class="log-export-btn"
-                :disabled="publishingDebugLink"
+                :disabled="publishingDebugLink || !logSelectedPluginId"
+                :aria-label="debugLinkCopied ? '调试链接已复制' : '复制当前项目调试链接'"
                 :title="debugLinkCopied ? '链接已复制' : '复制调试链接'"
                 @click="handleCopyDebugLink"
               >
                 <Check v-if="debugLinkCopied" :size="13" aria-hidden="true" />
                 <ExternalLink v-else :size="13" aria-hidden="true" />
               </button>
-              <button class="log-clear-btn" title="清空日志" @click="clearLogs">
+              <button
+                class="log-clear-btn"
+                title="清空日志"
+                aria-label="清空当前项目日志"
+                @click="clearLogs"
+              >
                 <History :size="13" aria-hidden="true" />
               </button>
             </div>
           </div>
           <div class="log-filters">
             <div class="log-filter-row">
-              <button
-                class="log-chip"
-                :class="{ active: logScope === 'selected' }"
-                @click="logScope = 'selected'"
-              >
-                当前插件
-              </button>
-              <button
-                class="log-chip"
-                :class="{ active: logScope === 'all' }"
-                @click="logScope = 'all'"
-              >
-                全部插件
-              </button>
+              <span class="log-chip active" aria-current="true">当前项目</span>
               <button
                 class="log-chip"
                 :class="{ active: logErrorsOnly }"
@@ -1497,7 +1567,7 @@ onUnmounted(() => {
             </div>
             <div class="log-filter-summary">
               <span>命中 {{ filteredLogCount }} 条</span>
-              <span v-if="logScope === 'selected' && !logSelectedPluginId">未选中插件，显示全部</span>
+              <span v-if="!logSelectedPluginId">当前项目未绑定 pluginId，暂无可展示日志</span>
             </div>
           </div>
           <div class="log-sections-body">
@@ -1567,7 +1637,13 @@ onUnmounted(() => {
         </div>
 
         <div class="action-group secondary">
-          <button class="studio-btn" :disabled="busy" @click="handleExportPackage" title="导出插件包">
+          <button
+            class="studio-btn"
+            :disabled="busy"
+            title="导出插件包"
+            aria-label="导出当前插件包"
+            @click="handleExportPackage"
+          >
             <Download :size="14" />
           </button>
         </div>
@@ -2062,8 +2138,6 @@ onUnmounted(() => {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg);
-  padding: 8px;
-  cursor: pointer;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -2078,6 +2152,27 @@ onUnmounted(() => {
 .panel-item-main {
   min-width: 0;
   flex: 1;
+}
+
+.panel-item-button {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 8px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 8px;
+}
+
+.panel-item-button:focus-visible,
+.panel-action-btn:focus-visible,
+.panel-item-icon-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .panel-item.active {
