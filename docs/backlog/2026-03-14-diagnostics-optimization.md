@@ -1,11 +1,12 @@
 ---
 id: ISSUE-001
 title: 诊断系统优化 — 6 项改进
-status: in_progress
+status: done
 priority: p1
 source: 调试对话 session-816e926f（2026-03-14 compaction 失败 + dog plugin UI 诊断）
 created: 2026-03-14
-assignee: unassigned
+assignee: agent
+resolved: 2026-03-14
 tags: [diagnostics, debug-snapshot, developer-experience]
 ---
 
@@ -41,17 +42,20 @@ tags: [diagnostics, debug-snapshot, developer-experience]
 - 第 5 项 `AGENTS.md 补充 diagnostics vs snapshot 选择策略`
   - 产品入口已先收敛，但 AGENTS 决策树文档尚未更新。
 
-### 本次未关闭项
+### 2026-03-14 第二轮进度
 
-- 第 1 项 `columnar 格式需要索引辅助`
-- 第 2 项 `llm.trace 缺少 source 标记`
-- 第 3 项 `diagnosticGuide 可做动态诊断建议`
-- 第 5 项剩余部分 `AGENTS.md 决策树`
-- 第 6 项 `transport 格式标识`
+- `0799d67` `feat: enhance diagnostics — source/contentType in llm trace + column index + dynamic hints`
+  - 第 1 项：diagnosticGuide.columnIndex 提供 rawEventTail/llm.skipped/llm.trace 的列名→索引映射
+  - 第 2 项：compaction llm.request 增加 `source: "compaction"`；所有 llm.response.raw 增加 source 和 contentType；llm.trace preferredColumns 显式包含 source/stage/detail/contentType
+  - 第 3 项：diagnosticGuide.hints 根据 lastError 自动生成诊断建议（compaction/offscreen/LLM HTTP/no_progress/timeout）
+  - 第 6 项：buildLlmRawTracePayload 新增 source 和 contentType 参数
+- `f17d418` `docs: add diagnostics vs snapshot decision strategy to AGENTS.md`
+  - 第 5 项：AGENTS.md 新增 diagnostics vs snapshot 选择策略、交叉检索规则、uiState 说明
 
 ### Close Issues 总结
 
-- `ISSUE-001` 保持 `in_progress`，第 4 项已完成，剩余第 1/2/3/5/6 项待后续处理。
+- `ISSUE-001` 全部 6 项均已完成，标记为 `done`。
+- 关联 commits：`5a86611` (uiState), `0799d67` (trace+guide), `f17d418` (AGENTS.md)
 
 ## 优化项
 
