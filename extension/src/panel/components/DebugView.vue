@@ -52,6 +52,22 @@ const recentEvents = computed(() => {
   return Array.isArray(rows) ? rows.map((item) => String(item || "")).filter(Boolean) : [];
 });
 
+const contextRefRows = computed(() => {
+  const table = diagnosticsPayload.value?.contextRefs;
+  if (!table || typeof table !== "object") return [];
+  const t = table as { columns?: string[]; rows?: unknown[][] };
+  const cols = Array.isArray(t.columns) ? t.columns : [];
+  const rows = Array.isArray(t.rows) ? t.rows : [];
+  return rows.map((row) => {
+    const record: Record<string, unknown> = {};
+    const values = Array.isArray(row) ? row : [];
+    for (let i = 0; i < cols.length; i += 1) {
+      record[cols[i]] = values[i] ?? null;
+    }
+    return record;
+  });
+});
+
 const currentSessionId = computed(() => {
   const selected = String(selectedSessionId.value || "").trim();
   if (selected) return selected;
@@ -307,6 +323,25 @@ onMounted(() => {
             </li>
           </ul>
           <p v-else class="text-[12px] text-ui-text-muted">暂无轨迹</p>
+        </div>
+      </section>
+
+      <section v-if="contextRefRows.length > 0" class="rounded-md border border-ui-border bg-ui-bg">
+        <header class="px-3 py-2 border-b border-ui-border text-[12px] font-semibold text-ui-text">上下文引用</header>
+        <div class="max-h-48 overflow-y-auto px-3 py-2.5">
+          <ul class="space-y-1.5 text-[12px] text-ui-text">
+            <li
+              v-for="(ref, idx) in contextRefRows"
+              :key="idx"
+              class="rounded bg-ui-surface/60 px-2 py-1.5 flex items-baseline gap-2"
+            >
+              <span class="font-mono text-[11px] shrink-0" :class="ref.mode === 'error' ? 'text-rose-600' : ref.mode === 'metadata_only' ? 'text-amber-600' : 'text-emerald-600'">{{ ref.mode }}</span>
+              <span class="font-mono text-[11px] truncate">{{ ref.displayPath }}</span>
+              <span class="text-[10px] text-ui-text-muted shrink-0">{{ ref.kind }} · {{ ref.runtime }}</span>
+              <span v-if="ref.sizeBytes" class="text-[10px] text-ui-text-muted shrink-0">{{ ref.sizeBytes }}B</span>
+              <span v-if="ref.summary" class="text-[10px] text-ui-text-muted truncate">{{ ref.summary }}</span>
+            </li>
+          </ul>
         </div>
       </section>
 

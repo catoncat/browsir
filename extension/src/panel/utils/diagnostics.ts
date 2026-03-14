@@ -985,6 +985,33 @@ function buildDiagnosticHints(lastError: string): string[] {
   return hints;
 }
 
+function buildContextRefSummary(messages: unknown[]): Array<Record<string, unknown>> {
+  const rows = Array.isArray(messages) ? messages : [];
+  const out: Array<Record<string, unknown>> = [];
+  for (const msg of rows) {
+    const m = toRecord(msg);
+    if (String(m.role || "") !== "user") continue;
+    const metadata = toRecord(m.metadata);
+    const refs = Array.isArray(metadata.contextRefs) ? metadata.contextRefs : [];
+    if (refs.length === 0) continue;
+    for (const ref of refs) {
+      const r = toRecord(ref);
+      out.push({
+        entryId: String(m.entryId || ""),
+        id: String(r.id || ""),
+        displayPath: String(r.displayPath || ""),
+        source: String(r.source || ""),
+        runtime: String(r.runtime || ""),
+        kind: String(r.kind || ""),
+        mode: String(r.mode || ""),
+        sizeBytes: r.sizeBytes ?? null,
+        summary: clipText(r.summary, 200),
+      });
+    }
+  }
+  return out;
+}
+
 export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}): Promise<CollectedDiagnostics> {
   const sessionId = String(options.sessionId || "").trim();
   const [config, dump] = await Promise.all([
@@ -1021,6 +1048,7 @@ export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}
   const rawEventTail = buildRawEventTail(events, options.eventLimit ?? 80);
   const eventTypeCounts = buildEventTypeCounts(events);
   const conversationTail = buildConversationTail(messages, options.conversationTailLimit ?? 14);
+  const contextRefSummary = buildContextRefSummary(messages);
   const agentDecisionTrace = buildAgentDecisionTrace(events, 100);
   const sandboxTrace = buildSandboxTrace(sandboxSession, 32);
   const sandboxSummary = toRecord(sandboxSession.summary);
@@ -1046,6 +1074,7 @@ export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}
         "llm.trace",
         "tools.trace",
         "agent.loopRuns",
+        "contextRefs",
         "rawEventTail"
       ],
       jqHints: [
@@ -1053,7 +1082,8 @@ export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}
         ".sandbox.summary",
         ".sandbox.trace.rows[]",
         ".llm.trace.rows[]",
-        ".tools.trace.rows[]"
+        ".tools.trace.rows[]",
+        ".contextRefs.rows[]"
       ],
       columnIndex: {
         "rawEventTail": { idx: 0, ts: 1, type: 2, payload: 3 },
@@ -1225,6 +1255,19 @@ export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}
       )
     },
     rawEventTail: buildCompactTable(rawEventTail, ["idx", "ts", "type", "payload"]),
+    contextRefs: contextRefSummary.length > 0
+      ? buildCompactTable(contextRefSummary, [
+          "entryId",
+          "id",
+          "displayPath",
+          "source",
+          "runtime",
+          "kind",
+          "mode",
+          "sizeBytes",
+          "summary"
+        ])
+      : null,
     debug: {
       entryCount: Number(dumpRecord.entryCount || 0),
       stepStreamCount: events.length,

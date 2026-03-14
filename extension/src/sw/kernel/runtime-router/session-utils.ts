@@ -163,6 +163,7 @@ export async function buildConversationView(
     entryId: string;
     toolName?: string;
     toolCallId?: string;
+    metadata?: Record<string, unknown>;
   }>;
   parentSessionId: string;
   forkedFrom: {
@@ -187,6 +188,7 @@ export async function buildConversationView(
       entryId: entry.id,
       toolName: entry.toolName,
       toolCallId: entry.toolCallId,
+      ...(entry.role === "user" && entry.metadata ? { metadata: entry.metadata } : {}),
     }));
   return {
     sessionId,
