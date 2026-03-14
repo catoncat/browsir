@@ -429,56 +429,10 @@ function extractTabIdsFromPrompt(prompt: string): number[] {
 }
 
 
-const NO_PROGRESS_VOLATILE_EVIDENCE_KEYS = new Set([
-  "backendNodeId",
-  "cmdId",
-  "contentRuntimeVersion",
-  "fallbackFrom",
-  "lastSenderError",
-  "leaseId",
-  "modeUsed",
-  "pageRuntimeVersion",
-  "providerId",
-  "ref",
-  "requestId",
-  "resolvedTool",
-  "rpcId",
-  "runtimeExpectedVersion",
-  "runtimeVersion",
-  "sessionId",
-  "snapshotId",
-  "stepRef",
-  "tabId",
-  "targetTabId",
-  "toolCallId",
-  "uid",
-]);
-
-function normalizeNoProgressEvidenceValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    const limit = 8;
-    const items = value
-      .slice(0, limit)
-      .map((item) => normalizeNoProgressEvidenceValue(item));
-    if (value.length > limit) items.push(`__truncated__:${value.length}`);
-    return items;
-  }
-  if (typeof value === "string") return clipText(value, 240);
-  if (!value || typeof value !== "object") return value;
-  const source = value as Record<string, unknown>;
-  const out: Record<string, unknown> = {};
-  for (const key of Object.keys(source).sort()) {
-    if (NO_PROGRESS_VOLATILE_EVIDENCE_KEYS.has(key)) continue;
-    const normalized = normalizeNoProgressEvidenceValue(source[key]);
-    if (normalized === undefined) continue;
-    out[key] = normalized;
-  }
-  return out;
-}
-
-function buildNoProgressEvidenceFingerprint(value: unknown): string {
-  return safeStringify(normalizeNoProgressEvidenceValue(value), 1200);
-}
+import {
+  buildNoProgressEvidenceFingerprint,
+  resolveNoProgressDecision,
+} from "./loop-progress-guard";
 
 function applyLatestUserPromptOverride(
   messages: JsonRecord[],
@@ -2645,45 +2599,6 @@ export function createRuntimeLoopController(
         .join("||");
     };
 
-    const isToolCallRequiringBrowserProof = (
-      toolCall: ToolCallItem,
-      canonicalToolName: string,
-    ): boolean => {
-      if (!BROWSER_PROOF_REQUIRED_TOOL_NAMES.has(canonicalToolName)) {
-        return false;
-      }
-      if (canonicalToolName !== "computer") return true;
-      const args = parseToolCallArgs(toolCall.function.arguments || "");
-      const action = String(args?.action || "")
-        .trim()
-        .toLowerCase();
-      if (!action) return false;
-      return !["wait", "hover", "scroll", "scroll_to"].includes(action);
-    };
-
-    const didToolProvideBrowserProof = (
-      toolName: string,
-      responsePayload: JsonRecord,
-    ): boolean => {
-      const normalized = String(toolName || "")
-        .trim()
-        .toLowerCase();
-      const directVerified =
-        responsePayload.verified === true ||
-        String(responsePayload.verifyReason || "") === "verified";
-      if (directVerified) return true;
-      if (normalized === "browser_verify") {
-        return toRecord(responsePayload.data).ok === true;
-      }
-      const nestedVerify = toRecord(toRecord(responsePayload.data).verify);
-      return nestedVerify.ok === true;
-    };
-
-    const buildNoProgressScopeKey = (
-      reason: NoProgressReason,
-      scopeKey: string,
-    ): string => `${reason}:${scopeKey || "(default)"}`;
-
     const clearNoProgressHits = (...reasons: NoProgressReason[]): void => {
       if (reasons.length <= 0) {
         noProgressHits.clear();
@@ -2696,30 +2611,6 @@ export function createRuntimeLoopController(
       }
     };
 
-    const resolveNoProgressDecision = (
-      reason: NoProgressReason,
-      scopeKey: string,
-    ): {
-      hit: number;
-      continueBudget: number;
-      remainingContinueBudget: number;
-      decision: "continue" | "stop";
-    } => {
-      const bucketKey = buildNoProgressScopeKey(reason, scopeKey);
-      const hit = (noProgressHits.get(bucketKey) || 0) + 1;
-      noProgressHits.set(bucketKey, hit);
-      const continueBudget = NO_PROGRESS_CONTINUE_BUDGET[reason] ?? 0;
-      const remainingContinueBudget = Math.max(0, continueBudget - hit);
-      const decision: "continue" | "stop" =
-        hit <= continueBudget ? "continue" : "stop";
-      return {
-        hit,
-        continueBudget,
-        remainingContinueBudget,
-        decision,
-      };
-    };
-
     const onNoProgressSignal = async (
       reason: NoProgressReason,
       details: JsonRecord,
@@ -2728,7 +2619,7 @@ export function createRuntimeLoopController(
       const scopeKey =
         String(options.scopeKey || details.signature || details.reasonDetail || "default").trim() ||
         "default";
-      const decision = resolveNoProgressDecision(reason, scopeKey);
+      const decision = resolveNoProgressDecision(noProgressHits, reason, scopeKey);
       const payload: JsonRecord = {
         reason,
         scopeKey,
@@ -3089,7 +2980,7 @@ export function createRuntimeLoopController(
           )
             .trim()
             .toLowerCase();
-          if (isToolCallRequiringBrowserProof(tc, canonicalToolName)) {
+          if (isToolCallRequiringBrowserProof(tc.function.arguments || "", canonicalToolName)) {
             browserProofRequired = true;
             stepUsedBrowserProofRequiredTool = true;
           }
