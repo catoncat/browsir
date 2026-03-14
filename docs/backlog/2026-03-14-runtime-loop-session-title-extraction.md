@@ -1,7 +1,7 @@
 ---
 id: ISSUE-004
 title: Runtime Loop 标题模块抽离
-status: in-progress
+status: done
 priority: p0
 source: next-development-master-plan-2026-03-14 + slice breakdown
 created: 2026-03-14
@@ -44,4 +44,23 @@ tags: [slice, kernel, runtime-loop, session-title]
 - 新模块成为唯一入口
 - `tsc --noEmit` 通过
 - 新增标题模块单测通过
+
+## 工作总结
+
+### Code Review（审查通过）
+
+经 code review 确认所有验收标准已满足：
+
+1. **6 个函数全部抽到 `loop-session-title.ts`**：normalizeSessionTitle, readSessionTitleSource, withSessionTitleMeta, parseLlmContent, requestSessionTitleFromLlm, refreshSessionTitleAuto
+2. **`runtime-loop.browser.ts` 不再定义这些函数**：仅保留 import + call
+3. **构建通过**：`bun run build` ✅
+4. **300 测试全通过**：`bun run test` ✅
+5. **测试文件覆盖**：`__tests__/loop-session-title.browser.test.ts` 含 3 个测试用例
+
+**小建议**：`withSessionTitleMeta` 是纯函数但测试未覆盖，建议后续补一个简单的 snapshot 测试。
+
+### 相关 commits
+
+- 模块抽离实现：由前序 agent 完成（已在代码库中）
+- 状态标记 done：当前 review 确认
 
