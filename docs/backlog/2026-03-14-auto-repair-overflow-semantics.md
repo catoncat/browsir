@@ -5,9 +5,20 @@ status: open
 priority: p3
 source: architecture-evolution-phase2
 created: 2026-03-14
-assignee: ""
-kind: alignment
-tags: [kernel, semantics, bdd, documentation, phase2]
+assignee: unassigned
+kind: slice
+epic: EPIC-2026-03-14-ARCH-EVOLUTION-PHASE2
+parallel_group: kernel-loop
+depends_on: [ISSUE-018, ISSUE-019]
+write_scope:
+  - extension/src/sw/kernel/orchestrator.browser.ts
+  - extension/src/sw/kernel/runtime-loop.browser.ts
+  - extension/src/sw/kernel/loop-shared-types.ts
+  - README.md
+  - AGENTS.md
+  - bdd/contracts/
+acceptance_ref: docs/architecture-evolution-plan-2026-03-14.md
+tags: [slice, kernel, semantics, bdd, documentation, phase2]
 ---
 
 ## 问题

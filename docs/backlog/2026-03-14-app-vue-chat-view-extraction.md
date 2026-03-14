@@ -5,9 +5,17 @@ status: open
 priority: p0
 source: architecture-evolution-phase2
 created: 2026-03-14
-assignee: ""
-kind: refactor
-tags: [panel, app-vue, architecture, phase2]
+assignee: unassigned
+kind: slice
+epic: EPIC-2026-03-14-ARCH-EVOLUTION-PHASE2
+parallel_group: panel-shell
+depends_on: []
+write_scope:
+  - extension/src/panel/App.vue
+  - extension/src/panel/components/ChatView.vue
+  - extension/src/panel/types.ts
+acceptance_ref: docs/architecture-evolution-plan-2026-03-14.md
+tags: [slice, panel, app-vue, architecture, phase2]
 ---
 
 ## 问题

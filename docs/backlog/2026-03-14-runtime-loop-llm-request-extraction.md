@@ -5,9 +5,16 @@ status: open
 priority: p1
 source: architecture-evolution-phase2
 created: 2026-03-14
-assignee: ""
-kind: refactor
-tags: [kernel, runtime-loop, llm, architecture, phase2]
+assignee: unassigned
+kind: slice
+epic: EPIC-2026-03-14-ARCH-EVOLUTION-PHASE2
+parallel_group: kernel-loop
+depends_on: []
+write_scope:
+  - extension/src/sw/kernel/runtime-loop.browser.ts
+  - extension/src/sw/kernel/loop-llm-request.ts
+acceptance_ref: docs/architecture-evolution-plan-2026-03-14.md
+tags: [slice, kernel, runtime-loop, llm, architecture, phase2]
 ---
 
 ## 问题
