@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, renameSync } from "node:fs";
+import { cpSync, existsSync, readFileSync, renameSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath, URL } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
@@ -124,9 +124,14 @@ function emitManifest() {
       const debugPath = resolve(rootDir, outDir, "debug.html");
       const pluginStudioIndexPath = resolve(rootDir, outDir, "plugin-studio-index.html");
       const pluginStudioPath = resolve(rootDir, outDir, "plugin-studio.html");
+      const pluginsSourcePath = resolve(rootDir, "plugins");
+      const pluginsOutPath = resolve(rootDir, outDir, "plugins");
       if (existsSync(indexPath)) renameSync(indexPath, sidepanelPath);
       if (existsSync(debugIndexPath)) renameSync(debugIndexPath, debugPath);
       if (existsSync(pluginStudioIndexPath)) renameSync(pluginStudioIndexPath, pluginStudioPath);
+      if (existsSync(pluginsSourcePath)) {
+        cpSync(pluginsSourcePath, pluginsOutPath, { recursive: true, force: true });
+      }
     }
   };
 }
