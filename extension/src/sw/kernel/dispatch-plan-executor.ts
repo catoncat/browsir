@@ -57,7 +57,7 @@ import type {
 export function createDispatchExecutor(deps: ToolDispatchDeps) {
   const { orchestrator, infra, executeStep } = deps;
   const SKILL_SCRIPT_RUNNER_PATH = "mem://__bbl/skill-script-runner.cjs";
-  const SKILL_SCRIPT_RUNNER_SOURCE = String.raw`const sourceBase64 = String(process.env.BBL_SKILL_SCRIPT_SOURCE_BASE64 || "").trim();
+  const SKILL_SCRIPT_RUNNER_SOURCE = String.raw`const { readFileSync } = require("fs");
 const argPayload = String(process.argv[2] || "{}");
 
 function decodeBase64Utf8(value) {
@@ -65,19 +65,18 @@ function decodeBase64Utf8(value) {
 }
 
 async function main() {
-  const targetPath = decodeBase64Utf8(
-    String(process.env.BBL_SKILL_SCRIPT_TARGET_PATH_BASE64 || "").trim(),
+  const filesystemPath = String(process.argv[3] || "").trim();
+  const virtualPath = decodeBase64Utf8(
+    String(process.env.BBL_SKILL_SCRIPT_VIRTUAL_PATH_BASE64 || "").trim(),
   ).trim();
-  if (!sourceBase64) {
-    throw new Error("missing BBL_SKILL_SCRIPT_SOURCE_BASE64");
+  if (!filesystemPath) {
+    throw new Error("missing skill script filesystem path");
   }
-  if (!targetPath) {
-    throw new Error("missing skill script path");
-  }
-  const source = decodeBase64Utf8(sourceBase64);
+  const displayPath = virtualPath || filesystemPath;
+  const source = readFileSync(filesystemPath, "utf8");
   const module = { exports: {} };
   const exports = module.exports;
-  const normalizedPath = String(targetPath || "");
+  const normalizedPath = String(displayPath || "");
   const lastSlash = normalizedPath.lastIndexOf("/");
   const moduleDir =
     lastSlash >= 0 ? normalizedPath.slice(0, lastSlash) || "/" : "/";
@@ -354,10 +353,27 @@ main().catch((error) => {
     return btoa(binary);
   }
 
+  function extractFunctionCompileErrorMessage(error: unknown): string {
+    return error instanceof Error ? String(error.message || "") : String(error || "");
+  }
+
   function hasTopLevelModuleSyntax(source: string): boolean {
-    return /^[\t ]*(?:import|export)\b/m.test(
-      String(source || "").replace(/^\uFEFF/, ""),
-    );
+    const normalized = String(source || "").replace(/^\uFEFF/, "");
+    try {
+      // Let the JS parser determine whether this script contains module-only syntax.
+      // This avoids false positives from comments, strings, and template literals.
+      // eslint-disable-next-line no-new-func
+      new Function(normalized);
+      return false;
+    } catch (error) {
+      const message = extractFunctionCompileErrorMessage(error);
+      return (
+        message.includes("Cannot use import statement outside a module") ||
+        message.includes("Cannot use 'import.meta' outside a module") ||
+        message.includes("Unexpected token 'export'") ||
+        message.includes("Unexpected token 'import'")
+      );
+    }
   }
 
   function buildUnsupportedSkillScriptEnvelope(input: {
@@ -925,9 +941,8 @@ main().catch((error) => {
               SKILL_SCRIPT_RUNNER_SOURCE,
             );
             command =
-              `BBL_SKILL_SCRIPT_SOURCE_BASE64=${shellQuote(encodeBase64Utf8(source))} ` +
-              `BBL_SKILL_SCRIPT_TARGET_PATH_BASE64=${shellQuote(encodeBase64Utf8(location))} ` +
-              `node ${shellQuote(SKILL_SCRIPT_RUNNER_PATH)} ${shellQuote(argPayload)}`;
+              `BBL_SKILL_SCRIPT_VIRTUAL_PATH_BASE64=${shellQuote(encodeBase64Utf8(location))} ` +
+              `node ${shellQuote(SKILL_SCRIPT_RUNNER_PATH)} ${shellQuote(argPayload)} ${shellQuote(location)}`;
           } else {
             return buildUnsupportedSkillScriptEnvelope({
               error: `当前 browser runtime 不支持技能脚本类型: .${ext || "<none>"}`,

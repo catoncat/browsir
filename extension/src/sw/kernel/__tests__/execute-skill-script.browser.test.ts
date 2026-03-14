@@ -119,6 +119,9 @@ describe("execute-skill-script.browser", () => {
     expect(String(payload.command || "")).toContain(
       "mem://__bbl/skill-script-runner.cjs",
     );
+    expect(String(payload.command || "")).not.toContain(
+      "BBL_SKILL_SCRIPT_SOURCE_BASE64",
+    );
     expect(String(bashResult.stdout || "")).toContain('"name":"browser"');
     expect(String(bashResult.stdout || "")).toContain(
       '"argv":["mem://skills/demo-skill/scripts/echo.js","{\\"name\\":\\"browser\\"}"]',
@@ -167,5 +170,33 @@ describe("execute-skill-script.browser", () => {
     expect(String(result.errorCode || "")).toBe("E_TOOL_UNSUPPORTED");
     expect(String(result.error || "")).toContain("顶层 import/export");
     expect(processExecCallCount(executeStep)).toBe(0);
+  });
+
+  it("does not treat import text inside template literal as module syntax", async () => {
+    const sessionId = "skill-script-template";
+    const { dispatchToolPlan, skill } = createDeps(sessionId);
+
+    await writeVirtualTextFile(
+      "mem://skills/demo-skill/scripts/template.js",
+      [
+        "const snippet = `",
+        'import fake from "pkg";',
+        "`;",
+        "console.log(JSON.stringify({ snippet }));",
+      ].join("\n"),
+      sessionId,
+    );
+
+    const result = await dispatchToolPlan(sessionId, {
+      kind: "local.execute_skill_script",
+      sessionId,
+      skillName: skill.id,
+      scriptPath: "template.js",
+    } as ToolPlan);
+
+    const payload = toRecord(toRecord(result.response).data);
+    const bashResult = toRecord(payload.result);
+    expect(toRecord(result.response).ok).toBe(true);
+    expect(String(bashResult.stdout || "")).toContain('import fake from \\"pkg\\";');
   });
 });
