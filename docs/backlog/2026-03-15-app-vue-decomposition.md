@@ -14,7 +14,7 @@ tags: [panel, refactor, vue, composables, chat-view, follow-up]
 
 ## 背景
 
-`ISSUE-017` 现已重新校准为：在保留 `App.vue` shell 收口成果的前提下，从 `ChatView.vue` 拆出第一层 controller 边界（run state / runtime bus / plugin runtime / conversation actions）。
+`ISSUE-017` 现已重新校准为：在保留 `App.vue` shell 收口成果的前提下，从 `ChatView.vue` 拆出第一层 controller 边界（run state / runtime bus / plugin runtime / conversation actions）。当前工作树里，`use-ui-render-pipeline.ts` 与 `use-llm-streaming.ts` 已经落下首轮抽离，本条目只承接其后的二阶段深拆。
 
 本条目保留为**第二阶段 follow-up**：当 `ISSUE-017` 完成首轮 controller 解耦后，如果 `ChatView.vue` 或新抽出的 composable 仍然偏厚，再继续做更深层的 presentational / auxiliary 拆分。
 
@@ -22,13 +22,13 @@ tags: [panel, refactor, vue, composables, chat-view, follow-up]
 
 ## 当前热点（基于真实工作树）
 
-当前 `ChatView.vue` 约 2,690 行，主要热点已从 `App.vue` 转移至此：
+当前 `ChatView.vue` 约 2,142 行，主要热点已从 `App.vue` 转移至此：
 
 | 区块 | 现状 |
 |------|------|
-| run state / tool pending / llm streaming | 与 step-stream sync、tool card model 紧耦合 |
+| tool pending / run-view / step-stream sync | 仍与 tool card model、事件恢复逻辑紧耦合 |
 | watchers / auto-scroll | 与运行态、消息列表可见性、fork scene 等交织 |
-| panel UI plugin runtime | hydrate、lifecycle、notice、render hook payload normalize 全在一个文件里 |
+| panel UI plugin runtime wiring | `use-ui-render-pipeline.ts` 已接入，但 `ChatView.vue` 仍保留不少 side-effect/wiring |
 | runtime message bus | `chrome.runtime.onMessage`、bridge/runtime event 分发、polling 混在视图主体 |
 | conversation actions | send / export / debug link / fork source / refresh title 混在同层 |
 
@@ -38,7 +38,7 @@ tags: [panel, refactor, vue, composables, chat-view, follow-up]
 
 1. **`ChatTranscript.vue` / `ChatTimeline.vue`**
    - 负责消息列表、流式草稿、tool pending card、空状态视图
-   - 前提：运行态状态机和 message bus 已从 `ChatView.vue` 主体拆出
+   - 前提：tool pending 状态机和 message bus 已从 `ChatView.vue` 主体拆出
 
 2. **`ChatHeaderActions.vue` / `ChatExportActions.vue`**
    - Header 菜单、export/debug/fork source 辅助动作
@@ -54,12 +54,15 @@ tags: [panel, refactor, vue, composables, chat-view, follow-up]
 ### Phase 2：对首轮新 composable 做二次细拆（仅在确实膨胀时）
 
 1. **若 `use-tool-pending-state.ts` 继续膨胀**
-   - 候选拆分：`useToolRunStream()` / `useLlmStreamingState()` / `useToolPendingCardModel()`
+   - 候选拆分：`useToolRunStream()` / `useToolPendingCardModel()`
 
-2. **若 `use-ui-render-pipeline.ts` 继续膨胀**
+2. **若 `use-llm-streaming.ts` 继续膨胀**
+   - 候选拆分：draft buffer / visibility heuristic / final reply commit
+
+3. **若 `use-ui-render-pipeline.ts` 继续膨胀**
    - 候选拆分：notice / lifecycle / render-payload-normalizer 三层
 
-3. **若 `use-runtime-message-bus.ts` 继续膨胀**
+4. **若 `use-runtime-message-bus.ts` 继续膨胀**
    - 候选拆分：runtime event dispatch / polling sync / bridge event output
 
 ## 非目标
