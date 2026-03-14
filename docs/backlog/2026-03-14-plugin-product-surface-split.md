@@ -84,4 +84,4 @@ claimed_at: "2026-03-14T09:24:28.645Z"
 
 ### 2026-03-14 19:02 CST
 
-- 未提交
+- `57451d8 fix(panel): tighten plugin studio boundaries`
