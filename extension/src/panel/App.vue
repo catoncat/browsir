@@ -29,7 +29,8 @@ import SettingsView from "./components/SettingsView.vue";
 import ProviderSettingsView from "./components/ProviderSettingsView.vue";
 import SkillsView from "./components/SkillsView.vue";
 import PluginsView from "./components/PluginsView.vue";
-import { Loader2, Plus, Settings, Activity, History, MoreVertical, FileText, Download, ExternalLink, Copy, GitBranch, RefreshCcw, Wrench, Server, Plug } from "lucide-vue-next";
+import DebugView from "./components/DebugView.vue";
+import { Loader2, Plus, Settings, Activity, History, MoreVertical, FileText, Download, ExternalLink, Copy, GitBranch, RefreshCcw, Wrench, Server, Plug, Bug } from "lucide-vue-next";
 import { onClickOutside } from "@vueuse/core";
 
 const store = useRuntimeStore();
@@ -47,7 +48,7 @@ const prompt = ref("");
 const scrollContainer = ref<HTMLElement | null>(null);
 const chatSceneOverlayRef = ref<HTMLElement | null>(null);
 const listOpen = ref(false);
-type ViewMode = "chat" | "settings" | "provider-settings" | "skills" | "plugins";
+type ViewMode = "chat" | "settings" | "provider-settings" | "skills" | "plugins" | "debug";
 const activeView = ref<ViewMode>("chat");
 const showMoreMenu = ref(false);
 const showExportMenu = ref(false);
@@ -2871,6 +2872,7 @@ onUnmounted(() => {
     <ProviderSettingsView v-if="activeView === 'provider-settings'" @close="activeView = 'chat'" />
     <SkillsView v-if="activeView === 'skills'" @close="activeView = 'chat'" />
     <PluginsView v-if="activeView === 'plugins'" @close="activeView = 'chat'" />
+    <DebugView v-if="activeView === 'debug'" @close="activeView = 'chat'" />
 
     <main
       class="relative flex-1 flex flex-col min-w-0 min-h-0 bg-ui-bg"
@@ -3019,6 +3021,9 @@ onUnmounted(() => {
               <button role="menuitem" @click="activeView = 'settings'; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
                 <Settings :size="14" aria-hidden="true" /> 系统设置
               </button>
+              <button role="menuitem" @click="activeView = 'debug'; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
+                <Bug :size="14" aria-hidden="true" /> 调试面板
+              </button>
             </div>
           </div>
         </div>
@@ -3131,7 +3136,7 @@ onUnmounted(() => {
               <h2 class="text-xl font-black uppercase tracking-tight text-ui-text">Agent Terminal</h2>
             </div>
             <p class="text-ui-text-muted text-[15px] leading-relaxed max-w-xs font-bold">
-              系统就绪。发送指令开始自动化任务。CDP 与网桥协议已建立。
+              就绪。发送消息让 Agent 帮你完成浏览器任务。
             </p>
           </div>
         </div>
