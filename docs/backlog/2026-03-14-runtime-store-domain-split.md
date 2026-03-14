@@ -69,3 +69,19 @@ Store 间协作约定：禁止循环依赖，store 间通过显式 action 调用
 
 **剩余**：Phase B (config/diagnostics)、Phase C (skills/plugins)
 
+### Phase B — 2026-03-14
+
+**完成内容**：config/health 域抽取
+
+- 新建 `config-store.ts`：config/health/savingConfig/error state + loadConfig/refreshHealth/saveConfig actions + 全部 LLM profile normalization + normalizeConfig/normalizeHealth
+- 新建 `store-helpers.ts`：共享 `toRecord`/`toIntInRange` 纯函数
+- `runtime.ts` 进一步瘦身到 ~360 行：只保留 `loading` + `bootstrap`（cross-store orchestrator）+ skills/plugins 域
+- `SettingsView`/`ProviderSettingsView`：切换到 `useConfigStore`，不再依赖 `useRuntimeStore`
+- `DebugView`：health/config 切到 `useConfigStore`
+- `App.vue`：三 store 消费（config + chat + runtime）
+- 验证：tsc --noEmit ✅ / bun run build ✅
+
+**Commit**: `d019f3f`
+
+**剩余**：Phase C (skills/plugins)
+
