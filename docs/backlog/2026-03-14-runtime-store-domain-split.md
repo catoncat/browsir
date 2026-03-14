@@ -1,7 +1,7 @@
 ---
 id: ISSUE-009
 title: Runtime Store 领域拆分
-status: in-progress
+status: done
 priority: p0
 source: next-development-master-plan-2026-03-14 + slice breakdown
 created: 2026-03-14
@@ -85,3 +85,35 @@ Store 间协作约定：禁止循环依赖，store 间通过显式 action 调用
 
 **剩余**：Phase C (skills/plugins)
 
+### Phase C — 2026-03-14
+
+**完成内容**：skills/plugins 域抽取，ISSUE-009 完结
+
+- 新建 `skill-store.ts` (259 行)：skill 接口 + ensureSkillSessionId + readVirtualFile/writeVirtualFile (VFS) + 全部 skill CRUD actions + extractContentFromStepExecuteResult
+- 新建 `plugin-store.ts` (341 行)：plugin 接口 + toStringArray/toNumberRecord + 全部 normalize 函数 + 全部 plugin CRUD actions
+- `runtime.ts` 最终瘦身到 70 行：仅 `loading` ref + `bootstrap` orchestrator + type re-exports（向后兼容）
+- `ChatInput`/`SkillsView`：切换到 `useSkillStore`
+- `PluginsView`/`PluginStudioView`：切换到 `usePluginStore`
+- 验证：tsc --noEmit ✅ / bun run build ✅
+
+**Commit**: `4e4110c`
+
+## 总结
+
+ISSUE-009 三阶段全部完成：
+- Phase A: chat-store (会话/消息域) — `0c24eee`
+- Phase B: config-store (配置/健康域) + store-helpers — `d019f3f`
+- Phase C: skill-store + plugin-store (技能/插件域) — `4e4110c`
+
+**最终 store 架构**（5 stores + 2 helpers）：
+| 文件 | 行数 | 职责 |
+|------|------|------|
+| `chat-store.ts` | ~460 | 会话/消息/runtime 状态 |
+| `config-store.ts` | ~350 | 配置/健康/LLM profile |
+| `skill-store.ts` | 259 | 技能 CRUD + VFS |
+| `plugin-store.ts` | 341 | 插件 CRUD + normalization |
+| `runtime.ts` | 70 | bootstrap orchestrator + re-exports |
+| `store-helpers.ts` | ~20 | 共享纯函数 |
+| `send-message.ts` | ~10 | 共享 chrome.runtime.sendMessage |
+
+**runtime.ts 变化**：1539 行 → 70 行（-95.5%）
