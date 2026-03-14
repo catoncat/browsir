@@ -60,7 +60,6 @@ const store = usePluginStore();
 const PROJECTS_STORAGE_KEY = "bbl.plugin_studio.projects.v1";
 const SELECTED_STORAGE_KEY = "bbl.plugin_studio.selected.v1";
 const MAX_LOG_ITEMS = 240;
-const EXAMPLE_PLUGIN_ID_PREFIX = "plugin.example.";
 const PLUGIN_STUDIO_SESSION_ID = "plugin-studio";
 const LOG_CHANNEL_OPTIONS = ["trigger", "hook", "brain", "runtime"] as const;
 
@@ -816,10 +815,6 @@ function handleInsertSnippet(snippet: string): void {
     indexJsCode.value = indexJsCode.value ? indexJsCode.value + "\n\n" + snippet : snippet;
     activeFile.value = "index.js";
   }
-}
-
-function isExamplePlugin(plugin: PluginMetadata): boolean {
-  return String(plugin.id || "").trim().startsWith(EXAMPLE_PLUGIN_ID_PREFIX);
 }
 
 const exampleProjects = computed(() => projects.value.filter((item) => item.category === "example"));
@@ -1580,10 +1575,10 @@ onUnmounted(() => {
 
       <div class="footer-status">
         <span v-if="selectedInstalledPlugin" class="status-pill">
-          {{ selectedInstalledPlugin.id }} · {{ selectedInstalledPluginEnabled ? "running" : "disabled" }}
+          {{ selectedInstalledPlugin.id }} · {{ selectedInstalledPluginEnabled ? "已启用" : "已停用" }}
         </span>
         <span v-else-if="selectedProjectPluginId" class="status-pill">
-          {{ selectedProjectPluginId }} · not installed
+          {{ selectedProjectPluginId }} · 未安装
         </span>
         <span v-if="statusMessage" class="status-pill success">{{ statusMessage }}</span>
         <span v-if="errorMessage" class="status-pill error">{{ errorMessage }}</span>

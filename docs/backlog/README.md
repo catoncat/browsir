@@ -17,6 +17,7 @@ priority: p0 | p1 | p2
 source: 来源描述（如"调试对话 session-xxx"）
 created: YYYY-MM-DD
 assignee: agent | human | unassigned
+claimed_at: ISO datetime（可选；claim 时写入）
 tags: [tag1, tag2]
 ---
 ```
@@ -64,3 +65,5 @@ acceptance_ref: docs/<某设计文档>.md
 2. **承接 issue**：空闲时或用户指派时，读取本目录寻找 `status: open` 的 issue
 3. **更新状态**：开始处理改为 `in-progress`，完成改为 `done` 并补充 `resolved` 字段
 4. **跨会话交接**：新 agent 进入时可扫描本目录了解未完成工作
+
+项目内也可以通过 repo skill `auto-claim-issues` 自动认领符合条件的 backlog slice。

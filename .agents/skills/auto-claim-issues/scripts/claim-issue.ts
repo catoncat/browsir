@@ -3,24 +3,24 @@
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-type Status = "open" | "in-progress" | "done";
-type Priority = "p0" | "p1" | "p2";
+export type Status = "open" | "in-progress" | "done";
+export type Priority = "p0" | "p1" | "p2";
 
-type FrontmatterValue = string | string[];
+export type FrontmatterValue = string | string[];
 
-interface Frontmatter {
+export interface Frontmatter {
   order: string[];
   data: Record<string, FrontmatterValue>;
 }
 
-interface IssueFile {
+export interface IssueFile {
   path: string;
   filename: string;
   body: string;
   frontmatter: Frontmatter;
 }
 
-interface ParsedArgs {
+export interface ParsedArgs {
   issueId?: string;
   assignee: string;
   group?: string;
@@ -29,7 +29,7 @@ interface ParsedArgs {
   allowConflicts: boolean;
 }
 
-type ClaimResult =
+export type ClaimResult =
   | {
       kind: "claimed" | "preview";
       issue: ReturnType<typeof toIssueSummary>;
@@ -52,7 +52,7 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-function parseArgs(argv: string[]): ParsedArgs {
+export function parseArgs(argv: string[]): ParsedArgs {
   const out: ParsedArgs = {
     assignee: "agent",
     dryRun: false,
@@ -105,7 +105,32 @@ function stripQuotes(raw: string): string {
   return text;
 }
 
-function parseFrontmatter(text: string): { frontmatter: Frontmatter; body: string } {
+function stripInlineComment(raw: string): string {
+  const text = String(raw || "");
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    const prev = i > 0 ? text[i - 1] : "";
+    if (char === "'" && !inDouble && prev !== "\\") {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (char === '"' && !inSingle && prev !== "\\") {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (char === "#" && !inSingle && !inDouble) {
+      const before = i === 0 ? "" : text[i - 1];
+      if (!before || /\s/.test(before)) {
+        return text.slice(0, i).trimEnd();
+      }
+    }
+  }
+  return text.trimEnd();
+}
+
+export function parseFrontmatter(text: string): { frontmatter: Frontmatter; body: string } {
   const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
   if (!match) fail("backlog 文件缺少合法 frontmatter");
   const yaml = String(match[1] || "");
@@ -120,7 +145,7 @@ function parseFrontmatter(text: string): { frontmatter: Frontmatter; body: strin
     const top = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
     if (!top) continue;
     const key = top[1];
-    const rest = top[2];
+    const rest = stripInlineComment(top[2]);
     order.push(key);
     if (!rest) {
       const items: string[] = [];
@@ -129,7 +154,7 @@ function parseFrontmatter(text: string): { frontmatter: Frontmatter; body: strin
         const child = lines[cursor];
         const bullet = child.match(/^\s*-\s+(.*)$/);
         if (!bullet) break;
-        items.push(stripQuotes(bullet[1]));
+        items.push(stripQuotes(stripInlineComment(bullet[1])));
         cursor += 1;
       }
       data[key] = items;
@@ -182,7 +207,7 @@ function serializeFrontmatter(frontmatter: Frontmatter): string {
   return `${lines.join("\n")}\n`;
 }
 
-function loadIssueFile(filePath: string): IssueFile {
+export function loadIssueFile(filePath: string): IssueFile {
   const text = readFileSync(filePath, "utf8");
   const parsed = parseFrontmatter(text);
   return {
@@ -198,12 +223,12 @@ function writeIssueFile(issue: IssueFile): void {
   writeFileSync(issue.path, next, "utf8");
 }
 
-function readString(issue: IssueFile, key: string): string {
+export function readString(issue: IssueFile, key: string): string {
   const value = issue.frontmatter.data[key];
   return Array.isArray(value) ? "" : String(value || "").trim();
 }
 
-function readArray(issue: IssueFile, key: string): string[] {
+export function readArray(issue: IssueFile, key: string): string[] {
   const value = issue.frontmatter.data[key];
   if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
   if (!value) return [];
@@ -218,7 +243,7 @@ function normalizeScope(raw: string): string {
     .replace(/\/+$/, "");
 }
 
-function scopesConflict(a: string, b: string): boolean {
+export function scopesConflict(a: string, b: string): boolean {
   const left = normalizeScope(a);
   const right = normalizeScope(b);
   if (!left || !right) return false;
@@ -226,7 +251,7 @@ function scopesConflict(a: string, b: string): boolean {
   return left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
 }
 
-function issueStatus(issue: IssueFile): Status {
+export function issueStatus(issue: IssueFile): Status {
   const value = readString(issue, "status");
   if (value === "open" || value === "in-progress" || value === "done") {
     return value;
@@ -234,7 +259,7 @@ function issueStatus(issue: IssueFile): Status {
   return "open";
 }
 
-function issuePriority(issue: IssueFile): Priority {
+export function issuePriority(issue: IssueFile): Priority {
   const value = readString(issue, "priority");
   if (value === "p0" || value === "p1" || value === "p2") return value;
   return "p2";
@@ -246,7 +271,7 @@ function priorityRank(priority: Priority): number {
   return 2;
 }
 
-function toIssueSummary(issue: IssueFile) {
+export function toIssueSummary(issue: IssueFile) {
   return {
     id: readString(issue, "id"),
     title: readString(issue, "title"),
@@ -259,17 +284,20 @@ function toIssueSummary(issue: IssueFile) {
   };
 }
 
-function findById(issues: IssueFile[], issueId: string): IssueFile | undefined {
+export function findById(issues: IssueFile[], issueId: string): IssueFile | undefined {
   return issues.find((issue) => readString(issue, "id") === issueId);
 }
 
-function dependenciesSatisfied(issue: IssueFile, all: IssueFile[]): boolean {
+export function dependenciesSatisfied(issue: IssueFile, all: IssueFile[]): boolean {
   const deps = readArray(issue, "depends_on");
   if (deps.length === 0) return true;
-  return deps.every((depId) => issueStatus(findById(all, depId) || issue) === "done");
+  return deps.every((depId) => {
+    const dep = findById(all, depId);
+    return dep != null && issueStatus(dep) === "done";
+  });
 }
 
-function hasScopeConflict(issue: IssueFile, active: IssueFile[]): boolean {
+export function hasScopeConflict(issue: IssueFile, active: IssueFile[]): boolean {
   const currentScopes = readArray(issue, "write_scope");
   if (currentScopes.length === 0) return false;
   return active.some((other) => {
@@ -281,7 +309,7 @@ function hasScopeConflict(issue: IssueFile, active: IssueFile[]): boolean {
   });
 }
 
-function loadAllIssues(repoRoot: string): IssueFile[] {
+export function loadAllIssues(repoRoot: string): IssueFile[] {
   const backlogDir = path.join(repoRoot, "docs", "backlog");
   const files = readdirSync(backlogDir)
     .filter((name) => name.endsWith(".md") && name !== "README.md")
@@ -289,7 +317,7 @@ function loadAllIssues(repoRoot: string): IssueFile[] {
   return files.map((name) => loadIssueFile(path.join(backlogDir, name)));
 }
 
-function chooseIssue(issues: IssueFile[], args: ParsedArgs): ClaimResult {
+export function chooseIssue(issues: IssueFile[], args: ParsedArgs): ClaimResult {
   const active = issues.filter((issue) => issueStatus(issue) === "in-progress");
 
   if (args.issueId) {
@@ -366,7 +394,7 @@ function chooseIssue(issues: IssueFile[], args: ParsedArgs): ClaimResult {
   };
 }
 
-function claimIssueFile(issue: IssueFile, assignee: string): void {
+export function claimIssueFile(issue: IssueFile, assignee: string): void {
   issue.frontmatter.data.status = "in-progress";
   issue.frontmatter.data.assignee = assignee;
   issue.frontmatter.data.claimed_at = new Date().toISOString();
@@ -410,7 +438,7 @@ function printResult(result: ClaimResult, asJson: boolean): void {
   console.log(`write_scope: ${result.issue.write_scope.join(", ") || "(none)"}`);
 }
 
-function main() {
+export function main() {
   const args = parseArgs(process.argv.slice(2));
   const repoRoot = process.cwd();
   const issues = loadAllIssues(repoRoot);
@@ -434,4 +462,6 @@ function main() {
   printResult(result, args.json);
 }
 
-main();
+if (import.meta.main) {
+  main();
+}

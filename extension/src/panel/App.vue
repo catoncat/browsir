@@ -3011,7 +3011,7 @@ onUnmounted(() => {
                 <Wrench :size="14" aria-hidden="true" /> Skills 管理
               </button>
               <button role="menuitem" @click="activeView = 'plugins'; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
-                <Plug :size="14" aria-hidden="true" /> 插件管理
+                <Plug :size="14" aria-hidden="true" /> 插件
               </button>
               <button role="menuitem" @click="activeView = 'provider-settings'; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
                 <Server :size="14" aria-hidden="true" /> 模型路由
