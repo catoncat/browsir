@@ -25,19 +25,18 @@ tags: [slice, panel, chat-view, controller, composable, architecture, phase2]
 
 ## 问题
 
-`App.vue` 壳层收口已经在真实工作树中完成：当前 `App.vue` 仅约 86 行，主要负责 bootstrap、视图切换和 `SessionList` 挂载。与此同时，`ChatView.vue` 已经接入了 `use-ui-render-pipeline.ts`、`use-llm-streaming.ts` 与 `use-tool-run-tracking.ts` 三条首轮边界，但复杂度并未被真正清空，而是继续集中在约 2,142 行的 `ChatView.vue` 中，当前仍混合了：
+`App.vue` 壳层收口已经在真实工作树中完成：当前 `App.vue` 仅约 86 行，主要负责 bootstrap、视图切换和 `SessionList` 挂载。与此同时，`ChatView.vue` 已经接入了 `use-ui-render-pipeline.ts`、`use-llm-streaming.ts`、`use-tool-run-tracking.ts` 与 `use-runtime-messages.ts` 四条首轮边界，但复杂度并未被真正清空，而是继续集中在约 2,142 行的 `ChatView.vue` 中，当前仍混合了：
 
 - chat 主视图渲染
-- runtime message bus / `chrome.runtime.onMessage`
-- polling / bridge status 刷新
 - 残余的 panel UI plugin render runtime / hook wiring
-- send / export / debug link 等动作处理
+- send / export / debug link / fork / refresh 等动作处理
+- 一批与滚动、会话切换、运行态展示相关的 view-local watches / glue
 
 因此本条目的真实目标，已经从“瘦 `App.vue`”变成“避免 `ChatView.vue` 成为新的巨型主控组件”。
 
 ## 目标
 
-保持当前 `App.vue` shell 不回退，并在已落地的 `use-ui-render-pipeline.ts` / `use-llm-streaming.ts` / `use-tool-run-tracking.ts` 基础上，继续从 `ChatView.vue` 中拆出稳定 controller 边界，优先把 runtime message bus、polling/bridge status 与会话动作处理分离出去。
+保持当前 `App.vue` shell 不回退，并在已落地的 `use-ui-render-pipeline.ts` / `use-llm-streaming.ts` / `use-tool-run-tracking.ts` / `use-runtime-messages.ts` 基础上，继续从 `ChatView.vue` 中拆出稳定 controller 边界，优先把会话动作处理与剩余的 view-local watch glue 分离出去。
 
 ## 验收标准
 
@@ -45,18 +44,20 @@ tags: [slice, panel, chat-view, controller, composable, architecture, phase2]
 - [x] `App.vue` 保持 shell-only，不重新吸回 chat controller 逻辑
 - [x] `use-llm-streaming.ts` 已承接 LLM 流式草稿状态的首轮抽离
 - [x] `use-tool-run-tracking.ts` 已承接 tool run tracking / step stream sync / tool card model 的首轮抽离
-- [ ] `use-runtime-messages.ts` 完成接线，`ChatView.vue` 不再直接承载 `chrome.runtime.onMessage` + polling + bridge status wiring
+- [x] `use-runtime-messages.ts` 已接线，`ChatView.vue` 不再直接承载 `chrome.runtime.onMessage` + polling + bridge status wiring
 - [x] panel UI plugin runtime / render hook 管线已有 `use-ui-render-pipeline.ts` 独立边界
-- [ ] send / export / debug link 等动作已提炼为独立 helper / composable，或至少被显式隔离
+- [ ] export / debug / clipboard 动作已提炼为独立 helper / composable，或至少被显式隔离
+- [ ] send / session control 动作已提炼为独立 helper / composable，或至少被显式隔离
 - [ ] `bun run build` 通过
 - [ ] `bun run test` 通过
 
 ## 推荐拆分顺序
 
-0. 保持并继续复用已接入的 `use-ui-render-pipeline.ts` / `use-llm-streaming.ts` / `use-tool-run-tracking.ts`
-1. `use-runtime-messages.ts`（接入现有首版文件，抽 runtime/bridge event wiring + polling + bridge status）
-2. `use-conversation-actions.ts`（抽 send/export/debug/fork 等动作）
-3. 如 `use-tool-run-tracking.ts` 继续膨胀，再做二阶段细拆
+0. 保持并继续复用已接入的 `use-ui-render-pipeline.ts` / `use-llm-streaming.ts` / `use-tool-run-tracking.ts` / `use-runtime-messages.ts`
+1. `use-conversation-export.ts`（优先抽 `generateMarkdown` / copy / export / debug link）
+2. `use-chat-send-action.ts`（再评估 `handleSend()` 的独立边界）
+3. 轻量 session controls（create / refresh / stop / fork jump / queue promote）视情况并入 `use-session-toolbar-actions.ts`
+4. 如 `use-tool-run-tracking.ts` 或 `use-runtime-messages.ts` 继续膨胀，再做二阶段细拆
 
 > `shell-context.ts` 不再是第一阶段硬约束；只有当 props/emits 或注入边界真的成为阻碍时再引入。
 
@@ -67,9 +68,10 @@ tags: [slice, panel, chat-view, controller, composable, architecture, phase2]
 - `extension/src/panel/types.ts`
 - `extension/src/panel/composables/use-llm-streaming.ts`（已落地，继续保持窄边界）
 - `extension/src/panel/composables/use-tool-run-tracking.ts`（已落地，继续观察是否二次细拆）
-- `extension/src/panel/composables/use-runtime-messages.ts`（已出现首版文件，待接线）
+- `extension/src/panel/composables/use-runtime-messages.ts`（已接线，继续观察是否二次细拆）
 - `extension/src/panel/composables/use-ui-render-pipeline.ts`（优先复用/扩展）
-- `extension/src/panel/composables/use-conversation-actions.ts`（推荐新建）
+- `extension/src/panel/composables/use-conversation-export.ts`（推荐新建）
+- `extension/src/panel/composables/use-chat-send-action.ts`（推荐新建）
 
 ## 泳道
 

@@ -14,7 +14,7 @@ tags: [panel, refactor, vue, composables, chat-view, follow-up]
 
 ## 背景
 
-`ISSUE-017` 现已重新校准为：在保留 `App.vue` shell 收口成果的前提下，从 `ChatView.vue` 拆出第一层 controller 边界（run state / runtime bus / plugin runtime / conversation actions）。当前工作树里，`use-ui-render-pipeline.ts`、`use-llm-streaming.ts` 与 `use-tool-run-tracking.ts` 已经落下首轮抽离，本条目只承接其后的二阶段深拆。
+`ISSUE-017` 现已重新校准为：在保留 `App.vue` shell 收口成果的前提下，从 `ChatView.vue` 拆出第一层 controller 边界（run state / runtime bus / plugin runtime / conversation actions）。当前工作树里，`use-ui-render-pipeline.ts`、`use-llm-streaming.ts`、`use-tool-run-tracking.ts` 与 `use-runtime-messages.ts` 已经落下首轮抽离，本条目只承接其后的二阶段深拆。
 
 本条目保留为**第二阶段 follow-up**：当 `ISSUE-017` 完成首轮 controller 解耦后，如果 `ChatView.vue` 或新抽出的 composable 仍然偏厚，再继续做更深层的 presentational / auxiliary 拆分。
 
@@ -27,9 +27,9 @@ tags: [panel, refactor, vue, composables, chat-view, follow-up]
 | 区块 | 现状 |
 |------|------|
 | `use-tool-run-tracking.ts` | 已接管 run tracking 主体；若继续增厚，需要再拆更窄边界 |
+| `use-runtime-messages.ts` | 已接管 runtime message bus / polling 主体；若继续增厚，需要再拆更窄边界 |
 | watchers / auto-scroll | 与运行态、消息列表可见性、fork scene 等交织 |
 | panel UI plugin runtime wiring | `use-ui-render-pipeline.ts` 已接入，但 `ChatView.vue` 仍保留不少 side-effect/wiring |
-| runtime message bus | `use-runtime-messages.ts` 已出现首版文件，但 `chrome.runtime.onMessage`、bridge/runtime event 分发、polling 仍在 `ChatView.vue` 主体 |
 | conversation actions | send / export / debug link / fork source / refresh title 混在同层 |
 
 ## 拆分计划（按优先级）
@@ -38,7 +38,7 @@ tags: [panel, refactor, vue, composables, chat-view, follow-up]
 
 1. **`ChatTranscript.vue` / `ChatTimeline.vue`**
    - 负责消息列表、流式草稿、tool pending card、空状态视图
-   - 前提：`use-runtime-messages.ts` 已完成接线，runtime message bus 与会话动作已从 `ChatView.vue` 主体拆出
+   - 前提：会话动作与大块 watch glue 已从 `ChatView.vue` 主体拆出
 
 2. **`ChatHeaderActions.vue` / `ChatExportActions.vue`**
    - Header 菜单、export/debug/fork source 辅助动作
@@ -64,6 +64,9 @@ tags: [panel, refactor, vue, composables, chat-view, follow-up]
 
 4. **若 `use-runtime-messages.ts` 继续膨胀**
    - 候选拆分：runtime event dispatch / polling sync / bridge event output
+
+5. **若 action composable 继续膨胀**
+   - 候选拆分：export/debug 簇 与 send/session-control 簇分层
 
 ## 非目标
 
