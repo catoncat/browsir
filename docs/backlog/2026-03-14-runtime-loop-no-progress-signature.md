@@ -26,7 +26,7 @@ tags: [slice, kernel, runtime-loop, no-progress]
 
 ## 范围
 
-- volatile evidence 归一化
+- volatile evidence 归一化（screenshot diff hash、DOM mutation count 等动态证据的标准化处理）
 - no-progress fingerprint
 - tool-call signature 计算
 - continue budget 判定

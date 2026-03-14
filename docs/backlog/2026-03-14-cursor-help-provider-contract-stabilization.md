@@ -42,4 +42,5 @@ tags: [slice, cursor-help, provider, inspect]
 - inspect 足以判断可执行性
 - runtime mismatch 明确 fail fast
 - UI 不泄露 direct-api / composer / DOM fallback 细节
+- 构建后确认 cursor-help-page-hook 产物为单文件可执行，无顶层 import/export
 

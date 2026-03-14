@@ -38,5 +38,4 @@ tags: [slice, skill, browser-scope, execution]
 ## 验收
 
 - `execute_skill_script` 不再返回“请迁到 host path”
-- 对不支持的运行时给出明确 unsupported
-
+- 对不支持的运行时给出明确 unsupported- browser scope 执行产物符合注入脚本单文件自包含约束（无顶层 import/export）

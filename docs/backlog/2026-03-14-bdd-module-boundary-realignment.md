@@ -26,8 +26,13 @@ tags: [slice, bdd, docs, architecture]
 
 ## 范围
 
-- contract categories
-- 证明要求
+建议分两阶段执行：
+
+### Phase A（可提前启动，不依赖代码重构完成）
+- contract categories 重编目
+- 证明要求更新
+
+### Phase B（等代码稳定后启动）
 - kernel 文档边界
 - context ref 文档边界
 

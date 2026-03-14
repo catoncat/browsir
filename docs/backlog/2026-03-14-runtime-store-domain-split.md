@@ -25,11 +25,20 @@ tags: [slice, panel, store, state]
 
 ## 范围
 
-- chat session / run
-- environment / config
-- skills
-- plugins
-- diagnostics
+建议分 2-3 个子 slice 执行：
+
+### Phase A（优先）
+- chat session / run → `chat-store.ts`
+
+### Phase B
+- environment / config → `config-store.ts`
+- diagnostics → `diagnostics-store.ts`
+
+### Phase C
+- skills → `skills-store.ts`
+- plugins → `plugins-store.ts`
+
+Store 间协作约定：禁止循环依赖，store 间通过显式 action 调用或 computed getter 引用（不允许直接 `$patch` 其他 store 的状态）。
 
 ## 非目标
 

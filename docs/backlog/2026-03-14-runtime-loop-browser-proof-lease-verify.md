@@ -9,7 +9,7 @@ assignee: unassigned
 kind: slice
 epic: EPIC-2026-03-14-NEXT-PHASE
 parallel_group: kernel-loop
-depends_on: [ISSUE-004]
+depends_on: [ISSUE-004]  # 单写者泳道串行约束（共享 runtime-loop.browser.ts），非逻辑依赖
 write_scope:
   - extension/src/sw/kernel/runtime-loop.browser.ts
   - extension/src/sw/kernel/loop-browser-proof.ts
