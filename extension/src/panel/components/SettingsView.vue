@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { storeToRefs } from "pinia";
 import { ref, onMounted } from "vue";
-import { useRuntimeStore } from "../stores/runtime";
+import { useConfigStore } from "../stores/config-store";
 import { ShieldCheck, Cpu, Loader2, ArrowLeft, Eye, EyeOff } from "lucide-vue-next";
 
 const emit = defineEmits(["close"]);
-const store = useRuntimeStore();
+const store = useConfigStore();
 const { config, savingConfig, error } = storeToRefs(store);
 
 const dialogRef = ref<HTMLElement | null>(null);

@@ -1,65 +1,25 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import {
-  normalizeBrowserRuntimeStrategy,
-  type BrowserRuntimeStrategy,
-} from "../../sw/kernel/browser-runtime-strategy";
-import {
-  normalizeCompactionSettings,
-  type CompactionSettings,
-} from "../../shared/compaction";
-import { normalizeProviderConnectionConfig } from "../../shared/llm-provider-config";
 import { sendMessage } from "./send-message";
+import { toRecord, toIntInRange } from "./store-helpers";
 import { useChatStore } from "./chat-store";
+import { useConfigStore } from "./config-store";
 export type {
   ConversationMessage,
   SessionForkSource,
   SessionIndexEntry,
   RuntimeStateView,
 } from "./chat-store";
-
-export interface PanelLlmProfile {
-  id: string;
-  provider: string;
-  llmApiBase: string;
-  llmApiKey: string;
-  llmModel: string;
-  providerOptions?: Record<string, unknown>;
-  llmTimeoutMs: number;
-  llmRetryMaxAttempts: number;
-  llmMaxRetryDelayMs: number;
-}
-
-interface PanelConfig {
-  bridgeUrl: string;
-  bridgeToken: string;
-  browserRuntimeStrategy: BrowserRuntimeStrategy;
-  compaction: CompactionSettings;
-  llmDefaultProfile: string;
-  llmAuxProfile: string;
-  llmFallbackProfile: string;
-  llmProfiles: PanelLlmProfile[];
-  llmSystemPromptCustom: string;
-  maxSteps: number;
-  autoTitleInterval: number;
-  bridgeInvokeTimeoutMs: number;
-  llmTimeoutMs: number;
-  llmRetryMaxAttempts: number;
-  llmMaxRetryDelayMs: number;
-  devAutoReload: boolean;
-  devReloadIntervalMs: number;
-}
-
-interface RuntimeHealth {
-  bridgeUrl: string;
-  llmDefaultProfile: string;
-  llmAuxProfile: string;
-  llmFallbackProfile: string;
-  llmProvider: string;
-  llmModel: string;
-  hasLlmApiKey: boolean;
-  systemPromptPreview: string;
-}
+export type {
+  PanelConfig,
+  PanelLlmProfile,
+  RuntimeHealth,
+} from "./config-store";
+export {
+  DEFAULT_PANEL_LLM_PROVIDER,
+  DEFAULT_PANEL_LLM_API_BASE,
+  DEFAULT_PANEL_LLM_MODEL,
+} from "./config-store";
 
 export interface SkillMetadata {
   id: string;
@@ -189,26 +149,6 @@ export interface PluginValidateResult {
   warnings: string[];
   checks: PluginValidateCheck[];
   sourceLocation?: string;
-}
-
-function toRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object"
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function toIntInRange(
-  raw: unknown,
-  fallback: number,
-  min: number,
-  max: number,
-): number {
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return fallback;
-  const rounded = Math.floor(n);
-  if (rounded < min) return min;
-  if (rounded > max) return max;
-  return rounded;
 }
 
 function toStringArray(input: unknown): string[] {
@@ -383,102 +323,6 @@ function normalizePluginUnregisterResult(
   };
 }
 
-export const DEFAULT_PANEL_LLM_PROVIDER = "openai_compatible";
-export const DEFAULT_PANEL_LLM_API_BASE = "https://ai.chen.rs/v1";
-export const DEFAULT_PANEL_LLM_MODEL = "gpt-5.3-codex";
-
-interface LlmProfileDefaults {
-  id: string;
-  llmTimeoutMs: number;
-  llmRetryMaxAttempts: number;
-  llmMaxRetryDelayMs: number;
-}
-
-function createDefaultLlmProfile(
-  defaults: LlmProfileDefaults,
-): PanelLlmProfile {
-  const id = String(defaults.id || "default").trim() || "default";
-  return {
-    id,
-    provider: DEFAULT_PANEL_LLM_PROVIDER,
-    llmApiBase: DEFAULT_PANEL_LLM_API_BASE,
-    llmApiKey: "",
-    llmModel: DEFAULT_PANEL_LLM_MODEL,
-    providerOptions: {},
-    llmTimeoutMs: defaults.llmTimeoutMs,
-    llmRetryMaxAttempts: defaults.llmRetryMaxAttempts,
-    llmMaxRetryDelayMs: defaults.llmMaxRetryDelayMs,
-  };
-}
-
-function normalizeSingleLlmProfile(
-  raw: Record<string, unknown>,
-  defaults: LlmProfileDefaults,
-): PanelLlmProfile {
-  const base = createDefaultLlmProfile(defaults);
-  const id = String(raw.id || base.id).trim() || base.id;
-  const connection = normalizeProviderConnectionConfig({
-    provider: raw.provider || base.provider,
-    llmApiBase: raw.llmApiBase ?? base.llmApiBase,
-    llmApiKey: raw.llmApiKey ?? base.llmApiKey,
-  });
-  return {
-    id,
-    provider: String(raw.provider || base.provider).trim() || base.provider,
-    llmApiBase: connection.llmApiBase,
-    llmApiKey: connection.llmApiKey,
-    llmModel: String(raw.llmModel || base.llmModel).trim() || base.llmModel,
-    providerOptions: toRecord(raw.providerOptions),
-    llmTimeoutMs: toIntInRange(
-      raw.llmTimeoutMs,
-      defaults.llmTimeoutMs,
-      1_000,
-      300_000,
-    ),
-    llmRetryMaxAttempts: toIntInRange(
-      raw.llmRetryMaxAttempts,
-      defaults.llmRetryMaxAttempts,
-      0,
-      6,
-    ),
-    llmMaxRetryDelayMs: toIntInRange(
-      raw.llmMaxRetryDelayMs,
-      defaults.llmMaxRetryDelayMs,
-      0,
-      300_000,
-    ),
-  };
-}
-
-function normalizeLlmProfiles(
-  raw: unknown,
-  defaults: LlmProfileDefaults,
-): PanelLlmProfile[] {
-  const out: PanelLlmProfile[] = [];
-  const dedup = new Set<string>();
-
-  const pushProfile = (value: unknown, idOverride?: string) => {
-    const row = toRecord(value);
-    const profile = normalizeSingleLlmProfile(row, {
-      ...defaults,
-      id: String(idOverride || defaults.id || "default").trim() || "default",
-    });
-    if (dedup.has(profile.id)) return;
-    dedup.add(profile.id);
-    out.push(profile);
-  };
-
-  if (Array.isArray(raw)) {
-    for (const item of raw) pushProfile(item);
-  }
-
-  if (out.length === 0) {
-    out.push(createDefaultLlmProfile(defaults));
-  }
-
-  return out;
-}
-
 function extractContentFromStepExecuteResult(value: unknown): string {
   const root = toRecord(value);
   const rootData = toRecord(root.data);
@@ -515,125 +359,10 @@ function extractContentFromStepExecuteResult(value: unknown): string {
   throw new Error("文件读取工具未返回 content 文本");
 }
 
-function normalizeConfig(
-  raw: Record<string, unknown> | null | undefined,
-): PanelConfig {
-  const bridgeUrl = String(raw?.bridgeUrl || "ws://127.0.0.1:8787/ws");
-  const bridgeToken = String(raw?.bridgeToken || "");
-  const llmTimeoutMs = toIntInRange(raw?.llmTimeoutMs, 120000, 1_000, 300_000);
-  const llmRetryMaxAttempts = toIntInRange(raw?.llmRetryMaxAttempts, 2, 0, 6);
-  const llmMaxRetryDelayMs = toIntInRange(
-    raw?.llmMaxRetryDelayMs,
-    60000,
-    0,
-    300_000,
-  );
-  const defaultProfile =
-    String(raw?.llmDefaultProfile || "default").trim() || "default";
-
-  const llmProfiles = normalizeLlmProfiles(raw?.llmProfiles, {
-    id: defaultProfile,
-    llmTimeoutMs,
-    llmRetryMaxAttempts,
-    llmMaxRetryDelayMs,
-  });
-  const validProfileIds = new Set(llmProfiles.map((item) => item.id));
-  const llmDefaultProfile = validProfileIds.has(defaultProfile)
-    ? defaultProfile
-    : llmProfiles[0]?.id || "default";
-  const auxProfile = String(raw?.llmAuxProfile || "").trim();
-  const fallbackProfile = String(raw?.llmFallbackProfile || "").trim();
-
-  return {
-    bridgeUrl,
-    bridgeToken,
-    browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
-      raw?.browserRuntimeStrategy,
-      "browser-first",
-    ),
-    compaction: normalizeCompactionSettings(raw?.compaction),
-    llmDefaultProfile,
-    llmAuxProfile:
-      auxProfile &&
-      auxProfile !== llmDefaultProfile &&
-      validProfileIds.has(auxProfile)
-        ? auxProfile
-        : "",
-    llmFallbackProfile:
-      fallbackProfile &&
-      fallbackProfile !== llmDefaultProfile &&
-      validProfileIds.has(fallbackProfile)
-        ? fallbackProfile
-        : "",
-    llmProfiles,
-    llmSystemPromptCustom: String(raw?.llmSystemPromptCustom || ""),
-    maxSteps: toIntInRange(raw?.maxSteps, 100, 1, 500),
-    autoTitleInterval: toIntInRange(raw?.autoTitleInterval, 10, 0, 100),
-    bridgeInvokeTimeoutMs: toIntInRange(
-      raw?.bridgeInvokeTimeoutMs,
-      120000,
-      1_000,
-      300_000,
-    ),
-    llmTimeoutMs,
-    llmRetryMaxAttempts,
-    llmMaxRetryDelayMs,
-    devAutoReload: raw?.devAutoReload === true,
-    devReloadIntervalMs: toIntInRange(
-      raw?.devReloadIntervalMs,
-      1500,
-      500,
-      30000,
-    ),
-  };
-}
-
-function normalizeHealth(
-  raw: Record<string, unknown> | null | undefined,
-): RuntimeHealth {
-  return {
-    bridgeUrl: String(raw?.bridgeUrl || "ws://127.0.0.1:8787/ws"),
-    llmDefaultProfile: String(raw?.llmDefaultProfile || "default"),
-    llmAuxProfile: String(raw?.llmAuxProfile || ""),
-    llmFallbackProfile: String(raw?.llmFallbackProfile || ""),
-    llmProvider: String(raw?.llmProvider || DEFAULT_PANEL_LLM_PROVIDER),
-    llmModel: String(raw?.llmModel || DEFAULT_PANEL_LLM_MODEL),
-    hasLlmApiKey: Boolean(raw?.hasLlmApiKey),
-    systemPromptPreview: String(raw?.systemPromptPreview || ""),
-  };
-}
-
 export const useRuntimeStore = defineStore("runtime", () => {
   const chatStore = useChatStore();
+  const configStore = useConfigStore();
   const loading = ref(false);
-  const savingConfig = ref(false);
-  const error = ref("");
-  const health = ref<RuntimeHealth>(
-    normalizeHealth({
-      bridgeUrl: "ws://127.0.0.1:8787/ws",
-      llmDefaultProfile: "default",
-      llmAuxProfile: "",
-      llmFallbackProfile: "",
-      llmProvider: DEFAULT_PANEL_LLM_PROVIDER,
-      llmModel: DEFAULT_PANEL_LLM_MODEL,
-      hasLlmApiKey: false,
-    }),
-  );
-  const config = ref<PanelConfig>(
-    normalizeConfig({
-      bridgeUrl: "ws://127.0.0.1:8787/ws",
-      llmDefaultProfile: "default",
-      llmAuxProfile: "",
-      llmFallbackProfile: "",
-      compaction: normalizeCompactionSettings(undefined),
-      llmSystemPromptCustom: "",
-      autoTitleInterval: 10,
-      bridgeInvokeTimeoutMs: 120000,
-      llmTimeoutMs: 120000,
-      llmRetryMaxAttempts: 2,
-      llmMaxRetryDelayMs: 60000,
-    }),
-  );
 
   async function ensureSkillSessionId(
     inputSessionId?: string,
@@ -865,143 +594,29 @@ export const useRuntimeStore = defineStore("runtime", () => {
 
   async function bootstrap() {
     loading.value = true;
-    error.value = "";
+    configStore.error = "";
     try {
-      const cfg = await sendMessage<Record<string, unknown>>("config.get");
-      config.value = normalizeConfig(cfg);
-      await Promise.all([refreshHealth(), chatStore.refreshSessions()]);
-      if (!String(config.value.llmSystemPromptCustom || "").trim()) {
-        const preview = String(health.value.systemPromptPreview || "");
+      await configStore.loadConfig();
+      await Promise.all([configStore.refreshHealth(), chatStore.refreshSessions()]);
+      if (!String(configStore.config.llmSystemPromptCustom || "").trim()) {
+        const preview = String(configStore.health.systemPromptPreview || "");
         if (preview.trim()) {
-          config.value.llmSystemPromptCustom = preview;
+          configStore.config.llmSystemPromptCustom = preview;
         }
       }
       if (chatStore.activeSessionId) {
         await chatStore.loadConversation(chatStore.activeSessionId, { setActive: false });
       }
     } catch (err) {
-      error.value = err instanceof Error ? err.message : String(err);
+      configStore.error = err instanceof Error ? err.message : String(err);
     } finally {
       loading.value = false;
     }
   }
 
-  async function refreshHealth() {
-    const raw =
-      await sendMessage<Record<string, unknown>>("brain.debug.config");
-    health.value = normalizeHealth(raw);
-  }
-
-  async function saveConfig() {
-    savingConfig.value = true;
-    error.value = "";
-    try {
-      const llmTimeoutMs = Math.max(
-        1000,
-        Number(config.value.llmTimeoutMs || 120000),
-      );
-      const llmRetryMaxAttempts = Math.max(
-        0,
-        Math.min(6, Number(config.value.llmRetryMaxAttempts || 2)),
-      );
-      const llmMaxRetryDelayMs = Math.max(
-        0,
-        Number(config.value.llmMaxRetryDelayMs || 60000),
-      );
-
-      const llmProfiles = normalizeLlmProfiles(config.value.llmProfiles, {
-        id:
-          String(config.value.llmDefaultProfile || "default").trim() ||
-          "default",
-        llmTimeoutMs,
-        llmRetryMaxAttempts,
-        llmMaxRetryDelayMs,
-      });
-      const profileIds = new Set(llmProfiles.map((item) => item.id));
-      const llmDefaultProfileRaw = String(
-        config.value.llmDefaultProfile || "",
-      ).trim();
-      const llmDefaultProfile = profileIds.has(llmDefaultProfileRaw)
-        ? llmDefaultProfileRaw
-        : llmProfiles[0]?.id || "default";
-      const llmAuxProfileRaw = String(config.value.llmAuxProfile || "").trim();
-      const llmFallbackProfileRaw = String(
-        config.value.llmFallbackProfile || "",
-      ).trim();
-      const llmAuxProfile =
-        llmAuxProfileRaw &&
-        llmAuxProfileRaw !== llmDefaultProfile &&
-        profileIds.has(llmAuxProfileRaw)
-          ? llmAuxProfileRaw
-          : "";
-      const llmFallbackProfile =
-        llmFallbackProfileRaw &&
-        llmFallbackProfileRaw !== llmDefaultProfile &&
-        profileIds.has(llmFallbackProfileRaw)
-          ? llmFallbackProfileRaw
-          : "";
-      const browserRuntimeStrategy = normalizeBrowserRuntimeStrategy(
-        config.value.browserRuntimeStrategy,
-        "browser-first",
-      );
-
-      config.value.llmProfiles = llmProfiles;
-      config.value.llmDefaultProfile = llmDefaultProfile;
-      config.value.llmAuxProfile = llmAuxProfile;
-      config.value.llmFallbackProfile = llmFallbackProfile;
-      config.value.browserRuntimeStrategy = browserRuntimeStrategy;
-      config.value.compaction = normalizeCompactionSettings(
-        config.value.compaction,
-      );
-
-      await sendMessage("config.save", {
-        payload: {
-          bridgeUrl: config.value.bridgeUrl.trim(),
-          bridgeToken: config.value.bridgeToken,
-          browserRuntimeStrategy,
-          compaction: config.value.compaction,
-          llmDefaultProfile,
-          llmAuxProfile,
-          llmFallbackProfile,
-          llmProfiles,
-          llmSystemPromptCustom: config.value.llmSystemPromptCustom,
-          maxSteps: Math.max(1, Number(config.value.maxSteps || 100)),
-          autoTitleInterval: Math.max(
-            0,
-            Number(config.value.autoTitleInterval ?? 10),
-          ),
-          bridgeInvokeTimeoutMs: Math.max(
-            1000,
-            Number(config.value.bridgeInvokeTimeoutMs || 120000),
-          ),
-          llmTimeoutMs,
-          llmRetryMaxAttempts,
-          llmMaxRetryDelayMs,
-          devAutoReload: config.value.devAutoReload,
-          devReloadIntervalMs: Math.max(
-            500,
-            Number(config.value.devReloadIntervalMs || 1500),
-          ),
-        },
-      });
-      await sendMessage("bridge.connect");
-      await refreshHealth();
-    } catch (err) {
-      error.value = err instanceof Error ? err.message : String(err);
-      throw err;
-    } finally {
-      savingConfig.value = false;
-    }
-  }
-
   return {
     loading,
-    savingConfig,
-    error,
-    health,
-    config,
     bootstrap,
-    refreshHealth,
     listSkills,
     readVirtualFile,
     writeVirtualFile,
@@ -1017,6 +632,5 @@ export const useRuntimeStore = defineStore("runtime", () => {
     enablePlugin,
     disablePlugin,
     unregisterPlugin,
-    saveConfig,
   };
 });

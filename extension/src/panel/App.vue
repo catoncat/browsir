@@ -4,6 +4,7 @@ import { storeToRefs } from "pinia";
 import { computed, onMounted, onUnmounted, ref, nextTick, watch } from "vue";
 import { useRuntimeStore } from "./stores/runtime";
 import { useChatStore } from "./stores/chat-store";
+import { useConfigStore } from "./stores/config-store";
 import { useMessageActions, type PanelMessageLike, type PendingRegenerateState } from "./utils/message-actions";
 import { publishDebugLinkToBridge } from "./utils/debug-link";
 import {
@@ -33,7 +34,9 @@ import { onClickOutside } from "@vueuse/core";
 
 const store = useRuntimeStore();
 const chatStore = useChatStore();
-const { loading, error, config } = storeToRefs(store);
+const cfgStore = useConfigStore();
+const { loading } = storeToRefs(store);
+const { error, config } = storeToRefs(cfgStore);
 const { sessions, activeSessionId, messages, runtime, isRegeneratingTitle } = storeToRefs(chatStore);
 
 function nowIso(): string {

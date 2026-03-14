@@ -5,14 +5,14 @@ import {
   DEFAULT_PANEL_LLM_API_BASE,
   DEFAULT_PANEL_LLM_MODEL,
   DEFAULT_PANEL_LLM_PROVIDER,
-  useRuntimeStore,
+  useConfigStore,
   type PanelLlmProfile,
-} from "../stores/runtime";
+} from "../stores/config-store";
 import { ArrowLeft, Eye, EyeOff, Loader2, Plus, Trash2 } from "lucide-vue-next";
 import { normalizeProviderConnectionConfig } from "../../shared/llm-provider-config";
 
 const emit = defineEmits(["close"]);
-const store = useRuntimeStore();
+const store = useConfigStore();
 const { config, savingConfig, error } = storeToRefs(store);
 
 const dialogRef = ref<HTMLElement | null>(null);
