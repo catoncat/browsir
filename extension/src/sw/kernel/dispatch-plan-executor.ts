@@ -9,23 +9,27 @@ import {
   asRuntimeErrorWithMeta,
   delay,
   callInfra,
+  normalizeVerifyExpect,
+  scoreSearchNode,
+  queryAllTabsForRuntime,
+  getActiveTabIdForRuntime,
+} from "./loop-shared-utils";
+import {
   attachFailureProtocol,
   extractBashExecOutcome,
   buildBashExitFailureEnvelope,
   buildSkillScriptSandboxFailureEnvelope,
   buildStepFailureEnvelope,
-  normalizeVerifyExpect,
-  scoreSearchNode,
   isRetryableToolErrorCode,
   shouldAutoReplayToolCall,
   computeToolRetryDelayMs,
   buildToolRetryHint,
-  queryAllTabsForRuntime,
-  getActiveTabIdForRuntime,
+} from "./loop-failure-protocol";
+import {
   CAPABILITIES,
   type RuntimeErrorWithMeta,
   type FailureReason,
-} from "./runtime-loop.browser";
+} from "./loop-shared-types";
 import {
   buildToolResponseEnvelope,
   mapVerifyReasonToFailureReason,

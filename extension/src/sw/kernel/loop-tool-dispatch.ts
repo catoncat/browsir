@@ -30,18 +30,9 @@ import {
   asRuntimeErrorWithMeta,
   delay,
   callInfra,
-  attachFailureProtocol,
-  extractBashExecOutcome,
-  buildBashExitFailureEnvelope,
-  buildSkillScriptSandboxFailureEnvelope,
-  buildStepFailureEnvelope,
   inferSearchElementsFilter,
   normalizeVerifyExpect,
   scoreSearchNode,
-  isRetryableToolErrorCode,
-  shouldAutoReplayToolCall,
-  computeToolRetryDelayMs,
-  buildToolRetryHint,
   readContractExecution,
   sanitizeLlmToolDefinitionForProvider,
   normalizeToolArgsForSignature,
@@ -51,6 +42,19 @@ import {
   getActiveTabIdForRuntime,
   extractLlmConfig,
   readSharedTabIds,
+} from "./loop-shared-utils";
+import {
+  attachFailureProtocol,
+  extractBashExecOutcome,
+  buildBashExitFailureEnvelope,
+  buildSkillScriptSandboxFailureEnvelope,
+  buildStepFailureEnvelope,
+  isRetryableToolErrorCode,
+  shouldAutoReplayToolCall,
+  computeToolRetryDelayMs,
+  buildToolRetryHint,
+} from "./loop-failure-protocol";
+import {
   CAPABILITIES,
   RUNTIME_EXECUTABLE_TOOL_NAMES,
   DEFAULT_BASH_TIMEOUT_MS,
@@ -58,7 +62,7 @@ import {
   type RuntimeErrorWithMeta,
   type ToolCallItem,
   type FailureReason,
-} from "./runtime-loop.browser";
+} from "./loop-shared-types";
 import { nowIso, type JsonRecord } from "./types";
 import { writeSessionMeta } from "./session-store.browser";
 
