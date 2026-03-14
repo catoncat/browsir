@@ -33,15 +33,25 @@ function clipText(value: unknown, max = 240): string {
   return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
-async function buildPluginSnapshot(orchestrator: BrainOrchestrator): Promise<JsonRecord> {
-  const plugins = orchestrator.listPlugins();
+async function buildPluginSnapshot(
+  orchestrator: BrainOrchestrator,
+  pluginId?: string,
+): Promise<JsonRecord> {
+  const targetPluginId = String(pluginId || "").trim();
+  const plugins = orchestrator
+    .listPlugins()
+    .filter((item) => !targetPluginId || String(item.id || "").trim() === targetPluginId);
   const enabledCount = plugins.filter((item) => item.enabled).length;
   const errorCount = plugins.filter((item) => Number(item.errorCount || 0) > 0).length;
   const timeoutCount = plugins.filter(
     (item) => Number(item.usageTotalTimeouts || 0) > 0
   ).length;
-  const persisted = await readPersistedPluginRecords();
-  const uiExtensions = await readUiExtensionDescriptors();
+  const persisted = (await readPersistedPluginRecords()).filter(
+    (item) => !targetPluginId || item.pluginId === targetPluginId
+  );
+  const uiExtensions = (await readUiExtensionDescriptors()).filter(
+    (item) => !targetPluginId || item.pluginId === targetPluginId
+  );
   return {
     summary: {
       total: plugins.length,
@@ -50,7 +60,8 @@ async function buildPluginSnapshot(orchestrator: BrainOrchestrator): Promise<Jso
       errorCount,
       timeoutCount,
       persistedCount: persisted.length,
-      uiExtensionCount: uiExtensions.length
+      uiExtensionCount: uiExtensions.length,
+      filteredByPluginId: targetPluginId || undefined,
     },
     plugins,
     persisted,
@@ -82,7 +93,8 @@ async function buildSkillSnapshot(orchestrator: BrainOrchestrator): Promise<Json
 async function buildRuntimeSnapshot(
   orchestrator: BrainOrchestrator,
   sessionId?: string,
-  limits: JsonRecord = {}
+  limits: JsonRecord = {},
+  pluginId?: string,
 ): Promise<JsonRecord> {
   const index = await orchestrator.sessions.listSessions();
   const kernel = orchestrator.getKernelDebugState();
@@ -114,7 +126,12 @@ async function buildRuntimeSnapshot(
       routeLimit: limits.routeLimit,
       pluginMessageLimit: limits.pluginMessageLimit,
       pluginHookLimit: limits.pluginHookLimit,
-      internalEventLimit: limits.internalEventLimit
+      internalEventLimit: limits.internalEventLimit,
+      pluginId,
+      eventTypes: limits.eventTypes,
+      text: limits.text,
+      errorsOnly: limits.errorsOnly,
+      channels: limits.channels,
     })
   };
   if (sessionId) {
@@ -146,12 +163,13 @@ async function buildDebugSnapshot(
   orchestrator: BrainOrchestrator,
   scope: string,
   sessionId?: string,
-  limits: JsonRecord = {}
+  limits: JsonRecord = {},
+  pluginId?: string,
 ): Promise<JsonRecord> {
   if (scope === "runtime") {
     return {
       scope,
-      ...(await buildRuntimeSnapshot(orchestrator, sessionId, limits))
+      ...(await buildRuntimeSnapshot(orchestrator, sessionId, limits, pluginId))
     };
   }
   if (scope === "sandbox") {
@@ -163,7 +181,7 @@ async function buildDebugSnapshot(
   if (scope === "plugins") {
     return {
       scope,
-      ...(await buildPluginSnapshot(orchestrator))
+      ...(await buildPluginSnapshot(orchestrator, pluginId))
     };
   }
   if (scope === "skills") {
@@ -175,9 +193,9 @@ async function buildDebugSnapshot(
   if (scope === "all") {
     return {
       scope,
-      runtime: await buildRuntimeSnapshot(orchestrator, sessionId, limits),
+      runtime: await buildRuntimeSnapshot(orchestrator, sessionId, limits, pluginId),
       sandbox: getLifoDiagnostics(sessionId),
-      plugins: await buildPluginSnapshot(orchestrator),
+      plugins: await buildPluginSnapshot(orchestrator, pluginId),
       skills: await buildSkillSnapshot(orchestrator)
     };
   }
@@ -283,8 +301,12 @@ export async function handleBrainDebug(
   }
 
   if (action === "brain.debug.plugins") {
+    const pluginId =
+      typeof payload.pluginId === "string" && payload.pluginId.trim()
+        ? payload.pluginId.trim()
+        : undefined;
     return ok({
-      plugins: orchestrator.listPlugins(),
+      ...(await buildPluginSnapshot(orchestrator, pluginId)),
       modeProviders: orchestrator.listToolProviders(),
       toolContracts: orchestrator.listToolContracts(),
       llmProviders: orchestrator.listLlmProviders(),
@@ -298,14 +320,19 @@ export async function handleBrainDebug(
       typeof payload.sessionId === "string" && payload.sessionId.trim()
         ? payload.sessionId.trim()
         : undefined;
+    const pluginId =
+      typeof payload.pluginId === "string" && payload.pluginId.trim()
+        ? payload.pluginId.trim()
+        : undefined;
     return ok({
       schemaVersion: "bbl.debug.runtime.v1",
       generatedAt: new Date().toISOString(),
       sessionId: sessionId || "",
+      pluginId: pluginId || "",
       data: {
-        runtime: await buildRuntimeSnapshot(orchestrator, sessionId, payload),
+        runtime: await buildRuntimeSnapshot(orchestrator, sessionId, payload, pluginId),
         sandbox: getLifoDiagnostics(sessionId),
-        plugins: await buildPluginSnapshot(orchestrator),
+        plugins: await buildPluginSnapshot(orchestrator, pluginId),
         skills: await buildSkillSnapshot(orchestrator)
       }
     });
@@ -317,12 +344,17 @@ export async function handleBrainDebug(
       typeof payload.sessionId === "string" && payload.sessionId.trim()
         ? payload.sessionId.trim()
         : undefined;
+    const pluginId =
+      typeof payload.pluginId === "string" && payload.pluginId.trim()
+        ? payload.pluginId.trim()
+        : undefined;
     return ok({
       schemaVersion: "bbl.debug.snapshot.v1",
       generatedAt: new Date().toISOString(),
       sessionId: sessionId || "",
+      pluginId: pluginId || "",
       scope,
-      data: await buildDebugSnapshot(orchestrator, scope, sessionId, payload)
+      data: await buildDebugSnapshot(orchestrator, scope, sessionId, payload, pluginId)
     });
   }
 

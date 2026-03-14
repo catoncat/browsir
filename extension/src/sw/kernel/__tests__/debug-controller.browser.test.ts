@@ -127,4 +127,111 @@ describe("debug-controller.browser", () => {
     ).toBe(true);
     expect(((skills.resolver || {}) as Record<string, unknown>).summary).toBeTruthy();
   });
+
+  it("filters runtime and plugin debug views by pluginId and error conditions", async () => {
+    const orchestrator = new BrainOrchestrator();
+    const { sessionId } = await orchestrator.createSession();
+
+    await upsertPersistedPluginRecord({
+      pluginId: "plugin.debug.target",
+      kind: "extension",
+      enabled: true,
+      createdAt: "2026-03-13T00:00:00.000Z",
+      updatedAt: "2026-03-13T00:00:00.000Z",
+      source: {
+        manifest: {
+          id: "plugin.debug.target",
+          name: "Plugin Debug Target",
+          version: "1.0.0",
+        },
+      },
+    });
+    await upsertPersistedPluginRecord({
+      pluginId: "plugin.debug.other",
+      kind: "extension",
+      enabled: true,
+      createdAt: "2026-03-13T00:00:00.000Z",
+      updatedAt: "2026-03-13T00:00:00.000Z",
+      source: {
+        manifest: {
+          id: "plugin.debug.other",
+          name: "Plugin Debug Other",
+          version: "1.0.0",
+        },
+      },
+    });
+
+    recordPluginRuntimeMessageDebugEvent({
+      type: "bbloop.plugin.trace",
+      pluginId: "plugin.debug.target",
+      message: "target error",
+    });
+    recordPluginRuntimeMessageDebugEvent({
+      type: "bbloop.global.message",
+      pluginId: "plugin.debug.other",
+      message: "other ok",
+    });
+    recordPluginHookTraceDebugEvent({
+      traceType: "hook",
+      pluginId: "plugin.debug.target",
+      hook: "runtime.route.after",
+      durationMs: 4,
+      sessionId,
+      error: "target failed",
+    });
+    recordPluginHookTraceDebugEvent({
+      traceType: "hook",
+      pluginId: "plugin.debug.other",
+      hook: "runtime.route.after",
+      durationMs: 2,
+      sessionId,
+      responsePreview: "{\"action\":\"continue\"}",
+    });
+    recordRuntimeInternalDebugEvent({
+      ts: "2026-03-13T00:00:03.000Z",
+      type: "plugin.rehydrate.failed",
+      ok: false,
+      pluginId: "plugin.debug.target",
+      detail: "target error",
+    });
+    recordRuntimeInternalDebugEvent({
+      ts: "2026-03-13T00:00:04.000Z",
+      type: "plugin.rehydrate.applied",
+      ok: true,
+      pluginId: "plugin.debug.other",
+      detail: "other ok",
+    });
+
+    const result = await handleBrainDebug(
+      orchestrator,
+      runtimeLoopStub,
+      infraStub,
+      {
+        type: "brain.debug.runtime",
+        sessionId,
+        pluginId: "plugin.debug.target",
+        errorsOnly: true,
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    const data = (result as { ok: true; data: Record<string, unknown> }).data;
+    const root = (data.data || {}) as Record<string, unknown>;
+    const runtime = (root.runtime || {}) as Record<string, unknown>;
+    const activity = (runtime.activity || {}) as Record<string, unknown>;
+    const plugins = (root.plugins || {}) as Record<string, unknown>;
+
+    expect(Array.isArray(activity.pluginRuntimeMessages)).toBe(true);
+    expect((activity.pluginRuntimeMessages as Array<Record<string, unknown>>).length).toBe(1);
+    expect(
+      String(((activity.pluginRuntimeMessages as Array<Record<string, unknown>>)[0] || {}).pluginId || "")
+    ).toBe("plugin.debug.target");
+    expect((activity.pluginHookTrace as Array<Record<string, unknown>>).length).toBe(1);
+    expect((activity.internalEvents as Array<Record<string, unknown>>).length).toBe(1);
+    expect((plugins.persisted as Array<Record<string, unknown>>).length).toBe(1);
+    expect(
+      String(((plugins.persisted as Array<Record<string, unknown>>)[0] || {}).pluginId || "")
+    ).toBe("plugin.debug.target");
+    expect(((plugins.summary || {}) as Record<string, unknown>).filteredByPluginId).toBe("plugin.debug.target");
+  });
 });

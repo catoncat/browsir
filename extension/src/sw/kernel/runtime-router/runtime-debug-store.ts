@@ -42,6 +42,8 @@ export interface RuntimeInternalDebugEvent {
   detail?: string;
 }
 
+type RuntimeDebugChannel = "routes" | "pluginRuntimeMessages" | "pluginHookTrace" | "internalEvents";
+
 const ROUTE_TAIL_LIMIT = 80;
 const PLUGIN_MESSAGE_TAIL_LIMIT = 80;
 const PLUGIN_HOOK_TAIL_LIMIT = 80;
@@ -166,7 +168,33 @@ export function getRuntimeDebugSnapshot(options: {
   pluginMessageLimit?: unknown;
   pluginHookLimit?: unknown;
   internalEventLimit?: unknown;
+  pluginId?: unknown;
+  eventTypes?: unknown;
+  text?: unknown;
+  errorsOnly?: unknown;
+  channels?: unknown;
 } = {}): JsonRecord {
+  const pluginId = clipText(options.pluginId, 120) || "";
+  const textQuery = clipText(options.text, 180).toLowerCase();
+  const errorsOnly = options.errorsOnly === true;
+  const eventTypes = Array.isArray(options.eventTypes)
+    ? options.eventTypes
+        .map((item) => clipText(item, 120).toLowerCase())
+        .filter(Boolean)
+    : [];
+  const channelSet = new Set<RuntimeDebugChannel>(
+    Array.isArray(options.channels)
+      ? options.channels
+          .map((item) => String(item || "").trim())
+          .filter(
+            (item): item is RuntimeDebugChannel =>
+              item === "routes"
+              || item === "pluginRuntimeMessages"
+              || item === "pluginHookTrace"
+              || item === "internalEvents"
+          )
+      : []
+  );
   const routeLimit = Math.max(1, Math.floor(Number(options.routeLimit || 40)));
   const pluginMessageLimit = Math.max(
     1,
@@ -180,18 +208,109 @@ export function getRuntimeDebugSnapshot(options: {
     1,
     Math.floor(Number(options.internalEventLimit || 24))
   );
+
+  const matchesPluginId = (value: unknown, fallback: unknown[] = []): boolean => {
+    if (!pluginId) return true;
+    const direct = clipText(value, 120);
+    if (direct && direct === pluginId) return true;
+    return fallback.some((item) => clipText(item, 200).includes(pluginId));
+  };
+
+  const matchesEventType = (...values: unknown[]): boolean => {
+    if (eventTypes.length === 0) return true;
+    const haystack = values
+      .map((item) => clipText(item, 160).toLowerCase())
+      .filter(Boolean);
+    return haystack.some((item) => eventTypes.includes(item));
+  };
+
+  const matchesText = (value: unknown): boolean => {
+    if (!textQuery) return true;
+    const text = clipText(
+      (() => {
+        try {
+          return typeof value === "string" ? value : JSON.stringify(value);
+        } catch {
+          return String(value ?? "");
+        }
+      })(),
+      2000
+    ).toLowerCase();
+    return text.includes(textQuery);
+  };
+
+  const hasErrorSignal = (row: Record<string, unknown>, extra: unknown[] = []): boolean => {
+    if (row.ok === false) return true;
+    if (clipText(row.error, 260)) return true;
+    if (clipText(row.detail, 260).toLowerCase().includes("error")) return true;
+    if (clipText(row.type, 160).toLowerCase().includes("error")) return true;
+    if (clipText(row.type, 160).toLowerCase().includes("failed")) return true;
+    return extra.some((item) => clipText(item, 260).toLowerCase().includes("error"));
+  };
+
+  const filteredRoutes = routeTail.filter((item) => {
+    const row = item as unknown as Record<string, unknown>;
+    if (!matchesPluginId(item.pluginId, [item.summary, item.error])) return false;
+    if (!matchesEventType(item.type)) return false;
+    if (!matchesText(row)) return false;
+    if (errorsOnly && !hasErrorSignal(row, [item.summary])) return false;
+    return true;
+  });
+
+  const filteredPluginMessages = pluginMessageTail.filter((item) => {
+    const row = item as unknown as Record<string, unknown>;
+    if (!matchesPluginId(item.pluginId, [item.preview])) return false;
+    if (!matchesEventType(item.type)) return false;
+    if (!matchesText(row)) return false;
+    if (errorsOnly && !hasErrorSignal(row, [item.preview])) return false;
+    return true;
+  });
+
+  const filteredPluginHooks = pluginHookTail.filter((item) => {
+    const row = item as unknown as Record<string, unknown>;
+    if (!matchesPluginId(item.pluginId, [item.requestPreview, item.responsePreview, item.error])) return false;
+    if (!matchesEventType(item.traceType, item.hook)) return false;
+    if (!matchesText(row)) return false;
+    if (errorsOnly && !hasErrorSignal(row, [item.requestPreview, item.responsePreview])) return false;
+    return true;
+  });
+
+  const filteredInternalEvents = internalEventTail.filter((item) => {
+    const row = item as unknown as Record<string, unknown>;
+    if (!matchesPluginId(item.pluginId, [item.detail])) return false;
+    if (!matchesEventType(item.type)) return false;
+    if (!matchesText(row)) return false;
+    if (errorsOnly && !hasErrorSignal(row, [item.detail])) return false;
+    return true;
+  });
+
+  const includeChannel = (channel: RuntimeDebugChannel): boolean =>
+    channelSet.size === 0 || channelSet.has(channel);
+
   return {
     schemaVersion: "bbl.runtime-debug.v1",
     summary: {
-      routeCount: routeTail.length,
-      pluginMessageCount: pluginMessageTail.length,
-      pluginHookCount: pluginHookTail.length,
-      internalEventCount: internalEventTail.length,
+      routeCount: filteredRoutes.length,
+      pluginMessageCount: filteredPluginMessages.length,
+      pluginHookCount: filteredPluginHooks.length,
+      internalEventCount: filteredInternalEvents.length,
+      filteredByPluginId: pluginId || undefined,
+      filteredByEventTypes: eventTypes,
+      filteredByText: textQuery || undefined,
+      errorsOnly,
+      channels:
+        channelSet.size > 0 ? Array.from(channelSet.values()) : undefined,
     },
-    routes: routeTail.slice(-routeLimit),
-    pluginRuntimeMessages: pluginMessageTail.slice(-pluginMessageLimit),
-    pluginHookTrace: pluginHookTail.slice(-pluginHookLimit),
-    internalEvents: internalEventTail.slice(-internalEventLimit),
+    routes: includeChannel("routes") ? filteredRoutes.slice(-routeLimit) : [],
+    pluginRuntimeMessages: includeChannel("pluginRuntimeMessages")
+      ? filteredPluginMessages.slice(-pluginMessageLimit)
+      : [],
+    pluginHookTrace: includeChannel("pluginHookTrace")
+      ? filteredPluginHooks.slice(-pluginHookLimit)
+      : [],
+    internalEvents: includeChannel("internalEvents")
+      ? filteredInternalEvents.slice(-internalEventLimit)
+      : [],
   };
 }
 
