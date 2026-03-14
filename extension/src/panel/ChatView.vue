@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onClickOutside } from "@vueuse/core";
 import { storeToRefs } from "pinia";
-import { computed, onUnmounted, ref, nextTick, watch } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { useRuntimeStore } from "./stores/runtime";
 import { useChatStore } from "./stores/chat-store";
 import { useConfigStore } from "./stores/config-store";
@@ -24,6 +24,7 @@ import { useUiRenderPipeline } from "./composables/use-ui-render-pipeline";
 import { useLlmStreaming } from "./composables/use-llm-streaming";
 import { useToolRunTracking } from "./composables/use-tool-run-tracking";
 import { useRuntimeMessages } from "./composables/use-runtime-messages";
+import { useChatScrollSync } from "./composables/use-chat-scroll-sync";
 import ChatMessage from "./components/ChatMessage.vue";
 import StreamingDraftContainer from "./components/StreamingDraftContainer.vue";
 import ChatInput from "./components/ChatInput.vue";
@@ -214,7 +215,6 @@ const {
   onError: setErrorMessage,
 });
 const queuedPromotingIds = ref<Set<string>>(new Set());
-const MAIN_SCROLL_BOTTOM_THRESHOLD_PX = 120;
 
 function setQueuedPromptPromoting(id: string, active: boolean) {
   const normalizedId = String(id || "").trim();
@@ -294,25 +294,6 @@ bindLlmStreaming({
   commitPendingLlmStreamingText,
   resetLlmStreamingState,
 });
-const {
-  bridgeConnectionStatus,
-  recentRuntimeEvents,
-} = useRuntimeMessages({
-  activeSessionId,
-  isRunActive,
-  chatSceneOverlayRef,
-  panelUiRuntime,
-  hydratePanelUiPlugins,
-  applyUiExtensionLifecycleMessage,
-  showActionNoticeWithPlugins,
-  applyRuntimeEventToolRun,
-  applyBridgeEventToolOutput,
-  syncActiveToolRun,
-  runSafely,
-  loadConversation: (sessionId, options) => chatStore.loadConversation(sessionId, options),
-  refreshSessions: () => chatStore.refreshSessions(),
-});
-
 const toolHistoryToggleLabel = computed(() =>
   showToolHistory.value ? "隐藏工具轨迹" : "显示工具轨迹"
 );
@@ -371,6 +352,36 @@ const {
   startRunPending,
   baseConversationMessages,
   actionNotice,
+});
+
+const {
+  bridgeConnectionStatus,
+  recentRuntimeEvents,
+} = useRuntimeMessages({
+  activeSessionId,
+  isRunActive,
+  chatSceneOverlayRef,
+  panelUiRuntime,
+  hydratePanelUiPlugins,
+  applyUiExtensionLifecycleMessage,
+  showActionNoticeWithPlugins,
+  applyRuntimeEventToolRun,
+  applyBridgeEventToolOutput,
+  syncActiveToolRun,
+  runSafely,
+  loadConversation: (sessionId, options) => chatStore.loadConversation(sessionId, options),
+  refreshSessions: () => chatStore.refreshSessions(),
+});
+useChatScrollSync({
+  scrollContainer,
+  stableMessages,
+  shouldShowStreamingDraft,
+  activeSessionId,
+  activeRunToken,
+  shouldShowToolPendingCard,
+  llmStreamingText,
+  isRunActive,
+  toolPendingStepStates,
 });
 
 watch(
@@ -580,57 +591,6 @@ watch(
     }
   },
   { immediate: true }
-);
-
-function isMainScrollNearBottom() {
-  const el = scrollContainer.value;
-  if (!el) return true;
-  const remain = el.scrollHeight - el.scrollTop - el.clientHeight;
-  return remain <= MAIN_SCROLL_BOTTOM_THRESHOLD_PX;
-}
-
-const visibleMessageStructureKey = computed(() =>
-  [
-    stableMessages.value.map((item) => `${item.role}:${item.entryId}`).join("|"),
-    shouldShowStreamingDraft.value
-      ? `draft:${String(activeSessionId.value || "__global__")}:${activeRunToken.value}`
-      : "",
-    shouldShowToolPendingCard.value
-      ? `tool:${String(activeSessionId.value || "__global__")}:${activeRunToken.value}`
-      : ""
-  ].join("|")
-);
-
-watch(visibleMessageStructureKey, async () => {
-  const shouldFollow = isMainScrollNearBottom();
-  await nextTick();
-  if (shouldFollow && scrollContainer.value) {
-    scrollContainer.value.scrollTop = scrollContainer.value.scrollHeight;
-  }
-});
-
-watch(llmStreamingText, async () => {
-  if (!isRunActive.value) return;
-  const shouldFollow = isMainScrollNearBottom();
-  await nextTick();
-  if (shouldFollow && scrollContainer.value) {
-    scrollContainer.value.scrollTop = scrollContainer.value.scrollHeight;
-  }
-});
-
-watch(
-  () =>
-    toolPendingStepStates.value
-      .map((item) => `${item.step}:${item.status}:${item.logs.length}`)
-      .join("|"),
-  async () => {
-    if (!isRunActive.value) return;
-    const shouldFollow = isMainScrollNearBottom();
-    await nextTick();
-    if (shouldFollow && scrollContainer.value) {
-      scrollContainer.value.scrollTop = scrollContainer.value.scrollHeight;
-    }
-  }
 );
 
 async function handleCreateSession() {
