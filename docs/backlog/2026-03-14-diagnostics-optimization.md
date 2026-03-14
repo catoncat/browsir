@@ -33,9 +33,11 @@ tags: [diagnostics, debug-snapshot, developer-experience]
 ### 对本 Issue 的影响
 
 - 第 4 项 `plugin snapshot 缺少 UI 渲染链路状态`
-  - 部分推进。
-  - 当前已经具备插件级筛选和统一导出，但 `plugin snapshot` 本身仍未新增
-    `uiState: { widgetMounted, lastMessageDelivered, relayActive }` 字段。
+  - **已完成**。`5a86611` 新增 `uiState` 字段到 plugin snapshot，包含：
+    - `relayActive`（SidePanel 连接状态，via `chrome.runtime.getContexts`）
+    - `panelAvailable`（SidePanel 是否响应查询）
+    - `plugins`（per-plugin widget mount 状态、mounted widget IDs、errorCount、lastError）
+  - 实现路径：`PanelUiPluginRuntime.getUiStateSnapshot()` → `bbloop.ui.state.query` 消息 → `buildPluginSnapshot()` 合并
 - 第 5 项 `AGENTS.md 补充 diagnostics vs snapshot 选择策略`
   - 产品入口已先收敛，但 AGENTS 决策树文档尚未更新。
 
@@ -44,14 +46,12 @@ tags: [diagnostics, debug-snapshot, developer-experience]
 - 第 1 项 `columnar 格式需要索引辅助`
 - 第 2 项 `llm.trace 缺少 source 标记`
 - 第 3 项 `diagnosticGuide 可做动态诊断建议`
-- 第 4 项剩余部分 `plugin snapshot uiState`
 - 第 5 项剩余部分 `AGENTS.md 决策树`
 - 第 6 项 `transport 格式标识`
 
 ### Close Issues 总结
 
-- 本次没有直接关闭 `ISSUE-001`。
-- 当前结论：`ISSUE-001` 保持 `in_progress`，后续优先补第 4 项剩余的 UI 渲染链路状态，再处理文档与 trace 结构优化。
+- `ISSUE-001` 保持 `in_progress`，第 4 项已完成，剩余第 1/2/3/5/6 项待后续处理。
 
 ## 优化项
 
