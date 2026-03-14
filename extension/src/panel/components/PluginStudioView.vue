@@ -696,16 +696,22 @@ async function handleTogglePlugin(enable: boolean): Promise<void> {
 function handleSaveProject(): void {
   errorMessage.value = "";
   statusMessage.value = "";
+  const currentSelectedProjectId = selectedProjectId.value;
   try {
     const baseProject = getSelectedProject();
+    const savingExampleProject = baseProject?.category === "example";
+    if (savingExampleProject) {
+      selectedProjectId.value = "";
+    }
     const nextProject = buildCurrentProject({
-      category: baseProject?.category === "example" ? "user" : (baseProject?.category || "user"),
-      baseProject: baseProject?.category === "example" ? null : baseProject
+      category: savingExampleProject ? "user" : (baseProject?.category || "user"),
+      baseProject: savingExampleProject ? null : baseProject
     });
     selectedProjectId.value = nextProject.id;
     upsertProject(nextProject);
-    statusMessage.value = baseProject?.category === "example" ? "已保存为用户项目" : "项目已保存";
+    statusMessage.value = savingExampleProject ? "已保存为用户项目" : "项目已保存";
   } catch (error) {
+    selectedProjectId.value = currentSelectedProjectId;
     errorMessage.value = error instanceof Error ? error.message : String(error || "保存失败");
   }
 }
@@ -1002,7 +1008,13 @@ async function bootstrap(): Promise<void> {
       loadExampleProjects(),
       refreshPlugins()
     ]);
-    const savedList = readProjectsFromStorage().filter((item) => item.category === "user");
+    const exampleIds = new Set(exampleList.map((item) => item.id));
+    const savedList = readProjectsFromStorage().filter(
+      (item) =>
+        item.category === "user"
+        && !exampleIds.has(item.id)
+        && !String(item.id || "").trim().startsWith("example.")
+    );
     const mergedById = new Map<string, StudioProject>();
     for (const item of exampleList) {
       mergedById.set(item.id, item);
