@@ -3,17 +3,20 @@ import { useIntervalFn } from "@vueuse/core";
 import { storeToRefs } from "pinia";
 import { computed, onMounted, ref, watch } from "vue";
 import { useRuntimeStore } from "../stores/runtime";
-import { collectDiagnostics } from "../utils/diagnostics";
-import { Server, Radio, Activity, RefreshCw, ArrowLeft, Copy, Check, Clock3 } from "lucide-vue-next";
+import { collectDiagnostics, publishDiagnosticsToBridge } from "../utils/diagnostics";
+import { publishDebugSnapshotToBridge } from "../utils/debug-snapshot";
+import { Server, Radio, Activity, RefreshCw, ArrowLeft, Copy, Check, Clock3, Upload } from "lucide-vue-next";
 
 const emit = defineEmits(["close"]);
 const store = useRuntimeStore();
-const { health, sessions, activeSessionId } = storeToRefs(store);
+const { health, sessions, activeSessionId, config } = storeToRefs(store);
 
 const dialogRef = ref<HTMLElement | null>(null);
 const loading = ref(false);
 const copying = ref(false);
 const copied = ref(false);
+const publishing = ref(false);
+const published = ref(false);
 const autoRefresh = ref(true);
 const error = ref("");
 const selectedSessionId = ref("");
@@ -114,6 +117,51 @@ async function handleCopyReport() {
   }
 }
 
+async function handlePublishDebugLogs() {
+  if (publishing.value) return;
+  publishing.value = true;
+  error.value = "";
+  try {
+    const sessionId = currentSessionId.value || undefined;
+    const bridgeUrl = config.value.bridgeUrl;
+    const bridgeToken = config.value.bridgeToken;
+
+    const [diagResult, snapshotResult] = await Promise.allSettled([
+      publishDiagnosticsToBridge({
+        sessionId,
+        bridgeUrl,
+        bridgeToken,
+        title: currentSessionTitle.value,
+        timelineLimit: 40,
+      }),
+      publishDebugSnapshotToBridge({
+        sessionId,
+        bridgeUrl,
+        bridgeToken,
+        title: currentSessionTitle.value,
+        scope: "all",
+      }),
+    ]);
+
+    const urls: string[] = [];
+    if (diagResult.status === "fulfilled") urls.push(diagResult.value.downloadUrl);
+    if (snapshotResult.status === "fulfilled") urls.push(snapshotResult.value.downloadUrl);
+
+    if (urls.length === 0) {
+      const firstErr = diagResult.status === "rejected" ? diagResult.reason : snapshotResult.status === "rejected" ? snapshotResult.reason : new Error("导出失败");
+      throw firstErr;
+    }
+
+    await navigator.clipboard.writeText(urls.join("\n"));
+    published.value = true;
+    setTimeout(() => { published.value = false; }, 2400);
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    publishing.value = false;
+  }
+}
+
 watch(activeSessionId, () => {
   syncSelectedSession();
 });
@@ -177,6 +225,16 @@ onMounted(() => {
         >
           <Check v-if="copied" :size="16" class="text-emerald-600" aria-hidden="true" />
           <Copy v-else :size="16" aria-hidden="true" />
+        </button>
+        <button
+          class="p-2 hover:bg-ui-surface rounded-full text-ui-text transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+          :disabled="publishing"
+          :title="published ? '链接已复制' : '导出调试日志'"
+          :aria-label="published ? '链接已复制' : '导出调试日志'"
+          @click="handlePublishDebugLogs"
+        >
+          <Check v-if="published" :size="16" class="text-emerald-600" aria-hidden="true" />
+          <Upload v-else :size="16" :class="publishing ? 'animate-pulse' : ''" aria-hidden="true" />
         </button>
       </div>
     </header>

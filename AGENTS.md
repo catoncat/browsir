@@ -220,20 +220,29 @@ Bridge WS 通信使用统一 `invoke` 帧格式：
   - `GET /api/diagnostics/<id>?token=<BRIDGE_TOKEN>`：下载单个诊断 JSON
   - `GET /api/debug-snapshots?token=<BRIDGE_TOKEN>`：列出已有调试快照
   - `GET /api/debug-snapshots/<id>?token=<BRIDGE_TOKEN>`：下载单个调试快照 JSON
+- **调试面板导出**：DebugView 面板的"导出调试日志"按钮会同时发布诊断 + 调试快照到 Bridge，并将下载链接复制到剪贴板。用户提供此链接后可直接用 `curl` 下载。
 - 典型调试流程：
 
 ```bash
-# 1. 列出导出
+# 1. 列出所有导出（诊断 + 快照）
 curl 'http://127.0.0.1:8787/api/diagnostics?token=<BRIDGE_TOKEN>'
+curl 'http://127.0.0.1:8787/api/debug-snapshots?token=<BRIDGE_TOKEN>'
 
 # 2. 下载单个诊断
 curl 'http://127.0.0.1:8787/api/diagnostics/<id>?token=<BRIDGE_TOKEN>' -o diag.json
 
-# 3. 本地搜索关键线索
+# 3. 下载单个调试快照
+curl 'http://127.0.0.1:8787/api/debug-snapshots/<id>?token=<BRIDGE_TOKEN>' -o snapshot.json
+
+# 4. 本地搜索关键线索
 rg 'loop_error|llm.skipped|step_finished|failed_execute|failed_verify|no_progress' diag.json
+
+# 5. 快照中检索插件/运行时异常
+jq '.payload.data.plugins.summary' snapshot.json
+jq '.payload.data.runtime.summary' snapshot.json
 ```
 
-- 如果用户给的是“复制诊断链接”，默认认为链接已包含 `token`，可直接下载；如果返回 `unauthorized`，先检查 `BRIDGE_TOKEN` 与扩展配置里的 `bridgeToken` 是否一致。
+- 如果用户直接给了"导出调试日志"的链接（可能包含两个 URL，一行诊断一行快照），逐个下载后分别分析。
 - 调试入口优先级：
   - 先用 `brain.debug.snapshot` 取模块级小快照：`runtime` / `sandbox` / `plugins` / `skills`
   - 再用 diagnostics 导出拿整包会话证据
