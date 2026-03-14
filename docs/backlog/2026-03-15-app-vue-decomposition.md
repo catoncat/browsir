@@ -43,16 +43,20 @@ tags: [panel, refactor, vue, composables, chat-view, follow-up]
 
 ### Phase 1: 提取剩余大块 controller / render hooks
 
-1. **`usePluginUiRender()`**
+1. **`use-tool-pending-state.ts` 二次细拆（若第一阶段后仍继续膨胀）**
+   - 候选拆分：`useToolRunStream()` / `useLlmStreamingState()` / `useToolPendingCardModel()`
+   - 目标是避免把 `App.vue` 的技术债完整迁移成一个新的“大 composable”
+
+2. **`usePluginUiRender()`**
    - Panel notice 系统、plugin UI 生命周期
    - `toUi*Payload` / `normalizeUi*Payload` pairs
    - 目标是把 `panelUiRuntime` 相关 render hook 收到单一边界
 
-2. **`ChatView.vue`（仅在 shell context 稳定后）**
+3. **`ChatView.vue`（仅在 shell context 稳定后）**
    - 负责 chat 主区组合：消息列表、流式草稿、tool pending card、fork overlay、输入框
    - 前提是 shell actions / panel runtime 可通过 context 注入，而不是新增大量 props/emits
 
-3. **`useConversationEditing()` / `useConversationExport()`**
+4. **`useConversationEditing()` / `useConversationExport()`**
    - user message editing、markdown/debug/export handlers
    - 把用户交互辅助逻辑从 `App.vue` 主体中继续挪出
 

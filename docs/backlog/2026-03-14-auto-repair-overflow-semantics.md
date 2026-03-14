@@ -31,6 +31,18 @@ tags: [slice, kernel, semantics, bdd, documentation, phase2]
 
 先定义 canonical terminal status / failure reason / agent-end decision 映射，再补齐 overflow → auto-compaction → continue 的真实控制流。
 
+## 分阶段落地
+
+### Phase A — 状态模型统一
+
+- 明确 `loop_done.status`、`FailureReason`、`handleAgentEnd()` decision 的 canonical mapping
+- 先解决“同一故障在不同层被不同名字描述”的问题
+
+### Phase B — overflow ownership
+
+- 明确 overflow 由谁上报、谁触发 compaction、谁决定 continue / done / failed_execute
+- 把 runtime-loop / orchestrator / runtime-router 的控制流连接成可测试闭环
+
 ## 验收标准
 
 - [ ] canonical terminal status / failure reason / agent-end decision 已在代码与文档中对齐
