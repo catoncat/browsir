@@ -284,93 +284,13 @@ export const useConfigStore = defineStore("config", () => {
     savingConfig.value = true;
     error.value = "";
     try {
-      const llmTimeoutMs = Math.max(
-        1000,
-        Number(config.value.llmTimeoutMs || 120000),
+      const normalized = normalizeConfig(
+        config.value as unknown as Record<string, unknown>,
       );
-      const llmRetryMaxAttempts = Math.max(
-        0,
-        Math.min(6, Number(config.value.llmRetryMaxAttempts || 2)),
-      );
-      const llmMaxRetryDelayMs = Math.max(
-        0,
-        Number(config.value.llmMaxRetryDelayMs || 60000),
-      );
-
-      const llmProfiles = normalizeLlmProfiles(config.value.llmProfiles, {
-        id:
-          String(config.value.llmDefaultProfile || "default").trim() ||
-          "default",
-        llmTimeoutMs,
-        llmRetryMaxAttempts,
-        llmMaxRetryDelayMs,
-      });
-      const profileIds = new Set(llmProfiles.map((item) => item.id));
-      const llmDefaultProfileRaw = String(
-        config.value.llmDefaultProfile || "",
-      ).trim();
-      const llmDefaultProfile = profileIds.has(llmDefaultProfileRaw)
-        ? llmDefaultProfileRaw
-        : llmProfiles[0]?.id || "default";
-      const llmAuxProfileRaw = String(config.value.llmAuxProfile || "").trim();
-      const llmFallbackProfileRaw = String(
-        config.value.llmFallbackProfile || "",
-      ).trim();
-      const llmAuxProfile =
-        llmAuxProfileRaw &&
-        llmAuxProfileRaw !== llmDefaultProfile &&
-        profileIds.has(llmAuxProfileRaw)
-          ? llmAuxProfileRaw
-          : "";
-      const llmFallbackProfile =
-        llmFallbackProfileRaw &&
-        llmFallbackProfileRaw !== llmDefaultProfile &&
-        profileIds.has(llmFallbackProfileRaw)
-          ? llmFallbackProfileRaw
-          : "";
-      const browserRuntimeStrategy = normalizeBrowserRuntimeStrategy(
-        config.value.browserRuntimeStrategy,
-        "browser-first",
-      );
-
-      config.value.llmProfiles = llmProfiles;
-      config.value.llmDefaultProfile = llmDefaultProfile;
-      config.value.llmAuxProfile = llmAuxProfile;
-      config.value.llmFallbackProfile = llmFallbackProfile;
-      config.value.browserRuntimeStrategy = browserRuntimeStrategy;
-      config.value.compaction = normalizeCompactionSettings(
-        config.value.compaction,
-      );
+      config.value = normalized;
 
       await sendMessage("config.save", {
-        payload: {
-          bridgeUrl: config.value.bridgeUrl.trim(),
-          bridgeToken: config.value.bridgeToken,
-          browserRuntimeStrategy,
-          compaction: config.value.compaction,
-          llmDefaultProfile,
-          llmAuxProfile,
-          llmFallbackProfile,
-          llmProfiles,
-          llmSystemPromptCustom: config.value.llmSystemPromptCustom,
-          maxSteps: Math.max(1, Number(config.value.maxSteps || 100)),
-          autoTitleInterval: Math.max(
-            0,
-            Number(config.value.autoTitleInterval ?? 10),
-          ),
-          bridgeInvokeTimeoutMs: Math.max(
-            1000,
-            Number(config.value.bridgeInvokeTimeoutMs || 120000),
-          ),
-          llmTimeoutMs,
-          llmRetryMaxAttempts,
-          llmMaxRetryDelayMs,
-          devAutoReload: config.value.devAutoReload,
-          devReloadIntervalMs: Math.max(
-            500,
-            Number(config.value.devReloadIntervalMs || 1500),
-          ),
-        },
+        payload: normalized,
       });
       await sendMessage("bridge.connect");
       await refreshHealth();
