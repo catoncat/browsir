@@ -5,6 +5,7 @@
   "description": "Browser-side planner + loop engine + CDP gateway + local WS bridge.",
   "permissions": [
     "debugger",
+    "offscreen",
     "scripting",
     "tabs",
     "storage",
