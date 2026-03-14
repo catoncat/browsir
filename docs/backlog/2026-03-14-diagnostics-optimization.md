@@ -1,7 +1,7 @@
 ---
 id: ISSUE-001
 title: 诊断系统优化 — 6 项改进
-status: open
+status: in_progress
 priority: p1
 source: 调试对话 session-816e926f（2026-03-14 compaction 失败 + dog plugin UI 诊断）
 created: 2026-03-14
@@ -14,6 +14,44 @@ tags: [diagnostics, debug-snapshot, developer-experience]
 ## 背景
 
 在诊断 compaction 失败 + dog plugin UI 未加载两个问题时，调试链接（diagnostics + debug-snapshot）提供了有效数据，但发现以下可优化点。
+
+## 2026-03-14 进度更新
+
+### 已落地
+
+- `49ca822` `feat(extension): add filtered debug runtime views`
+  - `brain.debug.runtime` / `brain.debug.snapshot` 支持按 `pluginId`
+    及 `channels / eventTypes / text / errorsOnly` 过滤。
+  - 为 Plugin Studio 的插件级调试导出打底，避免新增第三套后端 debug API。
+- `b1438c3` `feat(extension): add filtered plugin studio debug links`
+  - `extension/plugin-studio.html` 的运行日志支持按当前插件、关键词、错误状态、频道、热词筛选。
+  - Plugin Studio 新增统一“复制调试链接”，导出的 payload 带当前筛选条件和筛选后日志。
+- `f8f1448` `refactor(extension): unify chat debug link entry`
+  - Chat 侧边栏收敛为单一“复制调试链接”入口。
+  - 去掉并列的“复制诊断链接 / 复制调试快照链接 / 运行调试”入口，减少概念重叠。
+
+### 对本 Issue 的影响
+
+- 第 4 项 `plugin snapshot 缺少 UI 渲染链路状态`
+  - 部分推进。
+  - 当前已经具备插件级筛选和统一导出，但 `plugin snapshot` 本身仍未新增
+    `uiState: { widgetMounted, lastMessageDelivered, relayActive }` 字段。
+- 第 5 项 `AGENTS.md 补充 diagnostics vs snapshot 选择策略`
+  - 产品入口已先收敛，但 AGENTS 决策树文档尚未更新。
+
+### 本次未关闭项
+
+- 第 1 项 `columnar 格式需要索引辅助`
+- 第 2 项 `llm.trace 缺少 source 标记`
+- 第 3 项 `diagnosticGuide 可做动态诊断建议`
+- 第 4 项剩余部分 `plugin snapshot uiState`
+- 第 5 项剩余部分 `AGENTS.md 决策树`
+- 第 6 项 `transport 格式标识`
+
+### Close Issues 总结
+
+- 本次没有直接关闭 `ISSUE-001`。
+- 当前结论：`ISSUE-001` 保持 `in_progress`，后续优先补第 4 项剩余的 UI 渲染链路状态，再处理文档与 trace 结构优化。
 
 ## 优化项
 
