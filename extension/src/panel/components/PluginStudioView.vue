@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useRuntimeStore, type PluginMetadata } from "../stores/runtime";
 import ShikiCodeEditor from "./ShikiCodeEditor.vue";
 import HookReference from "./HookReference.vue";
+import { publishDebugLinkToBridge, type DebugExportChannel } from "../utils/debug-link";
 import {
   RefreshCcw,
   Plus,
@@ -19,7 +20,9 @@ import {
   History,
   Terminal,
   Activity,
-  BookOpen
+  BookOpen,
+  ExternalLink,
+  Check
 } from "lucide-vue-next";
 
 interface StudioFiles {
@@ -40,9 +43,15 @@ interface StudioProject {
 interface RuntimeLogItem {
   id: string;
   ts: string;
+  channel: "runtime" | "brain" | "trigger" | "hook";
   type: string;
   title: string;
   text: string;
+  pluginId?: string;
+  hook?: string;
+  hasError: boolean;
+  tags: string[];
+  searchText: string;
 }
 
 type StudioFileName = "plugin.json" | "index.js" | "ui.js";
@@ -56,6 +65,7 @@ const MAX_LOG_ITEMS = 240;
 const BUILTIN_PLUGIN_ID_PREFIX = "runtime.builtin.plugin.";
 const EXAMPLE_PLUGIN_ID_PREFIX = "plugin.example.";
 const PLUGIN_STUDIO_SESSION_ID = "plugin-studio";
+const LOG_CHANNEL_OPTIONS = ["trigger", "hook", "brain", "runtime"] as const;
 
 const loading = ref(false);
 const busy = ref(false);
@@ -67,9 +77,17 @@ const projects = ref<StudioProject[]>([]);
 const selectedProjectId = ref("");
 const selectedPluginId = ref("");
 const activeFile = ref<StudioFileName>("plugin.json");
-const activeLogTab = ref<"runtime" | "brain" | "trigger" | "hook">("trigger");
 const rightPanelMode = ref<"logs" | "docs">("docs");
 const showBuiltinPlugins = ref(false);
+const logScope = ref<"selected" | "all">("selected");
+const logKeyword = ref("");
+const logErrorsOnly = ref(false);
+const selectedLogTags = ref<string[]>([]);
+const selectedLogChannels = ref<Array<RuntimeLogItem["channel"]>>([
+  ...LOG_CHANNEL_OPTIONS,
+]);
+const publishingDebugLink = ref(false);
+const debugLinkCopied = ref(false);
 
 const pluginJsonCode = ref("");
 const indexJsCode = ref("");
@@ -108,11 +126,47 @@ function summarize(value: unknown, max = 180): string {
   return `${normalized.slice(0, Math.max(24, max - 1))}…`;
 }
 
-function pushLog(target: RuntimeLogItem[], item: Omit<RuntimeLogItem, "id" | "ts">): void {
+function normalizeLogTag(input: unknown): string {
+  return String(input || "").trim();
+}
+
+function buildLogSearchText(item: {
+  type: string;
+  title: string;
+  text: string;
+  pluginId?: string;
+  hook?: string;
+  tags?: string[];
+}): string {
+  return [
+    item.type,
+    item.title,
+    item.text,
+    item.pluginId,
+    item.hook,
+    ...(item.tags || [])
+  ]
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean)
+    .join("\n");
+}
+
+function pushLog(
+  target: RuntimeLogItem[],
+  item: Omit<RuntimeLogItem, "id" | "ts" | "searchText">,
+): void {
+  const tags = Array.from(
+    new Set((item.tags || []).map((value) => normalizeLogTag(value)).filter(Boolean))
+  );
   target.unshift({
     id: randomId("log"),
     ts: nowIso(),
-    ...item
+    ...item,
+    tags,
+    searchText: buildLogSearchText({
+      ...item,
+      tags,
+    }),
   });
   if (target.length > MAX_LOG_ITEMS) {
     target.length = MAX_LOG_ITEMS;
@@ -469,9 +523,13 @@ async function validatePayloadBeforeInstall(payload: Record<string, unknown>): P
   });
   const checkSummary = summarizeValidationForStatus(report);
   pushLog(triggerLogs.value, {
+    channel: "trigger",
     type: "validation",
     title: report.valid ? "校验通过" : "校验失败",
-    text: `${checkSummary} · pluginId=${report.pluginId || "<unknown>"}`
+    text: `${checkSummary} · pluginId=${report.pluginId || "<unknown>"}`,
+    pluginId: String(report.pluginId || "").trim() || undefined,
+    hasError: report.valid !== true,
+    tags: ["validation", String(report.pluginId || "").trim()]
   });
   if (!report.valid) {
     throw new Error(summarizeValidationError(report));
@@ -921,29 +979,259 @@ const selectedInstalledPlugin = computed(() =>
 
 const selectedInstalledPluginEnabled = computed(() => selectedInstalledPlugin.value?.enabled === true);
 const hasSelectedInstalledPlugin = computed(() => Boolean(selectedInstalledPlugin.value));
+const logSelectedPluginId = computed(() => {
+  if (logScope.value === "all") return "";
+  const installedId = String(selectedInstalledPlugin.value?.id || "").trim();
+  if (installedId) return installedId;
+  const projectId = String(getSelectedProject()?.pluginId || "").trim();
+  return projectId;
+});
+
+function isLogChannelEnabled(channel: RuntimeLogItem["channel"]): boolean {
+  return selectedLogChannels.value.includes(channel);
+}
+
+function toggleLogChannel(channel: RuntimeLogItem["channel"]): void {
+  if (isLogChannelEnabled(channel)) {
+    if (selectedLogChannels.value.length === 1) return;
+    selectedLogChannels.value = selectedLogChannels.value.filter((item) => item !== channel);
+    return;
+  }
+  selectedLogChannels.value = [...selectedLogChannels.value, channel];
+}
+
+function toggleLogTag(tag: string): void {
+  const normalized = normalizeLogTag(tag);
+  if (!normalized) return;
+  if (selectedLogTags.value.includes(normalized)) {
+    selectedLogTags.value = selectedLogTags.value.filter((item) => item !== normalized);
+    return;
+  }
+  selectedLogTags.value = [...selectedLogTags.value, normalized];
+}
+
+function clearLogFilters(): void {
+  logScope.value = "selected";
+  logKeyword.value = "";
+  logErrorsOnly.value = false;
+  selectedLogTags.value = [];
+  selectedLogChannels.value = [...LOG_CHANNEL_OPTIONS];
+}
+
+function matchesSelectedPluginLog(item: RuntimeLogItem): boolean {
+  const pluginId = String(logSelectedPluginId.value || "").trim();
+  if (!pluginId) return true;
+  const direct = String(item.pluginId || "").trim();
+  if (direct) return direct === pluginId;
+  return item.searchText.includes(pluginId.toLowerCase());
+}
+
+function matchesLogFilters(item: RuntimeLogItem): boolean {
+  if (!isLogChannelEnabled(item.channel)) return false;
+  if (!matchesSelectedPluginLog(item)) return false;
+  if (logErrorsOnly.value && item.hasError !== true) return false;
+  if (selectedLogTags.value.length > 0) {
+    const tagSet = new Set(item.tags);
+    if (!selectedLogTags.value.every((tag) => tagSet.has(tag))) return false;
+  }
+  const keyword = String(logKeyword.value || "").trim().toLowerCase();
+  if (keyword && !item.searchText.includes(keyword)) return false;
+  return true;
+}
+
+function filterLogs(list: RuntimeLogItem[], channel: RuntimeLogItem["channel"]): RuntimeLogItem[] {
+  return list.filter((item) => item.channel === channel && matchesLogFilters(item));
+}
+
+const filteredTriggerLogs = computed(() => filterLogs(triggerLogs.value, "trigger"));
+const filteredHookTraceLogs = computed(() => filterLogs(hookTraceLogs.value, "hook"));
+const filteredBrainLogs = computed(() => filterLogs(brainLogs.value, "brain"));
+const filteredRuntimeLogs = computed(() => filterLogs(runtimeLogs.value, "runtime"));
+const filteredLogCount = computed(
+  () =>
+    filteredTriggerLogs.value.length
+    + filteredHookTraceLogs.value.length
+    + filteredBrainLogs.value.length
+    + filteredRuntimeLogs.value.length
+);
+
+const logHotTags = computed(() => {
+  const counts = new Map<string, number>();
+  const keyword = String(logKeyword.value || "").trim().toLowerCase();
+  const all = [
+    ...runtimeLogs.value,
+    ...brainLogs.value,
+    ...triggerLogs.value,
+    ...hookTraceLogs.value,
+  ];
+  for (const item of all) {
+    if (!isLogChannelEnabled(item.channel)) continue;
+    if (!matchesSelectedPluginLog(item)) continue;
+    if (logErrorsOnly.value && item.hasError !== true) continue;
+    if (keyword && !item.searchText.includes(keyword)) continue;
+    for (const tag of item.tags) {
+      counts.set(tag, (counts.get(tag) || 0) + 1);
+    }
+  }
+  return Array.from(counts.entries())
+    .sort((a, b) => {
+      const countDiff = b[1] - a[1];
+      if (countDiff !== 0) return countDiff;
+      return a[0].localeCompare(b[0]);
+    })
+    .slice(0, 10)
+    .map(([tag, count]) => ({ tag, count }));
+});
+
+function buildStudioLogExportPayload(): Record<string, unknown> {
+  return {
+    studioSessionId: PLUGIN_STUDIO_SESSION_ID,
+    selectedPluginId: String(selectedInstalledPlugin.value?.id || "").trim() || undefined,
+    selectedProjectId: String(selectedProjectId.value || "").trim() || undefined,
+    filters: {
+      scope: logScope.value,
+      keyword: String(logKeyword.value || "").trim() || undefined,
+      errorsOnly: logErrorsOnly.value,
+      tags: [...selectedLogTags.value],
+      channels: [...selectedLogChannels.value],
+    },
+    logs: {
+      trigger: filteredTriggerLogs.value,
+      hook: filteredHookTraceLogs.value,
+      brain: filteredBrainLogs.value,
+      runtime: filteredRuntimeLogs.value,
+    }
+  };
+}
+
+function mapStudioChannelsToDebugExportChannels(): DebugExportChannel[] {
+  const out = new Set<DebugExportChannel>();
+  for (const channel of selectedLogChannels.value) {
+    if (channel === "runtime") out.add("pluginRuntimeMessages");
+    if (channel === "hook") out.add("pluginHookTrace");
+    if (channel === "brain") {
+      out.add("routes");
+      out.add("internalEvents");
+    }
+    if (channel === "trigger") {
+      out.add("routes");
+      out.add("pluginRuntimeMessages");
+      out.add("pluginHookTrace");
+      out.add("internalEvents");
+    }
+  }
+  return Array.from(out.values());
+}
+
+async function readBridgeExportConfig(): Promise<{ bridgeUrl: string; bridgeToken: string }> {
+  const response = await chrome.runtime.sendMessage({ type: "config.get" }) as {
+    ok?: boolean;
+    data?: Record<string, unknown>;
+    error?: string;
+  };
+  if (!response?.ok) {
+    throw new Error(String(response?.error || "config.get failed"));
+  }
+  const data = toRecord(response.data);
+  return {
+    bridgeUrl: String(data.bridgeUrl || "").trim(),
+    bridgeToken: String(data.bridgeToken || "").trim(),
+  };
+}
+
+async function handleCopyDebugLink(): Promise<void> {
+  const pluginId = String(logSelectedPluginId.value || "").trim();
+  if (!pluginId) {
+    errorMessage.value = "请先选择一个插件，再复制调试链接";
+    return;
+  }
+  publishingDebugLink.value = true;
+  errorMessage.value = "";
+  try {
+    const { bridgeUrl, bridgeToken } = await readBridgeExportConfig();
+    const { downloadUrl } = await publishDebugLinkToBridge({
+      bridgeUrl,
+      bridgeToken,
+      title: `插件调试 ${pluginId}`,
+      target: {
+        kind: "plugin",
+        sessionId: PLUGIN_STUDIO_SESSION_ID,
+        pluginId,
+      },
+      filters: {
+        channels: mapStudioChannelsToDebugExportChannels(),
+        eventTypes: selectedLogTags.value,
+        text: String(logKeyword.value || "").trim() || undefined,
+        errorsOnly: logErrorsOnly.value,
+        limit: 80,
+      },
+      clientPayload: buildStudioLogExportPayload(),
+    });
+    await navigator.clipboard.writeText(downloadUrl);
+    debugLinkCopied.value = true;
+    statusMessage.value = "插件调试链接已复制";
+    setTimeout(() => {
+      debugLinkCopied.value = false;
+    }, 1800);
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : String(error || "复制调试链接失败");
+  } finally {
+    publishingDebugLink.value = false;
+  }
+}
 
 function handleRuntimeMessage(message: unknown): void {
   const payload = toRecord(message);
   const type = String(payload.type || "").trim() || "unknown";
+  const payloadRow = toRecord(payload.payload);
+  const pluginId =
+    String(payload.pluginId || payloadRow.pluginId || "").trim()
+    || undefined;
+  const hasError =
+    String(payload.error || payloadRow.error || "").trim().length > 0
+    || type.includes("error")
+    || type.includes("failed");
   pushLog(runtimeLogs.value, {
+    channel: "runtime",
     type,
     title: type,
-    text: summarize(payload)
+    text: summarize(payload),
+    pluginId,
+    hasError,
+    tags: [type, pluginId || ""]
   });
 
   if (type === "brain.event") {
     const event = toRecord(payload.event);
     const eventType = String(event.type || "").trim() || "brain.event";
+    const eventPayload = toRecord(event.payload);
+    const eventPluginId =
+      String(event.pluginId || eventPayload.pluginId || pluginId || "").trim()
+      || undefined;
     pushLog(brainLogs.value, {
+      channel: "brain",
       type: eventType,
       title: eventType,
-      text: summarize(event.payload)
+      text: summarize(event.payload),
+      pluginId: eventPluginId,
+      hasError:
+        String(event.error || eventPayload.error || "").trim().length > 0
+        || eventType.includes("error")
+        || eventType.includes("failed"),
+      tags: [eventType, eventPluginId || ""]
     });
     if (eventType.includes("plugin") || eventType.startsWith("tool.") || eventType.startsWith("step.")) {
       pushLog(triggerLogs.value, {
+        channel: "trigger",
         type: eventType,
         title: eventType,
-        text: summarize(event.payload)
+        text: summarize(event.payload),
+        pluginId: eventPluginId,
+        hasError:
+          String(event.error || eventPayload.error || "").trim().length > 0
+          || eventType.includes("error")
+          || eventType.includes("failed"),
+        tags: [eventType, eventPluginId || ""]
       });
     }
     return;
@@ -965,14 +1253,24 @@ function handleRuntimeMessage(message: unknown): void {
       String(trace.responsePreview || "").trim() ? `resp=${String(trace.responsePreview || "").trim()}` : ""
     ].filter(Boolean);
     pushLog(hookTraceLogs.value, {
+      channel: "hook",
       type,
       title: `${traceType} · ${hook}`,
-      text: textParts.join(" · ")
+      text: textParts.join(" · "),
+      pluginId,
+      hook,
+      hasError: String(trace.error || "").trim().length > 0,
+      tags: [traceType, hook, pluginId]
     });
     pushLog(triggerLogs.value, {
+      channel: "trigger",
       type,
       title: `${traceType} · ${pluginId}`,
-      text: textParts.join(" · ")
+      text: textParts.join(" · "),
+      pluginId,
+      hook,
+      hasError: String(trace.error || "").trim().length > 0,
+      tags: [traceType, hook, pluginId]
     });
     return;
   }
@@ -985,9 +1283,13 @@ function handleRuntimeMessage(message: unknown): void {
     || type.startsWith("step.")
   ) {
     pushLog(triggerLogs.value, {
+      channel: "trigger",
       type,
       title: type,
-      text: summarize(payload.payload ?? payload.event ?? payload)
+      text: summarize(payload.payload ?? payload.event ?? payload),
+      pluginId,
+      hasError,
+      tags: [type, pluginId || ""]
     });
   }
 }
@@ -1265,16 +1567,95 @@ onUnmounted(() => {
 
         <div v-else class="log-sections">
           <div class="log-sections-header">
-            <span class="log-sections-title">运行日志</span>
-            <button class="log-clear-btn" title="清空日志" @click="clearLogs">
-              <History :size="13" aria-hidden="true" />
-            </button>
+            <div class="log-sections-header-main">
+              <span class="log-sections-title">运行日志</span>
+              <span v-if="logSelectedPluginId" class="log-target-pill">
+                当前插件 · {{ logSelectedPluginId }}
+              </span>
+            </div>
+            <div class="log-sections-actions">
+              <button
+                class="log-export-btn"
+                :disabled="publishingDebugLink"
+                :title="debugLinkCopied ? '链接已复制' : '复制调试链接'"
+                @click="handleCopyDebugLink"
+              >
+                <Check v-if="debugLinkCopied" :size="13" aria-hidden="true" />
+                <ExternalLink v-else :size="13" aria-hidden="true" />
+              </button>
+              <button class="log-clear-btn" title="清空日志" @click="clearLogs">
+                <History :size="13" aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+          <div class="log-filters">
+            <div class="log-filter-row">
+              <button
+                class="log-chip"
+                :class="{ active: logScope === 'selected' }"
+                @click="logScope = 'selected'"
+              >
+                当前插件
+              </button>
+              <button
+                class="log-chip"
+                :class="{ active: logScope === 'all' }"
+                @click="logScope = 'all'"
+              >
+                全部插件
+              </button>
+              <button
+                class="log-chip"
+                :class="{ active: logErrorsOnly }"
+                @click="logErrorsOnly = !logErrorsOnly"
+              >
+                仅错误
+              </button>
+              <button class="log-chip subtle" @click="clearLogFilters">
+                重置筛选
+              </button>
+            </div>
+            <div class="log-filter-row">
+              <input
+                v-model="logKeyword"
+                class="log-search-input"
+                type="text"
+                placeholder="按类型、hook、pluginId、文本筛选"
+                aria-label="筛选日志关键词"
+              />
+            </div>
+            <div class="log-filter-row channel-row">
+              <button
+                v-for="channel in LOG_CHANNEL_OPTIONS"
+                :key="channel"
+                class="log-chip"
+                :class="{ active: selectedLogChannels.includes(channel) }"
+                @click="toggleLogChannel(channel)"
+              >
+                {{ channel }}
+              </button>
+            </div>
+            <div v-if="logHotTags.length > 0" class="log-filter-row hot-tags-row">
+              <button
+                v-for="entry in logHotTags"
+                :key="entry.tag"
+                class="log-chip"
+                :class="{ active: selectedLogTags.includes(entry.tag) }"
+                @click="toggleLogTag(entry.tag)"
+              >
+                {{ entry.tag }} · {{ entry.count }}
+              </button>
+            </div>
+            <div class="log-filter-summary">
+              <span>命中 {{ filteredLogCount }} 条</span>
+              <span v-if="logScope === 'selected' && !logSelectedPluginId">未选中插件，显示全部</span>
+            </div>
           </div>
           <div class="log-sections-body">
             <section class="log-section">
               <h4 class="log-section-heading"><Zap :size="11" aria-hidden="true" /> 触发记录</h4>
-              <ul v-if="triggerLogs.length > 0" class="log-list" role="log" aria-live="polite">
-                <li v-for="item in triggerLogs" :key="item.id" class="log-row">
+              <ul v-if="filteredTriggerLogs.length > 0" class="log-list" role="log" aria-live="polite">
+                <li v-for="item in filteredTriggerLogs" :key="item.id" class="log-row">
                   <span class="log-time">{{ (item.ts.split('T')[1] || '').slice(0, 8) }}</span>
                   <span class="log-title">{{ item.title }}</span>
                   <p class="log-msg">{{ item.text }}</p>
@@ -1285,8 +1666,8 @@ onUnmounted(() => {
 
             <section class="log-section">
               <h4 class="log-section-heading"><Activity :size="11" aria-hidden="true" /> Hook 时间线</h4>
-              <ul v-if="hookTraceLogs.length > 0" class="log-list" role="log" aria-live="polite">
-                <li v-for="item in hookTraceLogs" :key="item.id" class="log-row">
+              <ul v-if="filteredHookTraceLogs.length > 0" class="log-list" role="log" aria-live="polite">
+                <li v-for="item in filteredHookTraceLogs" :key="item.id" class="log-row">
                   <span class="log-time">{{ (item.ts.split('T')[1] || '').slice(0, 8) }}</span>
                   <span class="log-title">{{ item.title }}</span>
                   <p class="log-msg">{{ item.text }}</p>
@@ -1297,8 +1678,8 @@ onUnmounted(() => {
 
             <section class="log-section">
               <h4 class="log-section-heading"><Cpu :size="11" aria-hidden="true" /> Brain 事件</h4>
-              <ul v-if="brainLogs.length > 0" class="log-list" role="log" aria-live="polite">
-                <li v-for="item in brainLogs" :key="item.id" class="log-row">
+              <ul v-if="filteredBrainLogs.length > 0" class="log-list" role="log" aria-live="polite">
+                <li v-for="item in filteredBrainLogs" :key="item.id" class="log-row">
                   <span class="log-time">{{ (item.ts.split('T')[1] || '').slice(0, 8) }}</span>
                   <span class="log-title">{{ item.title }}</span>
                   <p class="log-msg">{{ item.text }}</p>
@@ -1309,8 +1690,8 @@ onUnmounted(() => {
 
             <section class="log-section">
               <h4 class="log-section-heading"><Terminal :size="11" aria-hidden="true" /> Runtime 消息</h4>
-              <ul v-if="runtimeLogs.length > 0" class="log-list" role="log" aria-live="polite">
-                <li v-for="item in runtimeLogs" :key="item.id" class="log-row">
+              <ul v-if="filteredRuntimeLogs.length > 0" class="log-list" role="log" aria-live="polite">
+                <li v-for="item in filteredRuntimeLogs" :key="item.id" class="log-row">
                   <span class="log-time">{{ (item.ts.split('T')[1] || '').slice(0, 8) }}</span>
                   <span class="log-title">{{ item.title }}</span>
                   <p class="log-msg">{{ item.text }}</p>
@@ -1566,6 +1947,13 @@ onUnmounted(() => {
   border-bottom: 1px solid var(--border);
 }
 
+.log-sections-header-main,
+.log-sections-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .log-sections-title {
   font-size: 11px;
   font-weight: 700;
@@ -1574,15 +1962,110 @@ onUnmounted(() => {
   letter-spacing: 0.04em;
 }
 
+.log-target-pill {
+  display: inline-flex;
+  align-items: center;
+  max-width: 190px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--accent) 12%, var(--bg));
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-export-btn,
 .log-clear-btn {
   padding: 4px;
   color: var(--text-muted);
   border-radius: 4px;
 }
 
+.log-export-btn:hover:not(:disabled),
 .log-clear-btn:hover {
   background: color-mix(in oklab, var(--text) 5%, transparent);
+}
+
+.log-export-btn:hover:not(:disabled) {
+  color: var(--accent);
+}
+
+.log-clear-btn:hover {
   color: #ef4444;
+}
+
+.log-export-btn:disabled,
+.log-clear-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.log-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in oklab, var(--surface) 70%, transparent);
+}
+
+.log-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.log-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.log-chip.active {
+  border-color: color-mix(in oklab, var(--accent) 60%, var(--border));
+  background: color-mix(in oklab, var(--accent) 12%, var(--bg));
+  color: var(--accent);
+}
+
+.log-chip.subtle {
+  color: var(--text-muted);
+}
+
+.log-search-input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.channel-row,
+.hot-tags-row {
+  gap: 5px;
+}
+
+.log-filter-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 .log-sections-body {
