@@ -257,6 +257,14 @@ jq '.payload.data.runtime.summary' snapshot.json
   - `rawEventTail`
 - 推荐检索顺序：
   - `summary.lastError -> timeline -> sandbox.summary -> sandbox.trace -> llm.trace -> tools.trace -> agent.loopRuns -> rawEventTail`
+- **diagnostics vs snapshot 选择策略**：
+  - **会话级问题**（LLM 调用失败、tool 执行异常、loop 卡住/无进展）→ 优先用 diagnostics
+  - **系统级问题**（plugin 加载失败、skill 注册异常、provider 配置错误、UI widget 不显示）→ 优先用 debug-snapshot
+  - **交叉检索规则**：diagnostics 中出现 plugin 相关错误时（如 `rawEventTail` 含 `plugin.hook_error`），交叉查看 snapshot 的 `plugins[].lastError` + `uiState`
+  - **uiState 字段**：snapshot 的 `plugins.uiState` 包含 `relayActive`（SidePanel 连接状态）和 per-plugin widget mount 状态，诊断 UI 不渲染问题时必查
+  - 诊断 JSON 的 `diagnosticGuide.columnIndex` 提供 columnar 表的列名→索引映射，用 jq 查询时可直接引用
+  - 诊断 JSON 的 `diagnosticGuide.hints` 包含根据 `lastError` 自动生成的诊断建议
+  - llm.trace 的 `source` 列区分 `"compaction"` / `"hosted_chat_transport"` / `"llm_provider"`，`contentType` 列标记响应 transport 格式
 - 分析调试快照时关注：
   - `payload.data.runtime.summary`
   - `payload.data.plugins.summary`
@@ -303,6 +311,10 @@ Agent 行为规范：
 - **发现 issue**：对话中遇到值得跟踪的问题（bug、优化点、技术债），创建 `docs/backlog/YYYY-MM-DD-<slug>.md` 记录，用 frontmatter 标记 status/priority/tags
 - **承接 issue**：用户指派或空闲时，扫描 `docs/backlog/` 中 `status: open` 的 issue 作为可接任务
 - **更新状态**：开始处理改为 `in-progress`，完成改为 `done`
+- **完成回写**：任务完成后，必须回到原 issue 文档末尾追加本次工作记录，至少包含：
+  - `## 工作总结`：本次做了什么、结果是什么、还有哪些残留问题
+  - `## 相关 commits`：列出本次相关 commit hash / message；如果当前改动尚未提交，明确写 `未提交`
+  - 追加记录必须保留时间信息，按时间顺序附加在原文档末尾，不能覆盖历史记录
 - **跨会话交接**：新 agent 进入仓库后，可读取 backlog 了解未完成工作，避免重复发现同一问题
 
 ## 技术栈
