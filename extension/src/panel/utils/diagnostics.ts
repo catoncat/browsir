@@ -964,6 +964,27 @@ function buildAgentDecisionTrace(events: NormalizedStepEvent[], limit = 80): Arr
   return rows.slice(-Math.max(1, limit));
 }
 
+function buildDiagnosticHints(lastError: string): string[] {
+  const hints: string[] = [];
+  const err = String(lastError || "");
+  if (err.includes("compaction")) {
+    hints.push("Compaction 失败 — 检查 llm.trace 中 source=compaction 的行，确认 LLM 响应 format 是否被正确解析");
+  }
+  if (err.includes("offscreen") || err.includes("createDocument")) {
+    hints.push("Offscreen document 错误 — 检查 manifest.json 是否声明 offscreen 权限");
+  }
+  if (err.includes("LLM HTTP")) {
+    hints.push("LLM HTTP 错误 — 检查 llm.trace 中 status 列，确认 provider 配置和网络连接");
+  }
+  if (err.includes("no_progress") || err.includes("ping-pong")) {
+    hints.push("Loop 无进展 — 检查 agent.decisionTrace 中是否存在重复签名或往返模式");
+  }
+  if (err.includes("timeout")) {
+    hints.push("超时 — 检查 llm.trace 中最后一行的 requestBytes 和 messageChars，可能是 payload 过大");
+  }
+  return hints;
+}
+
 export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}): Promise<CollectedDiagnostics> {
   const sessionId = String(options.sessionId || "").trim();
   const [config, dump] = await Promise.all([
@@ -1033,7 +1054,13 @@ export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}
         ".sandbox.trace.rows[]",
         ".llm.trace.rows[]",
         ".tools.trace.rows[]"
-      ]
+      ],
+      columnIndex: {
+        "rawEventTail": { idx: 0, ts: 1, type: 2, payload: 3 },
+        "llm.skipped": { idx: 0, ts: 1, reason: 2, hasBase: 3, hasKey: 4 },
+        "llm.trace": { idx: 0, ts: 1, type: 2, step: 3, attempt: 4, status: 5, ok: 6, toolCalls: 7, packetCount: 8, contentLength: 9, messageCount: 10, messageChars: 11, maxMessageChars: 12, requestBytes: 13, requestMessageCount: 14, toolResultCount: 15, hasToolsDefinition: 16, model: 17, url: 18, lastUserSnippet: 19, bodyLength: 20, bodyTruncated: 21, body: 22, reason: 23, delayMs: 24, maxAttempts: 25, success: 26, finalError: 27, hasText: 28, hasBase: 29, hasKey: 30, assistantTextLength: 31, finishReason: 32, source: 33, stage: 34, detail: 35, contentType: 36 }
+      },
+      hints: buildDiagnosticHints(lastError),
     },
     generatedAt: new Date().toISOString(),
     sessionId: sessionId || String(dumpRecord.sessionId || ""),
@@ -1162,7 +1189,13 @@ export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}
           "finalError",
           "hasText",
           "hasBase",
-          "hasKey"
+          "hasKey",
+          "assistantTextLength",
+          "finishReason",
+          "source",
+          "stage",
+          "detail",
+          "contentType"
         ]
       )
     },
