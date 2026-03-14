@@ -6,6 +6,7 @@ import { DEFAULT_LLM_ROLE, type LlmResolvedRoute } from "./llm-provider";
 import { resolveLlmRoute } from "./llm-profile-resolver";
 import { normalizeErrorCode, toRecord } from "./loop-shared-utils";
 import { nowIso } from "./types";
+import { getProviderRuntimeKind } from "../../shared/llm-provider-config";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -86,6 +87,51 @@ export function resolveAuxiliaryLlmRoute(config: BridgeConfig) {
     role: DEFAULT_LLM_ROLE,
     escalationPolicy: "disabled",
   });
+}
+
+function collectConfiguredProfileIds(config: BridgeConfig): string[] {
+  const rawProfiles = Array.isArray(config.llmProfiles) ? config.llmProfiles : [];
+  const out: string[] = [];
+  for (const item of rawProfiles) {
+    const row = toRecord(item);
+    const id = String(row.id || "").trim();
+    if (!id) continue;
+    out.push(id);
+  }
+  return out;
+}
+
+export function resolveAuxiliaryNonHostedLlmRoute(config: BridgeConfig) {
+  const resolved = resolveAuxiliaryLlmRoute(config);
+  if (!resolved.ok) return resolved;
+  if (resolved.route.runtimeKind !== "hosted_chat") {
+    return resolved;
+  }
+
+  const preferredProfile = String(resolved.route.profile || "").trim();
+  const candidateProfiles = new Set<string>([
+    ...resolved.route.orderedProfiles,
+    ...collectConfiguredProfileIds(config),
+  ]);
+
+  for (const profile of candidateProfiles) {
+    const normalized = String(profile || "").trim();
+    if (!normalized || normalized === preferredProfile) continue;
+    const candidate = resolveLlmRoute({
+      config,
+      profile: normalized,
+      role: DEFAULT_LLM_ROLE,
+      escalationPolicy: "disabled",
+    });
+    if (!candidate.ok) continue;
+    const runtimeKind =
+      candidate.route.runtimeKind ||
+      getProviderRuntimeKind(candidate.route.provider);
+    if (runtimeKind === "hosted_chat") continue;
+    return candidate;
+  }
+
+  return resolved;
 }
 
 export function resolvePrimaryLlmRoute(

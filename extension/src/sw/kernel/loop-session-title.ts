@@ -20,7 +20,8 @@ import {
 } from "./loop-shared-utils";
 import { type SessionMeta } from "./types";
 import { parseLlmMessageFromBody } from "./loop-llm-stream";
-import { resolveAuxiliaryLlmRoute } from "./loop-llm-route";
+import { resolveAuxiliaryNonHostedLlmRoute } from "./loop-llm-route";
+import { resolveRouteRuntimeKind } from "./loop-llm-stream";
 
 export function normalizeSessionTitle(value: unknown, fallback = ""): string {
   const compact = String(value || "")
@@ -188,9 +189,10 @@ export async function refreshSessionTitleAuto(
 
   const cfgRaw = await callInfra(infra, { type: "config.get" });
   const config = extractLlmConfig(cfgRaw);
-  const resolvedRoute = resolveAuxiliaryLlmRoute(config);
+  const resolvedRoute = resolveAuxiliaryNonHostedLlmRoute(config);
   if (!resolvedRoute.ok) return;
   const route = resolvedRoute.route;
+  if (resolveRouteRuntimeKind(route) === "hosted_chat") return;
   const interval = config.autoTitleInterval;
 
   const isDefaultTitle =
