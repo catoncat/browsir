@@ -56,37 +56,11 @@ export interface SkillDiscoverResult {
 
 function extractContentFromStepExecuteResult(value: unknown): string {
   const root = toRecord(value);
-  const rootData = toRecord(root.data);
-  const rootDataData = toRecord(rootData.data);
-  const rootDataResponse = toRecord(rootData.response);
-  const rootDataResponseData = toRecord(rootDataResponse.data);
-  const rootResponse = toRecord(root.response);
-  const rootResponseData = toRecord(rootResponse.data);
-  const rootResponseInnerData = toRecord(rootResponseData.data);
-  const rootResult = toRecord(root.result);
-  const candidates: unknown[] = [
-    root.content,
-    root.text,
-    rootData.content,
-    rootData.text,
-    rootDataData.content,
-    rootDataData.text,
-    rootDataResponse.content,
-    rootDataResponse.text,
-    rootDataResponseData.content,
-    rootDataResponseData.text,
-    rootResponse.content,
-    rootResponse.text,
-    rootResponseData.content,
-    rootResponseData.text,
-    rootResponseInnerData.content,
-    rootResponseInnerData.text,
-    rootResult.content,
-    rootResult.text,
-  ];
-  for (const item of candidates) {
-    if (typeof item === "string") return item;
-  }
+  if (typeof root.content === "string") return root.content;
+  if (typeof root.text === "string") return root.text;
+  const data = toRecord(root.data);
+  if (typeof data.content === "string") return data.content;
+  if (typeof data.text === "string") return data.text;
   throw new Error("文件读取工具未返回 content 文本");
 }
 

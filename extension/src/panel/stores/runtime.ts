@@ -2,39 +2,6 @@ import { defineStore } from "pinia";
 import { ref } from "vue";
 import { useChatStore } from "./chat-store";
 import { useConfigStore } from "./config-store";
-export type {
-  ConversationMessage,
-  SessionForkSource,
-  SessionIndexEntry,
-  RuntimeStateView,
-} from "./chat-store";
-export type {
-  PanelConfig,
-  PanelLlmProfile,
-  RuntimeHealth,
-} from "./config-store";
-export {
-  DEFAULT_PANEL_LLM_PROVIDER,
-  DEFAULT_PANEL_LLM_API_BASE,
-  DEFAULT_PANEL_LLM_MODEL,
-} from "./config-store";
-export type {
-  SkillMetadata,
-  SkillInstallInput,
-  SkillDiscoverRoot,
-  SkillDiscoverOptions,
-  SkillDiscoverResult,
-} from "./skill-store";
-export type {
-  PluginMetadata,
-  PluginUiExtensionMetadata,
-  PluginListResult,
-  PluginRegisterResult,
-  PluginUnregisterResult,
-  PluginInstallInput,
-  PluginValidateCheck,
-  PluginValidateResult,
-} from "./plugin-store";
 
 export const useRuntimeStore = defineStore("runtime", () => {
   const chatStore = useChatStore();
