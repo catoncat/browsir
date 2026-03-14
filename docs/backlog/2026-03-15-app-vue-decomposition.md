@@ -1,80 +1,77 @@
 ---
 id: ISSUE-021
-title: App.vue 二阶段深拆 — plugin UI / ChatView / editing follow-up
+title: ChatView 二阶段深拆 — transcript / overlay / editor / export follow-up
 status: open
 priority: p2
-source: ISSUE-017 follow-up after shell/controller split
+source: ISSUE-017 follow-up after ChatView controller split
 created: 2026-03-15
 assignee: unassigned
 kind: refactor
 tags: [panel, refactor, vue, composables, chat-view, follow-up]
 ---
 
-# ISSUE-021: App.vue 二阶段深拆 — plugin UI / ChatView / editing follow-up
+# ISSUE-021: ChatView 二阶段深拆 — transcript / overlay / editor / export follow-up
 
 ## 背景
 
-`ISSUE-017` 现已校准为第一阶段的 shell/controller 拆分（含 `panel/types.ts`、`use-tool-pending-state.ts`、`shell-context.ts`）。本条目保留为第二阶段 follow-up：如果第一阶段完成后 `App.vue` / chat 区域仍偏大，再继续向 plugin UI / editing / ChatView 深拆。
+`ISSUE-017` 现已重新校准为：在保留 `App.vue` shell 收口成果的前提下，从 `ChatView.vue` 拆出第一层 controller 边界（run state / runtime bus / plugin runtime / conversation actions）。
 
-> 说明：本条目**不替代** `ISSUE-017`。第一阶段先解决 shell/controller 边界；本条目只跟踪第二阶段残余热点，不与当前正在进行的 `ISSUE-017` 重复派工。
+本条目保留为**第二阶段 follow-up**：当 `ISSUE-017` 完成首轮 controller 解耦后，如果 `ChatView.vue` 或新抽出的 composable 仍然偏厚，再继续做更深层的 presentational / auxiliary 拆分。
 
-## 结构分析
+> 说明：本条目**不替代** `ISSUE-017`。`ISSUE-017` 解决的是“一阶控制器边界”；本条目只处理首轮收口之后残留的二阶热点。
 
-| 行范围 | 区块 | 行数 |
-|--------|------|------|
-| 1-34 | Imports | 34 |
-| 35-65 | Store init + UI refs | 30 |
-| 66-124 | Runtime lifecycle computed | 58 |
-| 125-230 | Type interfaces (12个) | 105 |
-| 232-360 | Message actions + state refs | 128 |
-| 361-552 | RunView state + Fork scene | 191 |
-| 554-786 | Normalizer/formatter utilities | 232 |
-| 787-1134 | Tool pending state + log buffering | 347 |
-| 1135-1355 | applyRuntimeEventToolRun (单函数 220 行) | 220 |
-| 1356-1630 | Bridge sync + tool pending card computed | 274 |
-| 1631-1895 | Watchers + auto-scroll | 264 |
-| 1896-2397 | Plugin UI lifecycle + render hooks | 501 |
-| 2398-2478 | User message editing | 80 |
-| 2480-2620 | SW runtime message handler | 140 |
-| 2621-2834 | User action handlers | 213 |
-| 2835-2854 | onUnmounted cleanup | 19 |
+## 当前热点（基于真实工作树）
+
+当前 `ChatView.vue` 约 2,690 行，主要热点已从 `App.vue` 转移至此：
+
+| 区块 | 现状 |
+|------|------|
+| run state / tool pending / llm streaming | 与 step-stream sync、tool card model 紧耦合 |
+| watchers / auto-scroll | 与运行态、消息列表可见性、fork scene 等交织 |
+| panel UI plugin runtime | hydrate、lifecycle、notice、render hook payload normalize 全在一个文件里 |
+| runtime message bus | `chrome.runtime.onMessage`、bridge/runtime event 分发、polling 混在视图主体 |
+| conversation actions | send / export / debug link / fork source / refresh title 混在同层 |
 
 ## 拆分计划（按优先级）
 
-### Phase 1: 提取剩余大块 controller / render hooks
+### Phase 1：在 `ISSUE-017` 完成后再做的二阶段收尾
 
-1. **`use-tool-pending-state.ts` 二次细拆（若第一阶段后仍继续膨胀）**
+1. **`ChatTranscript.vue` / `ChatTimeline.vue`**
+   - 负责消息列表、流式草稿、tool pending card、空状态视图
+   - 前提：运行态状态机和 message bus 已从 `ChatView.vue` 主体拆出
+
+2. **`ChatHeaderActions.vue` / `ChatExportActions.vue`**
+   - Header 菜单、export/debug/fork source 辅助动作
+   - 减少 `ChatView.vue` 顶栏模板与动作处理耦合
+
+3. **`useConversationEditing()` / `useConversationExport()`**
+   - user message editing、markdown/debug/export handler
+   - 将辅助交互从主视图进一步沉降到独立 composable
+
+4. **plugin overlay / widget host 继续独立**
+   - 如果 `chat.scene.overlay` 插槽与 plugin runtime 仍然厚，可拆成独立 host component
+
+### Phase 2：对首轮新 composable 做二次细拆（仅在确实膨胀时）
+
+1. **若 `use-tool-pending-state.ts` 继续膨胀**
    - 候选拆分：`useToolRunStream()` / `useLlmStreamingState()` / `useToolPendingCardModel()`
-   - 目标是避免把 `App.vue` 的技术债完整迁移成一个新的“大 composable”
 
-2. **`usePluginUiRender()`**
-   - Panel notice 系统、plugin UI 生命周期
-   - `toUi*Payload` / `normalizeUi*Payload` pairs
-   - 目标是把 `panelUiRuntime` 相关 render hook 收到单一边界
+2. **若 `use-panel-ui-runtime.ts` 继续膨胀**
+   - 候选拆分：notice / lifecycle / render-payload-normalizer 三层
 
-3. **`ChatView.vue`（仅在 shell context 稳定后）**
-   - 负责 chat 主区组合：消息列表、流式草稿、tool pending card、fork overlay、输入框
-   - 前提是 shell actions / panel runtime 可通过 context 注入，而不是新增大量 props/emits
+3. **若 `use-runtime-message-bus.ts` 继续膨胀**
+   - 候选拆分：runtime event dispatch / polling sync / bridge event output
 
-4. **`useConversationEditing()` / `useConversationExport()`**
-   - user message editing、markdown/debug/export handlers
-   - 把用户交互辅助逻辑从 `App.vue` 主体中继续挪出
+## 非目标
 
-### Phase 2: 收尾型小块拆分
-
-4. **`useForkScene()`** — Fork 动画编排状态机
-5. **`useRuntimeMessageBus()`** — `chrome.runtime.onMessage` 相关 wiring（若仍然过厚）
-
-### 非目标 / 已并入 ISSUE-017 第一阶段
-
-- `panel/types.ts`
-- `use-tool-pending-state.ts`
-- `shell-context.ts`
+- 不把控制器职责搬回 `App.vue`
+- 不重新讨论“要不要 `ChatView.vue`”——它已经是当前真实边界
+- 不与 `ISSUE-017` 的首轮 controller 抽离 scope 重叠
 
 ## 验收标准
 
-- 第一阶段完成后，如仍有必要，再把剩余热点拆成独立 composable / ChatView
-- 新增模块职责边界明确，不与 `ISSUE-017` 当前 scope 重叠
+- `ISSUE-017` 完成后，如仍有必要，再把剩余热点拆成独立 presentational component / composable
+- 新增模块职责边界明确，不与 `ISSUE-017` 首轮 scope 重叠
 - `bun run build` 通过
 - 功能无回归（手动验证 SidePanel 主流程）
 
@@ -82,5 +79,5 @@ tags: [panel, refactor, vue, composables, chat-view, follow-up]
 
 - 不改变任何用户可见行为
 - 默认在 `ISSUE-017` 完成后再评估是否启动
-- 不把第一阶段已经开始落地的边界（`types.ts` / `use-tool-pending-state.ts` / `shell-context.ts`）重新建一套重复方案
-- 每个 composable 单独 commit，方便 review
+- 不制造仅为“符合旧计划”而存在的新抽象
+- 每个 composable / component 单独 commit，方便 review

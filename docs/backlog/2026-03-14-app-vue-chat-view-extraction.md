@@ -1,54 +1,77 @@
 ---
 id: ISSUE-017
-title: App.vue 壳层 / Controller 拆分 — tool pending state + shell context
-status: open
+title: ChatView 主控拆分 — run state / message bus / plugin runtime 解耦
+status: in-progress
 priority: p0
 source: architecture-evolution-phase2
 created: 2026-03-14
 assignee: unassigned
 kind: slice
 epic: EPIC-2026-03-14-ARCH-EVOLUTION-PHASE2
-parallel_group: panel-shell
+parallel_group: panel-chat
 depends_on: []
 write_scope:
   - extension/src/panel/App.vue
+  - extension/src/panel/ChatView.vue
   - extension/src/panel/types.ts
-  - extension/src/panel/utils/use-tool-pending-state.ts
-  - extension/src/panel/shell-context.ts
-  - extension/src/panel/components/ChatView.vue
+  - extension/src/panel/composables/use-tool-pending-state.ts
+  - extension/src/panel/composables/use-runtime-message-bus.ts
+  - extension/src/panel/composables/use-panel-ui-runtime.ts
+  - extension/src/panel/composables/use-conversation-actions.ts
 acceptance_ref: docs/architecture-evolution-plan-2026-03-14.md
-tags: [slice, panel, app-vue, controller, composable, architecture, phase2]
+tags: [slice, panel, chat-view, controller, composable, architecture, phase2]
 ---
 
 ## 问题
 
-`App.vue` 当前 3,247 行（script 2,854 + template 343 + style 50），技术债不只是模板过大，而是 **shell 路由、panel 级 runtime/plugin 生命周期、chat 运行态控制器、chat 主视图渲染** 四类职责叠加在一个 SFC 内。
+`App.vue` 壳层收口已经在真实工作树中完成：当前 `App.vue` 仅约 86 行，主要负责 bootstrap、视图切换和 `SessionList` 挂载。但复杂度并未消失，而是迁移到了约 2,690 行的 `ChatView.vue`，其中同时混合了：
+
+- chat 主视图渲染
+- tool pending / llm streaming / run-view 状态机
+- step stream 恢复与 polling
+- `chrome.runtime.onMessage` 消息总线
+- panel UI plugin render runtime / hook pipeline
+- send / export / debug link 等动作处理
+
+因此本条目的真实目标，已经从“瘦 `App.vue`”变成“避免 `ChatView.vue` 成为新的巨型主控组件”。
 
 ## 目标
 
-先把 `App.vue` 拆成更真实的边界：`types.ts` + `use-tool-pending-state.ts` + `shell-context.ts` + Shell；在 controller 边界稳定后，再决定是否引入 `ChatView.vue`。
+保持当前 `App.vue` shell 不回退，并从 `ChatView.vue` 中逐步拆出稳定 controller 边界，优先把运行态控制器、runtime message bus、plugin runtime 以及会话动作处理分离出去。
 
 ## 验收标准
 
-- [ ] `panel/types.ts` 集中 panel view-model / run-view 相关类型定义
-- [ ] `use-tool-pending-state.ts` 独立承载 tool pending / llm streaming / run-view 状态机
-- [ ] `shell-context.ts` 提供 shell actions / `panelUiRuntime` 的注入边界
-- [ ] `App.vue` 不再直接内联上述 run-view / tool pending 控制器逻辑
-- [ ] 若 props/emits 面已明显收敛，再评估是否引入 `ChatView.vue`（不是首轮硬约束）
+- [ ] `panel/types.ts` 继续集中 panel view-model / run-view 相关类型定义
+- [ ] `App.vue` 保持 shell-only，不重新吸回 chat controller 逻辑
+- [ ] `ChatView.vue` 不再直接内联 tool pending / llm streaming / run-view 主状态机
+- [ ] `ChatView.vue` 不再直接承载 `chrome.runtime.onMessage` + polling + step-stream wiring
+- [ ] panel UI plugin runtime / render hook 管线有单独边界
+- [ ] send / export / debug link 等动作已提炼为独立 helper / composable，或至少被显式隔离
 - [ ] `bun run build` 通过
 - [ ] `bun run test` 通过
 
+## 推荐拆分顺序
+
+1. `use-tool-pending-state.ts`（从 `ChatView.vue` 抽运行态状态机）
+2. `use-runtime-message-bus.ts`（抽 runtime/bridge event wiring + polling）
+3. `use-panel-ui-runtime.ts`（抽 panel UI plugin runtime / render hook）
+4. `use-conversation-actions.ts`（抽 send/export/debug/fork 等动作）
+
+> `shell-context.ts` 不再是第一阶段硬约束；只有当 props/emits 或注入边界真的成为阻碍时再引入。
+
 ## 写入范围
 
-- `extension/src/panel/App.vue`（瘦身）
+- `extension/src/panel/App.vue`（保持 shell，必要时仅适配）
+- `extension/src/panel/ChatView.vue`
 - `extension/src/panel/types.ts`
-- `extension/src/panel/utils/use-tool-pending-state.ts`
-- `extension/src/panel/shell-context.ts`
-- `extension/src/panel/components/ChatView.vue`（可选后续）
+- `extension/src/panel/composables/use-tool-pending-state.ts`（推荐新建）
+- `extension/src/panel/composables/use-runtime-message-bus.ts`（推荐新建）
+- `extension/src/panel/composables/use-panel-ui-runtime.ts`（推荐新建）
+- `extension/src/panel/composables/use-conversation-actions.ts`（推荐新建）
 
 ## 泳道
 
-`panel-shell`，App.vue 单写者
+`panel-chat`，`ChatView.vue` 单写者
 
 ## 依赖
 
