@@ -29,7 +29,7 @@ tags: [panel, refactor, vue, composables, chat-view, follow-up]
 | `use-tool-run-tracking.ts` | 已接管 run tracking 主体；若继续增厚，需要再拆更窄边界 |
 | watchers / auto-scroll | 与运行态、消息列表可见性、fork scene 等交织 |
 | panel UI plugin runtime wiring | `use-ui-render-pipeline.ts` 已接入，但 `ChatView.vue` 仍保留不少 side-effect/wiring |
-| runtime message bus | `chrome.runtime.onMessage`、bridge/runtime event 分发、polling 混在视图主体 |
+| runtime message bus | `use-runtime-messages.ts` 已出现首版文件，但 `chrome.runtime.onMessage`、bridge/runtime event 分发、polling 仍在 `ChatView.vue` 主体 |
 | conversation actions | send / export / debug link / fork source / refresh title 混在同层 |
 
 ## 拆分计划（按优先级）
@@ -38,7 +38,7 @@ tags: [panel, refactor, vue, composables, chat-view, follow-up]
 
 1. **`ChatTranscript.vue` / `ChatTimeline.vue`**
    - 负责消息列表、流式草稿、tool pending card、空状态视图
-   - 前提：runtime message bus 与会话动作已从 `ChatView.vue` 主体拆出
+   - 前提：`use-runtime-messages.ts` 已完成接线，runtime message bus 与会话动作已从 `ChatView.vue` 主体拆出
 
 2. **`ChatHeaderActions.vue` / `ChatExportActions.vue`**
    - Header 菜单、export/debug/fork source 辅助动作
@@ -62,7 +62,7 @@ tags: [panel, refactor, vue, composables, chat-view, follow-up]
 3. **若 `use-ui-render-pipeline.ts` 继续膨胀**
    - 候选拆分：notice / lifecycle / render-payload-normalizer 三层
 
-4. **若 `use-runtime-message-bus.ts` 继续膨胀**
+4. **若 `use-runtime-messages.ts` 继续膨胀**
    - 候选拆分：runtime event dispatch / polling sync / bridge event output
 
 ## 非目标

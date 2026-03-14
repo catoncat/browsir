@@ -16,7 +16,7 @@ write_scope:
   - extension/src/panel/types.ts
   - extension/src/panel/composables/use-llm-streaming.ts
   - extension/src/panel/composables/use-tool-run-tracking.ts
-  - extension/src/panel/composables/use-runtime-message-bus.ts
+  - extension/src/panel/composables/use-runtime-messages.ts
   - extension/src/panel/composables/use-ui-render-pipeline.ts
   - extension/src/panel/composables/use-conversation-actions.ts
 acceptance_ref: docs/architecture-evolution-plan-2026-03-14.md
@@ -45,7 +45,7 @@ tags: [slice, panel, chat-view, controller, composable, architecture, phase2]
 - [x] `App.vue` 保持 shell-only，不重新吸回 chat controller 逻辑
 - [x] `use-llm-streaming.ts` 已承接 LLM 流式草稿状态的首轮抽离
 - [x] `use-tool-run-tracking.ts` 已承接 tool run tracking / step stream sync / tool card model 的首轮抽离
-- [ ] `ChatView.vue` 不再直接承载 `chrome.runtime.onMessage` + polling + bridge status wiring
+- [ ] `use-runtime-messages.ts` 完成接线，`ChatView.vue` 不再直接承载 `chrome.runtime.onMessage` + polling + bridge status wiring
 - [x] panel UI plugin runtime / render hook 管线已有 `use-ui-render-pipeline.ts` 独立边界
 - [ ] send / export / debug link 等动作已提炼为独立 helper / composable，或至少被显式隔离
 - [ ] `bun run build` 通过
@@ -54,7 +54,7 @@ tags: [slice, panel, chat-view, controller, composable, architecture, phase2]
 ## 推荐拆分顺序
 
 0. 保持并继续复用已接入的 `use-ui-render-pipeline.ts` / `use-llm-streaming.ts` / `use-tool-run-tracking.ts`
-1. `use-runtime-message-bus.ts`（抽 runtime/bridge event wiring + polling + bridge status）
+1. `use-runtime-messages.ts`（接入现有首版文件，抽 runtime/bridge event wiring + polling + bridge status）
 2. `use-conversation-actions.ts`（抽 send/export/debug/fork 等动作）
 3. 如 `use-tool-run-tracking.ts` 继续膨胀，再做二阶段细拆
 
@@ -67,7 +67,7 @@ tags: [slice, panel, chat-view, controller, composable, architecture, phase2]
 - `extension/src/panel/types.ts`
 - `extension/src/panel/composables/use-llm-streaming.ts`（已落地，继续保持窄边界）
 - `extension/src/panel/composables/use-tool-run-tracking.ts`（已落地，继续观察是否二次细拆）
-- `extension/src/panel/composables/use-runtime-message-bus.ts`（推荐新建）
+- `extension/src/panel/composables/use-runtime-messages.ts`（已出现首版文件，待接线）
 - `extension/src/panel/composables/use-ui-render-pipeline.ts`（优先复用/扩展）
 - `extension/src/panel/composables/use-conversation-actions.ts`（推荐新建）
 
