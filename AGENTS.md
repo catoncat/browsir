@@ -295,6 +295,16 @@ jq '.payload.data.runtime.summary' snapshot.json
 - BDD 采用双层：默认 profile 用 mock 保证编排稳定；live profile 用真实 LLM 验证浏览器任务成功率（`brain:e2e:live` + `bdd:gate:live`）。
 - **Runtime Strategy**：`browser-first`（默认走浏览器沙箱）/ `host-first`（默认走 host bridge），通过 `BrowserRuntimeStrategy` 配置。
 
+## Issue 跟踪
+
+对话中发现的待办事项、优化建议、已知 bug 记录在 `docs/backlog/` 目录，详见 [docs/backlog/README.md](docs/backlog/README.md)。
+
+Agent 行为规范：
+- **发现 issue**：对话中遇到值得跟踪的问题（bug、优化点、技术债），创建 `docs/backlog/YYYY-MM-DD-<slug>.md` 记录，用 frontmatter 标记 status/priority/tags
+- **承接 issue**：用户指派或空闲时，扫描 `docs/backlog/` 中 `status: open` 的 issue 作为可接任务
+- **更新状态**：开始处理改为 `in-progress`，完成改为 `done`
+- **跨会话交接**：新 agent 进入仓库后，可读取 backlog 了解未完成工作，避免重复发现同一问题
+
 ## 技术栈
 
 - 运行时：Bun（bridge）、Chrome MV3 + Service Worker（extension）
