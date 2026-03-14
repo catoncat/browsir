@@ -1,7 +1,7 @@
 ---
 id: ISSUE-016
 title: Panel UX Bugs — 深度 Review 发现
-status: open
+status: in-progress
 priority: p0
 source: product-review-2026-03-15
 created: 2026-03-15
@@ -58,3 +58,15 @@ tags: [panel, ux, accessibility, bug]
 - 5 个 Bug 全部修复
 - dark mode 加载不再闪白
 - SidePanel 中卸载/删除有确认机制
+
+## 工作记录
+
+### 2026-03-15 Bug B1-B5 修复
+
+- **B1** ✅ App.vue loading overlay `bg-white/80` → `bg-white/80 dark:bg-neutral-900/80`
+- **B2** ✅ PluginsView.vue `globalThis.confirm()` → inline 二次点击确认 + 3s 超时自动取消
+- **B3** ✅ SessionList.vue trash icon 直接删除 → inline 二次点击确认 + 3s 超时
+- **B4** ⏭️ 跳过：textarea 已有 `aria-label="消息输入框"`，为误判
+- **B5** ✅ ChatInput.vue `refreshTabs()` → try-catch 包裹，失败时 fallback 空数组
+
+**commit**: `fbab780` fix(panel): B1-B5 UX bugs — dark mode flash, inline confirm, aria, tabs.query guard
