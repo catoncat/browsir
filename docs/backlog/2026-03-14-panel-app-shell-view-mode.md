@@ -1,11 +1,11 @@
 ---
 id: ISSUE-008
 title: App Shell / View Mode 收口
-status: open
+status: in-progress
 priority: p0
 source: next-development-master-plan-2026-03-14 + slice breakdown
 created: 2026-03-14
-assignee: unassigned
+assignee: agent
 kind: slice
 epic: EPIC-2026-03-14-NEXT-PHASE
 parallel_group: panel-shell
