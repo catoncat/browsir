@@ -4,8 +4,7 @@ import { storeToRefs } from "pinia";
 import { computed, onMounted, onUnmounted, ref, nextTick, watch } from "vue";
 import { useRuntimeStore } from "./stores/runtime";
 import { useMessageActions, type PanelMessageLike, type PendingRegenerateState } from "./utils/message-actions";
-import { publishDiagnosticsToBridge } from "./utils/diagnostics";
-import { publishDebugSnapshotToBridge } from "./utils/debug-snapshot";
+import { publishDebugLinkToBridge } from "./utils/debug-link";
 import {
   createPanelUiPluginRuntime,
   type UiChatInputPayload,
@@ -26,10 +25,9 @@ import StreamingDraftContainer from "./components/StreamingDraftContainer.vue";
 import ChatInput from "./components/ChatInput.vue";
 import SettingsView from "./components/SettingsView.vue";
 import ProviderSettingsView from "./components/ProviderSettingsView.vue";
-import DebugView from "./components/DebugView.vue";
 import SkillsView from "./components/SkillsView.vue";
 import PluginsView from "./components/PluginsView.vue";
-import { Loader2, Plus, Settings, Bug, Activity, History, MoreVertical, FileText, Download, ExternalLink, Copy, GitBranch, RefreshCcw, Wrench, Server, Plug } from "lucide-vue-next";
+import { Loader2, Plus, Settings, Activity, History, MoreVertical, FileText, Download, ExternalLink, Copy, GitBranch, RefreshCcw, Wrench, Server, Plug } from "lucide-vue-next";
 import { onClickOutside } from "@vueuse/core";
 
 const store = useRuntimeStore();
@@ -45,7 +43,6 @@ const chatSceneOverlayRef = ref<HTMLElement | null>(null);
 const listOpen = ref(false);
 const showSettings = ref(false);
 const showProviderSettings = ref(false);
-const showDebug = ref(false);
 const showSkills = ref(false);
 const showPlugins = ref(false);
 const showMoreMenu = ref(false);
@@ -96,8 +93,7 @@ const queuedPromptViewItems = computed<QueuedPromptViewItem[]>(() => {
   return out.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 });
 const showBridgeOfflineDot = computed(() => bridgeConnectionStatus.value === "disconnected");
-const publishingDiagnostics = ref(false);
-const publishingDebugSnapshot = ref(false);
+const publishingDebugLink = ref(false);
 const activeSession = computed(() => sessions.value.find((item) => item.id === activeSessionId.value) || null);
 
 const activeSessionTitle = computed(() => {
@@ -2761,60 +2757,39 @@ async function handleCopyMarkdown() {
   showExportMenu.value = false;
 }
 
-async function handlePublishDiagnostics() {
-  if (publishingDiagnostics.value) return;
-  publishingDiagnostics.value = true;
+async function handleCopyDebugLink() {
+  if (publishingDebugLink.value) return;
+  publishingDebugLink.value = true;
   try {
     const sessionId = String(activeSessionId.value || "").trim();
-    const { downloadUrl } = await publishDiagnosticsToBridge({
-      sessionId: sessionId || undefined,
+    const { downloadUrl } = await publishDebugLinkToBridge({
       bridgeUrl: config.value.bridgeUrl,
       bridgeToken: config.value.bridgeToken,
       title: activeSessionTitle.value,
-      recentEvents: recentRuntimeEvents.value.map((item) => ({
-        source: item.source,
-        ts: item.ts,
-        type: item.type,
-        preview: item.preview,
-        sessionId: item.sessionId
-      })),
-      timelineLimit: 28
+      target: {
+        kind: "session",
+        sessionId: sessionId || undefined,
+      },
+      clientPayload: {
+        recentEvents: recentRuntimeEvents.value.map((item) => ({
+          source: item.source,
+          ts: item.ts,
+          type: item.type,
+          preview: item.preview,
+          sessionId: item.sessionId
+        }))
+      }
     });
     await navigator.clipboard.writeText(downloadUrl);
     await showActionNoticeWithPlugins({
       type: "success",
-      message: "诊断链接已复制",
-      source: "panel.publish_diagnostics"
+      message: "调试链接已复制",
+      source: "panel.publish_debug_link"
     });
   } catch (err) {
-    setErrorMessage(err, "发布诊断失败");
+    setErrorMessage(err, "发布调试链接失败");
   } finally {
-    publishingDiagnostics.value = false;
-  }
-}
-
-async function handlePublishDebugSnapshot() {
-  if (publishingDebugSnapshot.value) return;
-  publishingDebugSnapshot.value = true;
-  try {
-    const sessionId = String(activeSessionId.value || "").trim();
-    const { downloadUrl } = await publishDebugSnapshotToBridge({
-      sessionId: sessionId || undefined,
-      bridgeUrl: config.value.bridgeUrl,
-      bridgeToken: config.value.bridgeToken,
-      title: activeSessionTitle.value,
-      scope: "all",
-    });
-    await navigator.clipboard.writeText(downloadUrl);
-    await showActionNoticeWithPlugins({
-      type: "success",
-      message: "调试快照链接已复制",
-      source: "panel.publish_debug_snapshot"
-    });
-  } catch (err) {
-    setErrorMessage(err, "发布调试快照失败");
-  } finally {
-    publishingDebugSnapshot.value = false;
+    publishingDebugLink.value = false;
   }
 }
 
@@ -2882,7 +2857,6 @@ onUnmounted(() => {
     <ProviderSettingsView v-if="showProviderSettings" @close="showProviderSettings = false" />
     <SkillsView v-if="showSkills" @close="showSkills = false" />
     <PluginsView v-if="showPlugins" @close="showPlugins = false" />
-    <DebugView v-if="showDebug" @close="showDebug = false" />
 
     <main
       class="relative flex-1 flex flex-col min-w-0 min-h-0 bg-ui-bg"
@@ -3010,11 +2984,8 @@ onUnmounted(() => {
               class="absolute right-0 mt-1 w-40 bg-ui-bg border border-ui-border rounded-lg shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-100"
               role="menu"
             >
-              <button role="menuitem" @click="handlePublishDiagnostics(); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none">
-                <ExternalLink :size="14" aria-hidden="true" /> 复制诊断链接
-              </button>
-              <button role="menuitem" @click="handlePublishDebugSnapshot(); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
-                <ExternalLink :size="14" aria-hidden="true" /> 复制调试快照链接
+              <button role="menuitem" @click="handleCopyDebugLink(); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none">
+                <ExternalLink :size="14" aria-hidden="true" /> 复制调试链接
               </button>
               <button role="menuitem" @click="handleRefreshSession(activeSessionId); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
                 <RefreshCcw :size="14" aria-hidden="true" /> 重新生成标题
@@ -3022,19 +2993,16 @@ onUnmounted(() => {
               <button role="menuitem" @click="showToolHistory = !showToolHistory; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
                 <Activity :size="14" aria-hidden="true" /> {{ toolHistoryToggleLabel }}
               </button>
-              <button role="menuitem" @click="showDebug = true; showSettings = false; showProviderSettings = false; showSkills = false; showPlugins = false; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
-                <Bug :size="14" aria-hidden="true" /> 运行调试
-              </button>
-              <button role="menuitem" @click="showSkills = true; showSettings = false; showProviderSettings = false; showDebug = false; showPlugins = false; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
+              <button role="menuitem" @click="showSkills = true; showSettings = false; showProviderSettings = false; showPlugins = false; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
                 <Wrench :size="14" aria-hidden="true" /> Skills 管理
               </button>
-              <button role="menuitem" @click="showPlugins = true; showSkills = false; showProviderSettings = false; showSettings = false; showDebug = false; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
+              <button role="menuitem" @click="showPlugins = true; showSkills = false; showProviderSettings = false; showSettings = false; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
                 <Plug :size="14" aria-hidden="true" /> 插件管理
               </button>
-              <button role="menuitem" @click="showProviderSettings = true; showPlugins = false; showSkills = false; showSettings = false; showDebug = false; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
+              <button role="menuitem" @click="showProviderSettings = true; showPlugins = false; showSkills = false; showSettings = false; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
                 <Server :size="14" aria-hidden="true" /> 模型路由
               </button>
-              <button role="menuitem" @click="showSettings = true; showProviderSettings = false; showPlugins = false; showSkills = false; showDebug = false; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
+              <button role="menuitem" @click="showSettings = true; showProviderSettings = false; showPlugins = false; showSkills = false; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
                 <Settings :size="14" aria-hidden="true" /> 系统设置
               </button>
             </div>
