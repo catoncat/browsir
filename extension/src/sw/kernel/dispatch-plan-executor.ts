@@ -4,6 +4,7 @@
  */
 import {
   toRecord,
+  clipText,
   safeStringify,
   normalizeErrorCode,
   asRuntimeErrorWithMeta,
@@ -55,6 +56,73 @@ import type {
 
 export function createDispatchExecutor(deps: ToolDispatchDeps) {
   const { orchestrator, infra, executeStep } = deps;
+  const SKILL_SCRIPT_RUNNER_PATH = "mem://__bbl/skill-script-runner.cjs";
+  const SKILL_SCRIPT_RUNNER_SOURCE = String.raw`const sourceBase64 = String(process.env.BBL_SKILL_SCRIPT_SOURCE_BASE64 || "").trim();
+const argPayload = String(process.argv[2] || "{}");
+
+function decodeBase64Utf8(value) {
+  return Buffer.from(String(value || ""), "base64").toString("utf8");
+}
+
+async function main() {
+  const targetPath = decodeBase64Utf8(
+    String(process.env.BBL_SKILL_SCRIPT_TARGET_PATH_BASE64 || "").trim(),
+  ).trim();
+  if (!sourceBase64) {
+    throw new Error("missing BBL_SKILL_SCRIPT_SOURCE_BASE64");
+  }
+  if (!targetPath) {
+    throw new Error("missing skill script path");
+  }
+  const source = decodeBase64Utf8(sourceBase64);
+  const module = { exports: {} };
+  const exports = module.exports;
+  const normalizedPath = String(targetPath || "");
+  const lastSlash = normalizedPath.lastIndexOf("/");
+  const moduleDir =
+    lastSlash >= 0 ? normalizedPath.slice(0, lastSlash) || "/" : "/";
+  const previousArgv = process.argv.slice();
+  process.argv = [previousArgv[0] || "node", normalizedPath, argPayload];
+  try {
+    const executeModule = new Function(
+      "module",
+      "exports",
+      "require",
+      "__filename",
+      "__dirname",
+      "process",
+      "console",
+      "Buffer",
+      "globalThis",
+      String(source || ""),
+    );
+    const result = executeModule(
+      module,
+      exports,
+      require,
+      normalizedPath,
+      moduleDir,
+      process,
+      console,
+      Buffer,
+      globalThis,
+    );
+    if (result && typeof result.then === "function") {
+      await result;
+    }
+  } finally {
+    process.argv = previousArgv;
+  }
+}
+
+main().catch((error) => {
+  const message =
+    error instanceof Error ? error.stack || error.message : String(error);
+  process.stderr.write(String(message || "skill script runner failed") + "\n");
+  process.exit(1);
+});`;
+  const BROWSER_SKILL_SCRIPT_JS_EXTENSIONS = new Set(["js", "cjs", "mjs"]);
+  const BROWSER_SKILL_SCRIPT_BASH_EXTENSIONS = new Set(["sh"]);
 
   const INTERVENTION_CATALOG: Record<
     string,
@@ -271,6 +339,61 @@ export function createDispatchExecutor(deps: ToolDispatchDeps) {
     return `'${String(input || "").replace(/'/g, "'\"'\"'")}'`;
   }
 
+  function encodeBase64Utf8(input: string): string {
+    const bytes = new TextEncoder().encode(String(input || ""));
+    const bufferCtor = (globalThis as {
+      Buffer?: { from(data: Uint8Array): { toString(encoding: string): string } };
+    }).Buffer;
+    if (typeof btoa !== "function" && bufferCtor) {
+      return bufferCtor.from(bytes).toString("base64");
+    }
+    let binary = "";
+    for (const byte of bytes) {
+      binary += String.fromCharCode(byte);
+    }
+    return btoa(binary);
+  }
+
+  function hasTopLevelModuleSyntax(source: string): boolean {
+    return /^[\t ]*(?:import|export)\b/m.test(
+      String(source || "").replace(/^\uFEFF/, ""),
+    );
+  }
+
+  function buildUnsupportedSkillScriptEnvelope(input: {
+    error: string;
+    location: string;
+    scriptPath: string;
+    runtime: string;
+    cwd?: string;
+    ext?: string;
+    details?: JsonRecord | null;
+  }): JsonRecord {
+    return attachFailureProtocol(
+      "execute_skill_script",
+      {
+        error: input.error,
+        errorCode: "E_TOOL_UNSUPPORTED",
+        errorReason: "failed_execute",
+        retryable: false,
+        retryHint:
+          "改用 browser sandbox 支持的单文件自包含脚本，或改用现有内置工具/host 工具完成同等动作。",
+        details: {
+          location: input.location,
+          scriptPath: input.scriptPath,
+          runtime: input.runtime,
+          cwd: input.cwd || null,
+          ext: input.ext || null,
+          ...(input.details || {}),
+        },
+      },
+      {
+        phase: "execute",
+        category: "missing_target",
+        resumeStrategy: "replan",
+      },
+    );
+  }
 
   async function dispatchToolPlan(
     sessionId: string,
@@ -748,18 +871,87 @@ export function createDispatchExecutor(deps: ToolDispatchDeps) {
             ? "{}"
             : safeStringify(plan.scriptArgs, 8_000);
         const ext = location.split(".").pop()?.toLowerCase() || "";
-        const command = (() => {
-          if (ext === "js" || ext === "mjs" || ext === "cjs") {
-            return `node ${shellQuote(location)} ${shellQuote(argPayload)}`;
+        let command = "";
+        if (runtimeHint === "browser") {
+          if (BROWSER_SKILL_SCRIPT_BASH_EXTENSIONS.has(ext)) {
+            command = `bash ${shellQuote(location)} ${shellQuote(argPayload)}`;
+          } else if (BROWSER_SKILL_SCRIPT_JS_EXTENSIONS.has(ext)) {
+            let source = "";
+            try {
+              source = await readTextByLocation(plan.sessionId, location);
+            } catch (error) {
+              return attachFailureProtocol(
+                "execute_skill_script",
+                {
+                  error:
+                    error instanceof Error
+                      ? error.message
+                      : `技能脚本读取失败: ${normalizedScript}`,
+                  errorCode: "E_TOOL",
+                  errorReason: "failed_execute",
+                  retryable: false,
+                  retryHint:
+                    "检查 skillName/scriptPath 是否存在，再重试 execute_skill_script。",
+                  details: {
+                    location,
+                    scriptPath: normalizedScript,
+                    runtime: runtimeHint,
+                  },
+                },
+                {
+                  phase: "execute",
+                  category: "missing_target",
+                  resumeStrategy: "replan",
+                },
+              );
+            }
+            if (hasTopLevelModuleSyntax(source)) {
+              return buildUnsupportedSkillScriptEnvelope({
+                error:
+                  "当前 browser runtime 仅支持单文件自包含 skill script，检测到顶层 import/export。",
+                location,
+                scriptPath: normalizedScript,
+                runtime: runtimeHint,
+                cwd: skillRuntimeCwd || undefined,
+                ext,
+                details: {
+                  sourcePreview: clipText(source, 600),
+                },
+              });
+            }
+            await writeTextByLocation(
+              plan.sessionId,
+              SKILL_SCRIPT_RUNNER_PATH,
+              SKILL_SCRIPT_RUNNER_SOURCE,
+            );
+            command =
+              `BBL_SKILL_SCRIPT_SOURCE_BASE64=${shellQuote(encodeBase64Utf8(source))} ` +
+              `BBL_SKILL_SCRIPT_TARGET_PATH_BASE64=${shellQuote(encodeBase64Utf8(location))} ` +
+              `node ${shellQuote(SKILL_SCRIPT_RUNNER_PATH)} ${shellQuote(argPayload)}`;
+          } else {
+            return buildUnsupportedSkillScriptEnvelope({
+              error: `当前 browser runtime 不支持技能脚本类型: .${ext || "<none>"}`,
+              location,
+              scriptPath: normalizedScript,
+              runtime: runtimeHint,
+              cwd: skillRuntimeCwd || undefined,
+              ext,
+            });
           }
-          if (ext === "ts" || ext === "tsx") {
-            return `bun ${shellQuote(location)} ${shellQuote(argPayload)}`;
-          }
-          if (ext === "sh") {
+        } else {
+          command = (() => {
+            if (ext === "js" || ext === "mjs" || ext === "cjs") {
+              return `node ${shellQuote(location)} ${shellQuote(argPayload)}`;
+            }
+            if (ext === "ts" || ext === "tsx") {
+              return `bun ${shellQuote(location)} ${shellQuote(argPayload)}`;
+            }
+            if (ext === "sh") {
+              return `bash ${shellQuote(location)} ${shellQuote(argPayload)}`;
+            }
             return `bash ${shellQuote(location)} ${shellQuote(argPayload)}`;
-          }
-          return `bash ${shellQuote(location)} ${shellQuote(argPayload)}`;
-        })();
+          })();
+        }
 
         const out = await executeStep({
           sessionId: plan.sessionId,
