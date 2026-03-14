@@ -61,9 +61,11 @@ describe("runtime-infra contenteditable backend action", () => {
 
     expect(action?.ok).toBe(true);
     if (!action || action.ok !== true) return;
-    expect((action.data as Record<string, unknown> | undefined)?.via).toBe(
-      "cdp-native-input",
+    const data = action.data as Record<string, unknown> | undefined;
+    const result = data?.result as Record<string, unknown> | undefined;
+    expect(result?.via).toBe(
+      "backend-node-contenteditable-inserttext",
     );
-    expect(functionDeclaration).toContain("dispatchEvent(new Event('input'");
+    expect(functionDeclaration).toContain('dispatchEvent(new Event("input"');
   });
 });
