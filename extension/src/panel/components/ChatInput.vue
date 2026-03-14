@@ -92,15 +92,19 @@ onClickOutside(skillContainer, () => {
 });
 
 async function refreshTabs() {
-  const tabs = await chrome.tabs.query({});
-  availableTabs.value = tabs
-    .filter(t => t.id && t.title)
-    .map(t => ({
-      id: t.id!,
-      title: t.title!,
-      url: t.url || "",
-      favIconUrl: t.favIconUrl
-    }));
+  try {
+    const tabs = await chrome.tabs.query({});
+    availableTabs.value = tabs
+      .filter(t => t.id && t.title)
+      .map(t => ({
+        id: t.id!,
+        title: t.title!,
+        url: t.url || "",
+        favIconUrl: t.favIconUrl
+      }));
+  } catch {
+    availableTabs.value = [];
+  }
 }
 
 const filteredTabs = computed(() => {

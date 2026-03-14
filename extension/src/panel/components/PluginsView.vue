@@ -9,9 +9,11 @@ const store = usePluginStore();
 const dialogRef = ref<HTMLElement | null>(null);
 const loading = ref(false);
 const actionPluginId = ref("");
+const pendingUnregisterId = ref("");
 const pageError = ref("");
 const plugins = ref<PluginMetadata[]>([]);
 const uiExtensions = ref<PluginUiExtensionMetadata[]>([]);
+let pendingUnregisterTimer: ReturnType<typeof setTimeout> | undefined;
 
 const BUILTIN_PLUGIN_ID_PREFIX = "runtime.builtin.plugin.";
 const EXAMPLE_PLUGIN_ID_PREFIX = "plugin.example.";
@@ -127,8 +129,16 @@ async function handleUnregister(plugin: PluginMetadata) {
     pageError.value = `内置插件不允许卸载: ${pluginId}`;
     return;
   }
-  const confirmed = globalThis.confirm(`确认卸载插件 ${plugin.name || plugin.id} ?`);
-  if (!confirmed) return;
+  if (pendingUnregisterId.value !== pluginId) {
+    clearTimeout(pendingUnregisterTimer);
+    pendingUnregisterId.value = pluginId;
+    pendingUnregisterTimer = setTimeout(() => {
+      pendingUnregisterId.value = "";
+    }, 3000);
+    return;
+  }
+  clearTimeout(pendingUnregisterTimer);
+  pendingUnregisterId.value = "";
   actionPluginId.value = pluginId;
   pageError.value = "";
   try {
@@ -256,12 +266,13 @@ onMounted(async () => {
                 {{ plugin.enabled ? "禁用" : "启用" }}
               </button>
               <button
-                class="px-2.5 py-1.5 rounded-sm bg-ui-bg border border-ui-border text-[12px] hover:bg-ui-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50"
+                class="px-2.5 py-1.5 rounded-sm border text-[12px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50 transition-colors"
+                :class="pendingUnregisterId === plugin.id ? 'bg-rose-50 border-rose-300 text-rose-700 hover:bg-rose-100' : 'bg-ui-bg border-ui-border hover:bg-ui-surface'"
                 :disabled="actionPluginId === plugin.id || isBuiltinPlugin(plugin)"
                 @click="handleUnregister(plugin)"
               >
                 <Trash2 :size="13" class="inline-block mr-1" />
-                {{ isBuiltinPlugin(plugin) ? "内置不可卸载" : "卸载" }}
+                {{ isBuiltinPlugin(plugin) ? "内置不可卸载" : pendingUnregisterId === plugin.id ? "确认卸载?" : "卸载" }}
               </button>
             </div>
           </li>
@@ -296,12 +307,13 @@ onMounted(async () => {
                 {{ plugin.enabled ? "禁用" : "启用" }}
               </button>
               <button
-                class="px-2.5 py-1.5 rounded-sm bg-ui-bg border border-ui-border text-[12px] hover:bg-ui-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50"
+                class="px-2.5 py-1.5 rounded-sm border text-[12px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50 transition-colors"
+                :class="pendingUnregisterId === plugin.id ? 'bg-rose-50 border-rose-300 text-rose-700 hover:bg-rose-100' : 'bg-ui-bg border-ui-border hover:bg-ui-surface'"
                 :disabled="actionPluginId === plugin.id"
                 @click="handleUnregister(plugin)"
               >
                 <Trash2 :size="13" class="inline-block mr-1" />
-                卸载
+                {{ pendingUnregisterId === plugin.id ? "确认卸载?" : "卸载" }}
               </button>
             </div>
           </li>

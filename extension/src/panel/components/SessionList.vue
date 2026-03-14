@@ -44,10 +44,26 @@ const emit = defineEmits<{
 const searchQuery = ref("");
 const renamingId = ref("");
 const renameDraft = ref("");
+const pendingDeleteId = ref("");
 const dialogRef = ref<HTMLElement | null>(null);
 const listRefs = ref<HTMLElement[]>([]);
 const focusedIndex = ref(-1);
 const searchInputId = "session-search-input";
+let pendingDeleteTimer: ReturnType<typeof setTimeout> | undefined;
+
+function handleDelete(sessionId: string) {
+  if (pendingDeleteId.value !== sessionId) {
+    clearTimeout(pendingDeleteTimer);
+    pendingDeleteId.value = sessionId;
+    pendingDeleteTimer = setTimeout(() => {
+      pendingDeleteId.value = "";
+    }, 3000);
+    return;
+  }
+  clearTimeout(pendingDeleteTimer);
+  pendingDeleteId.value = "";
+  emit("delete", sessionId);
+}
 
 const filteredSessions = computed(() => {
   const sorted = [...props.sessions].sort(
@@ -252,9 +268,10 @@ onMounted(() => {
               <Pencil :size="14" aria-hidden="true" />
             </button>
             <button
-              class="p-2 text-ui-text-muted hover:text-red-500 hover:bg-white rounded-lg shadow-sm border border-ui-border/50 bg-ui-bg transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-              :aria-label="`删除会话: ${displayTitle(session)}`"
-              @click.stop="$emit('delete', session.id)"
+              class="p-2 rounded-lg shadow-sm border transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+              :class="pendingDeleteId === session.id ? 'text-red-600 bg-rose-50 border-rose-300 hover:bg-rose-100' : 'text-ui-text-muted hover:text-red-500 hover:bg-white border-ui-border/50 bg-ui-bg'"
+              :aria-label="pendingDeleteId === session.id ? `确认删除会话: ${displayTitle(session)}` : `删除会话: ${displayTitle(session)}`"
+              @click.stop="handleDelete(session.id)"
             >
               <Trash2 :size="14" aria-hidden="true" />
             </button>

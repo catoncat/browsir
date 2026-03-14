@@ -2876,7 +2876,7 @@ onUnmounted(() => {
       class="relative flex-1 flex flex-col min-w-0 min-h-0 bg-ui-bg"
       :aria-busy="isForkSceneActive ? 'true' : undefined"
     >
-      <div v-if="loading && !hasVisibleConversation" class="absolute inset-0 z-40 flex items-center justify-center bg-white/80">
+      <div v-if="loading && !hasVisibleConversation" class="absolute inset-0 z-40 flex items-center justify-center bg-white/80 dark:bg-neutral-900/80">
         <Loader2 class="animate-spin text-ui-accent" :size="24" />
       </div>
 
