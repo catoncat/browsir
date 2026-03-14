@@ -2573,6 +2573,16 @@ const onRuntimeMessage = (message: unknown) => {
 
 onMounted(() => {
   chrome.runtime.onMessage.addListener(onRuntimeMessage);
+  chrome.runtime.onMessage.addListener(
+    (message: unknown, _sender: chrome.runtime.MessageSender, sendResponse: (response?: unknown) => void) => {
+      const msg = message as Record<string, unknown> | undefined;
+      if (msg?.type === "bbloop.ui.state.query") {
+        sendResponse({ ok: true, data: panelUiRuntime.getUiStateSnapshot() });
+        return false;
+      }
+      return false;
+    },
+  );
   void runSafely(async () => {
     if (chatSceneOverlayRef.value) {
       await panelUiRuntime.attachHostSlot("chat.scene.overlay", chatSceneOverlayRef.value);

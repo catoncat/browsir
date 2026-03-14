@@ -847,6 +847,21 @@ export class PanelUiPluginRuntime {
       error: message
     });
   }
+
+  getUiStateSnapshot(): Record<string, { widgetMounted: boolean; mountedWidgets: string[]; errorCount: number; lastError?: string }> {
+    const out: Record<string, { widgetMounted: boolean; mountedWidgets: string[]; errorCount: number; lastError?: string }> = {};
+    for (const [pluginId, state] of this.states.entries()) {
+      const mounted = Array.from(this.mountedWidgets.values())
+        .filter((w) => w.pluginId === pluginId);
+      out[pluginId] = {
+        widgetMounted: mounted.length > 0,
+        mountedWidgets: mounted.map((w) => w.widgetId),
+        errorCount: state.errorCount,
+        lastError: state.lastError,
+      };
+    }
+    return out;
+  }
 }
 
 export function createPanelUiPluginRuntime(

@@ -33,6 +33,18 @@ function clipText(value: unknown, max = 240): string {
   return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
+async function queryPanelUiState(): Promise<JsonRecord | null> {
+  try {
+    const resp = await chrome.runtime.sendMessage({
+      type: "bbloop.ui.state.query",
+    });
+    if (resp && resp.ok) return resp.data as JsonRecord;
+  } catch {
+    // SidePanel may not be open — ignore
+  }
+  return null;
+}
+
 async function buildPluginSnapshot(
   orchestrator: BrainOrchestrator,
   pluginId?: string,
@@ -52,6 +64,18 @@ async function buildPluginSnapshot(
   const uiExtensions = (await readUiExtensionDescriptors()).filter(
     (item) => !targetPluginId || item.pluginId === targetPluginId
   );
+  const panelUiState = await queryPanelUiState();
+  let relayActive = false;
+  try {
+    if (typeof chrome?.runtime?.getContexts === "function") {
+      const contexts = await chrome.runtime.getContexts({
+        contextTypes: ["SIDE_PANEL" as chrome.runtime.ContextType],
+      });
+      relayActive = contexts.length > 0;
+    }
+  } catch {
+    // getContexts unavailable
+  }
   return {
     summary: {
       total: plugins.length,
@@ -66,6 +90,11 @@ async function buildPluginSnapshot(
     plugins,
     persisted,
     uiExtensions,
+    uiState: {
+      relayActive,
+      panelAvailable: panelUiState !== null,
+      plugins: panelUiState ?? {},
+    },
     modeProviders: orchestrator.listToolProviders(),
     capabilityProviders: orchestrator.listCapabilityProviders(),
     capabilityPolicies: orchestrator.listCapabilityPolicies(),
