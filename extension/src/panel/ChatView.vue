@@ -35,6 +35,7 @@ import {
 import { useForkScene } from "./composables/use-fork-scene";
 import { useMessageEditing } from "./composables/use-message-editing";
 import { useUiRenderPipeline } from "./composables/use-ui-render-pipeline";
+import { useLlmStreaming } from "./composables/use-llm-streaming";
 import ChatMessage from "./components/ChatMessage.vue";
 import StreamingDraftContainer from "./components/StreamingDraftContainer.vue";
 import ChatInput from "./components/ChatInput.vue";
@@ -232,16 +233,11 @@ const runViewState = ref<RunViewState>({
   activeToolRun: null,
   toolPendingStepStates: []
 });
-const llmStreamingText = ref("");
-const llmStreamingSessionId = ref("");
-const llmStreamingActive = ref(false);
 const recentRuntimeEvents = ref<RuntimeEventDigest[]>([]);
 const queuedPromotingIds = ref<Set<string>>(new Set());
 let pendingStepLogFlushTimer: ReturnType<typeof setTimeout> | null = null;
 let toolPendingCardLeaveTimer: ReturnType<typeof setTimeout> | null = null;
 let initialToolSyncTimer: ReturnType<typeof setTimeout> | null = null;
-let llmStreamFlushRaf: number | null = null;
-let llmStreamingDeltaBuffer = "";
 const pendingStepLogBuffer = new Map<number, string[]>();
 
 const TOOL_STREAM_SYNC_INTERVAL_MS = 3200;
@@ -318,8 +314,6 @@ const toolPendingStepStates = computed<ToolPendingStepState[]>({
 const activeRunToken = ref(0);
 
 const toolPendingCardLeaving = computed(() => runPhase.value === "tool_handoff_leaving");
-
-const llmStreamingPendingText = ref("");
 
 const finalAssistantStreamingPhase = computed({
   get: () => runPhase.value === "final_assistant",
@@ -419,45 +413,6 @@ function startInitialToolSync() {
     initialToolSyncTimer = setTimeout(tick, TOOL_INITIAL_SYNC_INTERVAL_MS);
   };
   initialToolSyncTimer = setTimeout(tick, TOOL_INITIAL_SYNC_INTERVAL_MS);
-}
-
-function flushLlmStreamingDeltaBuffer() {
-  if (!llmStreamingDeltaBuffer) return;
-  llmStreamingPendingText.value = `${llmStreamingPendingText.value}${llmStreamingDeltaBuffer}`;
-  llmStreamingDeltaBuffer = "";
-}
-
-function scheduleLlmStreamingFlush() {
-  if (llmStreamFlushRaf != null) return;
-  llmStreamFlushRaf = requestAnimationFrame(() => {
-    llmStreamFlushRaf = null;
-    flushLlmStreamingDeltaBuffer();
-  });
-}
-
-function appendLlmStreamingDelta(chunk: string) {
-  const text = String(chunk || "");
-  if (!text) return;
-  llmStreamingDeltaBuffer += text;
-  scheduleLlmStreamingFlush();
-}
-
-function commitPendingLlmStreamingText() {
-  flushLlmStreamingDeltaBuffer();
-  llmStreamingText.value = llmStreamingPendingText.value;
-}
-
-function resetLlmStreamingState() {
-  if (llmStreamFlushRaf != null) {
-    cancelAnimationFrame(llmStreamFlushRaf);
-    llmStreamFlushRaf = null;
-  }
-  llmStreamingDeltaBuffer = "";
-  llmStreamingPendingText.value = "";
-  llmStreamingText.value = "";
-  llmStreamingSessionId.value = "";
-  llmStreamingActive.value = false;
-  finalAssistantStreamingPhase.value = false;
 }
 
 function resolveToolPendingLogStep(list: ToolPendingStepState[]): number {
@@ -1077,52 +1032,31 @@ const hasToolPendingActivity = computed(() =>
   Boolean(activeToolRun.value) || toolPendingStepStates.value.length > 0
 );
 
-const shouldShowStreamingDraft = computed(() => {
-  if (!isRunActive.value) return false;
-
-  const sourceSessionId = String(llmStreamingSessionId.value || "").trim();
-  const currentSessionId = String(activeSessionId.value || "").trim();
-  if (sourceSessionId && currentSessionId && sourceSessionId !== currentSessionId) {
-    return false;
-  }
-
-  const text = String(llmStreamingText.value || "");
-  const normalizedText = text.trim();
-
-  if (llmStreamingActive.value) {
-    if (runPhase.value === "tool_running" || runPhase.value === "tool_handoff_leaving") {
-      return normalizedText.length > 0;
-    }
-    return true;
-  }
-
-  if (!normalizedText) {
-    return false;
-  }
-
-  for (let i = messages.value.length - 1; i >= 0; i -= 1) {
-    const item = messages.value[i];
-    if (String(item?.role || "") !== "assistant") continue;
-    const content = String(item?.content || "").trim();
-    if (!content) continue;
-    if (content === normalizedText) return false;
-    break;
-  }
-
-  return true;
-});
-
-const shouldShowStartPendingDraft = computed(() =>
-  startRunPending.value &&
-  !isRunActive.value &&
-  !shouldShowStreamingDraft.value &&
-  !shouldShowToolPendingCard.value
-);
-
 const shouldShowToolPendingCard = computed(() => {
   if (!isRunActive.value) return false;
   if (runPhase.value !== "tool_running") return false;
   return Boolean(activeToolRun.value || runningToolPendingStepState.value);
+});
+
+const {
+  llmStreamingText,
+  llmStreamingSessionId,
+  llmStreamingActive,
+  llmStreamingPendingText,
+  shouldShowStreamingDraft,
+  shouldShowStartPendingDraft,
+  flushLlmStreamingDeltaBuffer,
+  appendLlmStreamingDelta,
+  commitPendingLlmStreamingText,
+  resetLlmStreamingState,
+  cleanup: cleanupLlmStreaming,
+} = useLlmStreaming({
+  isRunActive,
+  activeSessionId,
+  messages,
+  runPhase,
+  startRunPending,
+  shouldShowToolPendingCard,
 });
 
 const toolPendingCardAction = computed(() => {
@@ -1821,12 +1755,12 @@ function handleExport(mode: 'download' | 'open') {
 
 onUnmounted(() => {
   cleanupUiPipeline();
+  cleanupLlmStreaming();
   stopInitialToolSync();
   clearToolPendingCardLeaveTimer();
   cleanupForkScene();
   clearActiveToolRun();
   clearToolPendingSteps();
-  resetLlmStreamingState();
   recentRuntimeEvents.value = [];
   chrome.runtime.onMessage.removeListener(onRuntimeMessage);
   cleanupMessageActions();
