@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { useIntervalFn, onClickOutside } from "@vueuse/core";
+import { onClickOutside } from "@vueuse/core";
 import { storeToRefs } from "pinia";
-import { computed, onMounted, onUnmounted, ref, nextTick, watch } from "vue";
+import { computed, onUnmounted, ref, nextTick, watch } from "vue";
 import { useRuntimeStore } from "./stores/runtime";
 import { useChatStore } from "./stores/chat-store";
 import { useConfigStore } from "./stores/config-store";
@@ -11,24 +11,10 @@ import type {
   ViewMode,
   DisplayMessage,
   QueuedPromptViewItem,
-  StepTraceRecord,
-  ToolRunSnapshot,
-  RuntimeProgressHint,
-  RunViewPhase,
-  RunViewState,
-  RuntimeEventDigest,
 } from "./types";
 import {
   toRecord,
-  normalizeStepStreamMeta,
-  normalizeStep,
-  normalizeEventTs,
-  prettyToolAction,
-  clipText,
   shouldAlwaysShowToolMessage,
-  formatToolPendingDetail,
-  summarizeToolPendingStep,
-  type ToolPendingStepState
 } from "./utils/tool-formatters";
 
 
@@ -36,6 +22,8 @@ import { useForkScene } from "./composables/use-fork-scene";
 import { useMessageEditing } from "./composables/use-message-editing";
 import { useUiRenderPipeline } from "./composables/use-ui-render-pipeline";
 import { useLlmStreaming } from "./composables/use-llm-streaming";
+import { useToolRunTracking } from "./composables/use-tool-run-tracking";
+import { useRuntimeMessages } from "./composables/use-runtime-messages";
 import ChatMessage from "./components/ChatMessage.vue";
 import StreamingDraftContainer from "./components/StreamingDraftContainer.vue";
 import ChatInput from "./components/ChatInput.vue";
@@ -84,7 +72,6 @@ const creatingSession = ref(false);
 const moreMenuRef = ref(null);
 const exportMenuRef = ref(null);
 let createSessionTask: Promise<void> | null = null;
-const bridgeConnectionStatus = ref<"unknown" | "connected" | "disconnected">("unknown");
 const forkSourceResolvedTitle = ref("");
 
 onClickOutside(moreMenuRef, () => showMoreMenu.value = false);
@@ -226,37 +213,8 @@ const {
   cancelForkScene: () => { bumpForkSceneToken(); resetForkSceneState(); },
   onError: setErrorMessage,
 });
-const activeRunHint = ref<RuntimeProgressHint | null>(null);
-const runViewState = ref<RunViewState>({
-  phase: "idle",
-  epoch: 0,
-  activeToolRun: null,
-  toolPendingStepStates: []
-});
-const recentRuntimeEvents = ref<RuntimeEventDigest[]>([]);
 const queuedPromotingIds = ref<Set<string>>(new Set());
-let pendingStepLogFlushTimer: ReturnType<typeof setTimeout> | null = null;
-let toolPendingCardLeaveTimer: ReturnType<typeof setTimeout> | null = null;
-let initialToolSyncTimer: ReturnType<typeof setTimeout> | null = null;
-const pendingStepLogBuffer = new Map<number, string[]>();
-
-const TOOL_STREAM_SYNC_INTERVAL_MS = 3200;
-const TOOL_STREAM_SYNC_MAX_EVENTS = 5000;
-const TOOL_STREAM_SYNC_MAX_BYTES = 4 * 1024 * 1024;
-const TOOL_STEP_MAX_LINES = 24;
-const TOOL_STEP_LOG_MAX_LINES = 24;
-const TOOL_STEP_LOG_FLUSH_MS = 72;
-const TOOL_CARD_HANDOFF_MS = 180;
-const TOOL_INITIAL_SYNC_INTERVAL_MS = 180;
-const TOOL_INITIAL_SYNC_MAX_ATTEMPTS = 18;
 const MAIN_SCROLL_BOTTOM_THRESHOLD_PX = 120;
-const RUNTIME_EVENT_MAX = 220;
-const LOOP_TERMINAL_TYPES = new Set([
-  "loop_done",
-  "loop_error",
-  "loop_skip_stopped",
-  "loop_internal_error"
-]);
 
 function setQueuedPromptPromoting(id: string, active: boolean) {
   const normalizedId = String(id || "").trim();
@@ -272,770 +230,38 @@ function isQueuedPromptPromoting(id: string): boolean {
   if (!normalizedId) return false;
   return queuedPromotingIds.value.has(normalizedId);
 }
-
-function patchRunViewState(patch: Partial<RunViewState>) {
-  runViewState.value = {
-    ...runViewState.value,
-    ...patch
-  };
-}
-
-function bumpRunViewEpoch(phase: RunViewPhase) {
-  runViewState.value = {
-    phase,
-    epoch: runViewState.value.epoch + 1,
-    activeToolRun: null,
-    toolPendingStepStates: []
-  };
-}
-
-const runPhase = computed<RunViewPhase>({
-  get: () => runViewState.value.phase,
-  set: (value) => {
-    if (value === runViewState.value.phase) return;
-    patchRunViewState({ phase: value });
-  }
-});
-
-const activeToolRun = computed<ToolRunSnapshot | null>({
-  get: () => runViewState.value.activeToolRun,
-  set: (value) => {
-    patchRunViewState({ activeToolRun: value });
-  }
-});
-
-const toolPendingStepStates = computed<ToolPendingStepState[]>({
-  get: () => runViewState.value.toolPendingStepStates,
-  set: (value) => {
-    patchRunViewState({ toolPendingStepStates: Array.isArray(value) ? value : [] });
-  }
-});
-
-const activeRunToken = ref(0);
-
-const toolPendingCardLeaving = computed(() => runPhase.value === "tool_handoff_leaving");
-
-const finalAssistantStreamingPhase = computed({
-  get: () => runPhase.value === "final_assistant",
-  set: (value: boolean) => {
-    if (value) {
-      runPhase.value = "final_assistant";
-      return;
-    }
-    if (runPhase.value !== "final_assistant") return;
-    runPhase.value = isRunActive.value ? "llm" : "idle";
-  }
-});
-
-function pushRecentRuntimeEvent(source: "brain" | "bridge", event: unknown) {
-  const row = toRecord(event);
-  const payload = toRecord(row.payload || row.data);
-  const type = String(row.type || row.event || "").trim() || "unknown";
-  const ts = String(row.ts || row.timestamp || new Date().toISOString());
-  const sessionId = String(row.sessionId || "").trim();
-  const preview = clipText(
-    String(payload.error || payload.message || payload.action || payload.arguments || payload.reason || payload.chunk || ""),
-    180
-  );
-  const merged = [
-    ...recentRuntimeEvents.value,
-    { source, ts, type, preview, sessionId }
-  ];
-  if (merged.length > RUNTIME_EVENT_MAX) {
-    merged.splice(0, merged.length - RUNTIME_EVENT_MAX);
-  }
-  recentRuntimeEvents.value = merged;
-}
-
-function clearActiveToolRun() {
-  activeToolRun.value = null;
-}
-
-function clearToolPendingSteps() {
-  toolPendingStepStates.value = [];
-  pendingStepLogBuffer.clear();
-  if (pendingStepLogFlushTimer) {
-    clearTimeout(pendingStepLogFlushTimer);
-    pendingStepLogFlushTimer = null;
-  }
-}
-
-function clearToolPendingCardLeaveTimer() {
-  if (toolPendingCardLeaveTimer) {
-    clearTimeout(toolPendingCardLeaveTimer);
-    toolPendingCardLeaveTimer = null;
-  }
-}
-
-function resetToolPendingCardHandoff() {
-  clearToolPendingCardLeaveTimer();
-  if (runPhase.value === "tool_handoff_leaving") {
-    runPhase.value = "tool_running";
-  }
-}
-
-function dismissToolPendingCardWithHandoff() {
-  if (runPhase.value !== "tool_running") return;
-  const epoch = runViewState.value.epoch;
-  runPhase.value = "tool_handoff_leaving";
-  clearToolPendingCardLeaveTimer();
-  toolPendingCardLeaveTimer = setTimeout(() => {
-    toolPendingCardLeaveTimer = null;
-    if (epoch !== runViewState.value.epoch) return;
-    if (runPhase.value !== "tool_handoff_leaving") return;
-    runPhase.value = isRunActive.value ? "final_assistant" : "idle";
-  }, TOOL_CARD_HANDOFF_MS);
-}
-
-function stopInitialToolSync() {
-  if (initialToolSyncTimer) {
-    clearTimeout(initialToolSyncTimer);
-    initialToolSyncTimer = null;
-  }
-}
-
-function startInitialToolSync() {
-  stopInitialToolSync();
-  let attempts = 0;
-  const tick = () => {
-    if (!isRunActive.value) return;
-    const sessionId = String(activeSessionId.value || "").trim();
-    if (!sessionId) return;
-    const hasStableActivity =
-      Boolean(activeToolRun.value) ||
-      toolPendingStepStates.value.length > 0 ||
-      runPhase.value === "final_assistant" ||
-      runPhase.value === "tool_handoff_leaving";
-    if (hasStableActivity) return;
-    attempts += 1;
-    void runSafely(() => syncActiveToolRun(sessionId), "同步工具运行状态失败");
-    if (attempts >= TOOL_INITIAL_SYNC_MAX_ATTEMPTS) return;
-    initialToolSyncTimer = setTimeout(tick, TOOL_INITIAL_SYNC_INTERVAL_MS);
-  };
-  initialToolSyncTimer = setTimeout(tick, TOOL_INITIAL_SYNC_INTERVAL_MS);
-}
-
-function resolveToolPendingLogStep(list: ToolPendingStepState[]): number {
-  if (!list.length) return 0;
-  const activeStep = Number(activeToolRun.value?.step || 0);
-  if (activeStep > 0 && list.some((item) => item.step === activeStep)) return activeStep;
-  const running = list.findLast((item) => item.status === "running");
-  if (running) return running.step;
-  return Number(list[list.length - 1]?.step || 0);
-}
-
-function flushBufferedToolPendingLogs() {
-  if (pendingStepLogBuffer.size === 0) return;
-  const list = [...toolPendingStepStates.value];
-  let changed = false;
-
-  for (const [step, buffered] of pendingStepLogBuffer.entries()) {
-    if (!Array.isArray(buffered) || buffered.length === 0) continue;
-    const idx = list.findIndex((item) => item.step === step);
-    if (idx < 0 || !list[idx]) continue;
-    const merged = [...(Array.isArray(list[idx].logs) ? list[idx].logs : []), ...buffered];
-    if (merged.length > TOOL_STEP_LOG_MAX_LINES) {
-      merged.splice(0, merged.length - TOOL_STEP_LOG_MAX_LINES);
-    }
-    list[idx] = {
-      ...list[idx],
-      logs: merged
-    };
-    changed = true;
-  }
-
-  pendingStepLogBuffer.clear();
-  if (changed) {
-    toolPendingStepStates.value = list;
-  }
-}
-
-function scheduleFlushBufferedToolPendingLogs() {
-  if (pendingStepLogFlushTimer) return;
-  pendingStepLogFlushTimer = setTimeout(() => {
-    pendingStepLogFlushTimer = null;
-    flushBufferedToolPendingLogs();
-  }, TOOL_STEP_LOG_FLUSH_MS);
-}
-
-function appendToolPendingLogs(stream: "stdout" | "stderr", chunk: string) {
-  const raw = String(chunk || "");
-  if (!raw) return;
-  const parts = raw
-    .replace(/\r\n/g, "\n")
-    .split("\n")
-    .map((line) => line.trimEnd())
-    .filter((line) => line.length > 0);
-  if (!parts.length) return;
-
-  const normalized = parts.map((line) => (stream === "stderr" ? `stderr | ${line}` : line));
-  const list = [...toolPendingStepStates.value];
-  if (!list.length) return;
-
-  const step = resolveToolPendingLogStep(list);
-  if (!step) return;
-  const buffered = pendingStepLogBuffer.get(step) || [];
-  buffered.push(...normalized);
-  pendingStepLogBuffer.set(step, buffered);
-  scheduleFlushBufferedToolPendingLogs();
-}
-
-function upsertToolPendingStepState(input: ToolPendingStepState) {
-  const step = normalizeStep(input.step);
-  if (!step) return;
-  const action = String(input.action || "").trim();
-  if (!action) return;
-  const detail = String(input.detail || "").trim();
-  const errorText = String(input.error || "").trim();
-
-  const list = [...toolPendingStepStates.value];
-  const index = list.findIndex((item) => item.step === step);
-  const next: ToolPendingStepState = {
-    step,
-    action,
-    detail,
-    status: input.status,
-    error: errorText,
-    logs: index >= 0 && Array.isArray(list[index]?.logs) ? list[index].logs : []
-  };
-  if (index >= 0) {
-    list[index] = next;
-  } else {
-    list.push(next);
-  }
-  if (list.length > TOOL_STEP_MAX_LINES) {
-    list.splice(0, list.length - TOOL_STEP_MAX_LINES);
-  }
-  toolPendingStepStates.value = list;
-}
-
-function formatToolPendingStepLine(item: ToolPendingStepState): string {
-  const icon = item.status === "running" ? "…" : item.status === "done" ? "✓" : "✗";
-  const summary = summarizeToolPendingStep(item);
-  const base = `${icon} #${item.step} ${summary.label}${summary.detail ? ` · ${summary.detail}` : ""}`;
-  if (item.status !== "failed") return base;
-  const errorText = String(item.error || "").trim();
-  return errorText ? `${base} · ${clipText(errorText, 96)}` : base;
-}
-
-function formatToolPendingHeadline(item: ToolPendingStepState): string {
-  const summary = summarizeToolPendingStep(item);
-  const statusText = item.status === "running" ? "进行中" : item.status === "done" ? "已完成" : "失败";
-  const base = `${statusText} · #${item.step} ${summary.label}`;
-  if (item.status !== "failed") return base;
-  const errorText = String(item.error || "").trim();
-  return errorText ? `${base} · ${clipText(errorText, 64)}` : base;
-}
-
-function setLlmRunHint(label: string, detail = "") {
-  activeRunHint.value = {
-    phase: "llm",
-    label: String(label || "").trim() || "思考中",
-    detail: String(detail || "").trim(),
-    ts: new Date().toISOString()
-  };
-}
-
-function setToolRunHint(action: string, argsRaw: string, ts: string) {
-  activeRunHint.value = {
-    phase: "tool",
-    label: prettyToolAction(action),
-    detail: formatToolPendingDetail(action, argsRaw),
-    ts: String(ts || new Date().toISOString())
-  };
-}
-
-function deriveActiveToolRunFromStream(stream: StepTraceRecord[]): ToolRunSnapshot | null {
-  const pendingByStep = new Map<number, ToolRunSnapshot>();
-  for (const row of stream || []) {
-    const type = String(row?.type || "");
-    const payload = toRecord(row?.payload);
-    const mode = String(payload.mode || "");
-    if (type === "step_planned" && mode === "tool_call") {
-      const step = normalizeStep(payload.step);
-      if (!step) continue;
-      pendingByStep.set(step, {
-        step,
-        action: String(payload.action || ""),
-        arguments: String(payload.arguments || ""),
-        ts: normalizeEventTs(toRecord(row))
-      });
-      continue;
-    }
-    if (type === "step_finished" && mode === "tool_call") {
-      const step = normalizeStep(payload.step);
-      if (!step) continue;
-      pendingByStep.delete(step);
-      continue;
-    }
-    if (["loop_done", "loop_error", "loop_skip_stopped", "loop_internal_error"].includes(type)) {
-      pendingByStep.clear();
-    }
-  }
-  let latest: ToolRunSnapshot | null = null;
-  for (const item of pendingByStep.values()) {
-    if (!latest || item.step >= latest.step) latest = item;
-  }
-  return latest;
-}
-
-function deriveCurrentLoopWindow(stream: StepTraceRecord[]) {
-  const list = Array.isArray(stream) ? stream : [];
-  let lastLoopStartIndex = -1;
-  let lastLoopTerminalIndex = -1;
-
-  for (let i = 0; i < list.length; i += 1) {
-    const type = String(list[i]?.type || "");
-    if (type === "loop_start") {
-      lastLoopStartIndex = i;
-      continue;
-    }
-    if (LOOP_TERMINAL_TYPES.has(type)) {
-      lastLoopTerminalIndex = i;
-    }
-  }
-
-  const inProgress = lastLoopStartIndex >= 0 && lastLoopStartIndex > lastLoopTerminalIndex;
-  if (lastLoopStartIndex >= 0) {
-    return {
-      inProgress,
-      stream: list.slice(lastLoopStartIndex)
-    };
-  }
-  if (lastLoopTerminalIndex >= 0) {
-    return {
-      inProgress: false,
-      stream: list.slice(lastLoopTerminalIndex + 1)
-    };
-  }
-  return {
-    inProgress: false,
-    stream: list
-  };
-}
-
-function deriveToolPendingStepStatesFromStream(stream: StepTraceRecord[]): ToolPendingStepState[] {
-  const byStep = new Map<number, ToolPendingStepState>();
-  for (const row of stream || []) {
-    const type = String(row?.type || "");
-    const payload = toRecord(row?.payload);
-    const mode = String(payload.mode || "");
-    if (mode !== "tool_call") continue;
-    const step = normalizeStep(payload.step);
-    if (!step) continue;
-
-    const previous = byStep.get(step) || null;
-    const action = String(payload.action || previous?.action || "");
-    const detail =
-      String(previous?.detail || "").trim() || formatToolPendingDetail(action, String(payload.arguments || ""));
-
-    if (type === "step_planned") {
-      byStep.set(step, {
-        step,
-        action,
-        detail,
-        status: "running",
-        error: "",
-        logs: previous?.logs || []
-      });
-      continue;
-    }
-
-    if (type === "step_finished") {
-      byStep.set(step, {
-        step,
-        action,
-        detail,
-        status: payload.ok === true ? "done" : "failed",
-        error: String(payload.error || "").trim(),
-        logs: previous?.logs || []
-      });
-    }
-  }
-
-  return Array.from(byStep.values()).sort((a, b) => a.step - b.step);
-}
-
-function applyRuntimeEventToolRun(event: unknown) {
-  const envelope = toRecord(event);
-  const type = String(envelope.type || "");
-  const payload = toRecord(envelope.payload);
-  const mode = String(payload.mode || "");
-  const ts = normalizeEventTs(envelope);
-  const eventSessionId = String(envelope.sessionId || "").trim();
-  const responseSource = String(payload.source || "").trim();
-  if (type === "loop_start") {
-    activeRunToken.value += 1;
-    bumpRunViewEpoch("llm");
-    clearToolPendingCardLeaveTimer();
-    resetLlmStreamingState();
-    setLlmRunHint("分析任务", "正在规划下一步动作");
-    return;
-  }
-  if (type === "llm.request") {
-    if (String(payload.mode || "").trim().toLowerCase() === "compaction") {
-      if (runPhase.value === "idle") {
-        runPhase.value = "llm";
-      }
-      setLlmRunHint("整理上下文", "正在压缩历史上下文");
-      return;
-    }
-    if (runPhase.value === "idle") {
-      runPhase.value = "llm";
-    }
-    if (responseSource === "hosted_chat_transport") {
-      setLlmRunHint("宿主生成中", "正在通过网页会话规划下一步");
-      return;
-    }
-    setLlmRunHint("调用模型", "正在生成下一步计划");
-    return;
-  }
-  if (type === "hosted_chat.debug") {
-    if (runPhase.value === "idle") {
-      runPhase.value = "llm";
-    }
-    setLlmRunHint("宿主生成中", "正在接管网页会话");
-    return;
-  }
-  if (type === "hosted_chat.stream_text_delta") {
-    if (runPhase.value !== "tool_running" && runPhase.value !== "tool_handoff_leaving") {
-      runPhase.value = "llm";
-    }
-    llmStreamingPendingText.value = "";
-    llmStreamingText.value = "";
-    llmStreamingActive.value = false;
-    finalAssistantStreamingPhase.value = false;
-    setLlmRunHint("宿主生成中", "正在等待网页会话完成当前回合");
-    return;
-  }
-  if (type === "hosted_chat.tool_call_detected") {
-    llmStreamingPendingText.value = "";
-    llmStreamingText.value = "";
-    llmStreamingActive.value = false;
-    finalAssistantStreamingPhase.value = false;
-    if (runPhase.value !== "tool_running") {
-      runPhase.value = "llm";
-    }
-    setLlmRunHint("检测到工具计划", "即将进入工具执行");
-    return;
-  }
-  if (type === "hosted_chat.turn_resolved") {
-    llmStreamingPendingText.value = "";
-    llmStreamingText.value = "";
-    llmStreamingActive.value = false;
-    const finishReason = String(payload.finishReason || "").trim();
-    if (finishReason === "tool_calls") {
-      finalAssistantStreamingPhase.value = false;
-      if (runPhase.value !== "tool_running") {
-        runPhase.value = "llm";
-      }
-      setLlmRunHint("准备执行工具", "宿主回合已完成，正在交给工具执行");
-      return;
-    }
-    finalAssistantStreamingPhase.value = true;
-    setLlmRunHint("整理回复", "正在整理网页会话结果");
-    return;
-  }
-  if (type === "hosted_chat.transport_error") {
-    llmStreamingPendingText.value = "";
-    llmStreamingText.value = "";
-    llmStreamingActive.value = false;
-    finalAssistantStreamingPhase.value = false;
-    return;
-  }
-  if (type === "llm.stream.start") {
-    flushLlmStreamingDeltaBuffer();
-    llmStreamingPendingText.value = "";
-    llmStreamingText.value = "";
-    llmStreamingSessionId.value = eventSessionId || String(activeSessionId.value || "");
-    llmStreamingActive.value = true;
-    if (runPhase.value !== "tool_running" && runPhase.value !== "tool_handoff_leaving") {
-      runPhase.value = "llm";
-    }
-    setLlmRunHint("思考中", "正在规划下一步");
-    return;
-  }
-  if (type === "llm.stream.delta") {
-    const chunk = String(payload.text || "");
-    if (!chunk) return;
-    const activeId = String(activeSessionId.value || "").trim();
-    const sourceId = llmStreamingSessionId.value || eventSessionId;
-    if (sourceId && activeId && sourceId !== activeId) return;
-    llmStreamingSessionId.value = sourceId || activeId;
-    appendLlmStreamingDelta(chunk);
-    llmStreamingActive.value = true;
-    return;
-  }
-  if (type === "llm.stream.end") {
-    flushLlmStreamingDeltaBuffer();
-    llmStreamingActive.value = false;
-    return;
-  }
-  if (type === "llm.response.parsed") {
-    flushLlmStreamingDeltaBuffer();
-    const toolCalls = Number(payload.toolCalls || 0);
-    const isHostedTransport = responseSource === "hosted_chat_transport";
-    if (Number.isFinite(toolCalls) && toolCalls > 0) {
-      llmStreamingPendingText.value = "";
-      llmStreamingText.value = "";
-      llmStreamingActive.value = false;
-      finalAssistantStreamingPhase.value = false;
-      if (runPhase.value !== "tool_running") {
-        runPhase.value = "llm";
-      }
-    } else {
-      if (isHostedTransport) {
-        llmStreamingPendingText.value = "";
-        llmStreamingText.value = "";
-        llmStreamingActive.value = false;
-      } else {
-        commitPendingLlmStreamingText();
-      }
-      finalAssistantStreamingPhase.value = true;
-      setLlmRunHint(
-        "整理回复",
-        isHostedTransport ? "正在生成网页宿主聊天的最终回答" : "正在生成最终回答",
-      );
-    }
-    return;
-  }
-  if (type === "step_planned" && mode === "tool_call") {
-    const step = normalizeStep(payload.step);
-    if (!step) return;
-    finalAssistantStreamingPhase.value = false;
-    runPhase.value = "tool_running";
-    resetToolPendingCardHandoff();
-    const action = String(payload.action || "");
-    const detail = formatToolPendingDetail(action, String(payload.arguments || ""));
-    upsertToolPendingStepState({
-      step,
-      action,
-      detail,
-      status: "running"
-    });
-    activeToolRun.value = {
-      step,
-      action,
-      arguments: String(payload.arguments || ""),
-      ts
-    };
-    setToolRunHint(action, String(payload.arguments || ""), ts);
-    return;
-  }
-  if (type === "step_finished" && mode === "tool_call") {
-    flushBufferedToolPendingLogs();
-    const step = normalizeStep(payload.step);
-    if (!step) return;
-    const existing = toolPendingStepStates.value.find((item) => item.step === step) || null;
-    const action = String(payload.action || existing?.action || "");
-    const detail = existing?.detail || formatToolPendingDetail(action, String(payload.arguments || ""));
-    const ok = payload.ok === true;
-    const errorText = String(payload.error || "").trim();
-    upsertToolPendingStepState({
-      step,
-      action,
-      detail,
-      status: ok ? "done" : "failed",
-      error: errorText
-    });
-    if (activeToolRun.value && activeToolRun.value.step === step) {
-      activeToolRun.value = null;
-    }
-    if (!activeToolRun.value) {
-      runPhase.value = "llm";
-    }
-    setLlmRunHint("继续推理", "正在处理工具结果");
-    return;
-  }
-  if (type === "step_finished" && mode === "llm") {
-    flushLlmStreamingDeltaBuffer();
-    llmStreamingActive.value = false;
-    return;
-  }
-  if (type === "auto_compaction_start") {
-    if (runPhase.value === "idle") {
-      runPhase.value = "llm";
-    }
-    setLlmRunHint("整理上下文", "正在压缩历史上下文");
-    return;
-  }
-  if (type === "auto_compaction_end") {
-    if (String(payload.errorMessage || "").trim()) {
-      setLlmRunHint("继续推理", "上下文压缩失败，继续执行");
-    } else {
-      setLlmRunHint("继续推理", "上下文压缩完成，继续执行");
-    }
-    return;
-  }
-  if (["loop_done", "loop_error", "loop_skip_stopped", "loop_internal_error"].includes(type)) {
-    activeToolRun.value = null;
-    resetLlmStreamingState();
-    clearToolPendingCardLeaveTimer();
-    runPhase.value = "idle";
-    clearToolPendingSteps();
-    activeRunHint.value = null;
-  }
-}
-
-function applyBridgeEventToolOutput(rawEvent: unknown) {
-  const envelope = toRecord(rawEvent);
-  const eventSessionId = String(envelope.sessionId || "").trim();
-  if (!eventSessionId || eventSessionId !== String(activeSessionId.value || "").trim()) return;
-  if (!isRunActive.value) return;
-  const eventName = String(envelope.event || "").trim();
-  const data = toRecord(envelope.data);
-
-  if (eventName === "invoke.stdout") {
-    appendToolPendingLogs("stdout", String(data.chunk || ""));
-    return;
-  }
-  if (eventName === "invoke.stderr") {
-    appendToolPendingLogs("stderr", String(data.chunk || ""));
-    return;
-  }
-  if (eventName === "invoke.finished") return;
-}
-
-async function syncActiveToolRun(sessionId: string) {
-  const normalizedSessionId = String(sessionId || "").trim();
-  if (!normalizedSessionId) return;
-  const response = (await chrome.runtime.sendMessage({
-    type: "brain.step.stream",
-    sessionId: normalizedSessionId,
-    maxEvents: TOOL_STREAM_SYNC_MAX_EVENTS,
-    maxBytes: TOOL_STREAM_SYNC_MAX_BYTES
-  })) as { ok?: boolean; data?: { stream?: StepTraceRecord[]; streamMeta?: unknown }; error?: string };
-  if (!response?.ok) {
-    throw new Error(String(response?.error || "读取 step stream 失败"));
-  }
-  const stream = Array.isArray(response?.data?.stream) ? response.data?.stream || [] : [];
-  const meta = normalizeStepStreamMeta(response?.data?.streamMeta);
-  const currentLoop = deriveCurrentLoopWindow(stream);
-  const hasLoopStartEvent = stream.some((item) => String(item?.type || "") === "loop_start");
-  const shouldHoldStateForTruncatedWindow = Boolean(
-    isRunActive.value &&
-    meta.truncated &&
-    !hasLoopStartEvent
-  );
-  if (!currentLoop.inProgress) {
-    if (shouldHoldStateForTruncatedWindow) {
-      if (!activeRunHint.value || activeRunHint.value.phase !== "tool") {
-        setLlmRunHint("恢复中", "事件窗口已裁剪，等待增量事件同步");
-      }
-      return;
-    }
-    if (!isRunActive.value) {
-      runPhase.value = "idle";
-    } else if (runPhase.value !== "final_assistant") {
-      runPhase.value = "llm";
-    }
-    clearActiveToolRun();
-    clearToolPendingSteps();
-    return;
-  }
-  if (toolPendingStepStates.value.length === 0 && currentLoop.inProgress) {
-    const recovered = deriveToolPendingStepStatesFromStream(currentLoop.stream);
-    if (recovered.length > 0) {
-      toolPendingStepStates.value = recovered;
-    }
-  }
-  const latest = deriveActiveToolRunFromStream(currentLoop.stream);
-  activeToolRun.value = latest;
-  if (
-    latest ||
-    toolPendingStepStates.value.some((item) => item.status === "running")
-  ) {
-    runPhase.value = "tool_running";
-  } else {
-    const sawFinal = currentLoop.stream.some((row) => {
-      const rowType = String(row?.type || "");
-      if (rowType === "llm.stream.start" || rowType === "llm.stream.delta") return true;
-      if (rowType !== "llm.response.parsed") return false;
-      const data = toRecord(row?.payload);
-      const toolCalls = Number(data.toolCalls || 0);
-      return !(Number.isFinite(toolCalls) && toolCalls > 0);
-    });
-    runPhase.value = sawFinal ? "final_assistant" : "llm";
-  }
-  if (latest) {
-    setToolRunHint(latest.action, latest.arguments, latest.ts);
-  } else if (isRunActive.value && !activeRunHint.value) {
-    setLlmRunHint("思考中", "正在分析你的请求");
-  }
-}
-
-const runningStatus = computed(() => {
-  if (!isRunActive.value) return null;
-  if (activeToolRun.value) {
-    return {
-      action: prettyToolAction(activeToolRun.value.action),
-      detail: formatToolPendingDetail(activeToolRun.value.action, activeToolRun.value.arguments)
-    };
-  }
-  return null;
-});
-
-const latestToolPendingStepState = computed(() => {
-  const list = toolPendingStepStates.value;
-  return list.length > 0 ? list[list.length - 1] : null;
-});
-
-const runningToolPendingStepState = computed(() => {
-  const list = toolPendingStepStates.value;
-  for (let i = list.length - 1; i >= 0; i -= 1) {
-    if (list[i]?.status === "running") return list[i];
-  }
-  return null;
-});
-
-const primaryToolPendingStepState = computed(() =>
-  runningToolPendingStepState.value || latestToolPendingStepState.value
-);
-
-const hasRunningToolPendingActivity = computed(() =>
-  Boolean(activeToolRun.value) || toolPendingStepStates.value.some((item) => item.status === "running")
-);
-
-const toolPendingCardStatus = computed<"running" | "done" | "failed">(() => {
-  if (hasRunningToolPendingActivity.value) return "running";
-  if (isRunActive.value && hasToolPendingActivity.value) return "running";
-  if (latestToolPendingStepState.value?.status === "failed") return "failed";
-  if (latestToolPendingStepState.value?.status === "done") return "done";
-  return activeToolRun.value ? "running" : "done";
-});
-
-const toolPendingCardHeadline = computed(() => {
-  if (runningToolPendingStepState.value) {
-    return formatToolPendingHeadline(runningToolPendingStepState.value);
-  }
-  if (activeToolRun.value) {
-    const pending = {
-      step: activeToolRun.value.step,
-      action: activeToolRun.value.action,
-      detail: formatToolPendingDetail(activeToolRun.value.action, activeToolRun.value.arguments),
-      status: "running" as const,
-      error: "",
-      logs: []
-    };
-    return formatToolPendingHeadline(pending);
-  }
-  if (isRunActive.value && hasToolPendingActivity.value) {
-    return "进行中 · 正在处理步骤结果";
-  }
-  if (latestToolPendingStepState.value) {
-    return formatToolPendingHeadline(latestToolPendingStepState.value);
-  }
-  return "等待工具步骤";
-});
-
-const hasToolPendingActivity = computed(() =>
-  Boolean(activeToolRun.value) || toolPendingStepStates.value.length > 0
-);
-
-const shouldShowToolPendingCard = computed(() => {
-  if (!isRunActive.value) return false;
-  if (runPhase.value !== "tool_running") return false;
-  return Boolean(activeToolRun.value || runningToolPendingStepState.value);
+const {
+  runPhase,
+  activeToolRun,
+  toolPendingStepStates,
+  activeRunToken,
+  finalAssistantStreamingPhase,
+  toolPendingCardLeaving,
+  hasRunningToolPendingActivity,
+  hasToolPendingActivity,
+  toolPendingCardStatus,
+  toolPendingCardHeadline,
+  shouldShowToolPendingCard,
+  toolPendingCardAction,
+  toolPendingCardDetail,
+  toolPendingCardStepsData,
+  bindLlmStreaming,
+  setLlmRunHint,
+  clearRunHint,
+  clearActiveToolRun,
+  clearToolPendingSteps,
+  resetToolPendingCardHandoff,
+  dismissToolPendingCardWithHandoff,
+  stopInitialToolSync,
+  startInitialToolSync,
+  applyRuntimeEventToolRun,
+  applyBridgeEventToolOutput,
+  syncActiveToolRun,
+  cleanup: cleanupToolRunTracking,
+} = useToolRunTracking({
+  activeSessionId,
+  isRunActive,
+  runSafely,
 });
 
 const {
@@ -1058,56 +284,33 @@ const {
   startRunPending,
   shouldShowToolPendingCard,
 });
-
-const toolPendingCardAction = computed(() => {
-  if (activeToolRun.value) return prettyToolAction(activeToolRun.value.action);
-  if (primaryToolPendingStepState.value?.action) {
-    return prettyToolAction(primaryToolPendingStepState.value.action);
-  }
-  return "工具调用步骤";
+bindLlmStreaming({
+  llmStreamingText,
+  llmStreamingSessionId,
+  llmStreamingActive,
+  llmStreamingPendingText,
+  flushLlmStreamingDeltaBuffer,
+  appendLlmStreamingDelta,
+  commitPendingLlmStreamingText,
+  resetLlmStreamingState,
 });
-
-const toolPendingCardDetail = computed(() => {
-  if (activeToolRun.value) {
-    return formatToolPendingDetail(activeToolRun.value.action, activeToolRun.value.arguments);
-  }
-  return String(primaryToolPendingStepState.value?.detail || "").trim();
-});
-
-const toolPendingCardStepsData = computed(() => {
-  const active = activeToolRun.value;
-  const fallback = runningToolPendingStepState.value || latestToolPendingStepState.value;
-  const fromState = active
-    ? toolPendingStepStates.value.find((item) => item.step === active.step) || null
-    : null;
-  const source = fromState || fallback;
-
-  if (!source && !active) return [];
-
-  if (!source && active) {
-    const line = formatToolPendingStepLine({
-      step: active.step,
-      action: active.action,
-      detail: formatToolPendingDetail(active.action, active.arguments),
-      status: "running",
-      error: "",
-      logs: []
-    });
-    return [{
-      step: active.step,
-      status: "running" as const,
-      line,
-      logs: []
-    }];
-  }
-
-  if (!source) return [];
-  return [{
-    step: source.step,
-    status: source.status,
-    line: formatToolPendingStepLine(source),
-    logs: Array.isArray(source.logs) ? source.logs.slice(-TOOL_STEP_LOG_MAX_LINES) : []
-  }];
+const {
+  bridgeConnectionStatus,
+  recentRuntimeEvents,
+} = useRuntimeMessages({
+  activeSessionId,
+  isRunActive,
+  chatSceneOverlayRef,
+  panelUiRuntime,
+  hydratePanelUiPlugins,
+  applyUiExtensionLifecycleMessage,
+  showActionNoticeWithPlugins,
+  applyRuntimeEventToolRun,
+  applyBridgeEventToolOutput,
+  syncActiveToolRun,
+  runSafely,
+  loadConversation: (sessionId, options) => chatStore.loadConversation(sessionId, options),
+  refreshSessions: () => chatStore.refreshSessions(),
 });
 
 const toolHistoryToggleLabel = computed(() =>
@@ -1242,9 +445,7 @@ watch(isRunActive, (running, wasRunning) => {
       activeRunToken.value += 1;
       clearToolPendingSteps();
     }
-    if (!activeRunHint.value) {
-      setLlmRunHint("思考中", "正在分析你的请求");
-    }
+    setLlmRunHint("思考中", "正在分析你的请求");
     if (activeSessionId.value) {
       void runSafely(
         () => syncActiveToolRun(activeSessionId.value),
@@ -1261,7 +462,7 @@ watch(isRunActive, (running, wasRunning) => {
   clearActiveToolRun();
   clearToolPendingSteps();
   resetLlmStreamingState();
-  activeRunHint.value = null;
+  clearRunHint();
 });
 
 watch(activeSessionId, (nextSessionId, previousSessionId) => {
@@ -1278,7 +479,7 @@ watch(activeSessionId, (nextSessionId, previousSessionId) => {
   clearActiveToolRun();
   clearToolPendingSteps();
   resetLlmStreamingState();
-  activeRunHint.value = null;
+  clearRunHint();
   if (!activeSession.value?.forkedFrom?.sessionId) {
     setForkSessionHighlight(false);
   }
@@ -1431,134 +632,6 @@ watch(
     }
   }
 );
-
-async function refreshBridgeConnectionStatus() {
-  try {
-    const response = (await chrome.runtime.sendMessage({
-      type: "bridge.connect",
-      force: false
-    })) as { ok?: boolean };
-    bridgeConnectionStatus.value = response?.ok ? "connected" : "disconnected";
-  } catch {
-    bridgeConnectionStatus.value = "disconnected";
-  }
-}
-
-async function handleRuntimeMessage(message: unknown) {
-  const msgType = String(toRecord(message).type || "").trim();
-
-  if (msgType === "bbloop.plugin.trace" || msgType.startsWith("sandbox-")) return;
-
-  const runtimeHook = await panelUiRuntime.runHook("ui.runtime.event", {
-    type: msgType,
-    message
-  });
-  if (runtimeHook.blocked) return;
-
-  const payload = toRecord(runtimeHook.value.message) as {
-    type?: string;
-    status?: string;
-    event?: { sessionId?: string; type?: string; payload?: unknown };
-    payload?: { sessionId?: string; event?: string; data?: Record<string, unknown> };
-  };
-
-  const type = String(payload?.type || "").trim();
-  if (!type) return;
-
-  if (type.startsWith("brain.plugin.ui_extension.")) {
-    await applyUiExtensionLifecycleMessage(type, payload.payload);
-    return;
-  }
-
-  if (type === "bbloop.global.message") {
-    await showActionNoticeWithPlugins(payload.payload);
-    return;
-  }
-
-  if (type === "bridge.status") {
-    const status = String(payload.status || "").trim();
-    bridgeConnectionStatus.value = status === "connected" ? "connected" : "disconnected";
-    return;
-  }
-
-  if (type === "bridge.event") {
-    bridgeConnectionStatus.value = "connected";
-    if (payload.payload) {
-      pushRecentRuntimeEvent("bridge", payload.payload);
-    }
-    applyBridgeEventToolOutput(payload.payload);
-    return;
-  }
-
-  if (type !== "brain.event") return;
-  if (payload.event) {
-    pushRecentRuntimeEvent("brain", payload.event);
-  }
-  const brainEventType = String(payload?.event?.type || "").trim();
-  if (brainEventType === "plugin.global_message") {
-    await showActionNoticeWithPlugins(payload?.event?.payload);
-  }
-  const eventSessionId = String(payload?.event?.sessionId || "").trim();
-  if (!eventSessionId) return;
-
-  if (eventSessionId === activeSessionId.value) {
-    applyRuntimeEventToolRun(payload.event);
-    void runSafely(
-      () => chatStore.loadConversation(eventSessionId, { setActive: false }),
-      "刷新会话失败"
-    );
-    return;
-  }
-
-  void runSafely(() => chatStore.refreshSessions(), "刷新会话列表失败");
-}
-
-const onRuntimeMessage = (message: unknown) => {
-  void handleRuntimeMessage(message).catch((error) => {
-    console.error("runtime message handling failed", error);
-  });
-};
-
-onMounted(() => {
-  chrome.runtime.onMessage.addListener(onRuntimeMessage);
-  chrome.runtime.onMessage.addListener(
-    (message: unknown, _sender: chrome.runtime.MessageSender, sendResponse: (response?: unknown) => void) => {
-      const msg = message as Record<string, unknown> | undefined;
-      if (msg?.type === "bbloop.ui.state.query") {
-        sendResponse({ ok: true, data: panelUiRuntime.getUiStateSnapshot() });
-        return false;
-      }
-      return false;
-    },
-  );
-  void runSafely(async () => {
-    if (chatSceneOverlayRef.value) {
-      await panelUiRuntime.attachHostSlot("chat.scene.overlay", chatSceneOverlayRef.value);
-    }
-    await hydratePanelUiPlugins();
-    await refreshBridgeConnectionStatus();
-    if (activeSessionId.value && isRunActive.value) {
-      await syncActiveToolRun(activeSessionId.value);
-    }
-  }, "初始化失败");
-});
-
-useIntervalFn(() => {
-  if (!activeSessionId.value || !isRunActive.value) return;
-  void runSafely(
-    async () => {
-      await Promise.all([
-        chatStore.loadConversation(activeSessionId.value, { setActive: false }),
-        syncActiveToolRun(activeSessionId.value)
-      ]);
-    },
-    "轮询会话失败"
-  );
-}, TOOL_STREAM_SYNC_INTERVAL_MS);
-
-useIntervalFn(() => {
-  void refreshBridgeConnectionStatus();
-}, 6000);
 
 async function handleCreateSession() {
   if (createSessionTask) {
@@ -1756,13 +829,8 @@ function handleExport(mode: 'download' | 'open') {
 onUnmounted(() => {
   cleanupUiPipeline();
   cleanupLlmStreaming();
-  stopInitialToolSync();
-  clearToolPendingCardLeaveTimer();
+  cleanupToolRunTracking();
   cleanupForkScene();
-  clearActiveToolRun();
-  clearToolPendingSteps();
-  recentRuntimeEvents.value = [];
-  chrome.runtime.onMessage.removeListener(onRuntimeMessage);
   cleanupMessageActions();
 });
 
