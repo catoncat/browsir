@@ -159,7 +159,7 @@ export function buildToolRetryHint(toolName: string, errorCode: string): string 
 
 // ── Failure reason / phase / category inference ─────────────────────
 
-function normalizeFailureReason(raw: unknown): FailureReason {
+export function normalizeFailureReason(raw: unknown): FailureReason {
   const reason = String(raw || "")
     .trim()
     .toLowerCase();
