@@ -46,6 +46,7 @@ import {
   type UiNoticePayload
 } from "./utils/ui-plugin-runtime";
 
+import { useForkScene } from "./composables/use-fork-scene";
 import ChatMessage from "./components/ChatMessage.vue";
 import StreamingDraftContainer from "./components/StreamingDraftContainer.vue";
 import ChatInput from "./components/ChatInput.vue";
@@ -72,12 +73,6 @@ const { sessions, activeSessionId, messages, runtime, isRegeneratingTitle } = st
 
 function nowIso(): string {
   return new Date().toISOString();
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, Math.max(0, ms));
-  });
 }
 
 function setErrorMessage(err: unknown, fallback: string) {
@@ -211,11 +206,24 @@ const editingUserSubmitting = ref(false);
 const userPendingRegenerate = ref<PendingRegenerateState | null>(null);
 const userForkingEntryId = ref("");
 const startRunPending = ref(false);
-const forkScenePhase = ref<"idle" | "prepare" | "leave" | "swap" | "enter">("idle");
-const forkSceneToken = ref(0);
-const forkSceneSwitching = ref(false);
-const forkSceneTargetSessionId = ref("");
-const forkSessionHighlight = ref(false);
+const {
+  forkScenePhase,
+  forkSceneSwitching,
+  forkSessionHighlight,
+  isForkSceneActive,
+  chatSceneClass,
+  forkSceneProgressClass,
+  forkSceneIconClass,
+  playForkSceneSwitch,
+  switchForkSessionWithScene,
+  bumpForkSceneToken,
+  resetForkSceneState,
+  isExpectedSwitch: isForkSceneExpectedSwitch,
+  setHighlight: setForkSessionHighlight,
+  cleanup: cleanupForkScene,
+} = useForkScene({
+  loadSession: (id) => chatStore.loadConversation(id, { setActive: true }),
+});
 const activeRunHint = ref<RuntimeProgressHint | null>(null);
 const runViewState = ref<RunViewState>({
   phase: "idle",
@@ -266,7 +274,6 @@ const chatInputRenderState = ref<{
 }>({
   placeholder: "/技能 @标签"
 });
-let forkSessionHighlightTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingStepLogFlushTimer: ReturnType<typeof setTimeout> | null = null;
 let toolPendingCardLeaveTimer: ReturnType<typeof setTimeout> | null = null;
 let initialToolSyncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -277,11 +284,6 @@ let stableMessagesBuildToken = 0;
 const pendingStepLogBuffer = new Map<number, string[]>();
 const reportedPanelUiPluginFailures = new Set<string>();
 
-const USER_FORK_MIN_VISIBLE_MS = 620;
-const USER_FORK_SCENE_PREPARE_MS = 140;
-const USER_FORK_SCENE_LEAVE_MS = 170;
-const USER_FORK_SCENE_ENTER_MS = 240;
-const FORK_SWITCH_HIGHLIGHT_MS = 1800;
 const TOOL_STREAM_SYNC_INTERVAL_MS = 3200;
 const TOOL_STREAM_SYNC_MAX_EVENTS = 5000;
 const TOOL_STREAM_SYNC_MAX_BYTES = 4 * 1024 * 1024;
@@ -370,103 +372,6 @@ const finalAssistantStreamingPhase = computed({
     runPhase.value = isRunActive.value ? "llm" : "idle";
   }
 });
-
-const isForkSceneActive = computed(() => forkScenePhase.value !== "idle");
-
-const chatSceneClass = computed(() => ({
-  "chat-scene--prepare": forkScenePhase.value === "prepare",
-  "chat-scene--leave": forkScenePhase.value === "leave" || forkScenePhase.value === "swap",
-  "chat-scene--enter": forkScenePhase.value === "enter"
-}));
-
-const forkSceneProgressClass = computed(() => {
-  if (forkScenePhase.value === "prepare") return "w-[30%]";
-  if (forkScenePhase.value === "enter") return "w-full";
-  return "w-[74%]";
-});
-
-const forkSceneIconClass = computed(() => (
-  forkScenePhase.value === "enter" ? "animate-pulse" : "animate-spin"
-));
-
-function setForkSessionHighlight(active: boolean) {
-  forkSessionHighlight.value = active;
-}
-
-function triggerForkSessionHighlight() {
-  if (forkSessionHighlightTimer) {
-    clearTimeout(forkSessionHighlightTimer);
-    forkSessionHighlightTimer = null;
-  }
-  setForkSessionHighlight(true);
-  forkSessionHighlightTimer = setTimeout(() => {
-    setForkSessionHighlight(false);
-    forkSessionHighlightTimer = null;
-  }, FORK_SWITCH_HIGHLIGHT_MS);
-}
-
-function bumpForkSceneToken() {
-  forkSceneToken.value += 1;
-  return forkSceneToken.value;
-}
-
-function isForkSceneStale(token: number) {
-  return token !== forkSceneToken.value;
-}
-
-function resetForkSceneState() {
-  forkScenePhase.value = "idle";
-  forkSceneSwitching.value = false;
-  forkSceneTargetSessionId.value = "";
-}
-
-async function playForkSceneSwitch(targetSessionId: string) {
-  const normalizedTargetSessionId = String(targetSessionId || "").trim();
-  if (!normalizedTargetSessionId) return;
-
-  const token = bumpForkSceneToken();
-  forkSceneSwitching.value = true;
-  forkSceneTargetSessionId.value = normalizedTargetSessionId;
-
-  try {
-    forkScenePhase.value = "prepare";
-    await sleep(USER_FORK_SCENE_PREPARE_MS);
-    if (isForkSceneStale(token)) return;
-
-    forkScenePhase.value = "leave";
-    await sleep(USER_FORK_SCENE_LEAVE_MS);
-    if (isForkSceneStale(token)) return;
-
-    forkScenePhase.value = "swap";
-    await chatStore.loadConversation(normalizedTargetSessionId, { setActive: true });
-    if (isForkSceneStale(token)) return;
-
-    triggerForkSessionHighlight();
-    await nextTick();
-
-    forkScenePhase.value = "enter";
-    await sleep(USER_FORK_SCENE_ENTER_MS);
-  } finally {
-    if (!isForkSceneStale(token)) {
-      resetForkSceneState();
-    }
-  }
-}
-
-async function switchForkSessionWithScene(
-  targetSessionId: string,
-  options: { startedAt?: number } = {}
-) {
-  const normalizedTargetSessionId = String(targetSessionId || "").trim();
-  if (!normalizedTargetSessionId) return;
-
-  const startedAt = Number.isFinite(Number(options.startedAt)) ? Number(options.startedAt) : Date.now();
-  const elapsed = Date.now() - startedAt;
-  if (elapsed < USER_FORK_MIN_VISIBLE_MS) {
-    await sleep(USER_FORK_MIN_VISIBLE_MS - elapsed);
-  }
-  await playForkSceneSwitch(normalizedTargetSessionId);
-}
 
 function resetEditingState() {
   editingUserEntryId.value = "";
@@ -1451,10 +1356,7 @@ watch(activeSessionId, (nextSessionId, previousSessionId) => {
   resetToolPendingCardHandoff();
   runPhase.value = isRunActive.value ? "llm" : "idle";
   const currentSessionId = String(activeSessionId.value || "").trim();
-  const isExpectedForkSwitch =
-    forkSceneSwitching.value &&
-    currentSessionId.length > 0 &&
-    currentSessionId === forkSceneTargetSessionId.value;
+  const isExpectedForkSwitch = isForkSceneExpectedSwitch(currentSessionId);
   if (!isExpectedForkSwitch) {
     bumpForkSceneToken();
     resetForkSceneState();
@@ -2525,12 +2427,7 @@ onUnmounted(() => {
   stopInitialToolSync();
   clearToolPendingCardLeaveTimer();
   clearPanelNoticeTimer();
-  if (forkSessionHighlightTimer) {
-    clearTimeout(forkSessionHighlightTimer);
-    forkSessionHighlightTimer = null;
-  }
-  bumpForkSceneToken();
-  resetForkSceneState();
+  cleanupForkScene();
   clearActiveToolRun();
   clearToolPendingSteps();
   resetLlmStreamingState();
