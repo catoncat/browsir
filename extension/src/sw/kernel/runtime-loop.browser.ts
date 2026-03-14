@@ -77,172 +77,160 @@ import {
   type ToolDispatchDeps,
 } from "./loop-tool-dispatch";
 
+// ── Re-exports from shared modules (preserve public API) ────────────
+export {
+  type FailureReason,
+  type ToolCallItem,
+  type RuntimeErrorWithMeta,
+  type RuntimeLoopController,
+  type ToolRetryAction,
+  type FailurePhase,
+  type FailureCategory,
+  type ResumeStrategy,
+  type NoProgressReason,
+  type BashExecOutcome,
+  type RunStartInput,
+  type RegenerateRunInput,
+  type LlmRequestInput,
+  DEFAULT_BASH_TIMEOUT_MS,
+  MAX_BASH_TIMEOUT_MS,
+  CAPABILITIES,
+  CANONICAL_BROWSER_TOOL_NAMES,
+  RUNTIME_EXECUTABLE_TOOL_NAMES,
+  NO_PROGRESS_CONTINUE_BUDGET,
+  BROWSER_PROOF_REQUIRED_TOOL_NAMES,
+  MAX_LLM_RETRIES,
+  MAX_DEBUG_CHARS,
+  SESSION_TITLE_MAX,
+  SESSION_TITLE_MIN,
+  SESSION_TITLE_SOURCE_MANUAL,
+  SESSION_TITLE_SOURCE_AI,
+  DEFAULT_LLM_TIMEOUT_MS,
+  MIN_LLM_TIMEOUT_MS,
+  MAX_LLM_TIMEOUT_MS,
+  TOOL_AUTO_RETRY_BASE_DELAY_MS,
+  TOOL_AUTO_RETRY_CAP_DELAY_MS,
+  DEFAULT_LLM_MAX_RETRY_DELAY_MS,
+  MIN_LLM_MAX_RETRY_DELAY_MS,
+  MAX_LLM_MAX_RETRY_DELAY_MS,
+  LLM_TRACE_BODY_PREVIEW_MAX_CHARS,
+  LLM_TRACE_USER_SNIPPET_MAX_CHARS,
+  MAX_PROMPT_SKILL_ITEMS,
+  NO_PROGRESS_SIGNATURE_HISTORY_LIMIT,
+} from "./loop-shared-types";
+export {
+  toRecord,
+  clipText,
+  safeStringify,
+  stableHash,
+  parsePositiveInt,
+  normalizeIntInRange,
+  asRuntimeErrorWithMeta,
+  isPlainJsonRecord,
+  normalizeErrorCode,
+  normalizeSchemaRequiredList,
+  readTopLevelConstraintRequiredSets,
+  sanitizeLlmToolDefinitionForProvider,
+  readContractExecution,
+  normalizeToolCalls,
+  normalizeToolArgsForSignature,
+  normalizeVerifyExpect,
+  inferSearchElementsFilter,
+  scoreSearchNode,
+  queryAllTabsForRuntime,
+  getActiveTabIdForRuntime,
+  readSharedTabIds,
+  callInfra,
+  extractLlmConfig,
+  delay,
+} from "./loop-shared-utils";
+export {
+  isRetryableToolErrorCode,
+  shouldAutoReplayToolCall,
+  computeToolRetryDelayMs,
+  buildToolRetryHint,
+  attachFailureProtocol,
+  extractBashExecOutcome,
+  buildBashExitFailureEnvelope,
+  buildSkillScriptSandboxFailureEnvelope,
+  buildStepFailureEnvelope,
+} from "./loop-failure-protocol";
+
+// ── Imports from shared modules (used within this file) ─────────────
+import {
+  type FailureReason,
+  type ToolCallItem,
+  type RuntimeErrorWithMeta,
+  type RuntimeLoopController,
+  type BashExecOutcome,
+  type RunStartInput,
+  type RegenerateRunInput,
+  type LlmRequestInput,
+  type NoProgressReason,
+  CAPABILITIES,
+  CANONICAL_BROWSER_TOOL_NAMES,
+  RUNTIME_EXECUTABLE_TOOL_NAMES,
+  NO_PROGRESS_CONTINUE_BUDGET,
+  BROWSER_PROOF_REQUIRED_TOOL_NAMES,
+  DEFAULT_BASH_TIMEOUT_MS,
+  MAX_BASH_TIMEOUT_MS,
+  MAX_LLM_RETRIES,
+  MAX_DEBUG_CHARS,
+  SESSION_TITLE_MAX,
+  SESSION_TITLE_MIN,
+  SESSION_TITLE_SOURCE_MANUAL,
+  SESSION_TITLE_SOURCE_AI,
+  DEFAULT_LLM_TIMEOUT_MS,
+  MIN_LLM_TIMEOUT_MS,
+  MAX_LLM_TIMEOUT_MS,
+  DEFAULT_LLM_MAX_RETRY_DELAY_MS,
+  MIN_LLM_MAX_RETRY_DELAY_MS,
+  MAX_LLM_MAX_RETRY_DELAY_MS,
+  LLM_TRACE_BODY_PREVIEW_MAX_CHARS,
+  LLM_TRACE_USER_SNIPPET_MAX_CHARS,
+  MAX_PROMPT_SKILL_ITEMS,
+  NO_PROGRESS_SIGNATURE_HISTORY_LIMIT,
+} from "./loop-shared-types";
+import {
+  toRecord,
+  clipText,
+  safeStringify,
+  stableHash,
+  parsePositiveInt,
+  normalizeIntInRange,
+  asRuntimeErrorWithMeta,
+  isPlainJsonRecord,
+  normalizeErrorCode,
+  normalizeSchemaRequiredList,
+  readTopLevelConstraintRequiredSets,
+  sanitizeLlmToolDefinitionForProvider,
+  readContractExecution,
+  normalizeToolCalls,
+  normalizeToolArgsForSignature,
+  normalizeVerifyExpect,
+  inferSearchElementsFilter,
+  scoreSearchNode,
+  queryAllTabsForRuntime,
+  getActiveTabIdForRuntime,
+  readSharedTabIds,
+  callInfra,
+  extractLlmConfig,
+  delay,
+  safeJsonParse,
+} from "./loop-shared-utils";
+import {
+  attachFailureProtocol,
+  extractBashExecOutcome,
+  buildBashExitFailureEnvelope,
+  buildSkillScriptSandboxFailureEnvelope,
+  buildStepFailureEnvelope,
+  isRetryableToolErrorCode,
+  shouldAutoReplayToolCall,
+  computeToolRetryDelayMs,
+  buildToolRetryHint,
+} from "./loop-failure-protocol";
+
 type JsonRecord = Record<string, unknown>;
-
-const MAX_LLM_RETRIES = 2;
-const MAX_DEBUG_CHARS = 24_000;
-const SESSION_TITLE_MAX = 28;
-const SESSION_TITLE_MIN = 2;
-const SESSION_TITLE_SOURCE_MANUAL = "manual";
-const SESSION_TITLE_SOURCE_AI = "ai";
-const DEFAULT_LLM_TIMEOUT_MS = 120_000;
-const MIN_LLM_TIMEOUT_MS = 1_000;
-const MAX_LLM_TIMEOUT_MS = 300_000;
-export const DEFAULT_BASH_TIMEOUT_MS = 120_000;
-export const MAX_BASH_TIMEOUT_MS = 300_000;
-const TOOL_AUTO_RETRY_BASE_DELAY_MS = 300;
-const TOOL_AUTO_RETRY_CAP_DELAY_MS = 2_000;
-const DEFAULT_LLM_MAX_RETRY_DELAY_MS = 60_000;
-const MIN_LLM_MAX_RETRY_DELAY_MS = 0;
-const MAX_LLM_MAX_RETRY_DELAY_MS = 300_000;
-const LLM_TRACE_BODY_PREVIEW_MAX_CHARS = 1_200;
-const LLM_TRACE_USER_SNIPPET_MAX_CHARS = 420;
-const MAX_PROMPT_SKILL_ITEMS = 64;
-const NO_PROGRESS_SIGNATURE_HISTORY_LIMIT = 6;
-
-type ToolRetryAction = "auto_replay" | "llm_replan" | "fail_fast";
-export type FailureReason = "failed_execute" | "failed_verify" | "progress_uncertain";
-type FailurePhase = "plan" | "execute" | "verify" | "progress_guard";
-type FailureCategory =
-  | "timeout"
-  | "busy"
-  | "missing_target"
-  | "verify_failed"
-  | "focus_required"
-  | "no_progress"
-  | "unknown";
-type ResumeStrategy =
-  | "retry_same_args"
-  | "retry_with_fresh_snapshot"
-  | "replan";
-type NoProgressReason =
-  | "repeat_signature"
-  | "ping_pong"
-  | "browser_proof_guard";
-
-export interface ToolCallItem {
-  id: string;
-  type: "function";
-  function: {
-    name: string;
-    arguments: string;
-  };
-}
-
-interface BashExecOutcome {
-  cmdId: string;
-  argv: string[];
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
-}
-
-interface RunStartInput {
-  sessionId?: string;
-  sessionOptions?: JsonRecord;
-  prompt?: string;
-  tabIds?: unknown[];
-  skillIds?: unknown[];
-  contextRefs?: unknown[];
-  autoRun?: boolean;
-  streamingBehavior?: StreamingBehavior;
-}
-
-interface RegenerateRunInput {
-  sessionId: string;
-  prompt: string;
-  autoRun?: boolean;
-}
-
-interface LlmRequestInput {
-  sessionId: string;
-  route: LlmResolvedRoute;
-  providerRegistry: LlmProviderRegistry;
-  step: number;
-  messages: JsonRecord[];
-  toolChoice?: "auto" | "required";
-  toolScope?: "all" | "browser_only";
-}
-
-export type RuntimeErrorWithMeta = Error & {
-  code?: string;
-  details?: unknown;
-  retryable?: boolean;
-  status?: number;
-};
-
-export interface RuntimeLoopController {
-  startFromPrompt(
-    input: RunStartInput,
-  ): Promise<{ sessionId: string; runtime: RuntimeView }>;
-  startFromRegenerate(
-    input: RegenerateRunInput,
-  ): Promise<{ sessionId: string; runtime: RuntimeView }>;
-  executeStep(input: {
-    sessionId: string;
-    mode?: ExecuteMode;
-    capability?: ExecuteCapability;
-    action: string;
-    args?: JsonRecord;
-    verifyPolicy?: "off" | "on_critical" | "always";
-  }): Promise<ExecuteStepResult>;
-  refreshSessionTitle(
-    sessionId: string,
-    options?: { force?: boolean },
-  ): Promise<string>;
-  getSystemPromptPreview(): Promise<string>;
-}
-
-export const CAPABILITIES = {
-  processExec: "process.exec",
-  fsRead: "fs.read",
-  fsWrite: "fs.write",
-  fsEdit: "fs.edit",
-  browserSnapshot: "browser.snapshot",
-  browserAction: "browser.action",
-  browserVerify: "browser.verify",
-} as const;
-
-const CANONICAL_BROWSER_TOOL_NAMES = [
-  "get_all_tabs",
-  "get_current_tab",
-  "create_new_tab",
-  "get_tab_info",
-  "close_tab",
-  "ungroup_tabs",
-  "search_elements",
-  "click",
-  "fill_element_by_uid",
-  "select_option_by_uid",
-  "hover_element_by_uid",
-  "get_editor_value",
-  "press_key",
-  "scroll_page",
-  "navigate_tab",
-  "fill_form",
-  "browser_verify",
-  "computer",
-  "get_page_metadata",
-  "scroll_to_element",
-  "highlight_element",
-  "highlight_text_inline",
-  "capture_screenshot",
-  "capture_tab_screenshot",
-  "capture_screenshot_with_highlight",
-  "download_image",
-  "download_chat_images",
-  "list_interventions",
-  "get_intervention_info",
-  "request_intervention",
-  "cancel_intervention",
-  "create_skill",
-  "load_skill",
-  "execute_skill_script",
-  "read_skill_reference",
-  "get_skill_asset",
-  "list_skills",
-  "get_skill_info",
-] as const;
 
 const BUILTIN_BRIDGE_CAPABILITY_PROVIDERS: Array<{
   capability: ExecuteCapability;
@@ -258,251 +246,6 @@ const BUILTIN_BROWSER_CAPABILITY_PROVIDERS: Array<{
   capability: ExecuteCapability;
   providerId: string;
 }> = [];
-
-export const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
-  "host_bash",
-  "browser_bash",
-  "host_read_file",
-  "browser_read_file",
-  "host_write_file",
-  "browser_write_file",
-  "host_edit_file",
-  "browser_edit_file",
-  ...CANONICAL_BROWSER_TOOL_NAMES,
-]);
-
-const NO_PROGRESS_CONTINUE_BUDGET: Record<NoProgressReason, number> = {
-  repeat_signature: 1,
-  ping_pong: 0,
-  browser_proof_guard: 1,
-};
-
-const BROWSER_PROOF_REQUIRED_TOOL_NAMES = new Set([
-  "click",
-  "fill_element_by_uid",
-  "select_option_by_uid",
-  "hover_element_by_uid",
-  "press_key",
-  "scroll_page",
-  "navigate_tab",
-  "fill_form",
-  "browser_verify",
-  "computer",
-  "scroll_to_element",
-  "highlight_element",
-  "highlight_text_inline",
-  "capture_screenshot",
-  "capture_tab_screenshot",
-  "capture_screenshot_with_highlight",
-  "download_image",
-  "download_chat_images",
-]);
-
-export function toRecord(value: unknown): JsonRecord {
-  return value && typeof value === "object" ? (value as JsonRecord) : {};
-}
-
-const FORBIDDEN_TOP_LEVEL_TOOL_SCHEMA_KEYS = [
-  "oneOf",
-  "anyOf",
-  "allOf",
-  "enum",
-  "not",
-] as const;
-
-export function normalizeSchemaRequiredList(raw: unknown): string[] {
-  if (!Array.isArray(raw)) return [];
-  const dedup = new Set<string>();
-  const out: string[] = [];
-  for (const item of raw) {
-    const value = String(item || "").trim();
-    if (!value || dedup.has(value)) continue;
-    dedup.add(value);
-    out.push(value);
-  }
-  return out;
-}
-
-function normalizeTopLevelSchemaCombiner(raw: unknown): JsonRecord[] {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map((item) => toRecord(item))
-    .filter((item) => Object.keys(item).length > 0);
-}
-
-export function readTopLevelConstraintRequiredSets(raw: unknown): string[][] {
-  const clauses = normalizeTopLevelSchemaCombiner(raw);
-  const out: string[][] = [];
-  for (const clause of clauses) {
-    const required = normalizeSchemaRequiredList(clause.required);
-    if (required.length > 0) out.push(required);
-  }
-  return out;
-}
-
-function formatConstraintRequiredSet(input: string[]): string {
-  if (input.length === 1) return input[0];
-  return input.join(" + ");
-}
-
-function buildTopLevelSchemaConstraintHint(
-  parameters: unknown,
-  providerId: string,
-): string {
-  const provider = String(providerId || "")
-    .trim()
-    .toLowerCase();
-  if (provider !== "openai_compatible") return "";
-  const schema = toRecord(parameters);
-  const fragments: string[] = [];
-  const topLevelRequired = normalizeSchemaRequiredList(schema.required);
-  if (topLevelRequired.length > 0) {
-    fragments.push(`required: ${topLevelRequired.join(", ")}`);
-  }
-  const combinators: Array<"anyOf" | "oneOf" | "allOf"> = [
-    "anyOf",
-    "oneOf",
-    "allOf",
-  ];
-  for (const key of combinators) {
-    const requiredSets = readTopLevelConstraintRequiredSets(schema[key]);
-    if (requiredSets.length === 0) continue;
-    const formatted = requiredSets
-      .map((set) => `(${formatConstraintRequiredSet(set)})`)
-      .join(" | ");
-    fragments.push(`${key}: ${formatted}`);
-  }
-  if (fragments.length === 0) return "";
-  return `Schema constraint hints: ${fragments.join("; ")}.`;
-}
-
-function appendConstraintHintToDescription(
-  description: string,
-  hint: string,
-): string {
-  const base = String(description || "").trim();
-  const extra = String(hint || "").trim();
-  if (!extra) return base;
-  if (!base) return extra;
-  return `${base}\n${extra}`;
-}
-
-function sanitizeTopLevelToolSchemaForProvider(
-  parameters: unknown,
-  providerId: string,
-): JsonRecord {
-  const schema = toRecord(parameters);
-  const provider = String(providerId || "")
-    .trim()
-    .toLowerCase();
-  if (provider !== "openai_compatible") {
-    return {
-      ...schema,
-    };
-  }
-
-  const sanitized: JsonRecord = {
-    ...schema,
-    type: "object",
-    properties: toRecord(schema.properties),
-    required: normalizeSchemaRequiredList(schema.required),
-  };
-
-  for (const key of FORBIDDEN_TOP_LEVEL_TOOL_SCHEMA_KEYS) {
-    delete sanitized[key];
-  }
-  return sanitized;
-}
-
-export function sanitizeLlmToolDefinitionForProvider(
-  definition: unknown,
-  providerId: string,
-): JsonRecord {
-  const def = toRecord(definition);
-  const fn = toRecord(def.function);
-  const constraintHint = buildTopLevelSchemaConstraintHint(
-    fn.parameters,
-    providerId,
-  );
-  return {
-    ...def,
-    type: "function",
-    function: {
-      ...fn,
-      name: String(fn.name || "").trim(),
-      description: appendConstraintHintToDescription(
-        String(fn.description || ""),
-        constraintHint,
-      ),
-      parameters: sanitizeTopLevelToolSchemaForProvider(
-        fn.parameters,
-        providerId,
-      ),
-    },
-  };
-}
-
-export function clipText(input: unknown, maxChars = MAX_DEBUG_CHARS): string {
-  const text = String(input || "");
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars)}...<truncated:${text.length - maxChars}>`;
-}
-
-export function safeStringify(input: unknown, maxChars = 9000): string {
-  let text = "";
-  try {
-    text = JSON.stringify(input);
-  } catch {
-    text = String(input);
-  }
-  return clipText(text, maxChars);
-}
-
-export function stableHash(input: unknown): string {
-  const text = String(input || "");
-  let hash = 2166136261;
-  for (let index = 0; index < text.length; index += 1) {
-    hash ^= text.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
-}
-
-function safeJsonParse(raw: unknown): unknown {
-  try {
-    return JSON.parse(String(raw || ""));
-  } catch {
-    return null;
-  }
-}
-
-export function readContractExecution(contract: ToolContract | null): {
-  capability: string;
-  mode?: ExecuteMode;
-  action?: string;
-  verifyPolicy?: StepVerifyPolicy;
-} | null {
-  if (!contract?.execution) return null;
-  const capability = String(contract.execution.capability || "").trim();
-  if (!capability) return null;
-  const modeRaw = String(contract.execution.mode || "").trim();
-  const mode =
-    modeRaw === "script" || modeRaw === "cdp" || modeRaw === "bridge"
-      ? modeRaw
-      : undefined;
-  const action = String(contract.execution.action || "").trim() || undefined;
-  const verifyRaw = String(contract.execution.verifyPolicy || "").trim();
-  const verifyPolicy =
-    verifyRaw === "off" || verifyRaw === "on_critical" || verifyRaw === "always"
-      ? (verifyRaw as StepVerifyPolicy)
-      : undefined;
-  return {
-    capability,
-    ...(mode ? { mode } : {}),
-    ...(action ? { action } : {}),
-    ...(verifyPolicy ? { verifyPolicy } : {}),
-  };
-}
 
 function estimateJsonBytes(value: unknown): number {
   try {
@@ -612,35 +355,6 @@ function buildLlmRawTracePayload(input: {
   };
 }
 
-export function parsePositiveInt(raw: unknown): number | null {
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n <= 0) return null;
-  return n;
-}
-
-export function normalizeIntInRange(
-  raw: unknown,
-  fallback: number,
-  min: number,
-  max: number,
-): number {
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return fallback;
-  const floored = Math.floor(n);
-  if (floored < min) return min;
-  if (floored > max) return max;
-  return floored;
-}
-
-export function asRuntimeErrorWithMeta(error: unknown): RuntimeErrorWithMeta {
-  if (error instanceof Error) return error as RuntimeErrorWithMeta;
-  return new Error(String(error)) as RuntimeErrorWithMeta;
-}
-
-export function isPlainJsonRecord(value: unknown): value is JsonRecord {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
 function createNonRetryableRuntimeError(
   code: string,
   message: string,
@@ -653,369 +367,6 @@ function createNonRetryableRuntimeError(
     err.details = details;
   }
   return err;
-}
-
-export function normalizeErrorCode(code: unknown): string {
-  return String(code || "")
-    .trim()
-    .toUpperCase();
-}
-
-function isSideEffectingToolName(toolName: string): boolean {
-  const normalized = String(toolName || "")
-    .trim()
-    .toLowerCase();
-  return [
-    "host_write_file",
-    "browser_write_file",
-    "host_edit_file",
-    "browser_edit_file",
-    "create_new_tab",
-    "close_tab",
-    "ungroup_tabs",
-    "click",
-    "fill_element_by_uid",
-    "select_option_by_uid",
-    "hover_element_by_uid",
-    "press_key",
-    "scroll_page",
-    "navigate_tab",
-    "scroll_to_element",
-    "highlight_element",
-    "highlight_text_inline",
-    "fill_form",
-    "computer",
-    "download_image",
-    "download_chat_images",
-    "request_intervention",
-    "cancel_intervention",
-    "create_skill",
-    "execute_skill_script",
-  ].includes(normalized);
-}
-
-function classifyToolRetryDecision(
-  toolName: string,
-  errorCode: string,
-): {
-  action: ToolRetryAction;
-  retryable: boolean;
-  retryHint: string;
-} {
-  const normalizedCode = normalizeErrorCode(errorCode);
-  const sideEffecting = isSideEffectingToolName(toolName);
-
-  if (normalizedCode === "E_BUSY") {
-    return {
-      action: "auto_replay",
-      retryable: true,
-      retryHint: "Bridge is busy, retry after a short delay.",
-    };
-  }
-
-  if (normalizedCode === "E_BRIDGE_DISCONNECTED") {
-    return {
-      action: "auto_replay",
-      retryable: true,
-      retryHint: "Bridge connection was unstable; retry this tool call.",
-    };
-  }
-
-  if (normalizedCode === "E_TIMEOUT") {
-    return {
-      action: "llm_replan",
-      retryable: true,
-      retryHint: ["host_bash", "browser_bash"].includes(
-        String(toolName || "")
-          .trim()
-          .toLowerCase(),
-      )
-        ? "Increase timeoutMs and retry the same goal."
-        : "Operation timed out; adjust parameters and retry the same goal.",
-    };
-  }
-
-  if (normalizedCode === "E_CLIENT_TIMEOUT") {
-    if (sideEffecting) {
-      return {
-        action: "llm_replan",
-        retryable: true,
-        retryHint:
-          "Client timed out. Re-evaluate state with a fresh read/snapshot before retrying side effects.",
-      };
-    }
-    return {
-      action: "auto_replay",
-      retryable: true,
-      retryHint:
-        "Client timed out before receiving result; retry the same call.",
-    };
-  }
-
-  if (
-    normalizedCode === "E_NO_TAB" ||
-    normalizedCode === "E_REF_REQUIRED" ||
-    normalizedCode === "E_VERIFY_FAILED"
-  ) {
-    return {
-      action: "llm_replan",
-      retryable: true,
-      retryHint:
-        "Refresh context (get_all_tabs/search_elements) and retry with updated target.",
-    };
-  }
-
-  return {
-    action: "fail_fast",
-    retryable: false,
-    retryHint: "Retry only when the failure is transient.",
-  };
-}
-
-export function isRetryableToolErrorCode(toolName: string, code: string): boolean {
-  return classifyToolRetryDecision(toolName, code).retryable;
-}
-
-export function shouldAutoReplayToolCall(toolName: string, code: string): boolean {
-  return classifyToolRetryDecision(toolName, code).action === "auto_replay";
-}
-
-export function computeToolRetryDelayMs(attempt: number): number {
-  const next = TOOL_AUTO_RETRY_BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1);
-  return Math.min(TOOL_AUTO_RETRY_CAP_DELAY_MS, next);
-}
-
-export function buildToolRetryHint(toolName: string, errorCode: string): string {
-  return classifyToolRetryDecision(toolName, errorCode).retryHint;
-}
-
-function normalizeFailureReason(raw: unknown): FailureReason {
-  const reason = String(raw || "")
-    .trim()
-    .toLowerCase();
-  if (reason === "failed_verify") return "failed_verify";
-  if (reason === "progress_uncertain") return "progress_uncertain";
-  return "failed_execute";
-}
-
-function inferFailurePhase(reason: FailureReason): FailurePhase {
-  if (reason === "failed_verify") return "verify";
-  if (reason === "progress_uncertain") return "progress_guard";
-  return "execute";
-}
-
-function isBrowserToolName(toolName: string): boolean {
-  return CANONICAL_BROWSER_TOOL_NAMES.includes(
-    String(toolName || "")
-      .trim()
-      .toLowerCase() as (typeof CANONICAL_BROWSER_TOOL_NAMES)[number],
-  );
-}
-
-function inferModeEscalationDirective(input: {
-  toolName: string;
-  errorCode: string;
-  errorText: string;
-  retryHint: string;
-  details: unknown;
-  errorReason: FailureReason;
-}): JsonRecord | null {
-  if (!isBrowserToolName(input.toolName)) return null;
-
-  const errorCode = normalizeErrorCode(input.errorCode);
-  const combined = [
-    String(input.errorText || ""),
-    String(input.retryHint || ""),
-    safeStringify(input.details || null, 600),
-  ]
-    .join(" ")
-    .toLowerCase();
-  const browserWriteFailureFallback =
-    [
-      "click",
-      "fill_element_by_uid",
-      "select_option_by_uid",
-      "hover_element_by_uid",
-      "press_key",
-      "scroll_page",
-      "navigate_tab",
-      "scroll_to_element",
-      "highlight_element",
-      "highlight_text_inline",
-      "fill_form",
-      "computer",
-      "browser_verify",
-    ].includes(
-      String(input.toolName || "")
-        .trim()
-        .toLowerCase(),
-    ) &&
-    (input.errorReason === "failed_execute" ||
-      input.errorReason === "failed_verify");
-  const hasFocusSignal =
-    errorCode === "E_VERIFY_FAILED" ||
-    errorCode.startsWith("E_CDP_") ||
-    /focus|foreground|background|active tab|user.?gesture|lease|后台/.test(
-      combined,
-    ) ||
-    browserWriteFailureFallback;
-  if (!hasFocusSignal) return null;
-
-  return {
-    suggested: true,
-    from: "background",
-    to: "focus",
-    trigger:
-      input.errorReason === "failed_verify"
-        ? "verify_unstable"
-        : "focus_required",
-    prompt:
-      "当前步骤疑似受后台执行限制。请切换到 focus 模式并续跑当前 step（无需重开会话）。",
-    errorCode: errorCode || undefined,
-  };
-}
-
-function inferFailureCategory(input: {
-  errorCode: string;
-  errorReason: FailureReason;
-  modeEscalation: JsonRecord | null;
-}): FailureCategory {
-  const errorCode = normalizeErrorCode(input.errorCode);
-  if (input.errorReason === "progress_uncertain") return "no_progress";
-  if (input.errorReason === "failed_verify" || errorCode === "E_VERIFY_FAILED")
-    return "verify_failed";
-  if (errorCode === "E_BUSY") return "busy";
-  if (["E_TIMEOUT", "E_CLIENT_TIMEOUT", "E_CDP_TIMEOUT"].includes(errorCode))
-    return "timeout";
-  if (
-    [
-      "E_NO_TAB",
-      "E_REF_REQUIRED",
-      "E_CDP_RESOLVE_NODE",
-      "E_CDP_AXTREE_EMPTY",
-      "E_CDP_AXTREE_NO_NODES",
-    ].includes(errorCode)
-  ) {
-    return "missing_target";
-  }
-  if (input.modeEscalation) return "focus_required";
-  return "unknown";
-}
-
-function inferResumeStrategy(input: {
-  errorReason: FailureReason;
-  retryAction: ToolRetryAction;
-  modeEscalation: JsonRecord | null;
-  retryable: boolean;
-}): ResumeStrategy {
-  if (input.errorReason === "progress_uncertain")
-    return "retry_with_fresh_snapshot";
-  if (input.modeEscalation) return "retry_same_args";
-  if (input.retryAction === "auto_replay") return "retry_same_args";
-  if (input.retryAction === "llm_replan" && input.retryable)
-    return "retry_with_fresh_snapshot";
-  return "replan";
-}
-
-function mapNextBestAction(strategy: ResumeStrategy): string {
-  if (strategy === "retry_same_args") return "retry_same_args";
-  if (strategy === "retry_with_fresh_snapshot")
-    return "refresh_snapshot_then_retry";
-  return "replan_with_new_toolcall";
-}
-
-export function attachFailureProtocol(
-  toolName: string,
-  payload: JsonRecord,
-  options: {
-    defaultRetryable?: boolean;
-    errorReason?: FailureReason;
-    phase?: FailurePhase;
-    category?: FailureCategory;
-    modeEscalation?: JsonRecord | null;
-    resumeStrategy?: ResumeStrategy;
-    stepRef?: JsonRecord | null;
-  } = {},
-): JsonRecord {
-  const normalizedToolName = String(toolName || "")
-    .trim()
-    .toLowerCase();
-  const errorCode = normalizeErrorCode(payload.errorCode);
-  const errorReason = normalizeFailureReason(
-    options.errorReason || payload.errorReason,
-  );
-  const retryDecision = classifyToolRetryDecision(
-    normalizedToolName,
-    errorCode,
-  );
-  const defaultRetryable = options.defaultRetryable === true;
-  const retryable =
-    payload.retryable === true || defaultRetryable || retryDecision.retryable;
-  const retryHintBase = String(
-    payload.retryHint || buildToolRetryHint(normalizedToolName, errorCode),
-  );
-  const modeEscalation =
-    options.modeEscalation !== undefined
-      ? options.modeEscalation
-      : inferModeEscalationDirective({
-          toolName: normalizedToolName,
-          errorCode,
-          errorText: String(payload.error || ""),
-          retryHint: retryHintBase,
-          details: payload.details || payload.errorDetails || null,
-          errorReason,
-        });
-  let retryHint = retryHintBase;
-  if (
-    modeEscalation &&
-    !/focus|foreground|前台/.test(retryHint.toLowerCase())
-  ) {
-    retryHint = `${retryHint} Switch to focus mode and resume the current step without restarting the session.`;
-  }
-  const failureCategory =
-    options.category ||
-    inferFailureCategory({
-      errorCode,
-      errorReason,
-      modeEscalation,
-    });
-  const retryAction =
-    errorReason === "progress_uncertain" ? "llm_replan" : retryDecision.action;
-  const resumeStrategy =
-    options.resumeStrategy ||
-    inferResumeStrategy({
-      errorReason,
-      retryAction,
-      modeEscalation,
-      retryable,
-    });
-  const failureClass: JsonRecord = {
-    phase: options.phase || inferFailurePhase(errorReason),
-    reason: errorReason,
-    category: failureCategory,
-    retryAction,
-  };
-  const resume: JsonRecord = {
-    action: "resume_current_step",
-    strategy: resumeStrategy,
-  };
-  if (modeEscalation) resume.mode = "focus";
-
-  const out: JsonRecord = {
-    ...payload,
-    errorCode: errorCode || undefined,
-    errorReason,
-    retryable,
-    retryHint,
-    next_best_action: mapNextBestAction(resumeStrategy),
-    details: payload.details || payload.errorDetails || null,
-    failureClass,
-    resume,
-  };
-  if (modeEscalation) out.modeEscalation = modeEscalation;
-  if (options.stepRef && Object.keys(options.stepRef).length > 0)
-    out.stepRef = options.stepRef;
-  return out;
 }
 
 function normalizeTabIds(input: unknown[]): number[] {
@@ -1186,23 +537,6 @@ function parseLlmContent(message: unknown): string {
   return "";
 }
 
-export function normalizeVerifyExpect(raw: unknown): JsonRecord | null {
-  const source = toRecord(raw);
-  const out: JsonRecord = {};
-  if (typeof source.urlContains === "string" && source.urlContains.trim())
-    out.urlContains = source.urlContains.trim();
-  if (typeof source.titleContains === "string" && source.titleContains.trim())
-    out.titleContains = source.titleContains.trim();
-  if (typeof source.textIncludes === "string" && source.textIncludes.trim())
-    out.textIncludes = source.textIncludes.trim();
-  if (typeof source.selectorExists === "string" && source.selectorExists.trim())
-    out.selectorExists = source.selectorExists.trim();
-  if (source.urlChanged === true) out.urlChanged = true;
-  if (typeof source.previousUrl === "string" && source.previousUrl.trim())
-    out.previousUrl = source.previousUrl.trim();
-  return Object.keys(out).length > 0 ? out : null;
-}
-
 function buildObserveProgressVerify(
   beforeObserve: unknown,
   afterObserve: unknown,
@@ -1260,52 +594,6 @@ function buildObserveProgressVerify(
     checks,
     observation: afterObserve,
   };
-}
-
-function normalizeToolCalls(rawToolCalls: unknown): ToolCallItem[] {
-  if (!Array.isArray(rawToolCalls)) return [];
-  return rawToolCalls
-    .map((item, index) => {
-      const row = toRecord(item);
-      const fn = toRecord(row.function);
-      const name = String(fn.name || "").trim();
-      if (!name) return null;
-      const argsText =
-        typeof fn.arguments === "string"
-          ? fn.arguments
-          : safeStringify(fn.arguments || {});
-      return {
-        id: String(row.id || `toolcall-${index + 1}`),
-        type: "function" as const,
-        function: {
-          name,
-          arguments: argsText,
-        },
-      };
-    })
-    .filter((item): item is ToolCallItem => item !== null);
-}
-
-function sortJsonForSignature(value: unknown): unknown {
-  if (Array.isArray(value))
-    return value.map((item) => sortJsonForSignature(item));
-  if (!value || typeof value !== "object") return value;
-  const source = value as Record<string, unknown>;
-  const out: Record<string, unknown> = {};
-  for (const key of Object.keys(source).sort()) {
-    out[key] = sortJsonForSignature(source[key]);
-  }
-  return out;
-}
-
-export function normalizeToolArgsForSignature(rawArgs: unknown): string {
-  const text = String(rawArgs || "").trim();
-  if (!text) return "{}";
-  const parsed = safeJsonParse(text);
-  if (parsed !== null) {
-    return clipText(safeStringify(sortJsonForSignature(parsed), 1200), 1200);
-  }
-  return clipText(text.replace(/\s+/g, " "), 1200);
 }
 
 const NO_PROGRESS_VOLATILE_EVIDENCE_KEYS = new Set([
@@ -1604,171 +892,6 @@ function summarizeToolTarget(
   if (normalized === "get_current_tab") return "读取当前标签页";
   if (raw) return `参数：${clipText(raw, 220)}`;
   return "";
-}
-
-const SEARCH_ELEMENTS_INTERACTIVE_INTENT_TOKENS = [
-  "input",
-  "textarea",
-  "textbox",
-  "searchbox",
-  "combobox",
-  "editable",
-  "contenteditable",
-  "type",
-  "fill",
-  "write",
-  "prompt",
-  "compose",
-  "composer",
-  "send",
-  "输入",
-  "输入框",
-  "键入",
-  "可编辑",
-  "发送",
-];
-
-export function inferSearchElementsFilter(
-  queryRaw: string,
-): "all" | "interactive" {
-  const needles = String(queryRaw || "")
-    .trim()
-    .toLowerCase()
-    .split(/\s+/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-  if (
-    needles.some((needle) =>
-      SEARCH_ELEMENTS_INTERACTIVE_INTENT_TOKENS.some(
-        (token) => needle.includes(token) || token.includes(needle),
-      ),
-    )
-  ) {
-    return "interactive";
-  }
-  return "all";
-}
-
-export function scoreSearchNode(
-  node: JsonRecord,
-  needles: string[],
-): { score: number; matchedNeedles: number } {
-  if (needles.length === 0) return { score: 0, matchedNeedles: 0 };
-  const role = String(node.role || "").toLowerCase();
-  const tag = String(node.tag || "").toLowerCase();
-  const name = String(node.name || "").toLowerCase();
-  const value = String(node.value || "").toLowerCase();
-  const placeholder = String(node.placeholder || "").toLowerCase();
-  const ariaLabel = String(node.ariaLabel || "").toLowerCase();
-  const selector = String(node.selector || "").toLowerCase();
-  const haystack = [
-    role,
-    tag,
-    name,
-    value,
-    placeholder,
-    ariaLabel,
-    selector,
-  ].join(" ");
-
-  let score = 0;
-  let matchedNeedles = 0;
-  for (const needle of needles) {
-    if (!needle) continue;
-    let hit = false;
-
-    const exactInPrimary = [placeholder, ariaLabel, name].some(
-      (item) => item === needle,
-    );
-    if (exactInPrimary) {
-      score += 42;
-      hit = true;
-    }
-
-    const startsInPrimary = [placeholder, ariaLabel, name].some((item) =>
-      item.startsWith(needle),
-    );
-    if (startsInPrimary) {
-      score += 24;
-      hit = true;
-    }
-
-    const containsInPrimary = [placeholder, ariaLabel, name].some((item) =>
-      item.includes(needle),
-    );
-    if (containsInPrimary) {
-      score += 16;
-      hit = true;
-    }
-
-    if (selector.includes(needle)) {
-      score += 12;
-      hit = true;
-    }
-
-    if (role === needle || tag === needle) {
-      score += 16;
-      hit = true;
-    } else if (role.includes(needle) || tag.includes(needle)) {
-      score += 8;
-      hit = true;
-    }
-
-    if (value.includes(needle)) {
-      score += 6;
-      hit = true;
-    }
-
-    if (!hit && haystack.includes(needle)) {
-      score += 3;
-      hit = true;
-    }
-
-    if (hit) matchedNeedles += 1;
-  }
-
-  if (["input", "textarea", "button", "a", "select"].includes(tag)) score += 6;
-  if (["textbox", "searchbox", "button", "link", "combobox"].includes(role))
-    score += 6;
-  if (node.focused === true) score += 2;
-  if (node.disabled === true) score -= 20;
-  if (
-    selector.includes("[data-testid=") ||
-    selector.includes("[aria-label=") ||
-    selector.includes("[placeholder=")
-  ) {
-    score += 2;
-  }
-  const editable = node.editable === true;
-  const typingIntent = needles.some((needle) =>
-    [
-      "input",
-      "textarea",
-      "textbox",
-      "text",
-      "type",
-      "fill",
-      "write",
-      "compose",
-      "edit",
-      "输入",
-      "文本",
-      "回复",
-      "comment",
-    ].some((token) => needle.includes(token) || token.includes(needle)),
-  );
-  if (typingIntent) {
-    const looksTypable =
-      editable ||
-      ["input", "textarea"].includes(tag) ||
-      ["textbox", "searchbox", "combobox"].includes(role) ||
-      selector.includes("contenteditable");
-    if (looksTypable) score += 28;
-    if ((role === "div" || !role) && tag === "div") score -= 18;
-    if (selector.includes("_label") || selector.includes("label")) score -= 18;
-    if (role === "button") score -= 12;
-  }
-  return { score, matchedNeedles };
 }
 
 function buildToolFailurePayload(
@@ -2235,10 +1358,6 @@ function shouldAcquireLease(
   return actionRequiresLease(kind);
 }
 
-export function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function isRetryableLlmStatus(status: number): boolean {
   return [408, 409, 429, 500, 502, 503, 504].includes(Number(status || 0));
 }
@@ -2322,237 +1441,6 @@ function extractRetryDelayHintMs(
   return null;
 }
 
-export function extractBashExecOutcome(data: unknown): BashExecOutcome | null {
-  const root = toRecord(data);
-  const rootData = toRecord(root.data);
-  const rootResponse = toRecord(root.response);
-  const rootResponseData = toRecord(rootResponse.data);
-  const rootResponseInnerData = toRecord(rootResponseData.data);
-  const rootResult = toRecord(root.result);
-  const candidates = [
-    root,
-    rootData,
-    rootResponse,
-    rootResponseData,
-    rootResponseInnerData,
-    rootResult,
-  ];
-  for (const item of candidates) {
-    const cmdId = String(item.cmdId || "").trim();
-    const hasCmd = cmdId === "bash.exec";
-    const hasFields =
-      item.exitCode !== undefined ||
-      typeof item.stdout === "string" ||
-      typeof item.stderr === "string";
-    if (!hasCmd && !hasFields) continue;
-    const argv = Array.isArray(item.argv)
-      ? item.argv.map((value) => String(value || ""))
-      : [];
-    const exitCodeRaw = Number(item.exitCode);
-    return {
-      cmdId: hasCmd ? cmdId : "bash.exec",
-      argv,
-      stdout: typeof item.stdout === "string" ? item.stdout : "",
-      stderr: typeof item.stderr === "string" ? item.stderr : "",
-      exitCode: Number.isFinite(exitCodeRaw) ? exitCodeRaw : null,
-    };
-  }
-  return null;
-}
-
-function extractBashCommandFromArgv(argv: string[]): string {
-  if (!Array.isArray(argv) || argv.length === 0) return "";
-  const shellEvalIndex = argv.findIndex((value) => value === "-lc");
-  if (shellEvalIndex >= 0 && shellEvalIndex + 1 < argv.length) {
-    return String(argv[shellEvalIndex + 1] || "");
-  }
-  return String(argv[argv.length - 1] || "");
-}
-
-function diagnoseBashExitFailure(input: {
-  toolName: string;
-  exitCode: number;
-  stderr: string;
-}): { tag: string; error: string; retryHint: string } {
-  const normalizedTool = String(input.toolName || "")
-    .trim()
-    .toLowerCase();
-  const stderrLower = String(input.stderr || "").toLowerCase();
-  if (
-    normalizedTool === "browser_bash" &&
-    /(?:\bwindow is not defined\b|\bdocument is not defined\b)/i.test(
-      stderrLower,
-    )
-  ) {
-    return {
-      tag: "dom_global_unavailable",
-      error: `browser_bash 执行失败：sandbox shell 不是页面 DOM 上下文，window/document 不可用（exitCode=${input.exitCode}）。`,
-      retryHint:
-        "需要页面 DOM 时改用 browser.action/browser_verify/script_action；仅执行命令时请移除 window/document 后重试。",
-    };
-  }
-  if (
-    normalizedTool === "browser_bash" &&
-    /expected word but got lparen/i.test(stderrLower)
-  ) {
-    return {
-      tag: "unsupported_shell_syntax",
-      error: `browser_bash 执行失败：sandbox shell 不支持 C-style for ((...)) 语法（exitCode=${input.exitCode}）。`,
-      retryHint:
-        "改用 POSIX 写法（for i in ...; do ...; done），或切换 host_bash 使用宿主 bash。",
-    };
-  }
-  const stderrLine = clipText(
-    String(input.stderr || "")
-      .split(/\r?\n/)
-      .find((line) => String(line || "").trim().length > 0) || "",
-    240,
-  );
-  return {
-    tag: "non_zero_exit",
-    error: stderrLine
-      ? `${input.toolName} 执行失败：bash.exec exitCode=${input.exitCode}，stderr=${stderrLine}`
-      : `${input.toolName} 执行失败：bash.exec exitCode=${input.exitCode}`,
-    retryHint:
-      "检查命令与运行时兼容性后重试；browser_bash 使用 sandbox shell，语法与宿主 bash 可能不同。",
-  };
-}
-
-export function buildBashExitFailureEnvelope(
-  toolName: string,
-  invoke: ExecuteStepResult,
-  outcome: BashExecOutcome,
-): JsonRecord {
-  const exitCode = Number(outcome.exitCode);
-  const diagnosed = diagnoseBashExitFailure({
-    toolName,
-    exitCode: Number.isFinite(exitCode) ? exitCode : 1,
-    stderr: outcome.stderr,
-  });
-  return {
-    ...attachFailureProtocol(
-      toolName,
-      {
-        error: diagnosed.error,
-        errorCode: "E_BASH_EXIT_NON_ZERO",
-        errorReason: "failed_execute",
-        retryable: true,
-        retryHint: diagnosed.retryHint,
-        details: {
-          cmdId: outcome.cmdId,
-          exitCode: outcome.exitCode,
-          command: clipText(extractBashCommandFromArgv(outcome.argv), 1_200),
-          stdout: clipText(outcome.stdout, 1_200),
-          stderr: clipText(outcome.stderr, 1_200),
-          diagnosis: diagnosed.tag,
-        },
-      },
-      {
-        phase: "execute",
-        resumeStrategy: "replan",
-      },
-    ),
-    modeUsed: invoke.modeUsed,
-    providerId: invoke.providerId || undefined,
-    fallbackFrom: invoke.fallbackFrom || undefined,
-  };
-}
-
-export function buildSkillScriptSandboxFailureEnvelope(input: {
-  invoke: ExecuteStepResult;
-  outcome: BashExecOutcome;
-  location: string;
-  scriptPath: string;
-  command: string;
-  cwd?: string;
-}): JsonRecord {
-  const stderrLine = clipText(
-    String(input.outcome.stderr || "")
-      .split(/\r?\n/)
-      .find((line) => String(line || "").trim().length > 0) || "",
-    240,
-  );
-  const missingRuntime =
-    /^([a-zA-Z0-9._+-]+):\s*(?:command not found|not found)\b/i.exec(
-      stderrLine,
-    )?.[1] || "";
-
-  if (missingRuntime) {
-    return {
-      ...attachFailureProtocol(
-        "execute_skill_script",
-        {
-          error: `当前 browser runtime 不支持技能脚本解释器: ${missingRuntime}`,
-          errorCode: "E_TOOL_UNSUPPORTED",
-          errorReason: "failed_execute",
-          retryable: false,
-          retryHint:
-            "为 browser sandbox 提供对应解释器，或改用现有内置工具/host 工具完成同等动作。",
-          details: {
-            location: input.location,
-            scriptPath: input.scriptPath,
-            cwd: input.cwd || null,
-            command: clipText(input.command, 1_200),
-            exitCode: input.outcome.exitCode,
-            stdout: clipText(input.outcome.stdout, 1_200),
-            stderr: clipText(input.outcome.stderr, 1_200),
-            missingRuntime,
-          },
-        },
-        {
-          phase: "execute",
-          category: "missing_target",
-          resumeStrategy: "replan",
-        },
-      ),
-      modeUsed: input.invoke.modeUsed,
-      providerId: input.invoke.providerId || undefined,
-      fallbackFrom: input.invoke.fallbackFrom || undefined,
-    };
-  }
-
-  return buildBashExitFailureEnvelope(
-    "execute_skill_script",
-    input.invoke,
-    input.outcome,
-  );
-}
-
-export function buildStepFailureEnvelope(
-  toolName: string,
-  out: ExecuteStepResult,
-  fallbackError: string,
-  retryHint: string,
-  options: {
-    defaultRetryable?: boolean;
-    errorReason?: FailureReason;
-    phase?: FailurePhase;
-    category?: FailureCategory;
-    modeEscalation?: JsonRecord | null;
-    resumeStrategy?: ResumeStrategy;
-    stepRef?: JsonRecord | null;
-  } = {},
-): JsonRecord {
-  const base = attachFailureProtocol(
-    toolName,
-    {
-      error: out.error || fallbackError,
-      errorCode: normalizeErrorCode(out.errorCode) || undefined,
-      errorReason: options.errorReason || "failed_execute",
-      retryable: out.retryable === true,
-      retryHint,
-      details: out.errorDetails || null,
-    },
-    options,
-  );
-  return {
-    ...base,
-    modeUsed: out.modeUsed,
-    providerId: out.providerId || undefined,
-    fallbackFrom: out.fallbackFrom || undefined,
-  };
-}
-
 function mapToolErrorReasonToTerminalStatus(
   rawReason: unknown,
 ): "failed_execute" | "failed_verify" | "progress_uncertain" {
@@ -2562,157 +1450,6 @@ function mapToolErrorReasonToTerminalStatus(
   if (reason === "failed_verify") return "failed_verify";
   if (reason === "progress_uncertain") return "progress_uncertain";
   return "failed_execute";
-}
-
-export async function queryAllTabsForRuntime(): Promise<
-  Array<{
-    id: number;
-    windowId: number;
-    index: number;
-    active: boolean;
-    pinned: boolean;
-    title: string;
-    url: string;
-  }>
-> {
-  const tabs = await chrome.tabs.query({});
-  return (tabs || [])
-    .filter((tab) => Number.isInteger(tab?.id))
-    .map((tab) => ({
-      id: Number(tab.id),
-      windowId: Number(tab.windowId || 0),
-      index: Number(tab.index || 0),
-      active: tab.active === true,
-      pinned: tab.pinned === true,
-      title: String(tab.title || ""),
-      url: String(tab.url || tab.pendingUrl || ""),
-    }));
-}
-
-export async function getActiveTabIdForRuntime(): Promise<number | null> {
-  const isRestricted = (url: string) => {
-    const u = url.toLowerCase();
-    return (
-      u.startsWith("chrome://") ||
-      u.startsWith("about:") ||
-      u.startsWith("edge://") ||
-      u.startsWith("chrome-extension://") ||
-      u.includes("chrome.google.com/webstore")
-    );
-  };
-
-  const focused = await chrome.tabs.query({
-    active: true,
-    lastFocusedWindow: true,
-  });
-  const active = focused.find((tab) => Number.isInteger(tab?.id));
-  if (active?.id && active.url && !isRestricted(active.url))
-    return Number(active.id);
-
-  const all = await chrome.tabs.query({}).catch(() => []);
-  const valid = all.find(
-    (tab) => Number.isInteger(tab.id) && tab.url && !isRestricted(tab.url),
-  );
-  if (valid?.id) return Number(valid.id);
-
-  return active?.id ? Number(active.id) : all[0]?.id ? Number(all[0].id) : null;
-}
-
-export function readSharedTabIds(sharedTabs: unknown): number[] {
-  if (!Array.isArray(sharedTabs)) return [];
-  const out: number[] = [];
-  const seen = new Set<number>();
-  for (const item of sharedTabs) {
-    const id = parsePositiveInt(toRecord(item).id);
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    out.push(id);
-  }
-  return out;
-}
-
-export async function callInfra(
-  infra: RuntimeInfraHandler,
-  message: JsonRecord,
-): Promise<JsonRecord> {
-  const result = await infra.handleMessage(message);
-  if (!result) {
-    const error = new Error(
-      `unsupported infra message: ${String(message.type || "")}`,
-    ) as RuntimeErrorWithMeta;
-    error.code = "E_INFRA_UNSUPPORTED";
-    throw error;
-  }
-  if (!result.ok) {
-    const error = new Error(
-      String(result.error || "infra call failed"),
-    ) as RuntimeErrorWithMeta;
-    const resultWithMeta = result as {
-      code?: unknown;
-      details?: unknown;
-      retryable?: unknown;
-      status?: unknown;
-    };
-    if (typeof resultWithMeta.code === "string" && resultWithMeta.code.trim()) {
-      error.code = resultWithMeta.code.trim();
-    }
-    if (resultWithMeta.details !== undefined) {
-      error.details = resultWithMeta.details;
-    }
-    if (typeof resultWithMeta.retryable === "boolean") {
-      error.retryable = resultWithMeta.retryable;
-    }
-    if (Number.isFinite(Number(resultWithMeta.status))) {
-      error.status = Number(resultWithMeta.status);
-    }
-    throw error;
-  }
-  return toRecord(result.data);
-}
-
-export function extractLlmConfig(raw: JsonRecord): BridgeConfig {
-  return {
-    bridgeUrl: String(raw.bridgeUrl || ""),
-    bridgeToken: String(raw.bridgeToken || ""),
-    browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
-      raw.browserRuntimeStrategy,
-      "browser-first",
-    ),
-    compaction: normalizeCompactionSettings(raw.compaction),
-    llmDefaultProfile: String(raw.llmDefaultProfile || "default"),
-    llmAuxProfile: String(raw.llmAuxProfile || ""),
-    llmFallbackProfile: String(raw.llmFallbackProfile || ""),
-    llmProfiles: raw.llmProfiles,
-    llmSystemPromptCustom: String(raw.llmSystemPromptCustom || ""),
-    maxSteps: normalizeIntInRange(raw.maxSteps, 100, 1, 500),
-    autoTitleInterval: normalizeIntInRange(raw.autoTitleInterval, 10, 0, 100),
-    bridgeInvokeTimeoutMs: normalizeIntInRange(
-      raw.bridgeInvokeTimeoutMs,
-      DEFAULT_BASH_TIMEOUT_MS,
-      1_000,
-      MAX_BASH_TIMEOUT_MS,
-    ),
-    llmTimeoutMs: normalizeIntInRange(
-      raw.llmTimeoutMs,
-      DEFAULT_LLM_TIMEOUT_MS,
-      MIN_LLM_TIMEOUT_MS,
-      MAX_LLM_TIMEOUT_MS,
-    ),
-    llmRetryMaxAttempts: normalizeIntInRange(
-      raw.llmRetryMaxAttempts,
-      MAX_LLM_RETRIES,
-      0,
-      6,
-    ),
-    llmMaxRetryDelayMs: normalizeIntInRange(
-      raw.llmMaxRetryDelayMs,
-      DEFAULT_LLM_MAX_RETRY_DELAY_MS,
-      MIN_LLM_MAX_RETRY_DELAY_MS,
-      MAX_LLM_MAX_RETRY_DELAY_MS,
-    ),
-    devAutoReload: raw.devAutoReload === true,
-    devReloadIntervalMs: Number(raw.devReloadIntervalMs || 1500),
-  };
 }
 
 function resolveAuxiliaryLlmRoute(config: BridgeConfig) {
