@@ -8,6 +8,26 @@ import { useConfigStore } from "./stores/config-store";
 import { useMessageActions, type PanelMessageLike, type PendingRegenerateState } from "./utils/message-actions";
 import { publishDebugLinkToBridge } from "./utils/debug-link";
 import {
+  toRecord,
+  normalizeStepStreamMeta,
+  normalizeStep,
+  normalizeEventTs,
+  BASH_TOOL_ACTIONS,
+  FILE_TOOL_ACTIONS,
+  prettyToolAction,
+  clipText,
+  shouldAlwaysShowToolMessage,
+  toScalarText,
+  tryParseArgs,
+  formatToolPendingDetail,
+  extractBashCommandFromDetail,
+  extractPathHintFromCommand,
+  inferBashIntent,
+  summarizeToolPendingStep,
+  type StepStreamMeta,
+  type ToolPendingStepState
+} from "./utils/tool-formatters";
+import {
   createPanelUiPluginRuntime,
   type UiChatInputPayload,
   type UiChatInputRenderPayload,
@@ -172,17 +192,6 @@ interface StepTraceRecord {
   payload?: Record<string, unknown>;
 }
 
-interface StepStreamMeta {
-  truncated: boolean;
-  cutBy: "events" | "bytes" | null;
-  totalEvents: number;
-  totalBytes: number;
-  returnedEvents: number;
-  returnedBytes: number;
-  maxEvents: number;
-  maxBytes: number;
-}
-
 interface ToolRunSnapshot {
   step: number;
   action: string;
@@ -195,15 +204,6 @@ interface RuntimeProgressHint {
   label: string;
   detail: string;
   ts: string;
-}
-
-interface ToolPendingStepState {
-  step: number;
-  action: string;
-  detail: string;
-  status: "running" | "done" | "failed";
-  error?: string;
-  logs: string[];
 }
 
 type RunViewPhase = "idle" | "llm" | "tool_running" | "tool_handoff_leaving" | "final_assistant";
@@ -549,96 +549,6 @@ function findLatestUserEntryId(items: PanelMessageLike[]) {
     return entryId;
   }
   return "";
-}
-
-function toRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-}
-
-function normalizeStepStreamMeta(value: unknown): StepStreamMeta {
-  const row = toRecord(value);
-  const normalizeInt = (raw: unknown) => {
-    const n = Number(raw);
-    return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
-  };
-  const cutByRaw = String(row.cutBy || "").trim().toLowerCase();
-  const cutBy: "events" | "bytes" | null = cutByRaw === "events" || cutByRaw === "bytes"
-    ? (cutByRaw as "events" | "bytes")
-    : null;
-
-  return {
-    truncated: row.truncated === true,
-    cutBy,
-    totalEvents: normalizeInt(row.totalEvents),
-    totalBytes: normalizeInt(row.totalBytes),
-    returnedEvents: normalizeInt(row.returnedEvents),
-    returnedBytes: normalizeInt(row.returnedBytes),
-    maxEvents: normalizeInt(row.maxEvents),
-    maxBytes: normalizeInt(row.maxBytes)
-  };
-}
-
-function normalizeStep(value: unknown): number {
-  const n = Number(value);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
-}
-
-function normalizeEventTs(row: Record<string, unknown>): string {
-  return String(row.ts || row.timestamp || new Date().toISOString());
-}
-
-const BASH_TOOL_ACTIONS = new Set(["host_bash", "browser_bash"]);
-const FILE_TOOL_ACTIONS = new Set([
-  "host_read_file",
-  "browser_read_file",
-  "host_write_file",
-  "browser_write_file",
-  "host_edit_file",
-  "browser_edit_file"
-]);
-
-function prettyToolAction(action: string): string {
-  const normalized = String(action || "").trim().toLowerCase();
-  const map: Record<string, string> = {
-    snapshot: "读取页面快照",
-    list_tabs: "检索标签页",
-    open_tab: "打开标签页",
-    browser_action: "执行浏览器动作",
-    browser_verify: "执行页面验证",
-    host_read_file: "读取主机文件",
-    browser_read_file: "读取浏览器文件",
-    host_write_file: "写入主机文件",
-    browser_write_file: "写入浏览器文件",
-    host_edit_file: "编辑主机文件",
-    browser_edit_file: "编辑浏览器文件",
-    host_bash: "执行主机命令",
-    browser_bash: "执行浏览器命令"
-  };
-  return map[normalized] || (normalized ? `执行 ${normalized}` : "执行工具");
-}
-
-function clipText(text: string, max = 96): string {
-  const value = String(text || "").trim();
-  if (!value) return "";
-  return value.length > max ? `${value.slice(0, max)}…` : value;
-}
-
-function shouldAlwaysShowToolMessage(message: PanelMessageLike): boolean {
-  if (String(message?.role || "") !== "tool") return false;
-  const content = String(message?.content || "").trim();
-  if (!content) return false;
-  try {
-    const parsed = JSON.parse(content);
-    const row = toRecord(parsed);
-    if (typeof row.error === "string" && String(row.error).trim()) return true;
-    if (row.ok === false) return true;
-    const response = toRecord(row.response);
-    const bridgeResult = toRecord(response.response);
-    if (bridgeResult.ok === false) return true;
-    return false;
-  } catch {
-    return /error|failed|失败|异常/i.test(content);
-  }
 }
 
 function pushRecentRuntimeEvent(source: "brain" | "bridge", event: unknown) {
