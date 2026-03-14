@@ -69,4 +69,4 @@ claimed_at: "2026-03-14T10:21:59.909Z"
 
 ### 2026-03-14 18:33 CST
 
-- 未提交
+- `8dbbf6d feat(skill): close browser scope skill script execution`
