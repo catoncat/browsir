@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { useRuntimeStore, type PluginMetadata, type PluginUiExtensionMetadata } from "../stores/runtime";
+import { usePluginStore, type PluginMetadata, type PluginUiExtensionMetadata } from "../stores/plugin-store";
 import { ArrowLeft, RefreshCcw, Power, Trash2, Code2 } from "lucide-vue-next";
 
 const emit = defineEmits(["close"]);
-const store = useRuntimeStore();
+const store = usePluginStore();
 
 const dialogRef = ref<HTMLElement | null>(null);
 const loading = ref(false);
@@ -15,7 +15,6 @@ const uiExtensions = ref<PluginUiExtensionMetadata[]>([]);
 
 const BUILTIN_PLUGIN_ID_PREFIX = "runtime.builtin.plugin.";
 const EXAMPLE_PLUGIN_ID_PREFIX = "plugin.example.";
-const isStandaloneStudioPage = ref(false);
 
 const userPlugins = computed(() =>
   plugins.value.filter((p) => {
@@ -31,22 +30,8 @@ const examplePlugins = computed(() =>
   })
 );
 
-function isExamplePlugin(plugin: PluginMetadata): boolean {
-  return String(plugin.id || "").trim().startsWith(EXAMPLE_PLUGIN_ID_PREFIX);
-}
-
 function setPageError(error: unknown) {
   pageError.value = error instanceof Error ? error.message : String(error || "未知错误");
-}
-
-function formatList(values: string[]): string {
-  if (!values.length) return "无";
-  return values.join(", ");
-}
-
-interface PluginUsageRow {
-  label: string;
-  value: string;
 }
 
 function isBuiltinPlugin(plugin: PluginMetadata): boolean {
@@ -59,75 +44,47 @@ function findUiExtension(pluginId: string): PluginUiExtensionMetadata | null {
   return uiExtensions.value.find((item) => String(item.pluginId || "").trim() === id) || null;
 }
 
-function formatUiExtensionSummary(pluginId: string): string {
-  const ext = findUiExtension(pluginId);
-  if (!ext) return "无";
-  return `${ext.enabled ? "enabled" : "disabled"} · ${ext.exportName || "default"} · ${ext.moduleUrl}`;
+function pluginSurfaceTags(plugin: PluginMetadata): string[] {
+  const tags: string[] = [];
+  if (plugin.hooks.length > 0 || plugin.modes.length > 0 || plugin.capabilities.length > 0 || plugin.policyCapabilities.length > 0) {
+    tags.push("运行流程");
+  }
+  if (plugin.tools.length > 0) {
+    tags.push("工具扩展");
+  }
+  if (plugin.llmProviders.length > 0) {
+    tags.push("模型能力");
+  }
+  if (plugin.runtimeMessages.length > 0 || plugin.brainEvents.length > 0) {
+    tags.push("运行消息");
+  }
+  if (findUiExtension(plugin.id)) {
+    tags.push("面板 UI");
+  }
+  if (tags.length === 0) {
+    tags.push("基础插件");
+  }
+  return tags.slice(0, 4);
 }
 
-function buildPluginUsageRows(plugin: PluginMetadata): PluginUsageRow[] {
-  const rows: PluginUsageRow[] = [];
-  const push = (label: string, values: string[]) => {
-    if (!values.length) return;
-    rows.push({ label, value: values.join(", ") });
-  };
-  push("hooks", plugin.hooks);
-  push("modes", plugin.modes);
-  push("capabilities", plugin.capabilities);
-  push("policyCapabilities", plugin.policyCapabilities);
-  push("tools", plugin.tools);
-  push("runtimeMessages", plugin.runtimeMessages);
-  push("brainEvents", plugin.brainEvents);
-  const uiSummary = formatUiExtensionSummary(plugin.id);
-  if (uiSummary !== "无") {
-    rows.push({
-      label: "uiExtension",
-      value: uiSummary
-    });
+function pluginSurfaceSummary(plugin: PluginMetadata): string {
+  const summary: string[] = [];
+  if (plugin.hooks.length > 0 || plugin.modes.length > 0 || plugin.capabilities.length > 0 || plugin.policyCapabilities.length > 0) {
+    summary.push("参与运行流程");
   }
-  if (plugin.usageTotalCalls > 0 || plugin.usageTotalErrors > 0 || plugin.usageTotalTimeouts > 0) {
-    rows.push({
-      label: "usage.calls",
-      value: String(plugin.usageTotalCalls)
-    });
-    rows.push({
-      label: "usage.errors",
-      value: String(plugin.usageTotalErrors)
-    });
-    rows.push({
-      label: "usage.timeouts",
-      value: String(plugin.usageTotalTimeouts)
-    });
-    if (plugin.usageLastUsedAt) {
-      rows.push({
-        label: "usage.lastUsedAt",
-        value: plugin.usageLastUsedAt
-      });
-    }
-    const topHookCalls = Object.entries(plugin.usageHookCalls || {})
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 6)
-      .map(([hook, count]) => `${hook}:${count}`);
-    if (topHookCalls.length > 0) {
-      rows.push({
-        label: "usage.hooks",
-        value: topHookCalls.join(", ")
-      });
-    }
+  if (plugin.tools.length > 0) {
+    summary.push("扩展工具能力");
   }
-  return rows;
-}
-
-function pluginUsageKind(plugin: PluginMetadata): string {
-  const traits: string[] = [];
-  if (plugin.hooks.length > 0) traits.push("Hook");
-  if (plugin.modes.length > 0 || plugin.capabilities.length > 0 || plugin.policyCapabilities.length > 0) traits.push("执行链");
-  if (plugin.tools.length > 0) traits.push("Tool Contract");
-  if (plugin.runtimeMessages.length > 0 || plugin.brainEvents.length > 0) traits.push("UI/事件输出");
-  if (formatUiExtensionSummary(plugin.id) !== "无") traits.push("UI Extension");
-  if (plugin.usageTotalCalls > 0) traits.push("已执行");
-  if (!traits.length) return "未声明";
-  return traits.join(" + ");
+  if (plugin.runtimeMessages.length > 0 || plugin.brainEvents.length > 0) {
+    summary.push("输出运行消息");
+  }
+  if (findUiExtension(plugin.id)) {
+    summary.push("扩展侧边栏界面");
+  }
+  if (summary.length === 0) {
+    return "已安装，可在这里启用、禁用或卸载。";
+  }
+  return `${summary.join("，")}。`;
 }
 
 async function refreshPlugins() {
@@ -195,8 +152,6 @@ async function handleOpenStandaloneStudio() {
 }
 
 onMounted(async () => {
-  const path = String(globalThis.location?.pathname || "").trim().toLowerCase();
-  isStandaloneStudioPage.value = path.endsWith("/plugin-studio.html");
   dialogRef.value?.focus();
   await refreshPlugins();
 });
@@ -208,7 +163,7 @@ onMounted(async () => {
     tabindex="-1"
     role="dialog"
     aria-modal="true"
-    aria-label="插件管理"
+    aria-label="插件"
     class="fixed inset-0 z-[60] bg-ui-bg flex flex-col animate-in fade-in duration-200 focus:outline-none"
     @keydown.esc="$emit('close')"
   >
@@ -220,18 +175,9 @@ onMounted(async () => {
       >
         <ArrowLeft :size="18" />
       </button>
-      <h2 class="ml-2 font-bold text-[14px] text-ui-text tracking-tight">插件管理</h2>
+      <h2 class="ml-2 font-bold text-[14px] text-ui-text tracking-tight">插件</h2>
       <button
-        v-if="!isStandaloneStudioPage"
-        class="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-ui-accent/10 border border-ui-accent/30 text-[12px] font-semibold text-ui-accent hover:bg-ui-accent/20 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-        aria-label="打开 Plugin Studio 开发工作台"
-        @click="handleOpenStandaloneStudio"
-      >
-        <Code2 :size="14" aria-hidden="true" />
-        开发工作台
-      </button>
-      <button
-        class="p-2 hover:bg-ui-surface rounded-sm transition-colors text-ui-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50"
+        class="ml-auto p-2 hover:bg-ui-surface rounded-sm transition-colors text-ui-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50"
         :disabled="loading"
         aria-label="刷新插件列表"
         @click="refreshPlugins"
@@ -260,19 +206,20 @@ onMounted(async () => {
                 {{ plugin.enabled ? "enabled" : "disabled" }}
               </span>
             </div>
-            <div class="rounded border border-ui-border/70 bg-ui-bg px-2.5 py-2 text-[11px] text-ui-text-muted space-y-1.5">
-              <p><span class="font-semibold text-ui-text">类型:</span> {{ pluginUsageKind(plugin) }}</p>
-              <template v-if="buildPluginUsageRows(plugin).length > 0">
-                <p
-                  v-for="row in buildPluginUsageRows(plugin)"
-                  :key="`${plugin.id}-${row.label}`"
-                >
-                  <span class="font-semibold text-ui-text">{{ row.label }}:</span> {{ row.value }}
-                </p>
-              </template>
-              <p v-else>未声明可观测使用项</p>
+            <div class="flex flex-wrap gap-1.5">
+              <span
+                v-for="tag in pluginSurfaceTags(plugin)"
+                :key="`${plugin.id}-${tag}`"
+                class="rounded-full border border-ui-border bg-ui-bg px-2 py-0.5 text-[10px] font-semibold text-ui-text-muted"
+              >
+                {{ tag }}
+              </span>
             </div>
-            <p v-if="plugin.lastError" class="text-[11px] text-rose-600">lastError: {{ plugin.lastError }}</p>
+            <div class="rounded border border-ui-border/70 bg-ui-bg px-2.5 py-2 text-[11px] text-ui-text-muted space-y-1.5">
+              <p>{{ pluginSurfaceSummary(plugin) }}</p>
+              <p v-if="plugin.errorCount > 0">最近出现 {{ plugin.errorCount }} 次运行错误。</p>
+              <p v-if="plugin.lastError" class="text-rose-600">最近错误：{{ plugin.lastError }}</p>
+            </div>
             <div class="flex items-center gap-2">
               <button
                 class="px-2.5 py-1.5 rounded-sm bg-ui-bg border border-ui-border text-[12px] hover:bg-ui-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50"
@@ -333,6 +280,24 @@ onMounted(async () => {
             </div>
           </li>
         </ul>
+      </section>
+
+      <section class="space-y-3 rounded-md border border-ui-border bg-ui-surface/20 px-3 py-3">
+        <div class="space-y-1">
+          <h3 class="text-[11px] font-bold uppercase tracking-[0.1em] text-ui-text-muted">开发插件</h3>
+          <p class="text-[12px] leading-5 text-ui-text-muted">
+            创建、编辑、热更新和调试插件请使用独立的 Plugin Studio。
+            这里保留用户侧的启用、禁用和卸载。
+          </p>
+        </div>
+        <button
+          class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-ui-accent/10 border border-ui-accent/30 text-[12px] font-semibold text-ui-accent hover:bg-ui-accent/20 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+          aria-label="打开 Plugin Studio"
+          @click="handleOpenStandaloneStudio"
+        >
+          <Code2 :size="14" aria-hidden="true" />
+          打开 Plugin Studio
+        </button>
       </section>
     </div>
   </div>

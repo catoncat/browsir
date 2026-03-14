@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
-import { useRuntimeStore, type SkillMetadata } from "../stores/runtime";
+import { useSkillStore, type SkillMetadata } from "../stores/skill-store";
 import { ArrowLeft, Loader2, RefreshCcw, Play, Trash2 } from "lucide-vue-next";
 
 const emit = defineEmits(["close"]);
-const store = useRuntimeStore();
+const store = useSkillStore();
 
 const dialogRef = ref<HTMLElement | null>(null);
 const skills = ref<SkillMetadata[]>([]);

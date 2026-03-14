@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
-import { useRuntimeStore, type PluginMetadata } from "../stores/runtime";
+import { usePluginStore, type PluginMetadata } from "../stores/plugin-store";
 import ShikiCodeEditor from "./ShikiCodeEditor.vue";
 import HookReference from "./HookReference.vue";
 import { publishDebugLinkToBridge, type DebugExportChannel } from "../utils/debug-link";
@@ -10,8 +10,6 @@ import {
   Save,
   Download,
   Zap,
-  Play,
-  Pause,
   Trash2,
   FileJson2,
   FileCode2,
@@ -57,12 +55,11 @@ interface RuntimeLogItem {
 type StudioFileName = "plugin.json" | "index.js" | "ui.js";
 
 const emit = defineEmits(["close"]);
-const store = useRuntimeStore();
+const store = usePluginStore();
 
 const PROJECTS_STORAGE_KEY = "bbl.plugin_studio.projects.v1";
 const SELECTED_STORAGE_KEY = "bbl.plugin_studio.selected.v1";
 const MAX_LOG_ITEMS = 240;
-const BUILTIN_PLUGIN_ID_PREFIX = "runtime.builtin.plugin.";
 const EXAMPLE_PLUGIN_ID_PREFIX = "plugin.example.";
 const PLUGIN_STUDIO_SESSION_ID = "plugin-studio";
 const LOG_CHANNEL_OPTIONS = ["trigger", "hook", "brain", "runtime"] as const;
@@ -78,7 +75,6 @@ const selectedProjectId = ref("");
 const selectedPluginId = ref("");
 const activeFile = ref<StudioFileName>("plugin.json");
 const rightPanelMode = ref<"logs" | "docs">("docs");
-const showBuiltinPlugins = ref(false);
 const logScope = ref<"selected" | "all">("selected");
 const logKeyword = ref("");
 const logErrorsOnly = ref(false);
@@ -537,46 +533,6 @@ async function validatePayloadBeforeInstall(payload: Record<string, unknown>): P
   statusMessage.value = checkSummary;
 }
 
-function tryBuildInstallPackageForPlugin(pluginId: string): {
-  payload: Record<string, unknown>;
-  matched: boolean;
-  reason?: string;
-} {
-  const targetId = String(pluginId || "").trim();
-  if (!targetId) {
-    return {
-      payload: {},
-      matched: false,
-      reason: "pluginId 为空"
-    };
-  }
-  try {
-    const payload = buildInstallPackage();
-    const manifestId = extractManifestId(toRecord(payload));
-    if (!manifestId) {
-      return {
-        payload: {},
-        matched: false,
-        reason: "plugin.json 缺少 manifest.id"
-      };
-    }
-    if (manifestId !== targetId) {
-      return {
-        payload: {},
-        matched: false,
-        reason: `编辑区 manifest.id=${manifestId} 与目标插件 ${targetId} 不一致`
-      };
-    }
-    return { payload, matched: true };
-  } catch (error) {
-    return {
-      payload: {},
-      matched: false,
-      reason: error instanceof Error ? error.message : String(error || "构建插件包失败")
-    };
-  }
-}
-
 function buildCurrentProject(
   options: {
     category?: "example" | "user";
@@ -706,51 +662,6 @@ async function handleInstall(replace: boolean): Promise<void> {
   }
 }
 
-async function handleTogglePlugin(enable: boolean): Promise<void> {
-  const plugin = selectedInstalledPlugin.value;
-  const pluginId = String(plugin?.id || "").trim();
-  if (!pluginId) {
-    errorMessage.value = "请先在左侧选择一个已安装插件";
-    return;
-  }
-  busy.value = true;
-  errorMessage.value = "";
-  statusMessage.value = "";
-  try {
-    if (enable) {
-      // “重启插件”语义：优先按编辑区代码 replace 热更新，再启用。
-      const fromEditor = tryBuildInstallPackageForPlugin(pluginId);
-      if (fromEditor.matched) {
-        await validatePayloadBeforeInstall(fromEditor.payload);
-        await store.installPlugin(
-          {
-            package: fromEditor.payload,
-            sessionId: PLUGIN_STUDIO_SESSION_ID
-          },
-          {
-            replace: true,
-            enable: true
-          }
-        );
-        statusMessage.value = "插件已按当前代码重启";
-      } else {
-        await store.enablePlugin(pluginId);
-        statusMessage.value = fromEditor.reason
-          ? `插件已启用（未重载代码：${fromEditor.reason}）`
-          : "插件已启用";
-      }
-    } else {
-      await store.disablePlugin(pluginId);
-      statusMessage.value = "插件已禁用";
-    }
-    await refreshPlugins();
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error || "插件状态更新失败");
-  } finally {
-    busy.value = false;
-  }
-}
-
 function handleSaveProject(): void {
   errorMessage.value = "";
   statusMessage.value = "";
@@ -795,36 +706,6 @@ function handleDeleteProject(project: StudioProject): void {
   selectedPluginId.value = "";
   writeSelectedProjectToStorage("");
   applyDefaultDraftFiles();
-}
-
-async function handleUnregisterPlugin(targetPlugin?: PluginMetadata | null): Promise<void> {
-  const plugin = targetPlugin || selectedInstalledPlugin.value;
-  if (!plugin) {
-    errorMessage.value = "请先选择一个已安装插件";
-    return;
-  }
-  const pluginId = plugin.id;
-  if (pluginId.startsWith(BUILTIN_PLUGIN_ID_PREFIX)) {
-    errorMessage.value = "内置插件不允许卸载";
-    return;
-  }
-  const confirmed = globalThis.confirm(`确认卸载插件 ${pluginId}？`);
-  if (!confirmed) return;
-  busy.value = true;
-  errorMessage.value = "";
-  statusMessage.value = "";
-  try {
-    await store.unregisterPlugin(pluginId);
-    await refreshPlugins();
-    if (selectedPluginId.value === pluginId) {
-      selectedPluginId.value = "";
-    }
-    statusMessage.value = `插件 ${plugin.name || plugin.id} 已卸载`;
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error || "卸载失败");
-  } finally {
-    busy.value = false;
-  }
 }
 
 function handleCreateProject(): void {
@@ -937,28 +818,13 @@ function handleInsertSnippet(snippet: string): void {
   }
 }
 
-function isBuiltinPlugin(plugin: PluginMetadata): boolean {
-  return String(plugin.id || "").trim().startsWith(BUILTIN_PLUGIN_ID_PREFIX);
-}
-
 function isExamplePlugin(plugin: PluginMetadata): boolean {
   return String(plugin.id || "").trim().startsWith(EXAMPLE_PLUGIN_ID_PREFIX);
 }
 
-const installedBuiltinPlugins = computed(() =>
-  plugins.value.filter((item) => isBuiltinPlugin(item))
-);
-
-const installedExamplePlugins = computed(() =>
-  plugins.value.filter((item) => !isBuiltinPlugin(item) && isExamplePlugin(item))
-);
-
-const installedUserPlugins = computed(() =>
-  plugins.value.filter((item) => !isBuiltinPlugin(item) && !isExamplePlugin(item))
-);
-
 const exampleProjects = computed(() => projects.value.filter((item) => item.category === "example"));
 const userProjects = computed(() => projects.value.filter((item) => item.category === "user"));
+const selectedProject = computed(() => getSelectedProject());
 
 const activeEditor = computed({
   get(): string {
@@ -979,11 +845,40 @@ const selectedInstalledPlugin = computed(() =>
 
 const selectedInstalledPluginEnabled = computed(() => selectedInstalledPlugin.value?.enabled === true);
 const hasSelectedInstalledPlugin = computed(() => Boolean(selectedInstalledPlugin.value));
+const selectedProjectPluginId = computed(() => {
+  const projectPluginId = String(selectedProject.value?.pluginId || "").trim();
+  if (projectPluginId) return projectPluginId;
+  return String(selectedInstalledPlugin.value?.id || "").trim();
+});
+const runtimeBindingHeadline = computed(() => {
+  if (!selectedProject.value) {
+    return "请先选择一个插件项目";
+  }
+  if (selectedInstalledPlugin.value) {
+    return selectedInstalledPluginEnabled.value ? "当前项目已连接到运行时" : "当前项目已安装，但处于停用状态";
+  }
+  if (selectedProjectPluginId.value) {
+    return "当前项目尚未安装到运行时";
+  }
+  return "当前项目还没有绑定 pluginId";
+});
+const runtimeBindingDetail = computed(() => {
+  if (!selectedProject.value) {
+    return "选择项目后，Studio 会围绕该项目的编辑、安装、热更新和调试工作流工作。";
+  }
+  if (selectedInstalledPlugin.value) {
+    return "运行态已经和当前项目绑定。若要管理所有插件的启停或卸载，请回到侧边栏的插件页。";
+  }
+  if (selectedProjectPluginId.value) {
+    return "当前项目已有 pluginId，但运行时里还没有对应实例。点击“安装到运行时”即可创建。";
+  }
+  return "先在 plugin.json 中声明 manifest.id，再保存或安装，Studio 才能建立运行态绑定。";
+});
 const logSelectedPluginId = computed(() => {
   if (logScope.value === "all") return "";
   const installedId = String(selectedInstalledPlugin.value?.id || "").trim();
   if (installedId) return installedId;
-  const projectId = String(getSelectedProject()?.pluginId || "").trim();
+  const projectId = selectedProjectPluginId.value;
   return projectId;
 });
 
@@ -1086,7 +981,7 @@ const logHotTags = computed(() => {
 function buildStudioLogExportPayload(): Record<string, unknown> {
   return {
     studioSessionId: PLUGIN_STUDIO_SESSION_ID,
-    selectedPluginId: String(selectedInstalledPlugin.value?.id || "").trim() || undefined,
+    selectedPluginId: String(logSelectedPluginId.value || "").trim() || undefined,
     selectedProjectId: String(selectedProjectId.value || "").trim() || undefined,
     filters: {
       scope: logScope.value,
@@ -1369,7 +1264,7 @@ onUnmounted(() => {
     <header class="studio-header">
       <div class="studio-title-wrap">
         <h1 class="studio-title">Plugin Studio</h1>
-        <p class="studio-subtitle">在线编辑 + 一键热更新 + 触发日志</p>
+        <p class="studio-subtitle">面向当前插件项目的创建、热更新与调试工作台</p>
       </div>
       <div class="studio-header-actions">
         <button
@@ -1429,70 +1324,29 @@ onUnmounted(() => {
         </section>
 
         <section class="studio-panel flex-1">
-          <p class="panel-title">已安装</p>
-          <ul class="panel-list">
-            <li
-              v-for="plugin in installedExamplePlugins"
-              :key="plugin.id"
-              :class="['panel-item', selectedPluginId === plugin.id ? 'active' : '']"
-              @click="handleLoadFromInstalled(plugin)"
-            >
-              <div class="panel-item-main">
-                <p class="item-title">{{ plugin.name || plugin.id }}</p>
-                <p class="item-sub">{{ plugin.id }}</p>
-              </div>
+          <div class="panel-header">
+            <div>
+              <p class="panel-title">当前项目运行态</p>
+              <p class="panel-caption">插件的启停与卸载统一回到侧边栏插件页处理。</p>
+            </div>
+          </div>
+          <div class="runtime-binding-card">
+            <div class="runtime-binding-copy">
+              <p class="item-title">{{ runtimeBindingHeadline }}</p>
+              <p v-if="selectedProjectPluginId" class="item-sub">{{ selectedProjectPluginId }}</p>
+              <p class="runtime-binding-detail">{{ runtimeBindingDetail }}</p>
+            </div>
+            <div v-if="selectedInstalledPlugin" class="runtime-binding-actions">
               <button
-                class="panel-item-icon-btn danger"
+                class="studio-btn"
                 :disabled="busy"
-                :aria-label="`卸载插件 ${plugin.name || plugin.id}`"
-                title="卸载插件"
-                @click.stop="handleUnregisterPlugin(plugin)"
+                @click="handleLoadFromInstalled(selectedInstalledPlugin)"
               >
-                <Trash2 :size="13" aria-hidden="true" />
+                <Radio :size="14" />
+                回填到编辑区
               </button>
-            </li>
-            <li
-              v-for="plugin in installedUserPlugins"
-              :key="plugin.id"
-              :class="['panel-item', selectedPluginId === plugin.id ? 'active' : '']"
-              @click="handleLoadFromInstalled(plugin)"
-            >
-              <div class="panel-item-main">
-                <p class="item-title">{{ plugin.name || plugin.id }}</p>
-                <p class="item-sub">{{ plugin.id }}</p>
-              </div>
-              <button
-                class="panel-item-icon-btn danger"
-                :disabled="busy"
-                :aria-label="`卸载插件 ${plugin.name || plugin.id}`"
-                title="卸载插件"
-                @click.stop="handleUnregisterPlugin(plugin)"
-              >
-                <Trash2 :size="13" aria-hidden="true" />
-              </button>
-            </li>
-            <li v-if="installedExamplePlugins.length === 0 && installedUserPlugins.length === 0" class="panel-empty">
-              暂无已安装插件
-            </li>
-          </ul>
-          <button
-            class="builtin-toggle"
-            @click="showBuiltinPlugins = !showBuiltinPlugins"
-          >
-            {{ showBuiltinPlugins ? '隐藏内置' : `显示内置 (${installedBuiltinPlugins.length})` }}
-          </button>
-          <ul v-if="showBuiltinPlugins" class="panel-list builtin-list">
-            <li
-              v-for="plugin in installedBuiltinPlugins"
-              :key="plugin.id"
-              class="panel-item builtin"
-            >
-              <div class="panel-item-main">
-                <p class="item-title">{{ plugin.name || plugin.id }}</p>
-                <p class="item-sub">{{ plugin.id }}</p>
-              </div>
-            </li>
-          </ul>
+            </div>
+          </div>
         </section>
       </aside>
 
@@ -1713,25 +1567,7 @@ onUnmounted(() => {
           </button>
           <button class="studio-btn primary" :disabled="busy" @click="handleInstall(hasSelectedInstalledPlugin)">
             <Zap :size="14" />
-            {{ hasSelectedInstalledPlugin ? '热更新' : '安装' }}
-          </button>
-          <button
-            v-if="hasSelectedInstalledPlugin"
-            class="studio-btn"
-            :disabled="busy"
-            @click="handleTogglePlugin(!selectedInstalledPluginEnabled)"
-          >
-            <component :is="selectedInstalledPluginEnabled ? Pause : Play" :size="14" />
-            {{ selectedInstalledPluginEnabled ? '禁用' : '启用' }}
-          </button>
-          <button
-            v-if="selectedInstalledPlugin && !selectedInstalledPlugin.id.startsWith('runtime.builtin.plugin.')"
-            class="studio-btn danger"
-            :disabled="busy"
-            @click="handleUnregisterPlugin"
-          >
-            <Trash2 :size="14" />
-            卸载
+            {{ hasSelectedInstalledPlugin ? '热更新到运行时' : '安装到运行时' }}
           </button>
         </div>
 
@@ -1744,7 +1580,10 @@ onUnmounted(() => {
 
       <div class="footer-status">
         <span v-if="selectedInstalledPlugin" class="status-pill">
-          {{ selectedInstalledPlugin.id }} · {{ selectedInstalledPluginEnabled ? "enabled" : "disabled" }}
+          {{ selectedInstalledPlugin.id }} · {{ selectedInstalledPluginEnabled ? "running" : "disabled" }}
+        </span>
+        <span v-else-if="selectedProjectPluginId" class="status-pill">
+          {{ selectedProjectPluginId }} · not installed
         </span>
         <span v-if="statusMessage" class="status-pill success">{{ statusMessage }}</span>
         <span v-if="errorMessage" class="status-pill error">{{ errorMessage }}</span>
@@ -2165,6 +2004,13 @@ onUnmounted(() => {
   margin: 0;
 }
 
+.panel-caption {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
 .panel-action-btn {
   display: flex;
   align-items: center;
@@ -2196,29 +2042,6 @@ onUnmounted(() => {
   color: var(--text-muted);
   opacity: 0.6;
   text-align: center;
-}
-
-.builtin-toggle {
-  margin-top: 4px;
-  padding: 4px 8px;
-  font-size: 10px;
-  color: var(--text-muted);
-  background: none;
-  border: none;
-  cursor: pointer;
-  text-align: left;
-  opacity: 0.7;
-  transition: opacity 0.15s;
-}
-
-.builtin-toggle:hover {
-  opacity: 1;
-}
-
-.builtin-list {
-  margin-top: 4px;
-  padding-top: 4px;
-  border-top: 1px solid var(--border);
 }
 
 .panel-title {
@@ -2305,6 +2128,36 @@ onUnmounted(() => {
   line-height: 1.35;
   color: var(--text-muted);
   word-break: break-all;
+}
+
+.runtime-binding-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--accent) 3%, var(--bg));
+  padding: 10px;
+}
+
+.runtime-binding-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.runtime-binding-detail {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.runtime-binding-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
 }
 
 .log-panel {

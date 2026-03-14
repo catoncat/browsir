@@ -2,7 +2,7 @@
 import { ref, watch, computed, nextTick } from "vue";
 import { Send, Square, Plus, ChevronDown, ChevronUp, X, Globe, Search, Check, Loader2, Wand2 } from "lucide-vue-next";
 import { useTextareaAutosize, onClickOutside } from "@vueuse/core";
-import { useRuntimeStore, type SkillMetadata } from "../stores/runtime";
+import { useSkillStore, type SkillMetadata } from "../stores/skill-store";
 import { extractPromptContextRefs, isPathLikeMentionQuery } from "../../shared/context-ref";
 import DropdownPanel from "./DropdownPanel.vue";
 
@@ -57,7 +57,7 @@ const emit = defineEmits<{
 }>();
 
 const { textarea, input: text } = useTextareaAutosize();
-const runtimeStore = useRuntimeStore();
+const runtimeStore = useSkillStore();
 const selectedTabs = ref<TabItem[]>([]);
 const availableTabs = ref<TabItem[]>([]);
 const showMentionList = ref(false);
