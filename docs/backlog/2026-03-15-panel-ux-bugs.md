@@ -1,7 +1,7 @@
 ---
 id: ISSUE-016
 title: Panel UX Bugs — 深度 Review 发现
-status: in-progress
+status: done
 priority: p0
 source: product-review-2026-03-15
 created: 2026-03-15
@@ -70,3 +70,11 @@ tags: [panel, ux, accessibility, bug]
 - **B5** ✅ ChatInput.vue `refreshTabs()` → try-catch 包裹，失败时 fallback 空数组
 
 **commit**: `fbab780` fix(panel): B1-B5 UX bugs — dark mode flash, inline confirm, aria, tabs.query guard
+
+### 2026-03-15 产品层面 P1-P2 修复
+
+- **P1** ✅ DebugView 添加到 ViewMode 类型 + More 菜单 + 模板渲染，用 Bug icon
+- **P2** ✅ 空态文案从 "系统就绪。发送指令开始自动化任务。CDP 与网桥协议已建立。" → "就绪。发送消息让 Agent 帮你完成浏览器任务。"
+- **P3** ⏭️ App.vue 3192 行拆分为大型重构，需单独 issue 规划
+
+**commit**: `a596707` feat(panel): P1 DebugView入口 + P2 空态文案优化
