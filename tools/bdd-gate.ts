@@ -52,7 +52,7 @@ function normalizeCategory(value: unknown): "all" | ContractCategory {
   if (ALLOWED_CONTRACT_CATEGORIES.has(raw)) {
     return raw as ContractCategory;
   }
-  throw new Error(`BDD_GATE_CATEGORY 非法: ${raw}（允许: all|ux|protocol|storage）`);
+  throw new Error(`BDD_GATE_CATEGORY 非法: ${raw}（允许: all|orchestrator|runtime-loop|cdp|llm|session|panel）`);
 }
 
 function normalizeInlineText(value: unknown): string {

@@ -6,7 +6,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::refreshSessionTitleAuto + extension/src/panel/App.vue::handleRefreshSession"
+          "target": "extension/src/sw/kernel/loop-session-title.ts::refreshSessionTitleAuto + extension/src/sw/kernel/__tests__/loop-session-title.browser.test.ts::normalizes session titles and source metadata + parses text content from LLM message shapes + requests session title from provider and normalizes output"
         },
         {
           "layer": "browser-cdp",
@@ -23,7 +23,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::runAgentLoop + extension/src/panel/stores/runtime.ts::saveConfig"
+          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::runAgentLoop + extension/src/panel/stores/config-store.ts::saveConfig"
         },
         {
           "layer": "browser-cdp",
@@ -130,7 +130,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/panel/stores/runtime.ts::loadConversation + extension/src/panel/App.vue::message bubble rendering"
+          "target": "extension/src/panel/stores/chat-store.ts::loadConversation + extension/src/panel/App.vue::message bubble rendering"
         },
         {
           "layer": "browser-cdp",
@@ -356,7 +356,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/panel/utils/message-actions.ts::canForkMessage+canRetryMessage + extension/src/panel/App.vue::handleEditMessage + extension/src/panel/components/ChatMessage.vue::user/assistant action rendering + extension/src/panel/stores/runtime.ts::forkFromAssistantEntry+retryLastAssistantEntry + extension/src/sw/kernel/runtime-router.ts::handleSession(brain.session.fork)+handleBrainRun(brain.run.regenerate)"
+          "target": "extension/src/panel/utils/message-actions.ts::canForkMessage+canRetryMessage + extension/src/panel/App.vue::handleEditMessage + extension/src/panel/components/ChatMessage.vue::user/assistant action rendering + extension/src/panel/stores/chat-store.ts::forkFromAssistantEntry+retryLastAssistantEntry + extension/src/sw/kernel/runtime-router.ts::handleSession(brain.session.fork)+handleBrainRun(brain.run.regenerate)"
         },
         {
           "layer": "browser-cdp",
@@ -377,7 +377,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/panel/stores/runtime.ts::sendPrompt + extension/src/sw/kernel/runtime-loop.browser.ts::startFromPrompt + buildLlmMessagesFromContext"
+          "target": "extension/src/panel/stores/chat-store.ts::sendPrompt + extension/src/sw/kernel/runtime-loop.browser.ts::startFromPrompt + buildLlmMessagesFromContext"
         },
         {
           "layer": "browser-cdp",
@@ -394,7 +394,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::shouldVerifyStep + executeToolCall + runAgentLoop"
+          "target": "extension/src/sw/kernel/__tests__/loop-browser-proof.browser.test.ts::shouldVerifyStep + extension/src/sw/kernel/loop-browser-proof.ts::shouldVerifyStep + extension/src/sw/kernel/runtime-loop.browser.ts::executeToolCall + runAgentLoop"
         },
         {
           "layer": "integration",
@@ -478,11 +478,11 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts::strict verify 不可判定时应以 max_steps 收口（不做 no_progress 早停） + 重复同签名 tool_calls 时不再触发 loop_no_progress，改为 max_steps 收口 + PI 对齐后不再发 loop_no_progress 事件，重复调用由 max_steps 收口"
+          "target": "extension/src/sw/kernel/__tests__/loop-progress-guard.browser.test.ts::calculateActionSignature + isNoProgress + updateProgressBudget + normalizeNoProgressEvidenceValue + buildNoProgressEvidenceFingerprint + buildNoProgressScopeKey + resolveNoProgressDecision + extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts::strict verify 不可判定时应以 max_steps 收口（不做 no_progress 早停） + 重复同签名 tool_calls 时不再触发 loop_no_progress，改为 max_steps 收口 + PI 对齐后不再发 loop_no_progress 事件，重复调用由 max_steps 收口"
         },
         {
           "layer": "integration",
-          "target": "extension/src/sw/kernel/runtime-router.ts::handleBrainRun + extension/src/sw/kernel/runtime-loop.browser.ts::runAgentLoop"
+          "target": "extension/src/sw/kernel/loop-progress-guard.ts + extension/src/sw/kernel/runtime-router.ts::handleBrainRun + extension/src/sw/kernel/runtime-loop.browser.ts::runAgentLoop"
         },
         {
           "layer": "browser-cdp",
@@ -533,7 +533,7 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::shouldVerifyStep + executeToolCall + runAgentLoop"
+          "target": "extension/src/sw/kernel/__tests__/loop-browser-proof.browser.test.ts::shouldVerifyStep + extension/src/sw/kernel/loop-browser-proof.ts::shouldVerifyStep + extension/src/sw/kernel/runtime-loop.browser.ts::executeToolCall + runAgentLoop"
         },
         {
           "layer": "integration",
@@ -617,11 +617,11 @@
       "proofs": [
         {
           "layer": "unit",
-          "target": "extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts::strict verify 不可判定时应以 max_steps 收口（不做 no_progress 早停） + 重复同签名 tool_calls 时不再触发 loop_no_progress，改为 max_steps 收口 + PI 对齐后不再发 loop_no_progress 事件，重复调用由 max_steps 收口"
+          "target": "extension/src/sw/kernel/__tests__/loop-progress-guard.browser.test.ts::calculateActionSignature + isNoProgress + updateProgressBudget + resolveNoProgressDecision + extension/src/sw/kernel/__tests__/runtime-router.browser.test.ts::strict verify 不可判定时应以 max_steps 收口（不做 no_progress 早停） + 重复同签名 tool_calls 时不再触发 loop_no_progress，改为 max_steps 收口 + PI 对齐后不再发 loop_no_progress 事件，重复调用由 max_steps 收口"
         },
         {
           "layer": "integration",
-          "target": "extension/src/sw/kernel/runtime-router.ts::handleBrainRun + extension/src/sw/kernel/runtime-loop.browser.ts::runAgentLoop"
+          "target": "extension/src/sw/kernel/loop-progress-guard.ts + extension/src/sw/kernel/runtime-router.ts::handleBrainRun + extension/src/sw/kernel/runtime-loop.browser.ts::runAgentLoop"
         },
         {
           "layer": "browser-cdp",

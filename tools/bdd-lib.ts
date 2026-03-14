@@ -2,8 +2,8 @@ import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 export const ALLOWED_LAYERS = new Set(["unit", "integration", "browser-cdp", "e2e"]);
-export const ALLOWED_CONTRACT_CATEGORIES = new Set(["ux", "protocol", "storage"]);
-export type ContractCategory = "ux" | "protocol" | "storage";
+export const ALLOWED_CONTRACT_CATEGORIES = new Set(["orchestrator", "runtime-loop", "cdp", "llm", "session", "panel"]);
+export type ContractCategory = "orchestrator" | "runtime-loop" | "cdp" | "llm" | "session" | "panel";
 
 export interface BehaviorContract {
   id: string;

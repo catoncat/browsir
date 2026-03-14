@@ -47,8 +47,9 @@ const BUSINESS_FORBIDDEN_PATTERNS: ForbiddenPattern[] = [
 ];
 
 function expectedPrefixForCategory(category: ContractCategory): string {
-  if (category === "ux") return BUSINESS_PREFIX;
-  return TECHNICAL_PREFIX;
+  if (category === "panel") return BUSINESS_PREFIX;
+  if (category === "orchestrator" || category === "cdp" || category === "llm") return TECHNICAL_PREFIX;
+  return null; // session, runtime-loop span both business and technical
 }
 
 function normalizeRelPath(repoRoot: string, file: string): string {
@@ -110,10 +111,11 @@ async function lintCategoryToFeatureLayer(repoRoot: string, errors: string[]) {
     if (!category) continue;
 
     const expectedPrefix = expectedPrefixForCategory(category);
+    if (!expectedPrefix) continue;
     for (const file of files) {
       const relFile = normalizeRelPath(repoRoot, file);
       if (!path.normalize(relFile).startsWith(expectedPrefix)) {
-        const expectedLayer = category === "ux" ? "business" : "technical";
+        const expectedLayer = category === "panel" ? "business" : "technical";
         errors.push(
           `contract ${contractId} category=${category} 的 feature 必须位于 ${expectedLayer} 层: ${relFile}`
         );

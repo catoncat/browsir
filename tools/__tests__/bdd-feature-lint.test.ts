@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
 import { runBddFeatureLint } from "../bdd-feature-lint";
 
-type ContractCategory = "ux" | "protocol" | "storage";
+type ContractCategory = "orchestrator" | "runtime-loop" | "cdp" | "llm" | "session" | "panel";
 
 interface FixtureOptions {
   category: ContractCategory;
@@ -82,9 +82,9 @@ async function createFixture(options: FixtureOptions): Promise<string> {
 }
 
 describe("runBddFeatureLint", () => {
-  test("passes when ux feature is under business layer with business wording", async () => {
+  test("passes when panel feature is under business layer with business wording", async () => {
     const repoRoot = await createFixture({
-      category: "ux",
+      category: "panel",
       featurePath: "bdd/features/business/chat/sample.feature",
       featureBody: `@contract(BHV-SAMPLE-FEATURE-LINT)\nFeature: Sample\n\n  Scenario: Business scenario\n    Given 用户已进入会话\n    When 用户发送消息\n    Then 系统返回可读结果\n`
     });
@@ -100,16 +100,16 @@ describe("runBddFeatureLint", () => {
     }
   });
 
-  test("fails when ux feature is incorrectly placed under technical layer", async () => {
+  test("fails when panel feature is incorrectly placed under technical layer", async () => {
     const repoRoot = await createFixture({
-      category: "ux",
+      category: "panel",
       featurePath: "bdd/features/technical/chat/sample.feature",
       featureBody: `@contract(BHV-SAMPLE-FEATURE-LINT)\nFeature: Sample\n\n  Scenario: Layer mismatch\n    Given 用户已进入会话\n    When 用户发送消息\n    Then 系统返回可读结果\n`
     });
 
     try {
       const result = await runBddFeatureLint(repoRoot);
-      expect(result.errors.some((x) => x.includes("category=ux") && x.includes("business"))).toBeTrue();
+      expect(result.errors.some((x) => x.includes("category=panel") && x.includes("business"))).toBeTrue();
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
     }
@@ -117,7 +117,7 @@ describe("runBddFeatureLint", () => {
 
   test("fails when business feature contains implementation detail keywords", async () => {
     const repoRoot = await createFixture({
-      category: "ux",
+      category: "panel",
       featurePath: "bdd/features/business/chat/sample.feature",
       featureBody: `@contract(BHV-SAMPLE-FEATURE-LINT)\nFeature: Sample\n\n  Scenario: Forbidden token\n    Given 用户已进入会话\n    When 用户点击操作\n    Then 应看到 aria-label 为 "复制内容" 的按钮\n`
     });
@@ -132,7 +132,7 @@ describe("runBddFeatureLint", () => {
 
   test("fails when feature is outside business/technical directories", async () => {
     const repoRoot = await createFixture({
-      category: "ux",
+      category: "panel",
       featurePath: "bdd/features/chat/sample.feature",
       featureBody: `@contract(BHV-SAMPLE-FEATURE-LINT)\nFeature: Sample\n\n  Scenario: Wrong directory\n    Given 用户已进入会话\n    When 用户发送消息\n    Then 系统返回可读结果\n`
     });
