@@ -1,11 +1,13 @@
 ---
 id: ISSUE-003
 title: manifest.json 缺少 offscreen 权限导致 plugin sandbox fallback 失败
-status: open
+status: done
 priority: p0
 source: 调试对话 session-816e926f（2026-03-14）
 created: 2026-03-14
-assignee: unassigned
+assignee: agent
+resolved: 2026-03-14
+commit: c5ae106
 tags: [bug, manifest, offscreen, plugin, sandbox]
 ---
 

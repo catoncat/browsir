@@ -1,11 +1,13 @@
 ---
 id: ISSUE-002
 title: Compaction 不支持 hosted_chat 响应格式导致上下文压缩失败
-status: open
+status: done
 priority: p0
 source: 调试对话 session-816e926f（2026-03-14）
 created: 2026-03-14
-assignee: unassigned
+assignee: agent
+resolved: 2026-03-14
+commit: 2175bd1
 tags: [bug, compaction, hosted-chat, llm]
 ---
 
