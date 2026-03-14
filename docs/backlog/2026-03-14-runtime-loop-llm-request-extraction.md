@@ -23,11 +23,12 @@ tags: [slice, kernel, runtime-loop, llm, architecture, phase2]
 
 ## 目标
 
-提取为独立模块 `loop-llm-request.ts`，使 runtime-loop 继续向"仅编排粘合层"演进。
+提取为独立模块 `loop-llm-request.ts`，使 runtime-loop 继续向“仅编排粘合层”演进；模块需以窄依赖注入/工厂形态承载 request lifecycle，而不是把函数体原样搬家。
 
 ## 验收标准
 
 - [ ] `loop-llm-request.ts` 独立存在，承载 LLM HTTP 请求生命周期
+- [ ] 模块通过窄依赖接口接入 hook / retry state / trace emit，而不是继续隐式依赖 runtime-loop 闭包
 - [ ] `runtime-loop.browser.ts` 不再包含 `requestLlmWithRetry` 函数体
 - [ ] runtime-loop 总行数降至 ~3,076
 - [ ] `bun run build` 通过

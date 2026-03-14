@@ -1,47 +1,47 @@
 ---
 id: ISSUE-019
-title: Runtime Loop System Prompt 构建提取 — loop-system-prompt.ts
+title: Prompt 域整合 — system prompt resolver 下沉到 prompt/
 status: open
-priority: p2
+priority: p3
 source: architecture-evolution-phase2
 created: 2026-03-14
 assignee: unassigned
 kind: slice
 epic: EPIC-2026-03-14-ARCH-EVOLUTION-PHASE2
 parallel_group: kernel-loop
-depends_on: [ISSUE-018]
+depends_on: [ISSUE-018, ISSUE-020]
 write_scope:
   - extension/src/sw/kernel/runtime-loop.browser.ts
-  - extension/src/sw/kernel/loop-system-prompt.ts
+  - extension/src/sw/kernel/prompt/
 acceptance_ref: docs/architecture-evolution-plan-2026-03-14.md
-tags: [slice, kernel, runtime-loop, system-prompt, architecture, phase2]
+tags: [slice, kernel, prompt, system-prompt, architecture, phase2]
 ---
 
 ## 问题
 
-`buildResolvedSystemPrompt`（~150 行）+ skill prompt 展开逻辑是纯函数，无外部依赖，但仍内联在 `runtime-loop.browser.ts` 中。
+`buildResolvedSystemPrompt` 并不是“纯函数小工具”，而是 context-ref 解析 + system prompt 组装的一部分；当前 prompt 逻辑已分散在 `runtime-loop.browser.ts` 与 `prompt/prompt-policy.browser.ts` 两处。
 
 ## 目标
 
-提取为独立模块 `loop-system-prompt.ts`。
+将 system prompt resolver 下沉到 `prompt/` 域，避免再新增一个根层 `loop-system-prompt.ts` 继续打散 prompt 逻辑。
 
 ## 验收标准
 
-- [ ] `loop-system-prompt.ts` 独立存在，承载 system prompt 构建和 skill prompt 展开
-- [ ] `runtime-loop.browser.ts` 通过导入使用该模块
-- [ ] runtime-loop 总行数降至 ~2,926
+- [ ] resolver 位于 `extension/src/sw/kernel/prompt/` 域内（或并入 `prompt-policy.browser.ts`）
+- [ ] `runtime-loop.browser.ts` 不再定义 `buildResolvedSystemPrompt` 函数体
+- [ ] system prompt + context-ref 解析逻辑不再在 loop 根层与 prompt 域之间分裂
 - [ ] `bun run build` 通过
 - [ ] `bun run test` 通过
 
 ## 写入范围
 
 - `extension/src/sw/kernel/runtime-loop.browser.ts`（瘦身）
-- `extension/src/sw/kernel/loop-system-prompt.ts`（新建）
+- `extension/src/sw/kernel/prompt/`
 
 ## 泳道
 
-`kernel-loop`，runtime-loop 单写者
+`kernel-loop`，runtime-loop 单写者（建议在 ISSUE-020 之后进入）
 
 ## 依赖
 
-ISSUE-018（同泳道串行）
+ISSUE-018、ISSUE-020（同泳道串行）
