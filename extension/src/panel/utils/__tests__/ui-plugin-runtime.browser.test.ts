@@ -162,9 +162,9 @@ describe("panel ui plugin runtime remote mem hooks", () => {
       getActiveSessionId: () => "session-active"
     });
     const host = document.createElement("div") as unknown as FakeElement;
-    document.body.appendChild(host as unknown as FakeElement);
+    document.body.appendChild(host as unknown as Node);
 
-    await runtime.attachHostSlot("chat.scene.overlay", host);
+    await runtime.attachHostSlot("chat.scene.overlay", host as unknown as HTMLElement);
     await runtime.hydrate([
       {
         pluginId: "plugin.test.ui.widget",
@@ -218,9 +218,9 @@ describe("panel ui plugin runtime remote mem hooks", () => {
       getActiveSessionId: () => activeSessionId || undefined
     });
     const host = document.createElement("div") as unknown as FakeElement;
-    document.body.appendChild(host as unknown as FakeElement);
+    document.body.appendChild(host as unknown as Node);
 
-    await runtime.attachHostSlot("chat.scene.overlay", host);
+    await runtime.attachHostSlot("chat.scene.overlay", host as unknown as HTMLElement);
     await runtime.hydrate([
       {
         pluginId: "plugin.example.ui.mission-hud.dog",
@@ -263,9 +263,9 @@ describe("panel ui plugin runtime remote mem hooks", () => {
       getActiveSessionId: () => "session-active"
     });
     const host = document.createElement("div") as unknown as FakeElement;
-    document.body.appendChild(host as unknown as FakeElement);
+    document.body.appendChild(host as unknown as Node);
 
-    await runtime.attachHostSlot("chat.scene.overlay", host);
+    await runtime.attachHostSlot("chat.scene.overlay", host as unknown as HTMLElement);
     await runtime.hydrate([
       {
         pluginId: "plugin.example.ui.mission-hud.dog",

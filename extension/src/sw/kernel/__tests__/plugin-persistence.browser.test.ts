@@ -94,4 +94,24 @@ describe("plugin-persistence.browser", () => {
     expect(String(record?.source?.uiJs || "")).toContain("ui.notice.before_show");
     expect(String(record?.source?.uiModulePath || "")).toBe("mem://plugins/plugin.example.ui.mission-hud.dog/ui.js");
   });
+
+  it("re-seeds missing example plugins after seed version has already been written", async () => {
+    await kvSet(PLUGIN_EXAMPLE_SEED_STORAGE_KEY, {
+      version: 2,
+      seededAt: "2026-03-14T00:00:00.000Z"
+    });
+
+    await seedDefaultExamplePluginRecords();
+
+    const records = await readPersistedPluginRecords();
+    const missionHudDog = records.find((item) => item.pluginId === "plugin.example.ui.mission-hud.dog");
+    const sendSuccess = records.find(
+      (item) => item.pluginId === "plugin.example.notice.send-success-global-message"
+    );
+    expect(missionHudDog?.kind).toBe("extension");
+    expect(missionHudDog?.enabled).toBe(true);
+    expect(String(missionHudDog?.source?.uiModulePath || "")).toBe("plugins/example-mission-hud-dog/ui.js");
+    expect(sendSuccess?.kind).toBe("extension");
+    expect(sendSuccess?.enabled).toBe(true);
+  });
 });

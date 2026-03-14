@@ -226,6 +226,29 @@ function defaultExamplePluginSources(): Array<Record<string, unknown>> {
   return out;
 }
 
+function ensureDefaultExamplePluginRecords(
+  list: PersistedPluginRecord[],
+): { list: PersistedPluginRecord[]; changed: boolean } {
+  const next = [...list];
+  const knownIds = new Set(next.map((item) => item.pluginId));
+  let changed = false;
+  for (const source of defaultExamplePluginSources()) {
+    const pluginId = String(toRecord(source.manifest).id || "").trim();
+    if (!pluginId || knownIds.has(pluginId)) continue;
+    next.push({
+      pluginId,
+      kind: "extension",
+      enabled: true,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      source,
+    });
+    knownIds.add(pluginId);
+    changed = true;
+  }
+  return { list: next, changed };
+}
+
 export async function seedDefaultExamplePluginRecords(): Promise<void> {
   let list = await readPersistedPluginRecords();
   const seeded = toRecord(await kvGet(PLUGIN_EXAMPLE_SEED_STORAGE_KEY));
@@ -240,25 +263,10 @@ export async function seedDefaultExamplePluginRecords(): Promise<void> {
     }
   }
 
-  if (seededVersion <= 0) {
-    const knownIds = new Set(list.map((item) => item.pluginId));
-    for (const source of defaultExamplePluginSources()) {
-      const pluginId = String(toRecord(source.manifest).id || "").trim();
-      if (!pluginId || knownIds.has(pluginId)) continue;
-      list = [
-        ...list,
-        {
-          pluginId,
-          kind: "extension",
-          enabled: true,
-          createdAt: nowIso(),
-          updatedAt: nowIso(),
-          source,
-        },
-      ];
-      knownIds.add(pluginId);
-      changed = true;
-    }
+  const ensured = ensureDefaultExamplePluginRecords(list);
+  list = ensured.list;
+  if (ensured.changed) {
+    changed = true;
   }
 
   if (changed) {
