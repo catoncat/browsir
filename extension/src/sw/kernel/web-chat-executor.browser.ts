@@ -163,6 +163,10 @@ export function __resetCursorHelpWebProviderTestState(): void {
   LAST_CONVERSATION_KEY_BY_SESSION.clear();
   cursorHelpSlotLifecycleBoundTabs = null;
   cursorHelpSlotLifecycleBoundWindows = null;
+  lastAutoExpandAt = 0;
+  lastAutoShrinkAt = 0;
+  lastAutoExpandReason = "";
+  lastAutoShrinkReason = "";
 }
 
 function emitProviderDebugLog(step: string, status: "running" | "done" | "failed", detail: string): void {
@@ -1297,7 +1301,8 @@ async function tryAutoShrinkPool(
     if (slot.status !== "idle") return false;
     if (ACTIVE_REQUEST_ID_BY_SLOT.has(slot.slotId)) return false;
     if (hasSlotAffinity(slot.slotId)) return false;
-    const idleDuration = now - Math.max(slot.lastUsedAt || 0, slot.lastReadyAt || 0);
+    const lastActive = slot.lastUsedAt > 0 ? slot.lastUsedAt : (slot.lastReadyAt || 0);
+    const idleDuration = now - lastActive;
     return idleDuration >= AUTOSCALE_IDLE_THRESHOLD_MS;
   });
   if (shrinkCandidates.length <= 0) return false;
