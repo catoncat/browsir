@@ -8,7 +8,7 @@ import {
   useConfigStore,
   type PanelLlmProfile,
 } from "../stores/config-store";
-import { ArrowLeft, Eye, EyeOff, Loader2, Plus, Trash2 } from "lucide-vue-next";
+import { ArrowLeft, Eye, EyeOff, HelpCircle, Loader2, Plus, Trash2 } from "lucide-vue-next";
 import { normalizeProviderConnectionConfig } from "../../shared/llm-provider-config";
 
 const emit = defineEmits(["close"]);
@@ -35,7 +35,6 @@ const CURSOR_HELP_CONNECT_TIMEOUT_MS = 20_000;
 const CURSOR_HELP_CONNECT_POLL_MS = 250;
 const builtinProviderOptions = [
   { value: "openai_compatible", label: "通用 API" },
-  { value: "cursor_help_web", label: "Cursor" },
 ] as const;
 
 const visibleError = computed(
@@ -103,6 +102,10 @@ const secondaryProfileOptions = computed(() => {
     (profile) => String(profile.id || "").trim() !== defaultProfile,
   );
 });
+
+const editableProfiles = computed(() =>
+  config.value.llmProfiles.filter((p) => !isCursorHelpWebProvider(p)),
+);
 
 function normalizeProfileId(input: string): string {
   return String(input || "")
@@ -214,6 +217,7 @@ function getProfileSummary(profile: PanelLlmProfile): string {
 }
 
 function getProfileOptionLabel(profile: PanelLlmProfile): string {
+  if (isCursorHelpWebProvider(profile)) return "内置免费";
   const id = String(profile.id || "").trim() || "未命名模型";
   const model = String(profile.llmModel || "").trim() || "未设置模型";
   return `${id} · ${getProviderLabel(profile)} · ${model}`;
@@ -579,6 +583,9 @@ async function enableCursorWebPreset(): Promise<void> {
   config.value.llmDefaultProfile = profile.id;
   ensureProfiles();
   await ensureCursorHelpTab(profile, true);
+  await store.saveConfig();
+  await sendBrainMessage({ type: "brain.debug.cursor_help_pool", action: "rebuild" });
+  void refreshCursorHelpPool();
 }
 
 function buildDefaultProfile(idSeed: string): PanelLlmProfile {
@@ -752,16 +759,13 @@ async function handleSave(): Promise<void> {
   localError.value = "";
   try {
     normalizeProfilesBeforeSave();
-    for (const profile of config.value.llmProfiles) {
-      if (isCursorHelpWebProvider(profile) && !runtimeState(profile).canExecute) {
-        await ensureCursorHelpTab(profile, false);
-        if (!runtimeState(profile).canExecute) {
-          localError.value = `Cursor Help 连接探测失败（profile: ${String(profile.id || "").trim() || "unnamed"}），请先确认页面可用后再保存。`;
-          return;
-        }
-      }
-    }
     await store.saveConfig();
+    const hasCursorHelpProfile = config.value.llmProfiles.some(
+      (p) => isCursorHelpWebProvider(p),
+    );
+    if (hasCursorHelpProfile) {
+      await sendBrainMessage({ type: "brain.debug.cursor_help_pool", action: "rebuild" });
+    }
     emit("close");
   } catch (err) {
     localError.value = err instanceof Error ? err.message : String(err);
@@ -941,9 +945,26 @@ onMounted(() => {
         <div class="grid grid-cols-1 gap-3">
           <label class="space-y-1.5">
             <span
-              class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter"
-              >默认模型</span
+              class="flex items-center gap-1"
             >
+              <span class="text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">默认模型</span>
+              <span
+                v-if="isCursorHelpWebProvider(config.llmProfiles.find((p: PanelLlmProfile) => p.id === config.llmDefaultProfile) as PanelLlmProfile)"
+                class="relative group"
+              >
+                <HelpCircle
+                  :size="12"
+                  class="text-ui-text-muted/60 cursor-help"
+                  aria-hidden="true"
+                />
+                <span
+                  class="absolute left-1/2 -translate-x-1/2 top-full mt-1 z-50 hidden group-hover:block w-56 px-2.5 py-2 text-[11px] leading-relaxed text-ui-text bg-ui-surface border border-ui-border rounded-sm shadow-lg whitespace-normal"
+                  role="tooltip"
+                >
+                  通过你已登录的 Cursor 页面发起请求，共享 Cursor 订阅额度，无需额外 API Key。副作用：后台会保持一个 Cursor 浏览器标签页；对话内容会出现在 Cursor 的聊天记录中。
+                </span>
+              </span>
+            </span>
             <select
               :id="defaultProfileId"
               v-model="config.llmDefaultProfile"
@@ -1176,7 +1197,7 @@ onMounted(() => {
         </div>
 
         <article
-          v-for="(profile, index) in config.llmProfiles"
+          v-for="(profile, index) in editableProfiles"
           :key="profile.id || `${index}`"
           class="border border-ui-border rounded-sm p-3 space-y-3 bg-ui-bg"
         >
@@ -1366,7 +1387,6 @@ onMounted(() => {
             </template>
 
             <label
-              v-if="!isCursorHelpWebProvider(profile)"
               class="space-y-1 block"
             >
               <span
@@ -1382,7 +1402,6 @@ onMounted(() => {
             </label>
 
             <label
-              v-if="!isCursorHelpWebProvider(profile)"
               class="space-y-1 block"
             >
               <span
@@ -1416,7 +1435,6 @@ onMounted(() => {
             </label>
 
             <label
-              v-if="!isCursorHelpWebProvider(profile)"
               class="space-y-1 block"
             >
               <span
@@ -1432,7 +1450,6 @@ onMounted(() => {
             </label>
 
             <details
-              v-if="!isCursorHelpWebProvider(profile)"
               class="sm:col-span-2 rounded-sm border border-ui-border bg-ui-surface/40 px-3 py-2 group"
             >
               <summary

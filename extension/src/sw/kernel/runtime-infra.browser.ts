@@ -10,6 +10,7 @@ import {
   recordBackgroundFailure,
   buildUpgradeHint,
 } from "./background-failure-tracker";
+import { handleTabRemoved as handleStealthTabRemoved } from "./stealth-tab";
 export type { BridgeConfig } from "./infra-bridge-client";
 import {
   snapshotKey,
@@ -581,6 +582,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         telemetryByTab.delete(tabId);
         clearSnapshotState(tabId);
         leaseByTab.delete(tabId);
+        handleStealthTabRemoved(tabId);
       });
     }
   }

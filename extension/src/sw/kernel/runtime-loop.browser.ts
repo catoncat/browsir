@@ -1566,7 +1566,13 @@ export function createRuntimeLoopController(
     let verified = false;
     let verifyReason = "verify_policy_off";
     try {
-      if (verifyEnabled) {
+      if (
+        !verifyEnabled &&
+        (normalizedAction === "verify" || normalizedAction === "cdp.verify")
+      ) {
+        verified = toRecord(data).ok === true;
+        verifyReason = verified ? "verified" : "verify_failed";
+      } else if (verifyEnabled) {
         if (modeUsed === "bridge") {
           verifyReason = "verify_not_supported_for_bridge";
         } else if (!tabId) {

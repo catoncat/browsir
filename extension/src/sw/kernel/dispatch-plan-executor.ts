@@ -30,6 +30,7 @@ import {
 } from "./loop-failure-protocol";
 import { formatNodeCompact } from "./infra-snapshot-helpers";
 import { getAutomationMode } from "./automation-mode";
+import { createStealthTab, isStealthTab } from "./stealth-tab";
 import {
   CAPABILITIES,
   type RuntimeErrorWithMeta,
@@ -467,10 +468,20 @@ main().catch((error) => {
       }
       case "local.create_new_tab": {
         const autoMode = await getAutomationMode();
-        const created = await chrome.tabs.create({
-          url: String(plan.args.url || ""),
-          active: autoMode === "background" ? false : plan.args.active !== false,
-        });
+        const tabUrl = String(plan.args.url || "");
+        let created: chrome.tabs.Tab;
+        let stealthMode = false;
+
+        if (autoMode === "background") {
+          // Use stealth tab (minimized window) to avoid polluting user's tab bar
+          created = await createStealthTab(tabUrl);
+          stealthMode = true;
+        } else {
+          created = await chrome.tabs.create({
+            url: tabUrl,
+            active: plan.args.active !== false,
+          });
+        }
         return buildToolResponseEnvelope("tabs", {
           opened: true,
           tab: {
@@ -480,6 +491,7 @@ main().catch((error) => {
             title: created?.title || "",
             url: created?.url || created?.pendingUrl || "",
           },
+          ...(stealthMode ? { stealth: true, hint: "tab created in minimized stealth window (invisible to user)" } : {}),
         });
       }
       case "local.get_tab_info": {

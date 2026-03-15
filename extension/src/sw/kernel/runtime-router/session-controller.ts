@@ -8,7 +8,7 @@ import {
   writeSessionMeta,
 } from "../session-store.browser";
 import { nowIso } from "../types";
-import { clearSessionPreferences } from "../web-chat-executor.browser";
+import { clearSessionPreferences } from "../cursor-help-slot-preferences";
 import {
   buildConversationView,
   deriveSessionTitleFromEntries,
