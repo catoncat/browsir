@@ -14,15 +14,16 @@
 - `contracts/**/*.json`
   - Canonical 行为契约
 - `mappings/contract-categories.json`
-  - 契约分类清单：`ux | protocol | storage`
+  - 契约分类清单：`orchestrator | runtime-loop | cdp | llm | session | panel`
 - `features/**/*.feature`
   - Gherkin 视图，必须通过 `@contract(BHV-...)` 绑定契约
   - 分层约束：
     - `features/business/**`：业务行为语义（用户目标、系统可观察结果）
     - `features/technical/**`：技术契约语义（协议、路由、存储一致性）
   - 分类绑定：
-    - `ux -> business`
-    - `protocol|storage -> technical`
+    - `panel -> business`
+    - `orchestrator|cdp|llm -> technical`
+    - `session|runtime-loop -> business 或 technical（按场景语义选择）`
 - `mappings/contract-to-tests.json`
   - 契约到证明层映射（`unit|integration|browser-cdp|e2e`）
   - `target` 支持多文件（同一条 proof 可包含多个 `path::anchor`）
@@ -70,9 +71,12 @@ bun run brain:e2e
 bun run bdd:lint:features
 bun run bdd:validate
 bun run bdd:gate
-bun run bdd:gate:ux
-bun run bdd:gate:protocol
-bun run bdd:gate:storage
+bun run bdd:gate:orchestrator
+bun run bdd:gate:runtime-loop
+bun run bdd:gate:cdp
+bun run bdd:gate:llm
+bun run bdd:gate:session
+bun run bdd:gate:panel
 ```
 
 真实 LLM 门禁（需要外网与 key）：
@@ -115,7 +119,7 @@ bun run bdd:gate:live
 
 - `bdd:lint:features`
   - 校验 feature 是否位于 `business|technical` 正确目录。
-  - 校验 contract category 与 feature 分层一致性（`ux->business`，`protocol|storage->technical`）。
+  - 校验 contract category 与 feature 分层一致性（`panel->business`，`orchestrator|cdp|llm->technical`，`session|runtime-loop` 允许跨层）。
   - 对 `business` 层执行“实现细节禁词”检查，防止把内部实现写进业务场景。
 - `bdd:validate`
   - 先执行 `bdd:lint:features`，再校验契约结构、feature 引用、mapping 基本一致性、category 完整性。
@@ -123,8 +127,8 @@ bun run bdd:gate:live
   - 先执行 `bdd:lint:features`。
   - 检查默认 profile 契约的 required layers、目标文件存在、evidence `passed=true`。
   - 若 e2e `target` 带 selector（`file.json::token`），还会校验证据中有命中的 passed 测试项。
-- `bdd:gate:ux|protocol|storage`
-  - 仅检查对应分类契约，适合分层门禁与分责任维护。
+- `bdd:gate:<category>`
+  - 仅检查对应分类契约；当前支持 `orchestrator | runtime-loop | cdp | llm | session | panel`，适合分责任维护与分组门禁。
 - `bdd:gate:live`（`BDD_GATE_PROFILE=live`）
   - 在默认契约基础上，额外检查 `gate_profile=live` 的契约。
 

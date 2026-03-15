@@ -8,9 +8,12 @@
 - 内核运行时已收口到 `extension/src/sw/kernel/*`，`extension/service-worker.js` 仅为 shim 入口。
 - BDD 已从“单一门禁”升级为“分类门禁”：
   - `all`（默认）
-  - `ux`
-  - `protocol`
-  - `storage`
+  - `orchestrator`
+  - `runtime-loop`
+  - `cdp`
+  - `llm`
+  - `session`
+  - `panel`
 - e2e 证据门禁已支持 `path::selector` 命中校验（不再只看 `passed=true`）。
 
 ## 2. 本轮基线文件
@@ -26,9 +29,12 @@
 ```bash
 bun run bdd:validate
 bun run bdd:gate
-bun run bdd:gate:ux
-bun run bdd:gate:protocol
-bun run bdd:gate:storage
+bun run bdd:gate:orchestrator
+bun run bdd:gate:runtime-loop
+bun run bdd:gate:cdp
+bun run bdd:gate:llm
+bun run bdd:gate:session
+bun run bdd:gate:panel
 ```
 
 如需联动运行证据：
@@ -51,11 +57,11 @@ bun run bdd:gate:live
    - `bdd/mappings/contract-categories.json`
    - `bdd/mappings/contract-to-tests.json`
 2. 优先写“行为语义”，避免绑定内部变量名、私有 debug 路径、具体函数路径。
-3. 若只改 UX 行为，可先跑 `bdd:gate:ux`；合并前仍需跑全量 `bdd:gate`。
+3. 若只改某一分类，可先跑对应的 `bdd:gate:<category>`；合并前仍需跑全量 `bdd:gate`。
 
 ## 5. 下一步建议（按优先级）
 
 1. 继续清理高耦合契约措辞（实现细节 -> 行为语义）。
 2. 将 `e2e` selector 覆盖扩展到更多 high-risk 契约。
-3. 在 CI 按 `ux/protocol/storage` 分层并行 gate，缩短反馈时间。
+3. 在 CI 按 `orchestrator/runtime-loop/cdp/llm/session/panel` 分类并行 gate，缩短反馈时间。
 

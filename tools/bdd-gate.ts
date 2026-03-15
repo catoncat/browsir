@@ -216,10 +216,17 @@ async function main() {
       );
     }
 
-    if ((contract.risk === "high" || contract.risk === "critical") && contract.proof_requirements.min_layers < 2) {
-      gateErrors.push(
-        `gate: contract ${contract.id} 风险=${contract.risk} 但 min_layers=${contract.proof_requirements.min_layers}，必须 >= 2`
-      );
+    if (contract.risk === "high" || contract.risk === "critical") {
+      if (contract.proof_requirements.min_layers < 2) {
+        gateErrors.push(
+          `gate: contract ${contract.id} 风险=${contract.risk} 但 min_layers=${contract.proof_requirements.min_layers}，必须 >= 2`
+        );
+      }
+      if (!proofLayers.has("browser-cdp") && !proofLayers.has("e2e")) {
+        gateErrors.push(
+          `gate: contract ${contract.id} 风险=${contract.risk}，必须至少包含 browser-cdp 或 e2e 证明层`
+        );
+      }
     }
 
     for (const proof of mapping.proofs) {

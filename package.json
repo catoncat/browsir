@@ -16,8 +16,11 @@
     "bdd:validate": "bun run bdd:test:tools && bun run bdd:lint:features && bun tools/bdd-validate.ts",
     "bdd:gate": "bun run bdd:test:tools && bun run bdd:lint:features && bun tools/bdd-gate.ts",
     "bdd:gate:live": "bun --env-file=.env.live.local run bdd:test:tools && bun --env-file=.env.live.local run bdd:lint:features && BDD_GATE_PROFILE=live bun --env-file=.env.live.local tools/bdd-gate.ts",
-    "bdd:gate:ux": "bun run bdd:test:tools && bun run bdd:lint:features && BDD_GATE_CATEGORY=ux bun tools/bdd-gate.ts",
-    "bdd:gate:protocol": "bun run bdd:test:tools && bun run bdd:lint:features && BDD_GATE_CATEGORY=protocol bun tools/bdd-gate.ts",
-    "bdd:gate:storage": "bun run bdd:test:tools && bun run bdd:lint:features && BDD_GATE_CATEGORY=storage bun tools/bdd-gate.ts"
+    "bdd:gate:orchestrator": "bun run bdd:test:tools && bun run bdd:lint:features && BDD_GATE_CATEGORY=orchestrator bun tools/bdd-gate.ts",
+    "bdd:gate:runtime-loop": "bun run bdd:test:tools && bun run bdd:lint:features && BDD_GATE_CATEGORY=runtime-loop bun tools/bdd-gate.ts",
+    "bdd:gate:cdp": "bun run bdd:test:tools && bun run bdd:lint:features && BDD_GATE_CATEGORY=cdp bun tools/bdd-gate.ts",
+    "bdd:gate:llm": "bun run bdd:test:tools && bun run bdd:lint:features && BDD_GATE_CATEGORY=llm bun tools/bdd-gate.ts",
+    "bdd:gate:session": "bun run bdd:test:tools && bun run bdd:lint:features && BDD_GATE_CATEGORY=session bun tools/bdd-gate.ts",
+    "bdd:gate:panel": "bun run bdd:test:tools && bun run bdd:lint:features && BDD_GATE_CATEGORY=panel bun tools/bdd-gate.ts"
   }
 }

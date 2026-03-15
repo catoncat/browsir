@@ -4,11 +4,14 @@
 
 让契约描述“可观察行为”，而不是绑定某个实现细节，从而支持架构演进。
 
-## 三类契约
+## 契约分类
 
-- `ux`: 用户可感知行为（交互、反馈、可恢复性）。
-- `protocol`: 跨组件协议行为（请求/响应/错误语义）。
-- `storage`: 持久化与恢复行为（一致性、回放、清理）。
+- `panel`: 用户可感知的面板与交互行为。
+- `orchestrator`: 编排器、hook、provider 路由等技术控制面契约。
+- `runtime-loop`: loop 编排、tool_call、retry、no-progress 等运行时行为。
+- `cdp`: 浏览器执行与验证相关契约。
+- `llm`: provider 路由、能力门禁、升级策略相关契约。
+- `session`: 会话生命周期、压缩、恢复、标题等会话契约。
 
 分类清单见：`bdd/mappings/contract-categories.json`。
 
@@ -20,8 +23,9 @@
 - `bdd/features/technical/**`
   - 允许写协议与内部契约语义（例如路由、错误码、存储流程）。
 - 分类绑定：
-  - `ux -> business`
-  - `protocol|storage -> technical`
+  - `panel -> business`
+  - `orchestrator|cdp|llm -> technical`
+  - `session|runtime-loop -> business 或 technical（按场景语义选择）`
 
 ## 必须遵守
 
@@ -55,7 +59,10 @@
 
 - 语义 lint：`bun run bdd:lint:features`
 - 全量：`bun run bdd:gate`
-- UX：`bun run bdd:gate:ux`
-- 协议：`bun run bdd:gate:protocol`
-- 存储：`bun run bdd:gate:storage`
+- Orchestrator：`bun run bdd:gate:orchestrator`
+- Runtime Loop：`bun run bdd:gate:runtime-loop`
+- CDP：`bun run bdd:gate:cdp`
+- LLM：`bun run bdd:gate:llm`
+- Session：`bun run bdd:gate:session`
+- Panel：`bun run bdd:gate:panel`
 - Live：`bun run bdd:gate:live`
