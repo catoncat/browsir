@@ -131,8 +131,15 @@ const filteredSkills = computed(() => {
 const isSkillsManageMode = computed(() => skillCommandMode.value === "manage");
 const isCompacting = computed(() => Boolean(props.isCompacting) && Boolean(props.isRunning));
 const isStartingRun = computed(() => Boolean(props.isStartingRun) && !props.isRunning);
+const composerContextRefs = computed(() =>
+  extractPromptContextRefs(text.value, "composer_mention")
+);
 const canSubmit = computed(() =>
-  (text.value.trim().length > 0 || selectedSkills.value.length > 0) && !props.disabled && !isStartingRun.value
+  (
+    composerContextRefs.value.cleanedText.trim().length > 0 ||
+    selectedSkills.value.length > 0 ||
+    composerContextRefs.value.refs.length > 0
+  ) && !props.disabled && !isStartingRun.value
 );
 const queueItems = computed<QueueItem[]>(() => {
   return Array.isArray(props.queueItems) ? props.queueItems : [];
@@ -545,7 +552,7 @@ function scrollToFocusedSkill() {
 }
 
 function handleSubmit(mode: "normal" | "steer" | "followUp") {
-  const extracted = extractPromptContextRefs(text.value, "composer_mention");
+  const extracted = composerContextRefs.value;
   const hasContent = extracted.cleanedText.trim().length > 0 || selectedSkills.value.length > 0 || extracted.refs.length > 0;
   if (!hasContent || props.disabled || isStartingRun.value) return;
   const resolvedMode = props.isRunning ? (mode === "normal" ? "steer" : mode) : "normal";
