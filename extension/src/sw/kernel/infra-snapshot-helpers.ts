@@ -43,6 +43,32 @@ export const ROLE_SHORTHAND: Record<string, string> = {
   textarea: "area",
 };
 
+/**
+ * ARIA roles that carry no actionable semantics for the LLM.
+ * Aligned with AIPex's SKIP_ROLES — structural containers & landmarks only.
+ */
+export const SKIP_ROLES: ReadonlySet<string> = new Set([
+  "generic",
+  "none",
+  "group",
+  "main",
+  "navigation",
+  "contentinfo",
+  "search",
+  "banner",
+  "complementary",
+  "region",
+  "article",
+  "section",
+  "inlinetextbox",
+  "presentation",
+  "linebreak",
+]);
+
+export function isSkipRole(roleRaw: unknown): boolean {
+  return SKIP_ROLES.has(String(roleRaw || "").trim().toLowerCase());
+}
+
 export function formatNodeCompact(node: JsonRecord, depth = 0): string {
   const rawRole = String(node.role || "node").toLowerCase();
   const role = ROLE_SHORTHAND[rawRole] || rawRole;

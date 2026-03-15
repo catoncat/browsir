@@ -12,6 +12,8 @@ import {
   callInfra,
   normalizeVerifyExpect,
   scoreSearchNode,
+  parseSearchQuery,
+  scoreSearchNodeWithOrGroups,
   queryAllTabsForRuntime,
   getActiveTabIdForRuntime,
 } from "./loop-shared-utils";
@@ -26,6 +28,7 @@ import {
   computeToolRetryDelayMs,
   buildToolRetryHint,
 } from "./loop-failure-protocol";
+import { formatNodeCompact } from "./infra-snapshot-helpers";
 import {
   CAPABILITIES,
   type RuntimeErrorWithMeta,
@@ -1061,10 +1064,7 @@ main().catch((error) => {
         const query = String(plan.query || "")
           .trim()
           .toLowerCase();
-        const needles = query
-          .split(/\s+/)
-          .map((item) => item.trim())
-          .filter(Boolean);
+        const orGroups = parseSearchQuery(query);
         const normalizedNodes = rawNodes.map((node) => {
           const ref = String(node.ref || "");
           return {
@@ -1074,7 +1074,7 @@ main().catch((error) => {
           };
         });
         const rankedNodes = normalizedNodes.map((node, index) => {
-          const ranked = scoreSearchNode(node, needles);
+          const ranked = scoreSearchNodeWithOrGroups(node, orGroups);
           return {
             node,
             index,
@@ -1082,29 +1082,28 @@ main().catch((error) => {
             matchedNeedles: ranked.matchedNeedles,
           };
         });
-        const filteredRanked = needles.length
+        const hasQuery = orGroups.length > 0;
+        const filteredRanked = hasQuery
           ? rankedNodes.filter((item) => item.matchedNeedles > 0)
           : rankedNodes;
-        const sortedRanked = needles.length
+        const sortedRanked = hasQuery
           ? filteredRanked.sort((a, b) => {
-              const aFullMatch = a.matchedNeedles >= needles.length;
-              const bFullMatch = b.matchedNeedles >= needles.length;
-              if (aFullMatch !== bFullMatch) return bFullMatch ? 1 : -1;
               if (a.score !== b.score) return b.score - a.score;
               return a.index - b.index;
             })
           : filteredRanked;
-        const nodes = sortedRanked
+        const topNodes = sortedRanked
           .slice(0, plan.maxResults)
           .map((item) => item.node);
+        const compactLines = topNodes.map((n) => formatNodeCompact(n, 0));
         return buildToolResponseEnvelope(
           "search_elements",
           {
             query: plan.query,
             tabId: plan.tabId,
-            count: nodes.length,
+            count: topNodes.length,
             total: sortedRanked.length,
-            nodes,
+            results: compactLines.join("\n"),
             snapshotId: String(snapshotData.snapshotId || ""),
             url: String(snapshotData.url || ""),
             title: String(snapshotData.title || ""),

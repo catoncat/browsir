@@ -12,6 +12,7 @@ import {
   readAxValue,
   readAxBooleanProperty,
   isInteractiveRole,
+  isSkipRole,
   collectFrameIdsFromTree,
   actionRequiresLease,
   normalizeActionKind,
@@ -916,6 +917,7 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         const backendNodeId = toPositiveInteger(node.backendDOMNodeId);
         if (!backendNodeId) continue;
         const role = readAxValue(node.role).trim().toLowerCase();
+        if (isSkipRole(role)) continue;
         const name = readAxValue(node.name).trim();
         const value = readAxValue(node.value).trim();
         const focusable = readAxBooleanProperty(node.properties, "focusable");

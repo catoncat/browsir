@@ -365,7 +365,8 @@ export function inferSearchElementsFilter(
   const needles = String(queryRaw || "")
     .trim()
     .toLowerCase()
-    .split(/\s+/)
+    .split("|")
+    .flatMap((group) => group.trim().split(/\s+/))
     .map((item) => item.trim())
     .filter(Boolean);
   if (
@@ -500,6 +501,44 @@ export function scoreSearchNode(
     if (role === "button") score -= 12;
   }
   return { score, matchedNeedles };
+}
+
+/**
+ * Parse a search query with `|` OR groups.
+ * "Login | Sign in | 登录" → [["login"], ["sign", "in"], ["登录"]]
+ * Each inner array is an AND group of needles.
+ */
+export function parseSearchQuery(query: string): string[][] {
+  return query
+    .split("|")
+    .map((group) =>
+      group
+        .trim()
+        .toLowerCase()
+        .split(/\s+/)
+        .filter(Boolean),
+    )
+    .filter((group) => group.length > 0);
+}
+
+/**
+ * Score a node against OR groups. Returns the best score across all groups.
+ */
+export function scoreSearchNodeWithOrGroups(
+  node: JsonRecord,
+  orGroups: string[][],
+): { score: number; matchedNeedles: number } {
+  if (orGroups.length === 0) return { score: 0, matchedNeedles: 0 };
+  let bestScore = 0;
+  let bestMatched = 0;
+  for (const group of orGroups) {
+    const result = scoreSearchNode(node, group);
+    if (result.score > bestScore) {
+      bestScore = result.score;
+      bestMatched = result.matchedNeedles;
+    }
+  }
+  return { score: bestScore, matchedNeedles: bestMatched };
 }
 
 // ── Tab / infra helpers ─────────────────────────────────────────────
