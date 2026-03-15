@@ -1,7 +1,7 @@
 ---
 id: ISSUE-026
 title: Cursor Help pool lane 并发冲突细化
-status: in-progress
+status: done
 priority: p2
 source: ISSUE-023 decomposition
 created: 2026-03-15
@@ -54,3 +54,44 @@ tags: [slice, cursor-help, pool, lane, concurrency]
 - [ ] 抽出集中式 conflict 判定函数，避免分散条件判断
 - [ ] 调整 busy / rejected / retryable 的错误语义与日志文案
 - [ ] 覆盖至少一组 primary+compaction、compaction+title、same-session title 的组合测试
+
+## 工作总结（2026-03-15 第一轮实现）
+
+- 已为 `ISSUE-026` 落下第一刀：新增集中式 `resolveSessionLaneConflict()` 判定函数，把 lane conflict 规则从零散条件收拢到单点入口。
+- 当前已明确的第一批规则：
+  - same-session `primary + compaction` 允许并行
+  - same-session `title` 在已有 active lane（如 `primary`）时拒绝
+  - same-session same-lane 仍视为 busy / reject
+- Provider debug log 已新增 `provider.lane_conflict` 事件，能区分 lane rule reject 与普通 busy。
+- 对应新增回归测试：
+  - `allows same-session compaction while primary is active`
+  - `rejects same-session title while primary is active`
+- 本轮验证结果：
+  - 聚焦测试 `src/sw/kernel/__tests__/web-chat-executor.browser.test.ts` 25/25 通过
+  - `bun run build` 成功
+
+## 相关 commits（2026-03-15 第一轮实现）
+
+- 未提交
+
+## 工作总结（2026-03-15 第二轮实现）
+
+- 已继续补全 `ISSUE-026` 的 lane conflict 矩阵：
+  - same-session `title` 在 active `compaction` 时拒绝
+  - same-session `compaction` 在 active `title` 时拒绝
+- 当前 title lane 已收紧为 same-session 独占 lane；`primary + compaction` 仍允许并行。
+- `provider.lane_conflict` 事件继续沿用，lane rule reject 与普通 busy 的区分口径已明确。
+- 对应新增回归测试：
+  - `rejects same-session title while compaction is active`
+  - `rejects same-session compaction while title is active`
+- 本轮验证结果：
+  - 聚焦测试 `src/sw/kernel/__tests__/web-chat-executor.browser.test.ts` 27/27 通过
+  - `bun run build` 成功
+- 至此，`ISSUE-026` 的验收口径已基本满足：
+  - 冲突规则集中表达
+  - primary / compaction / title 关键组合已覆盖
+  - busy vs lane-rule-reject 有不同语义与日志
+
+## 相关 commits（2026-03-15 第二轮实现）
+
+- 未提交

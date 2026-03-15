@@ -241,6 +241,15 @@ function resolveSessionLaneConflict(
     };
   }
 
+  const activeTitle = activeEntries.find((entry) => entry.lane === "title");
+  if (activeTitle) {
+    return {
+      kind: "lane-rule-reject",
+      reason: `${lane}-waits-for:title`,
+      message: `会话 ${normalizedSessionId} 的 ${lane} lane 需等待 title 完成后再执行`,
+    };
+  }
+
   if (lane === "title") {
     const blocking = activeEntries[0];
     return {
@@ -668,7 +677,10 @@ function failExecution(entry: PendingExecution, error: string): void {
     });
   }
   if (entry.controller) {
-    entry.controller.error(new Error(error));
+    const err = new Error(error) as Error & { code?: string; retryable?: boolean };
+    err.code = "E_HOSTED_CHAT_EXECUTION";
+    err.retryable = true;
+    entry.controller.error(err);
   }
 }
 
