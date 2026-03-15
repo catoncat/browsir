@@ -1,11 +1,11 @@
 ---
 id: ISSUE-035
 title: "web-chat-executor 拆分 — pool/execution/heartbeat/window 职责分离"
-status: open
+status: in-progress
 priority: p2
 source: "ISSUE-023 code quality review"
 created: 2026-03-16
-assignee: unassigned
+assignee: copilot
 kind: refactor
 tags:
   - kernel
@@ -81,3 +81,18 @@ tags:
 - 不改变 MV3 service worker 的入口接口
 - content script / page hook 不受影响（自包含设计）
 - 若提取后发现循环依赖需人工评估
+
+## 执行记录
+
+### P2 窗口策略提取 — done (45f7c4d)
+- 新建 `cursor-help-pool-policy.ts` — 4 types + 11 pure functions (~270 lines)
+- web-chat-executor: 2389 → 2109 行
+
+### P3 健康分类提取 — done (aa7ae71)
+- 新建 `cursor-help-health.ts` — `CursorHelpInspectResult` type + 5 pure functions (~85 lines)
+- web-chat-executor: 2109 → 2029 行
+- 移除了 web-chat-executor 对 `cursor-help-protocol` 的直接依赖（现由 cursor-help-health 间接引入）
+
+### P1 + P4 待评估
+- P1 执行生命周期紧耦合 P4 池状态管理（`closeExecution`/`failExecution` 调用 `patchCursorHelpSlotState`/`loadCursorHelpPoolState`）
+- 推荐 P4 先行或 P1+P4 合并提取
