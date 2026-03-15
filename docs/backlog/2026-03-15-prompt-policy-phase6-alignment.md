@@ -1,5 +1,5 @@
 ---
-id: ISSUE-025
+id: ISSUE-029
 title: "Prompt Policy Phase 6 — tool policy / done heuristic 收口"
 status: done
 priority: p2
@@ -9,7 +9,7 @@ closed: 2026-03-15
 assignee: unassigned
 kind: task
 depends_on:
-  - ISSUE-024
+  - ISSUE-028
 write_scope:
   - extension/src/sw/kernel/prompt/prompt-policy.browser.ts
 tags:
@@ -18,7 +18,7 @@ tags:
   - llm-behavior
 ---
 
-# ISSUE-025: Prompt Policy Phase 6 — tool policy / done heuristic 收口
+# ISSUE-029: Prompt Policy Phase 6 — tool policy / done heuristic 收口
 
 ## 背景
 

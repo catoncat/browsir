@@ -163,4 +163,6 @@ tags: [slice, cursor-help, pool, heartbeat, health-check]
 
 ## 相关 commits（2026-03-15 第五轮实现）
 
-- 未提交
+- `421058c` fix(cursor-help): close ISSUE-025 heartbeat — update docs & fix test inspect mock
+
+> 注：以上各轮实现已通过 `421058c` 及后续提交合并入 main。

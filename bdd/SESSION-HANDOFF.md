@@ -1,20 +1,50 @@
 # BDD 交接文档（当前基线）
 
-更新时间：2026-02-24  
+更新时间：2026-03-15
 仓库路径：`/Users/envvar/work/repos/browser-brain-loop`
 
 ## 1. 当前状态
 
 - 内核运行时已收口到 `extension/src/sw/kernel/*`，`extension/service-worker.js` 仅为 shim 入口。
-- BDD 已从“单一门禁”升级为“分类门禁”：
-  - `all`（默认）
-  - `orchestrator`
-  - `runtime-loop`
-  - `cdp`
-  - `llm`
-  - `session`
-  - `panel`
-- e2e 证据门禁已支持 `path::selector` 命中校验（不再只看 `passed=true`）。
+- BDD 已从"单一门禁"升级为"分类门禁"（6 分类）。
+- Kernel 引擎 50 模块，聚合在 `BrainOrchestrator` 单例。
+- 46 个内置工具契约。
+
+### 近期重大进展（2026-03-14 ~ 2026-03-15）
+
+**已完成：**
+
+| ISSUE | 标题 | 提交 | 状态 |
+|-------|------|------|------|
+| ISSUE-017 | ChatView 主控拆分 | `9501a7b` | done |
+| ISSUE-018 | Runtime Loop LLM 请求提取 | `aae8421` | done |
+| ISSUE-019 | System Prompt Resolver 提取 | `eb175fe` | done |
+| ISSUE-020 | Terminal/Failure/Agent-end 域统一 | `c81ff08` | done |
+| ISSUE-022 | 浏览器自动化 AIPex 对齐 | 多次提交 | done |
+| ISSUE-025 | Cursor Help pool 心跳 | `421058c` | done |
+| ISSUE-026 | Lane 并发冲突细化 | `a444abe`, `158dba6` | done |
+| ISSUE-027 | 窗口行为优化 | `8c85676`, `9aa1a79` 等 | done |
+| ISSUE-028 | Sandbox Runtime 归一化 Phase 2-5 | `d2d7733`~`252d5e7` | done |
+| ISSUE-029 | Prompt Policy Phase 6 | `694b97c`, `ce58b87` | done |
+
+**进行中：**
+
+| ISSUE | 标题 | 负责 | 说明 |
+|-------|------|------|------|
+| ISSUE-023 | Cursor Help Pool 架构 (Epic) | human | Provider 连通性恢复 |
+| ISSUE-024 | Cursor Help pool 自动扩缩容 | agent | 刚启动，依赖 025/026 |
+
+**待启动：**
+
+| ISSUE | 标题 | 说明 |
+|-------|------|------|
+| ISSUE-021 | ChatView 二阶段深拆 | 前置 ISSUE-017 已 done |
+
+### 调试基础设施
+
+- CDP 直连工具 `tools/cdp-debug.ts` 已落地（targets/screenshot/dom/eval/chat/sw-eval/serve 模式）
+- Bridge HTTP 诊断 API 可用
+- AI 三层调试模型：L1(CDP) / L2(Bridge API) / L3(自动化)
 
 ## 2. 本轮基线文件
 

@@ -94,4 +94,7 @@ tags: [slice, cursor-help, pool, lane, concurrency]
 
 ## 相关 commits（2026-03-15 第二轮实现）
 
-- 未提交
+- `a444abe` feat(cursor-help): ISSUE-026 lane conflict refinement — resolveSessionLaneConflict
+- `158dba6` feat(cursor-help): ISSUE-026 round 2 — title/compaction lane mutual exclusion
+
+> 注：以上两轮实现已合并入 main。

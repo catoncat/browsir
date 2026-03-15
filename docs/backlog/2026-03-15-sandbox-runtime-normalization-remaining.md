@@ -1,5 +1,5 @@
 ---
-id: ISSUE-024
+id: ISSUE-028
 title: "Sandbox Runtime 文件系统规范化 — Phase 2-5 剩余工作"
 status: done
 priority: p2
@@ -23,7 +23,7 @@ tags:
   - refactor
 ---
 
-# ISSUE-024: Sandbox Runtime 文件系统规范化 — Phase 2-5 剩余工作
+# ISSUE-028: Sandbox Runtime 文件系统规范化 — Phase 2-5 剩余工作
 
 ## 背景
 

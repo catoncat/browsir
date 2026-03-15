@@ -276,4 +276,11 @@ tags: [slice, cursor-help, pool, window, minimized]
 
 ## 相关 commits（2026-03-15 第五轮实现）
 
-- 未提交
+- `8c85676` trace cursor help window decisions
+- `9aa1a79` explain cursor help window actions
+- `22ff659` refine cursor help window policy
+- `4c8af56` improve cursor help window recovery
+- `7dd80ad` clarify cursor help window recovery triggers
+- `3d65039` fix cursor help provider readiness
+
+> 注：以上各轮实现（Slice A-G + 5 轮迭代）已通过上述提交合并入 main。

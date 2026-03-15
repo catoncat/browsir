@@ -246,4 +246,7 @@ f0ddbd3 完成了 Pool/Slot/Lane 核心架构：
 
 ## 相关 commits（2026-03-15 18:51）
 
-- 未提交
+- `758d512` relax cursor help connect probe gating
+- `9aa1a79` explain cursor help window actions
+
+> 注：以上各轮连接修复改动已通过上述提交和先前的多个 commit 合并入 main。ISSUE-023 整体仍 in-progress，Provider 连通性恢复由 human 继续推进。
