@@ -12,11 +12,20 @@
  *   dom                    获取 SidePanel DOM 概览
  *   chat <message>         在 SidePanel 中发送消息并等待回复
  *   sw-eval <expr>         在 Service Worker 中执行 JS 表达式
+ *   serve                  启动持久 HTTP 服务（只需授权一次 Chrome 弹窗）
+ *
+ * 持久服务模式：
+ *   先启动: bun tools/cdp-debug.ts serve &
+ *   后使用: curl http://127.0.0.1:9333/targets
+ *           curl -X POST http://127.0.0.1:9333/eval -d '{"expr":"document.title"}'
+ *           curl http://127.0.0.1:9333/screenshot > /tmp/ss.png
+ *   只需 Chrome 授权一次，后续命令不再弹窗。
  *
  * 环境变量：
  *   CHROME_CHANNEL        Chrome 渠道 ("beta" | "stable"，默认 beta)
  *   CHROME_PORT           自定义调试端口（默认从 DevToolsActivePort 读取）
  *   BBL_EXT_ID            扩展 ID（默认 jhfgfgnkpceegbkojajfadeijojekgod）
+ *   CDP_SERVE_PORT        serve 模式端口（默认 9333）
  */
 
 import { readFileSync, writeFileSync, existsSync } from "fs";
@@ -276,6 +285,185 @@ class BrowserSession {
   }
 }
 
+// --- Persistent HTTP Server mode ---
+const SERVE_PORT = parseInt(process.env.CDP_SERVE_PORT || "9333", 10);
+
+class PersistentCdpPool {
+  private browserClient: CdpClient | null = null;
+  private browserWsUrl: string = "";
+  private sessions = new Map<string, BrowserSession>();
+
+  async ensureBrowser(): Promise<CdpClient> {
+    if (this.browserClient) return this.browserClient;
+    this.browserWsUrl = await getBrowserWsUrl();
+    this.browserClient = new CdpClient("pool-browser", this.browserWsUrl);
+    await this.browserClient.connect(30_000); // 30s — 用户需要时间点击 Chrome 授权弹窗
+    console.log(`🔗 CDP 连接已建立: ${this.browserWsUrl}`);
+    return this.browserClient;
+  }
+
+  async getTargets(): Promise<TargetInfo[]> {
+    const client = await this.ensureBrowser();
+    const result = await client.send("Target.getTargets");
+    return result.targetInfos || [];
+  }
+
+  async getSession(targetFilter: string): Promise<BrowserSession> {
+    const targets = await this.getTargets();
+    const target = findTarget(targets, targetFilter);
+    if (!target) throw new Error(`未找到目标: ${targetFilter}`);
+
+    const cached = this.sessions.get(target.targetId);
+    if (cached) return cached;
+
+    const session = new BrowserSession(this.browserWsUrl, target.targetId);
+    await session.connect();
+    this.sessions.set(target.targetId, session);
+    return session;
+  }
+
+  async cleanup(): Promise<void> {
+    for (const [, session] of this.sessions) {
+      await session.close().catch(() => {});
+    }
+    this.sessions.clear();
+    await this.browserClient?.close();
+    this.browserClient = null;
+  }
+}
+
+async function cmdServe() {
+  const pool = new PersistentCdpPool();
+  console.log("⏳ 正在连接 Chrome... 请在 Chrome 弹窗中点击「允许」（只需这一次）");
+  await pool.ensureBrowser(); // 建立连接 → 只触发一次 Chrome 授权弹窗
+
+  const server = Bun.serve({
+    port: SERVE_PORT,
+    hostname: "127.0.0.1",
+    async fetch(req) {
+      const url = new URL(req.url);
+      const pathname = url.pathname;
+
+      try {
+        // GET /targets
+        if (pathname === "/targets") {
+          const targets = await pool.getTargets();
+          return Response.json({ ok: true, targets });
+        }
+
+        // GET /screenshot?target=sidepanel
+        if (pathname === "/screenshot") {
+          const targetFilter = url.searchParams.get("target") || "sidepanel";
+          const session = await pool.getSession(targetFilter);
+          await session.send("Page.enable").catch(() => {});
+          const { data } = await session.send("Page.captureScreenshot", { format: "png" });
+          const buf = Buffer.from(data, "base64");
+          return new Response(buf, {
+            headers: { "Content-Type": "image/png", "X-Target": targetFilter },
+          });
+        }
+
+        // POST /eval { expr, target? }
+        if (pathname === "/eval" && req.method === "POST") {
+          const body = (await req.json()) as { expr: string; target?: string };
+          const session = await pool.getSession(body.target || "sidepanel");
+          const result = await session.evaluate(body.expr);
+          return Response.json({ ok: true, result });
+        }
+
+        // GET /dom?target=sidepanel
+        if (pathname === "/dom") {
+          const targetFilter = url.searchParams.get("target") || "sidepanel";
+          const session = await pool.getSession(targetFilter);
+          const dom = await session.evaluate(`JSON.stringify({
+            title: document.title,
+            url: location.href,
+            bodyChildCount: document.body?.children?.length || 0,
+            inputFields: document.querySelectorAll('input, textarea').length,
+            buttons: document.querySelectorAll('button').length,
+            chatMessages: document.querySelectorAll('[class*=message], [data-role]').length,
+            bodyText: document.body?.innerText?.slice(0, 500) || ''
+          })`);
+          return Response.json({ ok: true, dom: JSON.parse(dom) });
+        }
+
+        // POST /sw-eval { expr }
+        if (pathname === "/sw-eval" && req.method === "POST") {
+          const body = (await req.json()) as { expr: string };
+          const session = await pool.getSession("sw");
+          await session.send("Runtime.enable").catch(() => {});
+          const result = await session.evaluate(body.expr);
+          return Response.json({ ok: true, result });
+        }
+
+        // POST /chat { message, waitMs? }
+        if (pathname === "/chat" && req.method === "POST") {
+          const body = (await req.json()) as { message: string; waitMs?: number };
+          const session = await pool.getSession("sidepanel");
+          await session.send("Runtime.enable").catch(() => {});
+
+          const beforeText = await session.evaluate("document.body?.innerText || ''");
+          const escaped = JSON.stringify(body.message);
+          await session.evaluate(`(() => {
+            const ta = document.querySelector('textarea') || document.querySelector('input[type="text"]');
+            if (!ta) throw new Error('未找到输入框');
+            const setter = Object.getOwnPropertyDescriptor(
+              window.HTMLTextAreaElement.prototype, 'value'
+            )?.set || Object.getOwnPropertyDescriptor(
+              window.HTMLInputElement.prototype, 'value'
+            )?.set;
+            if (setter) setter.call(ta, ${escaped});
+            else ta.value = ${escaped};
+            ta.dispatchEvent(new Event('input', { bubbles: true }));
+            ta.dispatchEvent(new Event('change', { bubbles: true }));
+            return 'ok';
+          })()`);
+
+          await session.evaluate(`(() => {
+            const btns = Array.from(document.querySelectorAll('button'));
+            const sendBtn = btns.find(b => {
+              const label = b.getAttribute('aria-label') || '';
+              return label.includes('发送');
+            }) || btns[btns.length - 1];
+            if (sendBtn) sendBtn.click();
+            return sendBtn ? 'clicked' : 'no-button';
+          })()`);
+
+          const waitMs = Math.max(1000, Math.min(60_000, body.waitMs || 10_000));
+          await new Promise((r) => setTimeout(r, waitMs));
+
+          const afterText = await session.evaluate("document.body?.innerText || ''");
+          const newLines = afterText.split("\n").filter((l: string) => !beforeText.includes(l));
+
+          return Response.json({ ok: true, newContent: newLines.filter((l: string) => l.trim()) });
+        }
+
+        // GET /health
+        if (pathname === "/health") {
+          return Response.json({ ok: true, uptime: process.uptime?.() || 0 });
+        }
+
+        return Response.json({ error: "未知路径", routes: [
+          "GET /targets", "GET /screenshot?target=", "POST /eval {expr,target?}",
+          "GET /dom?target=", "POST /sw-eval {expr}", "POST /chat {message,waitMs?}",
+          "GET /health"
+        ] }, { status: 404 });
+      } catch (err: any) {
+        return Response.json({ ok: false, error: err.message }, { status: 500 });
+      }
+    },
+  });
+
+  console.log(`\n🚀 CDP 调试服务已启动: http://127.0.0.1:${server.port}`);
+  console.log(`   Chrome 授权已完成，后续命令不再弹窗\n`);
+  console.log(`用法示例:`);
+  console.log(`  curl http://127.0.0.1:${server.port}/targets`);
+  console.log(`  curl http://127.0.0.1:${server.port}/screenshot > /tmp/ss.png`);
+  console.log(`  curl -X POST http://127.0.0.1:${server.port}/eval -H 'Content-Type: application/json' -d '{"expr":"document.title"}'`);
+  console.log(`  curl -X POST http://127.0.0.1:${server.port}/chat -H 'Content-Type: application/json' -d '{"message":"你好"}'`);
+  console.log(`\n按 Ctrl+C 停止服务\n`);
+}
+
 // --- Commands ---
 const [, , command, ...args] = process.argv;
 
@@ -477,6 +665,7 @@ const commands: Record<string, () => Promise<void>> = {
   dom: cmdDom,
   chat: cmdChat,
   "sw-eval": cmdSwEval,
+  serve: cmdServe,
 };
 
 if (!command || command === "--help" || command === "-h") {
@@ -493,6 +682,13 @@ CDP 直连调试工具
   dom                    SidePanel DOM 概览
   chat <message>         发送消息并等待回复
   sw-eval <expression>   在 Service Worker 执行 JS
+  serve                  启动持久 HTTP 服务（只需一次授权）
+
+持久服务模式（推荐，避免重复弹窗）:
+  bun tools/cdp-debug.ts serve &         # 启动后台服务
+  curl http://127.0.0.1:9333/targets     # 列出目标
+  curl http://127.0.0.1:9333/screenshot > /tmp/ss.png
+  curl -X POST http://127.0.0.1:9333/eval -H 'Content-Type: application/json' -d '{"expr":"document.title"}'
 
 目标过滤器 (--target):
   sidepanel / panel      扩展 SidePanel（默认）

@@ -1110,7 +1110,7 @@ describe("web-chat-executor.browser", () => {
     expect(debugState.summary.managedCursorHelpTabCount).toBe(1);
     expect(debugState.summary.unmanagedCursorHelpTabCount).toBe(0);
     expect(debugState.summary.adoptAction).toBe("already-adopted");
-    expect(debugState.summary.backgroundAction).toBe("background");
+    expect(debugState.summary.backgroundAction).toBe("skip");
     expect(debugState.window).toBeNull();
     expect(chrome.windows.update).not.toHaveBeenCalled();
     expect(chromeMock.sendMessage).toHaveBeenCalled();

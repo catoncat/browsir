@@ -1,11 +1,11 @@
 ---
 id: ISSUE-024
 title: Cursor Help pool slot 自动扩缩容
-status: open
+status: in-progress
 priority: p2
 source: ISSUE-023 decomposition
 created: 2026-03-15
-assignee: unassigned
+assignee: agent
 kind: slice
 epic: EPIC-2026-03-15-CURSOR-HELP-POOL
 parallel_group: cursor-help

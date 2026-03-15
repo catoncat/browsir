@@ -227,3 +227,23 @@ f0ddbd3 完成了 Pool/Slot/Lane 核心架构：
 ## 相关 commits（2026-03-15 18:35）
 
 - 未提交
+
+## 工作总结（2026-03-15 18:51）
+
+- 在上一轮仅放宽 panel probe 仍不足以覆盖 provider 主链路后，本轮继续把“inspect-first / inspect-ready 再 background”原则同时接入了 panel 与 executor：
+  - `ProviderSettingsView.vue`
+    - `openCursorFallbackTab(active)` 不再一创建就立即最小化。
+    - `ensureCursorHelpTab()` 现在会先等待 `waitForCursorHelpTabUsable()` 返回有效 inspect 结果，再决定是否在 `active=false` 路径下最小化窗口；`active=true` 路径会显式聚焦目标 tab。
+  - `web-chat-executor.browser.ts`
+    - 新增 `waitForCursorHelpInspectReady()`，用于 external tab adoption 与 dedicated pool slot 初始化。
+    - 新开的 pool slot 不再只看 `tab.status === complete`；只要拿到任意非空 inspect 结果，就会进入后续状态判断，并在 `canBootExecute` 时直接标为 `idle`。
+- 该修复保持了 pool / lane / background 架构本身，没有回退架构，只是把“页面打开了”提升成“inspect 至少已有结果”的更强就绪语义，避免 panel / executor 在 fresh popup 上过早 background 导致 `state=null` 或 sender 尚未接起时就误判失败。
+- 同时补了一条 executor 回归测试：
+  - `waits for inspect-ready before treating a new pool slot as usable`
+- 完整验证结果：
+  - `cd extension && bun run test src/sw/kernel/__tests__/web-chat-executor.browser.test.ts` → 28/28 通过
+  - `cd extension && bun run build` → 成功
+
+## 相关 commits（2026-03-15 18:51）
+
+- 未提交

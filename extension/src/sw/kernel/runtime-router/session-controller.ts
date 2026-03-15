@@ -8,6 +8,7 @@ import {
   writeSessionMeta,
 } from "../session-store.browser";
 import { nowIso } from "../types";
+import { clearSessionPreferences } from "../web-chat-executor.browser";
 import {
   buildConversationView,
   deriveSessionTitleFromEntries,
@@ -179,6 +180,7 @@ export async function handleSession(
     const removedVirtualKeys = await clearVirtualFilesForSession(sessionId);
     const index = await removeSessionIndexEntry(sessionId, nowIso());
     await orchestrator.evictSessionRuntime(sessionId);
+    clearSessionPreferences(sessionId);
     return ok({
       sessionId,
       deleted: true,

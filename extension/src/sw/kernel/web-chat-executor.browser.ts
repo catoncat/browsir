@@ -1217,6 +1217,15 @@ async function collectCursorHelpTabDecisionTrace(
   liveCursorHelpTabCount: number;
   managedCursorHelpTabCount: number;
   unmanagedCursorHelpTabCount: number;
+  entries: Array<{
+    tabId: number;
+    windowId: number;
+    url: string;
+    status: string;
+    managed: boolean;
+    decision: "managed" | "candidate";
+    reason: string;
+  }>;
 }> {
   const liveTabs = await chrome.tabs
     .query({ url: [...CURSOR_TAB_PATTERNS] })
@@ -1228,13 +1237,40 @@ async function collectCursorHelpTabDecisionTrace(
   );
   let managedCursorHelpTabCount = 0;
   let unmanagedCursorHelpTabCount = 0;
+  const entries: Array<{
+    tabId: number;
+    windowId: number;
+    url: string;
+    status: string;
+    managed: boolean;
+    decision: "managed" | "candidate";
+    reason: string;
+  }> = [];
 
   for (const tab of liveTabs) {
     if (!tab?.id) continue;
     if (managedTabIds.has(tab.id)) {
       managedCursorHelpTabCount += 1;
+      entries.push({
+        tabId: tab.id,
+        windowId: Number(tab.windowId || 0),
+        url: String(tab.url || ""),
+        status: String(tab.status || ""),
+        managed: true,
+        decision: "managed",
+        reason: "tracked-slot",
+      });
     } else {
       unmanagedCursorHelpTabCount += 1;
+      entries.push({
+        tabId: tab.id,
+        windowId: Number(tab.windowId || 0),
+        url: String(tab.url || ""),
+        status: String(tab.status || ""),
+        managed: false,
+        decision: "candidate",
+        reason: "unmanaged-live-tab",
+      });
     }
   }
 
@@ -1242,6 +1278,7 @@ async function collectCursorHelpTabDecisionTrace(
     liveCursorHelpTabCount: liveTabs.length,
     managedCursorHelpTabCount,
     unmanagedCursorHelpTabCount,
+    entries,
   };
 }
 
@@ -1880,6 +1917,7 @@ export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebug
           lastEventReason: state.lastWindowEventReason || "",
         }
       : null,
+    tabDecisionTrace: decisionTrace.entries,
     slots,
   };
 }

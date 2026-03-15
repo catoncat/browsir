@@ -87,10 +87,10 @@ acceptance_ref: docs/<某设计文档>.md
   - 说明：当前 Cursor Help 方向仍在处理中；其中 Provider 连通性由 human 继续接手，其他 agent 默认不要再并行改 `web-chat-executor.browser.ts` / `cursor-help-content.ts` / `cursor-help-page-hook.ts`，除非先明确重新分工。
 
 3. `ISSUE-024` [Cursor Help pool slot 自动扩缩容](./2026-03-15-cursor-help-pool-autoscaling.md)
-  - `status: open`
+  - `status: in-progress`
   - `priority: p2`
   - `parallel_group: cursor-help`
-  - 说明：`ISSUE-026` 收尾后，当前队列中的最后一张 cursor-help card 是 autoscaling。
+  - 说明：`ISSUE-026` 收尾后，当前队列中的最后一张 cursor-help card 已开始推进 autoscaling。
 
 ### 可立即开工
 
@@ -104,34 +104,27 @@ acceptance_ref: docs/<某设计文档>.md
    - 阻塞：依赖 `ISSUE-017` 首轮 controller 解耦完成
    - 说明：这是 follow-up，不替代 `ISSUE-017`，默认不要提前启动。
 
-2. `ISSUE-024` [Cursor Help pool slot 自动扩缩容](./2026-03-15-cursor-help-pool-autoscaling.md)
-  - `status: open`
-  - `priority: p2`
-  - 阻塞：依赖 `ISSUE-023`（当前 human 正在处理 Provider 连通性）
-  - 说明：这是 `ISSUE-023` 的后续 slice，先不要与连接恢复并行推进。
-
-3. `ISSUE-025` [Cursor Help pool slot 健康检查心跳](./2026-03-15-cursor-help-pool-heartbeat.md)
+2. `ISSUE-025` [Cursor Help pool slot 健康检查心跳](./2026-03-15-cursor-help-pool-heartbeat.md)
   - `status: done`
   - `priority: p1`
   - 说明：已完成 heartbeat / health reason / soft recovery / retry budget 收口。
 
-4. `ISSUE-026` [Cursor Help pool lane 并发冲突细化](./2026-03-15-cursor-help-pool-lane-conflict-refinement.md)
+3. `ISSUE-026` [Cursor Help pool lane 并发冲突细化](./2026-03-15-cursor-help-pool-lane-conflict-refinement.md)
   - `status: done`
   - `priority: p2`
   - 说明：已完成 lane conflict 集中判定与关键组合测试覆盖。
 
-5. `ISSUE-024` [Cursor Help pool slot 自动扩缩容](./2026-03-15-cursor-help-pool-autoscaling.md)
-  - `status: open`
+4. `ISSUE-024` [Cursor Help pool slot 自动扩缩容](./2026-03-15-cursor-help-pool-autoscaling.md)
+  - `status: in-progress`
   - `priority: p2`
-  - 阻塞：依赖 `ISSUE-025` 与 `ISSUE-026`（均已满足，等待认领）
-  - 说明：当前已成为 Cursor Help 队列中的下一张可开工 card。
+  - 说明：依赖 `ISSUE-025` 与 `ISSUE-026` 已满足，当前已正式进入 autoscaling 实施阶段。
 
 ## 推荐领取顺序
 
 1. 先看是否有人正在持有 `panel-chat` 或 `kernel-loop` 单写者泳道。
 2. `panel-chat` 侧当前仍是 `ISSUE-017` 单写者，默认不要重复认领。
 3. `kernel-loop` 侧当前 `ISSUE-019` 已完成，暂无后续 open slice。
-4. `cursor-help` 侧当前下一张建议 card 为 `ISSUE-024`；认领后应避免并行写入其 `write_scope`。
+4. `cursor-help` 侧当前 active slice 为 `ISSUE-024`；默认避免并行写入其 `write_scope`。
 5. `ISSUE-024` 完成后，当前这一组 Cursor Help pool follow-up 即可视为基本收束。
 6. `ISSUE-021` 必须排在 `ISSUE-017` 后，并且仅在一阶段拆分后仍有明显厚度时才启动。
 

@@ -115,6 +115,25 @@ Chrome Beta（≥ 144）需先在 `chrome://inspect/#remote-debugging` 启用远
 
 本工具通过 CDP WebSocket 直连用户正在使用的 Chrome，可完整访问所有扩展目标：
 
+#### 推荐：持久服务模式（避免重复 Chrome 授权弹窗）
+
+每次直接运行 `bun tools/cdp-debug.ts <cmd>` 都会新建 WebSocket 连接，Chrome M144+ 每次新连接都弹授权框。使用 `serve` 模式只需授权一次：
+
+```bash
+# 1. 后台启动持久服务（只弹一次授权窗口）
+bun tools/cdp-debug.ts serve &
+
+# 2. 通过 HTTP 发送命令，不再弹窗
+curl http://127.0.0.1:9333/targets
+curl http://127.0.0.1:9333/screenshot > /tmp/ss.png
+curl http://127.0.0.1:9333/dom
+curl -X POST http://127.0.0.1:9333/eval -H 'Content-Type: application/json' -d '{"expr":"document.title"}'
+curl -X POST http://127.0.0.1:9333/sw-eval -H 'Content-Type: application/json' -d '{"expr":"self.registration.scope"}'
+curl -X POST http://127.0.0.1:9333/chat -H 'Content-Type: application/json' -d '{"message":"你好"}'
+```
+
+#### 直接模式（每次都弹授权窗口，简单场景可用）
+
 | 命令 | 用途 | 示例 |
 |------|------|------|
 | `targets` | 列出所有 Chrome target | `bun tools/cdp-debug.ts targets` |

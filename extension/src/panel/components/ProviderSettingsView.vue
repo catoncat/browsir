@@ -67,7 +67,6 @@ function emptyCursorHelpRuntimeState(): CursorHelpRuntimeState {
     fetchHookReady: false,
     senderReady: false,
     selectedModel: "",
-    availableModels: [],
     senderKind: "",
     lastSenderError: "",
     url: "",
@@ -483,7 +482,7 @@ async function ensureCursorHelpTab(
     if (inspected) {
       patchCursorHelpRuntimeState(profile, inspected);
     }
-    if (active && !createdNewTab) {
+    if (active) {
       await focusTab(boundTab);
     }
     setCursorHelpTargetTabId(profile, boundTab.id);
@@ -493,6 +492,11 @@ async function ensureCursorHelpTab(
       patchCursorHelpRuntimeState(profile, {
         ...inspected,
         targetTabId: boundTab.id,
+      });
+    }
+    if (!active && typeof boundTab.windowId === "number") {
+      await chrome.windows.update(boundTab.windowId, { state: "minimized" }).catch(() => {
+        // noop
       });
     }
     if (!inspected?.canExecute) {
