@@ -117,7 +117,20 @@ tags: [slice, cursor-help, pool, window, minimized]
 
 ## 相关 commits（2026-03-15 Slice A）
 
-- 未提交
+## 相关 commits（2026-03-15 Slice D）
+
+- `47d5a74` feat(cursor-help): ISSUE-027/025/026/024 - Pool 优化完整实现
+
+## 完成总结（2026-03-16）
+
+ISSUE-027 已全部完成，实现内容包括：
+- 窗口策略矩阵：`buildCursorHelpWindowPolicyState()` 统一决策窗口行为
+- Cooldown 机制：`pool_window_removed` 后不立即重建，允许 opportunistic adopt
+- 恢复决策：区分 `skip-cooldown` / `await-manual` / `auto-rebuild`
+- Debug 可见：`windowMode` / `lastWindowEvent` / `recoveryCooldownActive` 等字段
+- 回归测试：10+ 个窗口策略测试全部通过
+
+验收状态：✅ 全部满足
 
 ## 工作总结（2026-03-15 Slice B/C）
 

@@ -98,3 +98,17 @@ tags: [slice, cursor-help, pool, lane, concurrency]
 - `158dba6` feat(cursor-help): ISSUE-026 round 2 — title/compaction lane mutual exclusion
 
 > 注：以上两轮实现已合并入 main。
+
+## 完成总结（2026-03-16）
+
+ISSUE-026 已全部完成，实现内容包括：
+- 集中式冲突判定：`resolveSessionLaneConflict()` 统一决策 lane 互斥
+- 并发矩阵：
+  - ✅ same-session `primary + compaction` 允许并行
+  - ❌ same-session `title` 在 active `primary`/`compaction` 时拒绝
+  - ❌ same-session `compaction` 在 active `title` 时拒绝
+  - ❌ same-session same-lane busy 拒绝
+- 事件日志：`provider.lane_conflict` 区分 lane rule reject 与普通 busy
+- 回归测试：4+ 个 lane 冲突测试全部通过
+
+验收状态：✅ 全部满足

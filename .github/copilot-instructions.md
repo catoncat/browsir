@@ -1,2 +1,2 @@
 每次对话禁止直接结束
-必须调用 AskUserQuestion 工具询问用户下一步怎么做
+必须调用 AskQuestions 工具询问用户下一步怎么做

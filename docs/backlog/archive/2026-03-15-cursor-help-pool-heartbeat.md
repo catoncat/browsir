@@ -148,6 +148,22 @@ tags: [slice, cursor-help, pool, heartbeat, health-check]
 - 已把 `ISSUE-025` 的恢复链进一步收口到“会收手”的阶段：新增 per-reason retry budget，并在恢复预算耗尽后把 slot 明确降级到 `error`，而不是无限 `recovering`。
 - 当前 retry budget / degradation 已覆盖：
   - `tab-missing`
+  ## 相关 commits（2026-03-15 第五轮实现）
+
+  - `47d5a74` feat(cursor-help): ISSUE-027/025/026/024 - Pool 优化完整实现
+
+  ## 完成总结（2026-03-16）
+
+  ISSUE-025 已全部完成，实现内容包括：
+  - 周期性心跳：`runCursorHelpPoolHeartbeat()` 手动触发 + 元数据返回
+  - 健康探测：tab 存活 / inspect / runtime mismatch 检测
+  - Auto-heal: 三类恢复路径（tab-missing / page-not-ready / inspect-failed）
+  - Retry budget: per-reason 恢复预算，耗尽后降级到 `error`
+  - 扩缩容协同：heartbeat 触发 idle slot 收缩（带冷却时间）
+  - Debug 可见：`lastHealthCheckedAt` / `lastHealthReason` / `lastHeartbeatAt`
+  - 回归测试：8+ 个心跳/恢复测试全部通过
+
+  验收状态：✅ 全部满足
   - `page-not-ready`
   - `inspect-failed`
 - 对应新增回归测试：`heartbeat downgrades to error after inspect-failed recovery budget is exhausted`。
