@@ -80,9 +80,12 @@ acceptance_ref: docs/<某设计文档>.md
   - `status: in-progress`
   - `priority: p1`
   - `parallel_group: cursor-help`
-  - 说明：Provider 连通性由 human 接手，其他 agent 默认不要并行改 `web-chat-executor.browser.ts` / `cursor-help-content.ts` / `cursor-help-page-hook.ts`，除非先明确重新分工。
+  - `assignee: human`
+  - 说明：Provider 连通性由 human 接手。子 slice ISSUE-024/025/026/027 全部已完成，仅剩 S1（multi-conversation conversationKey）部分已落地首阶段。
 
-2. `ISSUE-024` [Cursor Help pool slot 自动扩缩容](./2026-03-15-cursor-help-pool-autoscaling.md)
+### 已完成（未归档）
+
+1. `ISSUE-024` [Cursor Help pool slot 自动扩缩容](./2026-03-15-cursor-help-pool-autoscaling.md)
   - `status: done`
   - `priority: p2`
   - `parallel_group: cursor-help`
@@ -93,16 +96,14 @@ acceptance_ref: docs/<某设计文档>.md
 1. `ISSUE-021` [ChatView 二阶段深拆 follow-up](./2026-03-15-app-vue-decomposition.md)
    - `status: open`
    - `priority: p2`
-   - 说明：前置 `ISSUE-017` 已 done，可启动 transcript/overlay/editor/export 拆分。
+   - 说明：ChatView 已从 2142→892 行，composables 分工合理。当前厚度不紧迫，可推迟。
 
 ## 推荐领取顺序
 
-1. 先看是否有人正在持有 `panel-chat` 或 `kernel-loop` 单写者泳道。
-2. `panel-chat` 侧当前仍是 `ISSUE-017` 单写者，默认不要重复认领。
-3. `kernel-loop` 侧当前 `ISSUE-019` 已完成，暂无后续 open slice。
-4. `cursor-help` 侧当前 active slice 为 `ISSUE-024`；默认避免并行写入其 `write_scope`。
-5. `ISSUE-024` 完成后，当前这一组 Cursor Help pool follow-up 即可视为基本收束。
-6. `ISSUE-021` 必须排在 `ISSUE-017` 后，并且仅在一阶段拆分后仍有明显厚度时才启动。
+1. `ISSUE-023` 由 human 负责，agent 不要并行改其 `write_scope`。
+2. `ISSUE-024` 已 done，Cursor Help pool follow-up 子 slice 全部收束。
+3. `ISSUE-021` 是唯一剩余的 open slice，但当前 ChatView 厚度（892 行）已在合理范围，优先级低。
+4. 如无新需求，backlog 已基本清空。
 
 ## 维护规则
 
