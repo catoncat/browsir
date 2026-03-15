@@ -71,10 +71,26 @@ tags:
 - 所有 browser 路径最终经过 `virtual-path-resolver.ts` 的 `parseVirtualUri()` + `resolveVirtualPath()`
 - `@mem://...` 被正确拒绝为 `browser_canonical_invalid`，指引用户使用 `@/mem/...`
 
-### Slice D: session delete / reset 语义闭环（Phase 5）
+### Slice D: session delete / reset 语义闭环（Phase 5）✅ 审计通过
 
-当前 `clearVirtualFilesForSession()` 已接通 `sandboxManager.dispose()`。
-验证是否有遗漏的 runtime 生命周期层需要清理。
+经深度审计（session-controller / storage-controller / storage-reset / orchestrator / lifo-adapter / session-runtime-manager），Phase 5 两条清理链路均已完整覆盖：
+
+**`brain.session.delete` 链路**（7 步）：
+1. `orchestrator.stop()` → 停止运行态
+2. `flushSessionTraceWrites()` → 等待 pending trace
+3. `removeSessionMeta()` → IDB sessions + entries（含 cursor 遍历）
+4. `removeTraceRecords()` → IDB traces
+5. `clearVirtualFilesForSession()` → sandbox dispose + namespace 清理（session + ephemeral __bbl）+ 遥测
+6. `removeSessionIndexEntry()` → session 索引
+7. `evictSessionRuntime()` → 清除所有内存缓存
+
+**`brain.storage.reset` 链路**（4 步）：
+1. `resetSessionStore()` → 清空 IDB sessions/entries/traces/SESSION_INDEX_KEY
+2. `clearSessionScopedVirtualFiles()` → disposeAll + 所有 session/ephemeral namespace + 遥测
+3. `initSessionIndex()` → 重建空索引
+4. `orchestrator.resetRuntimeState()` → 清空所有内存 Maps
+
+测试覆盖：6 个测试用例验证 delete/reset 后 VFS 读取 throws、stream cache 清空、trace 删除。
 
 ## 优先级
 

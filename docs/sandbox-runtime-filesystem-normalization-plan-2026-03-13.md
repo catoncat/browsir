@@ -2,7 +2,7 @@
 
 日期：2026-03-13
 
-状态：大部分落地（Phase 0/1/2/3/4 完成，Phase 5/6 待验证）
+状态：大部分落地（Phase 0/1/2/3/4/5 完成，Phase 6 待验证）
 
 > **2026-03-15 工作树对齐更新**：
 >
@@ -342,30 +342,50 @@
 - ✅ skill `location: "mem://..."` → `executeStep()` → `invokeVirtualFrame()`
 - ✅ 三条链路 resolve / materialize 结果一致（共用 `context-ref-service` + `filesystem-inspect`）
 
-### Phase 5：升级 session delete / storage reset 语义
+### Phase 5：升级 session delete / storage reset 语义 ✅ 审计通过
 
-目标：把清理语义从“清快照”升级到“清 runtime + 清快照”。
+目标：把清理语义从"清快照"升级到"清 runtime + 清快照"。
+
+> **2026-03-15 审计结果**：两条链路均已完整覆盖所有清理层。
+>
+> `brain.session.delete` 清理链（session-controller.ts）：
+> 1. `orchestrator.stop()` → 停止运行态 + 清空队列
+> 2. `orchestrator.flushSessionTraceWrites()` → 等待 pending trace 写入
+> 3. `removeSessionMeta()` → IDB sessions + entries（cursor 遍历 by-session 索引）
+> 4. `removeTraceRecords()` → IDB traces
+> 5. `clearVirtualFilesForSession()` → sandboxManager.dispose() + namespace 清理 + 遥测清理
+> 6. `removeSessionIndexEntry()` → session 索引
+> 7. `orchestrator.evictSessionRuntime()` → 清除 stream/traceWriteTail/runState 内存缓存
+>
+> `brain.storage.reset` 清理链（storage-controller.ts + storage-reset.browser.ts）：
+> 1. `resetSessionStore()` → 清空 IDB sessions/entries/traces/SESSION_INDEX_KEY
+> 2. `clearSessionScopedVirtualFiles()` → disposeAll + 所有 session/ephemeral namespace + 遥测
+> 3. `initSessionIndex()` → 重建空索引
+> 4. `orchestrator.resetRuntimeState()` → 清空所有内存 Maps
+>
+> 测试覆盖：6 个测试用例覆盖 delete/reset 后的 VFS 读取（throws "virtual file not found"）、
+> step stream cache 清空、trace 删除、session 列表移除。
 
 `brain.session.delete` 必须清：
 
-- session meta
-- entries
-- traces
-- orchestrator runtime state
-- live sandbox runtime
-- session namespace snapshot
-- session `__bbl` ephemeral namespace
+- ✅ session meta
+- ✅ entries
+- ✅ traces
+- ✅ orchestrator runtime state
+- ✅ live sandbox runtime
+- ✅ session namespace snapshot
+- ✅ session `__bbl` ephemeral namespace
 
 `brain.storage.reset` 必须清：
 
-- 所有 session/meta/entries/traces
-- 所有 live sandbox runtime
-- 所有 namespace snapshot
-- 所有 ephemeral namespace
+- ✅ 所有 session/meta/entries/traces
+- ✅ 所有 live sandbox runtime
+- ✅ 所有 namespace snapshot
+- ✅ 所有 ephemeral namespace
 
 验收：
 
-- delete/reset 后重新 acquire session，不会读到旧 runtime 状态
+- ✅ delete/reset 后重新 acquire session，不会读到旧 runtime 状态
 
 ### Phase 6：planner / tool policy / done heuristic 收口
 
