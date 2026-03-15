@@ -707,8 +707,8 @@ function enqueueHostedEvent(entry: PendingExecution, event: HostedChatTransportE
   entry.queue.push(chunk);
 }
 
-function closeExecution(entry: PendingExecution): void {
-  if (entry.closed) return;
+function releaseExecution(entry: PendingExecution): boolean {
+  if (entry.closed) return false;
   entry.closed = true;
   entry.queue.length = 0;
   if (entry.timeoutHandle) {
@@ -721,6 +721,11 @@ function closeExecution(entry: PendingExecution): void {
   ACTIVE_REQUEST_ID_BY_SESSION_LANE.delete(
     buildSessionLaneKey(entry.sessionId, entry.lane),
   );
+  return true;
+}
+
+function closeExecution(entry: PendingExecution): void {
+  if (!releaseExecution(entry)) return;
   void loadCursorHelpPoolState().then((poolState) => {
     const currentSlot = poolState.slots.find((s) => s.slotId === entry.slotId);
     if (currentSlot?.status === "recovering") return;
@@ -730,6 +735,8 @@ function closeExecution(entry: PendingExecution): void {
       lastError: "",
       lastReadyAt: Math.max(entry.lastEventAt, entry.createdAt),
     });
+  }).catch((err) => {
+    console.warn(`[web-chat-executor] closeExecution: patchSlotState(idle) failed for slot=${entry.slotId}`, err);
   });
   if (entry.controller) {
     entry.controller.close();
@@ -737,19 +744,7 @@ function closeExecution(entry: PendingExecution): void {
 }
 
 function failExecution(entry: PendingExecution, error: string): void {
-  if (entry.closed) return;
-  entry.closed = true;
-  entry.queue.length = 0;
-  if (entry.timeoutHandle) {
-    clearTimeout(entry.timeoutHandle);
-    entry.timeoutHandle = null;
-  }
-  ACTIVE_BY_REQUEST_ID.delete(entry.requestId);
-  ACTIVE_REQUEST_ID_BY_SLOT.delete(entry.slotId);
-  ACTIVE_REQUEST_ID_BY_TAB.delete(entry.tabId);
-  ACTIVE_REQUEST_ID_BY_SESSION_LANE.delete(
-    buildSessionLaneKey(entry.sessionId, entry.lane),
-  );
+  if (!releaseExecution(entry)) return;
   if (entry.startedAt === null) {
     void patchCursorHelpSlotState(entry.slotId, {
       status: "stale",
@@ -1605,7 +1600,6 @@ async function reconcileCursorHelpPoolStateUnsafe(
 
 async function markCursorHelpSlotBusy(
   slot: CursorHelpSlotRecord,
-  _entry: PendingExecution,
 ): Promise<void> {
   await patchCursorHelpSlotState(slot.slotId, {
     status: "busy",
@@ -2215,7 +2209,7 @@ export function createCursorHelpWebProvider() {
       });
 
       ACTIVE_BY_REQUEST_ID.set(requestId, entry);
-      await markCursorHelpSlotBusy(slot, entry);
+      await markCursorHelpSlotBusy(slot);
       PREFERRED_SLOT_ID_BY_SESSION.set(sessionId, slot.slotId);
       armExecutionWatchdog(
         entry,
@@ -2275,24 +2269,14 @@ export function createCursorHelpWebProvider() {
           }`,
         );
       } catch (error) {
-        ACTIVE_BY_REQUEST_ID.delete(requestId);
-        ACTIVE_REQUEST_ID_BY_SLOT.delete(slot.slotId);
-        ACTIVE_REQUEST_ID_BY_TAB.delete(slot.tabId);
-        ACTIVE_REQUEST_ID_BY_SESSION_LANE.delete(sessionLaneKey);
-        void patchCursorHelpSlotState(slot.slotId, {
-          status: "stale",
-          lastUsedAt: nowMs(),
-          lastError:
-            error instanceof Error ? error.message : String(error),
-        }).catch(() => {
-          // noop
-        });
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        failExecution(entry, errorMessage);
         emitProviderDebugLog(
           "provider.execute",
           "failed",
-          error instanceof Error ? error.message : String(error),
+          errorMessage,
         );
-        throw error instanceof Error ? error : new Error(String(error));
+        throw error instanceof Error ? error : new Error(errorMessage);
       }
 
       return new Response(stream, {
