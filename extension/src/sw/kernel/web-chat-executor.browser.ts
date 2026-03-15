@@ -69,6 +69,17 @@ import {
   readLiveCursorHelpSlot,
   clearLegacySessionSlots,
 } from "./cursor-help-tab-ops";
+import {
+  DEFAULT_CURSOR_HELP_POOL_SLOT_COUNT,
+  MIN_CURSOR_HELP_POOL_SLOT_COUNT,
+  MAX_CURSOR_HELP_POOL_SLOT_COUNT,
+  normalizePoolSlotCount,
+  buildCursorHelpSlotRecord,
+  tryAdoptExistingCursorHelpSlots,
+  createCursorHelpPoolWindow,
+  createAdditionalPoolSlot,
+  collectCursorHelpTabDecisionTrace,
+} from "./cursor-help-pool-window";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -81,21 +92,15 @@ interface CursorHelpPoolDebugView {
 }
 
 const PROVIDER_ID = "cursor_help_web";
-const CURSOR_TAB_PATTERNS = ["https://cursor.com/help*"] as const;
 const PREFERRED_SLOT_ID_BY_SESSION = new Map<string, string>();
 const PREFERRED_SLOT_ID_BY_CONVERSATION = new Map<string, string>();
 const LAST_CONVERSATION_KEY_BY_SESSION = new Map<string, string>();
 const SLOT_WAIT_POLL_MS = 200;
 const PRIMARY_SLOT_WAIT_MS = 15_000;
 const AUXILIARY_SLOT_WAIT_MS = 10_000;
-const DEFAULT_CURSOR_HELP_POOL_SLOT_COUNT = 3;
-const MIN_CURSOR_HELP_POOL_SLOT_COUNT = 2;
-const MAX_CURSOR_HELP_POOL_SLOT_COUNT = 6;
 const CURSOR_HELP_HEARTBEAT_INTERVAL_MS = 30_000;
 const CURSOR_HELP_HEARTBEAT_BACKOFF_MS = 60_000;
 const CURSOR_HELP_HEARTBEAT_RECOVERY_RETRY_MS = 500;
-const CURSOR_HELP_CONTAINER_WIDTH = 1280;
-const CURSOR_HELP_CONTAINER_HEIGHT = 900;
 const CURSOR_HELP_WINDOW_REBUILD_COOLDOWN_MS = 15_000;
 const AUTOSCALE_EXPAND_COOLDOWN_MS = 10_000;
 const AUTOSCALE_SHRINK_COOLDOWN_MS = 60_000;
@@ -169,15 +174,6 @@ function nowMs(): number {
 
 function randomSlotId(): string {
   return `cursor-slot-${crypto.randomUUID()}`;
-}
-
-function normalizePoolSlotCount(raw: unknown): number {
-  const count = Number(raw);
-  if (!Number.isInteger(count)) return DEFAULT_CURSOR_HELP_POOL_SLOT_COUNT;
-  return Math.min(
-    MAX_CURSOR_HELP_POOL_SLOT_COUNT,
-    Math.max(MIN_CURSOR_HELP_POOL_SLOT_COUNT, count),
-  );
 }
 
 function readRequestedPoolSlotCount(input: LlmProviderSendInput): number {
@@ -298,36 +294,13 @@ function formatRewriteDebugSummary(raw: unknown): string {
     `system=${debug.systemMessageInjected === true ? "1" : "0"}`,
     `stripCtl=${Number(debug.strippedNativeControlMessageCount || 0)}`,
     `user=${debug.userPromptInjected === true ? "1" : "0"}`,
+    `convMode=${String(debug.conversationControlMode || "").trim() || "implicit"}`,
+    `convId=${String(debug.forcedConversationId || "").trim() || "-"}`,
     `promptHash=${String(debug.compiledPromptHash || "").trim() || "-"}`,
     `promptLen=${Number(debug.compiledPromptLength || 0)}`,
     `origLen=${Number(debug.originalTargetLength || 0)}`,
     `nextLen=${Number(debug.rewrittenTargetLength || 0)}`
   ].join(" ");
-}
-
-function buildCursorHelpSlotRecord(
-  tab: chrome.tabs.Tab,
-  lanePreference: "primary" | "auxiliary",
-  existingSlotId?: string,
-): CursorHelpSlotRecord {
-  return {
-    slotId: existingSlotId || randomSlotId(),
-    tabId: Number(tab.id),
-    windowId:
-      typeof tab.windowId === "number" && tab.windowId > 0
-        ? tab.windowId
-        : undefined,
-    lanePreference,
-    status: "warming",
-    lastKnownUrl: String(tab.url || ""),
-    lastReadyAt: 0,
-    lastUsedAt: 0,
-    lastHealthCheckedAt: 0,
-    lastHealthReason: undefined,
-    recoveryAttemptCount: 0,
-    lastRecoveryReason: undefined,
-    lastError: undefined,
-  };
 }
 
 function resolveHeartbeatDelay(debugState: CursorHelpPoolDebugView): {
@@ -377,156 +350,6 @@ function scheduleCursorHelpPoolHeartbeat(delayMs = CURSOR_HELP_HEARTBEAT_INTERVA
   if (typeof nodeTimer?.unref === "function") {
     nodeTimer.unref();
   }
-}
-
-async function tryAdoptExistingCursorHelpSlots(
-  slotCount: number,
-): Promise<CursorHelpPoolState | null> {
-  const desiredSlotCount = normalizePoolSlotCount(slotCount);
-  const existingTabs = await chrome.tabs
-    .query({ url: [...CURSOR_TAB_PATTERNS] })
-    .catch(() => [] as chrome.tabs.Tab[]);
-  const adoptedSlots: CursorHelpSlotRecord[] = [];
-
-  for (const tab of existingTabs) {
-    if (!tab?.id) continue;
-    await markCursorHelpTabStable(tab.id);
-    try {
-      await waitForCursorHelpTabReady(tab.id, 5_000);
-    } catch {
-      continue;
-    }
-    const inspect = await waitForCursorHelpInspectReady(tab.id, 8_000);
-    if (!canCursorHelpSlotBootExecute(inspect)) continue;
-    adoptedSlots.push({
-      slotId: randomSlotId(),
-      tabId: tab.id,
-      windowId:
-        typeof tab.windowId === "number" && tab.windowId > 0
-          ? tab.windowId
-          : undefined,
-      lanePreference: adoptedSlots.length === 0 ? "primary" : "auxiliary",
-      status: "idle",
-      lastKnownUrl: String(inspect.url || tab.url || CURSOR_HELP_URL),
-      lastReadyAt: nowMs(),
-      lastUsedAt: 0,
-      lastHealthCheckedAt: nowMs(),
-      lastHealthReason: "ready",
-      recoveryAttemptCount: 0,
-      lastRecoveryReason: undefined,
-      lastError: undefined,
-    });
-    if (adoptedSlots.length >= Math.min(desiredSlotCount, 1)) break;
-  }
-
-  if (adoptedSlots.length <= 0) return null;
-  await clearLegacySessionSlots();
-  return await saveCursorHelpPoolState(withWindowEvent({
-    version: 1,
-    windowId: undefined,
-    slots: sortSlotsForDisplay(adoptedSlots),
-    windowMode: "external-tabs",
-    updatedAt: nowMs(),
-  }, "adopt_existing_tabs", {
-    mode: "external-tabs",
-    reason: `adopted=${adoptedSlots.length}`,
-  }));
-}
-
-async function createCursorHelpPoolWindow(
-  slotCount: number,
-): Promise<CursorHelpPoolState> {
-  const desiredSlotCount = normalizePoolSlotCount(slotCount);
-  const adopted = await tryAdoptExistingCursorHelpSlots(desiredSlotCount);
-  if (adopted) {
-    return adopted;
-  }
-  const createdWindow = await chrome.windows
-    .create({
-      url: CURSOR_HELP_URL,
-      focused: false,
-      type: "popup",
-      width: CURSOR_HELP_CONTAINER_WIDTH,
-      height: CURSOR_HELP_CONTAINER_HEIGHT,
-    })
-    .catch(async () => {
-      return chrome.windows.create({
-        url: CURSOR_HELP_URL,
-        focused: false,
-        width: CURSOR_HELP_CONTAINER_WIDTH,
-        height: CURSOR_HELP_CONTAINER_HEIGHT,
-      });
-    });
-  const firstTab = Array.isArray(createdWindow?.tabs)
-    ? createdWindow.tabs[0]
-    : null;
-  if (!firstTab?.id || !createdWindow?.id) {
-    throw new Error("cursor_help_web 无法打开专用 Help 窗口");
-  }
-
-  const slots: CursorHelpSlotRecord[] = [];
-  await markCursorHelpTabStable(firstTab.id);
-  const firstSlot = buildCursorHelpSlotRecord(firstTab, "primary");
-  const firstInspect = await waitForCursorHelpInspectReady(firstTab.id, 8_000);
-  if (canCursorHelpSlotBootExecute(firstInspect)) {
-    firstSlot.status = "idle";
-    firstSlot.lastReadyAt = nowMs();
-    firstSlot.lastHealthCheckedAt = nowMs();
-    firstSlot.lastHealthReason = "ready";
-    firstSlot.lastError = undefined;
-  }
-  slots.push(firstSlot);
-
-  for (let index = 1; index < desiredSlotCount; index += 1) {
-    const tab = await chrome.tabs.create({
-      windowId: createdWindow.id,
-      url: CURSOR_HELP_URL,
-      active: false,
-    });
-    if (!tab?.id) continue;
-    await markCursorHelpTabStable(tab.id);
-    const slot = buildCursorHelpSlotRecord(tab, "auxiliary");
-    const inspect = await waitForCursorHelpInspectReady(tab.id, 8_000);
-    if (canCursorHelpSlotBootExecute(inspect)) {
-      slot.status = "idle";
-      slot.lastReadyAt = nowMs();
-      slot.lastHealthCheckedAt = nowMs();
-      slot.lastHealthReason = "ready";
-      slot.lastError = undefined;
-    }
-    slots.push(slot);
-  }
-
-  const createdWindowType = String(createdWindow.type || "").trim() || "unknown";
-  const minimized = await minimizeCursorHelpWindow(createdWindow.id);
-  await clearLegacySessionSlots();
-  return await saveCursorHelpPoolState(withWindowEvent({
-    version: 1,
-    windowId: createdWindow.id,
-    slots: sortSlotsForDisplay(slots),
-    windowMode: "pool-window",
-    updatedAt: nowMs(),
-  }, "create_pool_window", {
-    mode: "pool-window",
-    reason: `slots=${slots.length} type=${createdWindowType} minimized=${minimized ? 1 : 0}`,
-  }));
-}
-
-async function createAdditionalPoolSlot(
-  windowId: number,
-  lanePreference: "primary" | "auxiliary",
-  existingSlotId?: string,
-): Promise<CursorHelpSlotRecord | null> {
-  const tab = await chrome.tabs
-    .create({
-      windowId,
-      url: CURSOR_HELP_URL,
-      active: false,
-    })
-    .catch(() => null);
-  if (!tab?.id) return null;
-  await markCursorHelpTabStable(tab.id);
-  return buildCursorHelpSlotRecord(tab, lanePreference, existingSlotId);
 }
 
 function hasSlotAffinity(slotId: string): boolean {
@@ -606,77 +429,6 @@ async function tryAutoShrinkPool(
   lastAutoShrinkAt = nowMs();
   lastAutoShrinkReason = reason;
   return true;
-}
-
-async function collectCursorHelpTabDecisionTrace(
-  state: CursorHelpPoolState,
-): Promise<{
-  liveCursorHelpTabCount: number;
-  managedCursorHelpTabCount: number;
-  unmanagedCursorHelpTabCount: number;
-  entries: Array<{
-    tabId: number;
-    windowId: number;
-    url: string;
-    status: string;
-    managed: boolean;
-    decision: "managed" | "candidate";
-    reason: string;
-  }>;
-}> {
-  const liveTabs = await chrome.tabs
-    .query({ url: [...CURSOR_TAB_PATTERNS] })
-    .catch(() => [] as chrome.tabs.Tab[]);
-  const managedTabIds = new Set(
-    state.slots
-      .map((slot) => Number(slot.tabId || 0))
-      .filter((tabId) => Number.isInteger(tabId) && tabId > 0),
-  );
-  let managedCursorHelpTabCount = 0;
-  let unmanagedCursorHelpTabCount = 0;
-  const entries: Array<{
-    tabId: number;
-    windowId: number;
-    url: string;
-    status: string;
-    managed: boolean;
-    decision: "managed" | "candidate";
-    reason: string;
-  }> = [];
-
-  for (const tab of liveTabs) {
-    if (!tab?.id) continue;
-    if (managedTabIds.has(tab.id)) {
-      managedCursorHelpTabCount += 1;
-      entries.push({
-        tabId: tab.id,
-        windowId: Number(tab.windowId || 0),
-        url: String(tab.url || ""),
-        status: String(tab.status || ""),
-        managed: true,
-        decision: "managed",
-        reason: "tracked-slot",
-      });
-    } else {
-      unmanagedCursorHelpTabCount += 1;
-      entries.push({
-        tabId: tab.id,
-        windowId: Number(tab.windowId || 0),
-        url: String(tab.url || ""),
-        status: String(tab.status || ""),
-        managed: false,
-        decision: "candidate",
-        reason: "unmanaged-live-tab",
-      });
-    }
-  }
-
-  return {
-    liveCursorHelpTabCount: liveTabs.length,
-    managedCursorHelpTabCount,
-    unmanagedCursorHelpTabCount,
-    entries,
-  };
 }
 
 async function attemptCursorHelpSlotRecovery(
