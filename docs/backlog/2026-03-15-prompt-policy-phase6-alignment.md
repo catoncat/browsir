@@ -1,10 +1,11 @@
 ---
 id: ISSUE-025
 title: "Prompt Policy Phase 6 — tool policy / done heuristic 收口"
-status: open
+status: done
 priority: p2
 source: sandbox-runtime-filesystem-normalization-plan-2026-03-13
 created: 2026-03-15
+closed: 2026-03-15
 assignee: unassigned
 kind: task
 depends_on:
@@ -52,8 +53,8 @@ ISSUE-024（Phase 0-5）已全部完成。Phase 6 是行为层对齐，目标是
 
 ## 验收
 
-- [ ] `browser_bash` 描述不再暗示 "(primary)" 或完整宿主 shell
-- [ ] `host_bash` 描述不再阻碍正常使用
-- [ ] skill 安装引导语明确 host_bash 定位
-- [ ] `bun run build` 通过
-- [ ] `bun run test` 通过
+- [x] `browser_bash` 描述不再暗示 "(primary)" 或完整宿主 shell
+- [x] `host_bash` 描述不再阻碍正常使用
+- [x] skill 安装引导语明确 host_bash 定位
+- [x] `bun run build` 通过
+- [x] `bun run test` 通过
