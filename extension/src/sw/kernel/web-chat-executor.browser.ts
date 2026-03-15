@@ -2,8 +2,6 @@ import {
   buildCursorHelpCompiledPrompt,
   extractLastUserMessage,
   parseHostedChatTransportEvent,
-  serializeHostedChatTransportEvent,
-  type HostedChatTransportEvent
 } from "../../shared/cursor-help-web-shared";
 import { CURSOR_HELP_RUNTIME_VERSION } from "../../shared/cursor-help-runtime-meta";
 import type {
@@ -36,34 +34,28 @@ import {
   getRecoveryBudget,
 } from "./cursor-help-health";
 import {
-  cloneSlotRecord,
-  normalizeSlotRecord,
-  normalizePoolState,
   loadCursorHelpPoolState,
-  persistCursorHelpPoolState,
   saveCursorHelpPoolState,
   patchCursorHelpSlotState,
 } from "./cursor-help-pool-state";
+import {
+  type PendingExecution,
+  ACTIVE_BY_REQUEST_ID,
+  ACTIVE_REQUEST_ID_BY_SLOT,
+  ACTIVE_REQUEST_ID_BY_TAB,
+  ACTIVE_REQUEST_ID_BY_SESSION_LANE,
+  EXECUTION_BOOT_TIMEOUT_MS,
+  EXECUTION_STALE_MS,
+  enqueueHostedEvent,
+  closeExecution,
+  failExecution,
+  touchExecution,
+  armExecutionWatchdog,
+  clearStaleExecution,
+  reapStaleExecutionsForSlots,
+} from "./cursor-help-execution";
 
 type JsonRecord = Record<string, unknown>;
-
-interface PendingExecution {
-  requestId: string;
-  sessionId: string;
-  slotId: string;
-  lane: LlmProviderExecutionLane;
-  tabId: number;
-  windowId?: number;
-  createdAt: number;
-  lastEventAt: number;
-  startedAt: number | null;
-  timeoutHandle: ReturnType<typeof setTimeout> | null;
-  controller: ReadableStreamDefaultController<Uint8Array> | null;
-  queue: Uint8Array[];
-  firstDeltaLogged: boolean;
-  conversationKey: string | null;
-  closed: boolean;
-}
 
 
 
@@ -76,15 +68,9 @@ interface CursorHelpPoolDebugView {
 const PROVIDER_ID = "cursor_help_web";
 const CURSOR_HELP_URL = "https://cursor.com/help";
 const CURSOR_TAB_PATTERNS = ["https://cursor.com/help*"] as const;
-const ACTIVE_BY_REQUEST_ID = new Map<string, PendingExecution>();
-const ACTIVE_REQUEST_ID_BY_SLOT = new Map<string, string>();
-const ACTIVE_REQUEST_ID_BY_TAB = new Map<number, string>();
-const ACTIVE_REQUEST_ID_BY_SESSION_LANE = new Map<string, string>();
 const PREFERRED_SLOT_ID_BY_SESSION = new Map<string, string>();
 const PREFERRED_SLOT_ID_BY_CONVERSATION = new Map<string, string>();
 const LAST_CONVERSATION_KEY_BY_SESSION = new Map<string, string>();
-const EXECUTION_BOOT_TIMEOUT_MS = 20_000;
-const EXECUTION_STALE_MS = 90_000;
 const SLOT_WAIT_POLL_MS = 200;
 const PRIMARY_SLOT_WAIT_MS = 15_000;
 const AUXILIARY_SLOT_WAIT_MS = 10_000;
@@ -94,7 +80,6 @@ const MAX_CURSOR_HELP_POOL_SLOT_COUNT = 6;
 const CURSOR_HELP_HEARTBEAT_INTERVAL_MS = 30_000;
 const CURSOR_HELP_HEARTBEAT_BACKOFF_MS = 60_000;
 const CURSOR_HELP_HEARTBEAT_RECOVERY_RETRY_MS = 500;
-const encoder = new TextEncoder();
 const CONTENT_SCRIPT_FILE = "assets/cursor-help-content.js";
 const PAGE_HOOK_SCRIPT_FILE = "assets/cursor-help-page-hook.js";
 const CURSOR_HELP_SESSION_SLOT_STORAGE_KEY = "cursor_help_web.session_slots";
@@ -311,122 +296,6 @@ function formatRewriteDebugSummary(raw: unknown): string {
     `origLen=${Number(debug.originalTargetLength || 0)}`,
     `nextLen=${Number(debug.rewrittenTargetLength || 0)}`
   ].join(" ");
-}
-
-function enqueueHostedEvent(entry: PendingExecution, event: HostedChatTransportEvent): void {
-  if (entry.closed) return;
-  const chunk = encoder.encode(serializeHostedChatTransportEvent(event));
-  if (entry.controller) {
-    entry.controller.enqueue(chunk);
-    return;
-  }
-  entry.queue.push(chunk);
-}
-
-function releaseExecution(entry: PendingExecution): boolean {
-  if (entry.closed) return false;
-  entry.closed = true;
-  entry.queue.length = 0;
-  if (entry.timeoutHandle) {
-    clearTimeout(entry.timeoutHandle);
-    entry.timeoutHandle = null;
-  }
-  ACTIVE_BY_REQUEST_ID.delete(entry.requestId);
-  ACTIVE_REQUEST_ID_BY_SLOT.delete(entry.slotId);
-  ACTIVE_REQUEST_ID_BY_TAB.delete(entry.tabId);
-  ACTIVE_REQUEST_ID_BY_SESSION_LANE.delete(
-    buildSessionLaneKey(entry.sessionId, entry.lane),
-  );
-  return true;
-}
-
-function closeExecution(entry: PendingExecution): void {
-  if (!releaseExecution(entry)) return;
-  void loadCursorHelpPoolState().then((poolState) => {
-    const currentSlot = poolState.slots.find((s) => s.slotId === entry.slotId);
-    if (currentSlot?.status === "recovering") return;
-    return patchCursorHelpSlotState(entry.slotId, {
-      status: "idle",
-      lastUsedAt: nowMs(),
-      lastError: "",
-      lastReadyAt: Math.max(entry.lastEventAt, entry.createdAt),
-    });
-  }).catch((err) => {
-    console.warn(`[web-chat-executor] closeExecution: patchSlotState(idle) failed for slot=${entry.slotId}`, err);
-  });
-  if (entry.controller) {
-    entry.controller.close();
-  }
-}
-
-function failExecution(entry: PendingExecution, error: string): void {
-  if (!releaseExecution(entry)) return;
-  if (entry.startedAt === null) {
-    void patchCursorHelpSlotState(entry.slotId, {
-      status: "stale",
-      lastUsedAt: nowMs(),
-      lastError: error,
-    }).catch((patchErr) => {
-      console.warn(`[web-chat-executor] failExecution: patchSlotState(stale) failed for slot=${entry.slotId}`, patchErr);
-    });
-  } else {
-    void patchCursorHelpSlotState(entry.slotId, {
-      status: "error",
-      lastUsedAt: nowMs(),
-      lastError: error,
-    }).catch((patchErr) => {
-      console.warn(`[web-chat-executor] failExecution: patchSlotState(error) failed for slot=${entry.slotId}`, patchErr);
-    });
-  }
-  if (entry.controller) {
-    const err = new Error(error) as Error & { code?: string; retryable?: boolean };
-    err.code = "E_HOSTED_CHAT_EXECUTION";
-    err.retryable = true;
-    entry.controller.error(err);
-  }
-}
-
-function touchExecution(entry: PendingExecution): void {
-  entry.lastEventAt = Date.now();
-}
-
-function armExecutionWatchdog(entry: PendingExecution, timeoutMs: number, reason: string): void {
-  if (entry.timeoutHandle) {
-    clearTimeout(entry.timeoutHandle);
-  }
-  entry.timeoutHandle = setTimeout(() => {
-    failExecution(entry, reason);
-  }, timeoutMs);
-}
-
-function clearStaleExecution(slotId: string, tabId: number): void {
-  const requestIds = new Set<string>();
-  const bySlot = ACTIVE_REQUEST_ID_BY_SLOT.get(slotId);
-  const byTab = ACTIVE_REQUEST_ID_BY_TAB.get(tabId);
-  if (bySlot) requestIds.add(bySlot);
-  if (byTab) requestIds.add(byTab);
-  for (const requestId of requestIds) {
-    const entry = ACTIVE_BY_REQUEST_ID.get(requestId);
-    if (!entry) {
-      ACTIVE_REQUEST_ID_BY_SLOT.delete(slotId);
-      ACTIVE_REQUEST_ID_BY_TAB.delete(tabId);
-      continue;
-    }
-    if (entry.startedAt === null && Date.now() - entry.createdAt >= EXECUTION_BOOT_TIMEOUT_MS) {
-      failExecution(entry, "网页 provider 请求启动超时，已自动回收旧执行");
-      continue;
-    }
-    if (Date.now() - entry.lastEventAt < EXECUTION_STALE_MS) continue;
-    failExecution(entry, "网页 provider 请求已超时，已自动回收旧执行");
-  }
-}
-
-function reapStaleExecutionsForSlots(
-  slots: CursorHelpSlotRecord[],
-): void {
-  for (const slot of slots) {
-    clearStaleExecution(slot.slotId, slot.tabId);
-  }
 }
 
 async function waitForCursorHelpTabReady(tabId: number, timeoutMs = 20_000): Promise<void> {
