@@ -83,27 +83,23 @@ acceptance_ref: docs/<某设计文档>.md
   - `assignee: human`
   - 说明：Provider 连通性由 human 接手。子 slice ISSUE-024/025/026/027 全部已完成，仅剩 S1（multi-conversation conversationKey）部分已落地首阶段。
 
-### 已完成（未归档）
+### 已归档
 
-1. `ISSUE-024` [Cursor Help pool slot 自动扩缩容](./2026-03-15-cursor-help-pool-autoscaling.md)
-  - `status: done`
-  - `priority: p2`
-  - `parallel_group: cursor-help`
-  - 说明：autoscaling 已实现并通过 5 组回归测试覆盖扩缩容决策与冷却时间。
+以下 issue 已完成并移入 `archive/` 子目录：
 
-### 可立即开工
-
-1. `ISSUE-021` [ChatView 二阶段深拆 follow-up](./2026-03-15-app-vue-decomposition.md)
-   - `status: open`
-   - `priority: p2`
-   - 说明：ChatView 已从 2142→892 行，composables 分工合理。当前厚度不紧迫，可推迟。
+- `ISSUE-021` ChatView 二阶段深拆（done）
+- `ISSUE-024` Pool slot 自动扩缩容（done）
+- `ISSUE-030` web-chat-executor 正确性修复（done）
+- `ISSUE-031` web-chat-executor MEDIUM 改进（done）
+- `ISSUE-032` ChatView 拆分复查修复（done）
+- `ISSUE-033` LLM 模块提取残留清理（done）
+- `ISSUE-034` Sandbox 路径遍历防御 + CDP 安全加固（done）
 
 ## 推荐领取顺序
 
 1. `ISSUE-023` 由 human 负责，agent 不要并行改其 `write_scope`。
-2. `ISSUE-024` 已 done，Cursor Help pool follow-up 子 slice 全部收束。
-3. `ISSUE-021` 是唯一剩余的 open slice，但当前 ChatView 厚度（892 行）已在合理范围，优先级低。
-4. 如无新需求，backlog 已基本清空。
+2. 所有 agent 可认领的 issue 已全部完成并归档。
+3. 如有新需求，创建新的 backlog slice。
 
 ## 维护规则
 
