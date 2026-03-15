@@ -2281,6 +2281,11 @@ export function createRuntimeLoopController(
             if (shouldStop) {
               break;
             }
+            messages.push({
+              role: "user",
+              content:
+                "WARNING: You attempted to finish but your browser actions were not verified. Call browser_verify with a concrete expect assertion before giving your final answer.",
+            });
             continue;
           }
           // 仅在最终回答阶段（无工具调用）写入 assistant 文本。
@@ -2605,6 +2610,11 @@ export function createRuntimeLoopController(
           if (shouldStop) {
             break;
           }
+          messages.push({
+            role: "user",
+            content:
+              "WARNING: Your last browser action had no verification. Use browser_verify or include an expect parameter to confirm the action succeeded before proceeding.",
+          });
         }
 
         if (!browserGuardSignaled && toolCallSignature) {

@@ -10,7 +10,6 @@ import {
 } from "./loop-shared-utils";
 import {
   buildToolRetryHint,
-  isRetryableToolErrorCode,
 } from "./loop-failure-protocol";
 
 type JsonRecord = Record<string, unknown>;
@@ -278,28 +277,14 @@ export function buildToolFailurePayload(
   const args = parseToolCallArgs(rawArgs);
   const target = summarizeToolTarget(toolName, args, rawArgs);
   const errorCode = normalizeErrorCode(result.errorCode);
-  const retryable =
-    result.retryable === true || isRetryableToolErrorCode(toolName, errorCode);
   return {
     error: String(result.error || "工具执行失败"),
-    errorReason: String(result.errorReason || "failed_execute"),
     errorCode: errorCode || undefined,
-    retryable,
     retryHint: String(
       result.retryHint || buildToolRetryHint(toolName, errorCode),
     ),
     tool: toolName,
     target,
-    args: args || null,
-    rawArgs: args ? undefined : clipText(rawArgs, 1200),
-    details: result.details || null,
-    modeUsed: String(result.modeUsed || "") || undefined,
-    providerId: String(result.providerId || "") || undefined,
-    fallbackFrom: String(result.fallbackFrom || "") || undefined,
-    failureClass: result.failureClass || undefined,
-    modeEscalation: result.modeEscalation || undefined,
-    resume: result.resume || undefined,
-    stepRef: result.stepRef || undefined,
   };
 }
 

@@ -55,7 +55,6 @@ describe("loop-tool-display", () => {
 
     expect(payload.tool).toBe("execute_skill_script");
     expect(payload.target).toBe("执行技能脚本 · skill.fy:scripts/main.ts");
-    expect(payload.retryable).toBe(true);
     expect(String(payload.retryHint || "")).toContain("retry");
   });
 

@@ -255,7 +255,7 @@ export function hostedChatTurnToMessage(
   result: HostedChatTurnResult,
 ): JsonRecord {
   return {
-    content: result.assistantText,
+    content: result.finishReason === "tool_calls" ? "" : result.assistantText,
     tool_calls: result.toolCalls,
     finish_reason: result.finishReason,
     meta: result.meta,
@@ -271,6 +271,7 @@ export function buildHostedChatEventPayload(
     return {
       step,
       attempt,
+      text: event.deltaText || "",
       textLength: String(event.deltaText || "").length,
       ...toRecord(event.meta),
     };
@@ -280,6 +281,7 @@ export function buildHostedChatEventPayload(
       step,
       attempt,
       toolCalls: Array.isArray(event.toolCalls) ? event.toolCalls.length : 0,
+      assistantText: String(event.assistantText || ""),
       assistantTextLength: String(event.assistantText || "").length,
       ...toRecord(event.meta),
     };

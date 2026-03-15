@@ -207,7 +207,37 @@ function sanitizeTopLevelToolSchemaForProvider(
   for (const key of FORBIDDEN_TOP_LEVEL_TOOL_SCHEMA_KEYS) {
     delete sanitized[key];
   }
+
+  sanitizeNestedSchemas(sanitized);
+
   return sanitized;
+}
+
+function sanitizeNestedSchemas(schema: JsonRecord): void {
+  const props = toRecord(schema.properties);
+  for (const key of Object.keys(props)) {
+    const prop = toRecord(props[key]);
+    if (!prop || typeof prop !== "object") continue;
+
+    if (prop.type === "array" && prop.items) {
+      const items = toRecord(prop.items);
+      for (const fk of FORBIDDEN_TOP_LEVEL_TOOL_SCHEMA_KEYS) {
+        delete items[fk];
+      }
+      sanitizeNestedSchemas(items);
+      prop.items = items;
+    }
+
+    if (prop.type === "object") {
+      for (const fk of FORBIDDEN_TOP_LEVEL_TOOL_SCHEMA_KEYS) {
+        delete prop[fk];
+      }
+      sanitizeNestedSchemas(prop);
+    }
+
+    props[key] = prop;
+  }
+  schema.properties = props;
 }
 
 export function sanitizeLlmToolDefinitionForProvider(
