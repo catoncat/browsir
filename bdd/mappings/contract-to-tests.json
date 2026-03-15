@@ -432,6 +432,45 @@
       ]
     },
     {
+      "contractId": "BHV-CDP-BACKGROUND-SNAPSHOT-ROUTING",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/__tests__/dom-snapshot-collector.browser.test.ts::collectDomSnapshot + extension/src/sw/kernel/__tests__/automation-mode.browser.test.ts::getAutomationMode + setAutomationMode"
+        },
+        {
+          "layer": "integration",
+          "target": "extension/src/sw/kernel/__tests__/background-mode-integration.browser.test.ts::snapshot routing by automation mode"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-CDP-BACKGROUND-ACTION-ROUTING",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/__tests__/dom-locator.browser.test.ts::DomLocator"
+        },
+        {
+          "layer": "integration",
+          "target": "extension/src/sw/kernel/__tests__/background-mode-integration.browser.test.ts::action routing by automation mode"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-CDP-BACKGROUND-TOOL-FILTERING",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/__tests__/background-mode-integration.browser.test.ts::tool filtering in background mode"
+        },
+        {
+          "layer": "integration",
+          "target": "extension/src/sw/kernel/runtime-loop.browser.ts::listRuntimeLlmToolDefinitions + BACKGROUND_FILTERED_TOOLS"
+        }
+      ]
+    },
+    {
       "contractId": "BHV-CHAT-DONE-SEMANTICS-STRICT",
       "proofs": [
         {

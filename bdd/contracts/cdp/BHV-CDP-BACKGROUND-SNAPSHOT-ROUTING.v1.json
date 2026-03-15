@@ -1,0 +1,57 @@
+{
+  "id": "BHV-CDP-BACKGROUND-SNAPSHOT-ROUTING",
+  "intent": "background 模式下快照通过 content script DOM 收集而非 CDP debugger，focus 模式保持原 CDP 路径不变",
+  "context": {
+    "surface": "sidepanel.chat.loop",
+    "automation_modes": ["focus", "background"],
+    "snapshot_paths": {
+      "focus": "CDP Accessibility.getFullAXTree + DOM.resolveNode",
+      "background": "chrome.tabs.sendMessage → content script collectDomSnapshot"
+    },
+    "storage_key": "brain:automation_mode",
+    "content_script": "content/dom-snapshot-collector.js"
+  },
+  "steps": [
+    "read_automation_mode_from_chrome_storage",
+    "if_background_send_message_to_content_script",
+    "content_script_traverses_dom_and_assigns_uid",
+    "convert_dom_nodes_to_pipeline_compatible_format",
+    "run_enrichment_pipeline_on_converted_nodes",
+    "return_snapshot_with_source_dom_background",
+    "if_focus_use_cdp_debugger_path_unchanged"
+  ],
+  "observables": [
+    "background_snapshot_has_source_dom_background",
+    "background_snapshot_nodes_carry_brainUid",
+    "focus_snapshot_does_not_have_source_dom_background",
+    "content_script_failure_returns_source_dom_background_error",
+    "content_script_timeout_returns_graceful_error",
+    "no_debugger_attach_in_background_mode"
+  ],
+  "risk": "medium",
+  "allowed_side_effects": [
+    "chrome.tabs.sendMessage(tabId, brain:collect-dom-snapshot)",
+    "data-brain-uid attribute assigned to page elements",
+    "enrichmentPipeline.run()"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "integration"],
+    "min_layers": 2
+  },
+  "degrade_policy": {
+    "on_content_script_not_ready": [
+      "return_error_snapshot_with_source_dom_background_error",
+      "snapshot_count_is_zero",
+      "never_fallback_to_cdp_silently"
+    ],
+    "on_content_script_exception": [
+      "return_error_snapshot_with_error_message",
+      "preserve_base_metadata"
+    ]
+  },
+  "rollback_or_compensation": [
+    "content_script_failure_does_not_break_session",
+    "mode_switch_to_focus_restores_cdp_path"
+  ],
+  "version": "1.0.0"
+}

@@ -1,0 +1,58 @@
+{
+  "id": "BHV-CDP-BACKGROUND-TOOL-FILTERING",
+  "intent": "background 模式下屏蔽依赖 CDP 截图能力的工具（computer、screenshot 类），focus 模式保留全部工具",
+  "context": {
+    "surface": "sidepanel.chat.loop",
+    "automation_modes": ["focus", "background"],
+    "filtered_tools": [
+      "computer",
+      "capture_screenshot",
+      "capture_tab_screenshot",
+      "capture_screenshot_with_highlight"
+    ],
+    "wildcard_filter": "any tool name containing 'screenshot'",
+    "filter_location": "listRuntimeLlmToolDefinitions"
+  },
+  "steps": [
+    "read_automation_mode_before_listing_tools",
+    "pass_automationMode_to_listRuntimeLlmToolDefinitions",
+    "if_background_filter_BACKGROUND_FILTERED_TOOLS_set",
+    "if_background_filter_any_tool_name_containing_screenshot",
+    "return_filtered_tool_list_to_llm",
+    "if_focus_return_all_tools_unchanged"
+  ],
+  "observables": [
+    "background_mode_tool_list_excludes_computer",
+    "background_mode_tool_list_excludes_capture_screenshot",
+    "background_mode_tool_list_excludes_capture_tab_screenshot",
+    "background_mode_tool_list_excludes_capture_screenshot_with_highlight",
+    "background_mode_tool_list_excludes_any_screenshot_wildcard",
+    "background_mode_tool_list_keeps_click_navigate_fill_etc",
+    "focus_mode_tool_list_includes_all_tools",
+    "system_prompt_preview_respects_current_mode"
+  ],
+  "risk": "medium",
+  "allowed_side_effects": [
+    "chrome.storage.local.get(brain:automation_mode)",
+    "LLM receives reduced tool set in background mode"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "integration"],
+    "min_layers": 2
+  },
+  "degrade_policy": {
+    "on_mode_read_failure": [
+      "default_to_focus_mode",
+      "return_full_tool_list"
+    ],
+    "on_mode_switch_mid_session": [
+      "next_llm_call_uses_updated_tool_list",
+      "no_in_flight_tool_call_affected"
+    ]
+  },
+  "rollback_or_compensation": [
+    "switching_to_focus_restores_full_tool_list",
+    "tool_filtering_is_stateless_per_call"
+  ],
+  "version": "1.0.0"
+}

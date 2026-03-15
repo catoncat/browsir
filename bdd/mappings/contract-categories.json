@@ -23,6 +23,18 @@
       "category": "cdp"
     },
     {
+      "contractId": "BHV-CDP-BACKGROUND-SNAPSHOT-ROUTING",
+      "category": "cdp"
+    },
+    {
+      "contractId": "BHV-CDP-BACKGROUND-ACTION-ROUTING",
+      "category": "cdp"
+    },
+    {
+      "contractId": "BHV-CDP-BACKGROUND-TOOL-FILTERING",
+      "category": "cdp"
+    },
+    {
       "contractId": "BHV-CHAT-AUTO-REPAIR-BOUNDARY",
       "category": "runtime-loop"
     },

@@ -1,0 +1,67 @@
+{
+  "id": "BHV-CDP-BACKGROUND-ACTION-ROUTING",
+  "intent": "background 模式下浏览器操作通过 DomLocator 合成 DOM 事件执行而非 CDP Input.dispatch，focus 模式保持原 CDP 路径不变",
+  "context": {
+    "surface": "sidepanel.chat.loop",
+    "automation_modes": ["focus", "background"],
+    "action_paths": {
+      "focus": "CDP Input.dispatchMouseEvent / Input.dispatchKeyEvent",
+      "background": "chrome.scripting.executeScript → DomLocator synthetic events"
+    },
+    "supported_background_actions": ["click", "fill", "type", "hover"],
+    "uid_attribute": "data-brain-uid",
+    "uid_lookup": "querySelector + iframe recursion"
+  },
+  "steps": [
+    "read_automation_mode_from_chrome_storage",
+    "if_background_create_dom_locator_instance",
+    "resolve_uid_from_action_ref_or_uid_or_brainUid",
+    "reject_if_uid_is_empty",
+    "inject_runDomAction_via_chrome_scripting_executeScript",
+    "locate_element_by_data_brain_uid_selector",
+    "dispatch_synthetic_events_for_action_kind",
+    "return_result_with_mode_background"
+  ],
+  "observables": [
+    "background_action_result_has_mode_background",
+    "background_click_dispatches_mousedown_mouseup_click",
+    "background_fill_dispatches_focus_input_change_blur",
+    "background_hover_dispatches_mouseover_mouseenter",
+    "missing_uid_returns_explicit_error",
+    "unsupported_action_kind_returns_explicit_error",
+    "element_not_found_returns_retryable_error",
+    "focus_mode_action_uses_cdp_path",
+    "no_debugger_attach_in_background_action"
+  ],
+  "risk": "medium",
+  "allowed_side_effects": [
+    "chrome.scripting.executeScript(tabId, runDomAction)",
+    "synthetic DOM events dispatched on target element",
+    "visual highlight effect on actioned element (1.2s)",
+    "element scrolled into view"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit", "integration"],
+    "min_layers": 2
+  },
+  "degrade_policy": {
+    "on_element_not_found": [
+      "return_E_DOM_ACTION_FAILED_error",
+      "error_is_retryable",
+      "suggest_new_snapshot"
+    ],
+    "on_unsupported_action_kind": [
+      "reject_with_explicit_message",
+      "do_not_fallback_to_cdp"
+    ],
+    "on_isTrusted_rejection": [
+      "action_may_silently_fail_on_security_sensitive_sites",
+      "documented_in_design_appendix_B"
+    ]
+  },
+  "rollback_or_compensation": [
+    "action_failure_does_not_break_session",
+    "mode_switch_to_focus_restores_cdp_action_path"
+  ],
+  "version": "1.0.0"
+}
