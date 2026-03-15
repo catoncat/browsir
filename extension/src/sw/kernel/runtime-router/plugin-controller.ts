@@ -413,16 +413,7 @@ export async function handleBrainPlugin(
     const manifest = deps.normalizePluginManifest(source.manifest);
     const options = resolvePluginRegisterOptions(source, payload);
     const pluginId = manifest.id;
-    const uiDescriptor = resolveUiExtensionDescriptorFromSource(
-      pluginId,
-      source,
-      options.enable,
-      deps.pluginSandboxDefaultSessionId,
-    );
     const setupRaw = source.setup;
-    const moduleInput = source.moduleUrl ?? source.modulePath ?? source.module;
-    const exportName =
-      String(source.exportName || "default").trim() || "default";
     const moduleSessionId =
       String(source.moduleSessionId || source.sessionId || "").trim() ||
       deps.pluginSandboxDefaultSessionId;
@@ -432,6 +423,33 @@ export async function handleBrainPlugin(
         "moduleSource 暂不支持（CSP 禁止 unsafe-eval），请使用 moduleUrl/modulePath",
       );
     }
+
+    const hasInlineSources =
+      String(source.indexJs || "").trim() !== "" ||
+      String(source.uiJs || "").trim() !== "";
+    let resolvedSource = source;
+    if (hasInlineSources) {
+      try {
+        resolvedSource = await deps.materializeInlinePluginSources(
+          source,
+          moduleSessionId,
+        );
+      } catch {
+        // Virtual FS not available (e.g. test environment); fall back to original source
+      }
+    }
+
+    const uiDescriptor = resolveUiExtensionDescriptorFromSource(
+      pluginId,
+      resolvedSource,
+      options.enable,
+      deps.pluginSandboxDefaultSessionId,
+    );
+
+    const moduleInput =
+      resolvedSource.moduleUrl ?? resolvedSource.modulePath ?? resolvedSource.module;
+    const exportName =
+      String(resolvedSource.exportName || "default").trim() || "default";
 
     let setup: ExtensionFactory;
     let moduleUrl = "";
@@ -448,7 +466,38 @@ export async function handleBrainPlugin(
         setup = () => undefined;
       } else {
         moduleUrl = resolvePluginModuleUrl(moduleInput);
-        if (isVirtualUri(rawModulePath) || isVirtualUri(moduleUrl)) {
+        const hasVirtualPath =
+          isVirtualUri(rawModulePath) || isVirtualUri(moduleUrl);
+        const originalModulePath = String(
+          source.modulePath ?? source.moduleUrl ?? source.module ?? "",
+        ).trim();
+        const hasOriginalFallback =
+          !!originalModulePath && !isVirtualUri(originalModulePath);
+
+        if (hasVirtualPath && hasOriginalFallback) {
+          // Materialized virtual path available + original non-virtual path.
+          // Try import() first (works in Vitest / non-SW contexts),
+          // fall back to virtual module sandbox runner (works in Chrome SW).
+          const fallbackUrl = resolvePluginModuleUrl(originalModulePath);
+          try {
+            setup = await loadExtensionFactoryFromModule(
+              fallbackUrl,
+              exportName,
+            );
+            moduleUrl = fallbackUrl;
+          } catch {
+            const virtualModulePath = isVirtualUri(rawModulePath)
+              ? rawModulePath
+              : moduleUrl;
+            setup = await deps.loadExtensionFactoryFromVirtualModule({
+              manifest,
+              modulePath: virtualModulePath,
+              exportName,
+              sessionId: moduleSessionId,
+            });
+            moduleUrl = virtualModulePath;
+          }
+        } else if (hasVirtualPath) {
           const virtualModulePath = isVirtualUri(rawModulePath)
             ? rawModulePath
             : moduleUrl;
@@ -616,12 +665,14 @@ export async function handleBrainPlugin(
               }),
             );
           } else {
-            await loadExtensionFactoryFromModule(moduleUrl, exportName);
+            const factory = await loadExtensionFactoryFromModule(moduleUrl, exportName);
+            void factory;
             checks.push(
               buildPluginValidationCheck("index.module", true, {
                 details: {
                   moduleUrl,
                   exportName,
+                  loadedViaImport: true,
                 },
               }),
             );
@@ -664,15 +715,13 @@ export async function handleBrainPlugin(
               }),
             );
           } else {
-            await loadExtensionFactoryFromModule(
-              uiDescriptor.moduleUrl,
-              uiDescriptor.exportName,
-            );
+            await loadExtensionFactoryFromModule(uiDescriptor.moduleUrl, uiDescriptor.exportName);
             checks.push(
               buildPluginValidationCheck("ui.module", true, {
                 details: {
                   moduleUrl: uiDescriptor.moduleUrl,
                   exportName: uiDescriptor.exportName,
+                  loadedViaImport: true,
                 },
               }),
             );

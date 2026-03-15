@@ -2,10 +2,14 @@ import { kvGet, kvSet } from "../idb-storage";
 import { nowIso } from "../types";
 import exampleSendSuccessPluginPackage from "../../../../plugins/example-send-success-global-message/plugin.json";
 import exampleMissionHudDogPluginPackage from "../../../../plugins/example-mission-hud-dog/plugin.json";
+import exampleSendSuccessIndexJs from "../../../../plugins/example-send-success-global-message/index.js?raw";
+import exampleSendSuccessUiJs from "../../../../plugins/example-send-success-global-message/ui.js?raw";
+import exampleMissionHudDogIndexJs from "../../../../plugins/example-mission-hud-dog/index.js?raw";
+import exampleMissionHudDogUiJs from "../../../../plugins/example-mission-hud-dog/ui.js?raw";
 
 const PLUGIN_REGISTRY_STORAGE_KEY = "brain.plugin.registry:v1";
 const PLUGIN_EXAMPLE_SEED_STORAGE_KEY = "brain.plugin.seed.examples:v1";
-const PLUGIN_EXAMPLE_SEED_VERSION = 2;
+const PLUGIN_EXAMPLE_SEED_VERSION = 3;
 const MISSION_HUD_DOG_PLUGIN_ID = "plugin.example.ui.mission-hud.dog";
 const LEGACY_MISSION_HUD_DOG_UI_JS = `// mission-hud-dog 主要通过 runtime message 驱动 UI（bbloop.ui.mascot）
 // 当前不需要额外 ui hook。你可在这里加自定义渲染逻辑。
@@ -116,6 +120,34 @@ function migrateLegacyExampleRecords(
   return { list: next, changed };
 }
 
+function migrateExampleRecordsToInlineSources(
+  list: PersistedPluginRecord[],
+): { list: PersistedPluginRecord[]; changed: boolean } {
+  const defaults = new Map<string, Record<string, unknown>>();
+  for (const source of defaultExamplePluginSources()) {
+    const pluginId = String(toRecord(source.manifest).id || "").trim();
+    if (pluginId) defaults.set(pluginId, source);
+  }
+  let changed = false;
+  const next = list.map((record) => {
+    if (record.kind !== "extension" || !defaults.has(record.pluginId)) return record;
+    const existingSource = toRecord(record.source);
+    if (String(existingSource.indexJs || "").trim()) return record;
+    const defaultSource = defaults.get(record.pluginId)!;
+    changed = true;
+    return {
+      ...record,
+      updatedAt: nowIso(),
+      source: {
+        ...existingSource,
+        indexJs: defaultSource.indexJs,
+        uiJs: defaultSource.uiJs,
+      },
+    };
+  });
+  return { list: next, changed };
+}
+
 export async function readPersistedPluginRecords(): Promise<
   PersistedPluginRecord[]
 > {
@@ -215,13 +247,17 @@ export async function updatePersistedPluginEnabled(
 
 function defaultExamplePluginSources(): Array<Record<string, unknown>> {
   const out: Record<string, unknown>[] = [];
-  const candidates = [
-    clonePersistableRecord(exampleSendSuccessPluginPackage),
-    clonePersistableRecord(exampleMissionHudDogPluginPackage),
+  const candidates: Array<{ pkg: unknown; indexJs: string; uiJs: string }> = [
+    { pkg: exampleSendSuccessPluginPackage, indexJs: exampleSendSuccessIndexJs, uiJs: exampleSendSuccessUiJs },
+    { pkg: exampleMissionHudDogPluginPackage, indexJs: exampleMissionHudDogIndexJs, uiJs: exampleMissionHudDogUiJs },
   ];
-  for (const item of candidates) {
+  for (const { pkg, indexJs, uiJs } of candidates) {
+    const item = clonePersistableRecord(pkg);
     if (!item || typeof item !== "object") continue;
-    out.push(item as Record<string, unknown>);
+    const record = item as Record<string, unknown>;
+    record.indexJs = indexJs;
+    record.uiJs = uiJs;
+    out.push(record);
   }
   return out;
 }
@@ -259,6 +295,11 @@ export async function seedDefaultExamplePluginRecords(): Promise<void> {
     const migrated = migrateLegacyExampleRecords(list);
     list = migrated.list;
     if (migrated.changed) {
+      changed = true;
+    }
+    const inlineMigrated = migrateExampleRecordsToInlineSources(list);
+    list = inlineMigrated.list;
+    if (inlineMigrated.changed) {
       changed = true;
     }
   }

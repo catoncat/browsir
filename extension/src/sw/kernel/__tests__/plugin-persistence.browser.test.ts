@@ -22,7 +22,7 @@ beforeEach(async () => {
 });
 
 describe("plugin-persistence.browser", () => {
-  it("migrates legacy mission-hud-dog studio source to builtin package source", async () => {
+  it("migrates legacy mission-hud-dog studio source to builtin package source with inline JS", async () => {
     await upsertPersistedPluginRecord({
       pluginId: "plugin.example.ui.mission-hud.dog",
       kind: "extension",
@@ -53,12 +53,15 @@ describe("plugin-persistence.browser", () => {
     const records = await readPersistedPluginRecords();
     const record = records.find((item) => item.pluginId === "plugin.example.ui.mission-hud.dog");
     expect(record).toBeTruthy();
+    // After v1→v3 migration: legacy record is first replaced by builtin package
+    // (which strips indexJs), then v3 migration injects inline sources.
+    expect(String(record?.source?.indexJs || "")).toBeTruthy();
+    expect(String(record?.source?.uiJs || "")).toBeTruthy();
+    // modulePath is kept as fallback for environments without virtual FS
     expect(String(record?.source?.modulePath || "")).toBe("plugins/example-mission-hud-dog/index.js");
-    expect(String(record?.source?.uiModulePath || "")).toBe("plugins/example-mission-hud-dog/ui.js");
-    expect(String(record?.source?.uiJs || "")).toBe("");
 
     const seedInfo = await kvGet(PLUGIN_EXAMPLE_SEED_STORAGE_KEY);
-    expect(Number(seedInfo?.version || 0)).toBe(2);
+    expect(Number(seedInfo?.version || 0)).toBe(3);
   });
 
   it("keeps customized mission-hud-dog studio source intact during seed migration", async () => {
@@ -91,13 +94,14 @@ describe("plugin-persistence.browser", () => {
 
     const records = await readPersistedPluginRecords();
     const record = records.find((item) => item.pluginId === "plugin.example.ui.mission-hud.dog");
+    // Custom source already has indexJs → v3 migration skips it, preserving user edits
     expect(String(record?.source?.uiJs || "")).toContain("ui.notice.before_show");
     expect(String(record?.source?.uiModulePath || "")).toBe("mem://plugins/plugin.example.ui.mission-hud.dog/ui.js");
   });
 
   it("re-seeds missing example plugins after seed version has already been written", async () => {
     await kvSet(PLUGIN_EXAMPLE_SEED_STORAGE_KEY, {
-      version: 2,
+      version: 3,
       seededAt: "2026-03-14T00:00:00.000Z"
     });
 
@@ -110,7 +114,9 @@ describe("plugin-persistence.browser", () => {
     );
     expect(missionHudDog?.kind).toBe("extension");
     expect(missionHudDog?.enabled).toBe(true);
-    expect(String(missionHudDog?.source?.uiModulePath || "")).toBe("plugins/example-mission-hud-dog/ui.js");
+    // Newly seeded records have inline sources, with modulePath kept as fallback
+    expect(String(missionHudDog?.source?.indexJs || "")).toBeTruthy();
+    expect(String(missionHudDog?.source?.modulePath || "")).toBe("plugins/example-mission-hud-dog/index.js");
     expect(sendSuccess?.kind).toBe("extension");
     expect(sendSuccess?.enabled).toBe(true);
   });

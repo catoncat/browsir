@@ -201,6 +201,13 @@ function createApi(registry) {
       if (!normalizedCapability) return;
       registry.capabilityPolicies[normalizedCapability] = clonePlain(toRecord(policy));
     },
+    // Widget registration is a panel-side concern (needs DOM).  In the SW
+    // sandbox runner we accept the call as a no-op so that UI plugin
+    // factories that call registerWidget() before on() do not throw,
+    // allowing their hook registrations to succeed.
+    registerWidget(_definition) {
+      // no-op in sandbox context
+    },
     registerProvider(name, provider) {
       const id = String(name || "").trim();
       if (

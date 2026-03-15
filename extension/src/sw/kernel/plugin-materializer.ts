@@ -9,6 +9,7 @@ import {
   invokePluginSandboxRunner,
   writeVirtualTextFile,
 } from "./runtime-router/plugin-sandbox";
+import { isVirtualUri } from "./virtual-fs.browser";
 import { serializeValueToModuleSource } from "./plugin-module-serializer";
 import type {
   AgentPluginManifest,
@@ -257,17 +258,22 @@ export async function materializeInlinePluginSources(
   ).trim();
 
   if (indexJs) {
-    const modulePath = existingModulePath || paths.indexPath;
+    const modulePath = (existingModulePath && isVirtualUri(existingModulePath))
+      ? existingModulePath
+      : paths.indexPath;
     await writeVirtualTextFile(modulePath, indexJs, sessionId);
     next.modulePath = modulePath;
     next.moduleSessionId = sessionId;
   }
 
   if (uiJs) {
-    const uiModulePath =
+    const existingUiModulePath =
       String(
         source.uiModulePath || source.uiModuleUrl || source.uiModule || "",
-      ).trim() || paths.uiPath;
+      ).trim();
+    const uiModulePath = (existingUiModulePath && isVirtualUri(existingUiModulePath))
+      ? existingUiModulePath
+      : paths.uiPath;
     await writeVirtualTextFile(uiModulePath, uiJs, sessionId);
     next.uiModulePath = uiModulePath;
     next.uiModuleSessionId = sessionId;
