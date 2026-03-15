@@ -26,24 +26,24 @@ Round 1 Code Review — 3 个 CRITICAL + 5 个 HIGH 发现。
 
 ### CRITICAL
 
-- [ ] **C1**: `__resetCursorHelpWebProviderTestState()` 中对 7 个 module-level Map 调用 `.clear()`，同时将 `cursorHelpSlotLifecycleBound*` 置 null
-- [ ] **C2**: `send()` 中 slot 分配引入原子 acquire/release，消除 TOCTOU 竞态
-- [ ] **C3**: `transport_error` 路径改用 `failExecution(entry, event.error)` 替代 `closeExecution(entry)`
+- [x] **C1**: `__resetCursorHelpWebProviderTestState()` 中对 7 个 module-level Map 调用 `.clear()`，同时将 `cursorHelpSlotLifecycleBound*` 置 null
+- [x] **C2**: `send()` 中 slot 分配引入原子 acquire/release，消除 TOCTOU 竞态
+- [x] **C3**: `transport_error` 路径改用 `failExecution(entry, event.error)` 替代 `closeExecution(entry)`
 
 ### HIGH
 
-- [ ] **H1**: 删除死代码 `classifySlotStatusFromInspect`
-- [ ] **H2**: 将 `CURSOR_HELP_HEARTBEAT_RECOVERY_RETRY_MS` 从 1ms 调整为合理值（500ms）或移除
-- [ ] **H3**: `getCursorHelpPoolDebugState` 中 `chrome.windows.get()` 只调一次
-- [ ] **H4**: `closeExecution` 中清空 `entry.queue`（`entry.queue.length = 0`）
-- [ ] **H5**: `reconcileCursorHelpPoolState` 引入互斥锁
+- [x] **H1**: 删除死代码 `classifySlotStatusFromInspect`
+- [x] **H2**: 将 `CURSOR_HELP_HEARTBEAT_RECOVERY_RETRY_MS` 从 1ms 调整为合理值（500ms）或移除
+- [x] **H3**: `getCursorHelpPoolDebugState` 中 `chrome.windows.get()` 只调一次
+- [x] **H4**: `closeExecution` 中清空 `entry.queue`（`entry.queue.length = 0`）
+- [x] **H5**: `reconcileCursorHelpPoolState` 引入互斥锁
 
 ### 新增测试
 
-- [ ] **H6**: 修复或定义 `defaultExecuteResponse()`
-- [ ] **H8**: 添加 `transport_error` 事件传播测试
-- [ ] **H9**: 添加 abort signal 传播测试
-- [ ] **H10**: 添加 `sendTabMessageWithRetry` 失败/重试测试
+- [x] **H6**: 修复或定义 `defaultExecuteResponse()`
+- [x] **H8**: 添加 `transport_error` 事件传播测试
+- [x] **H9**: 添加 abort signal 传播测试
+- [x] **H10**: 添加 `sendTabMessageWithRetry` 失败/重试测试
 
 ## 验收
 

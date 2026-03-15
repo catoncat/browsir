@@ -243,6 +243,10 @@ function getExecuteCalls(): Array<Record<string, unknown>> {
     .map(([, message]) => ((message as Record<string, unknown>) || {}));
 }
 
+function defaultExecuteResponse(): { ok: true } {
+  return { ok: true };
+}
+
 describe("web-chat-executor.browser", () => {
   beforeEach(async () => {
     (globalThis as typeof globalThis & {
@@ -1721,5 +1725,127 @@ describe("web-chat-executor.browser", () => {
         setTimeout: typeof setTimeout;
       }).setTimeout = realSetTimeout;
     }
+  });
+
+  it("propagates transport_error to the consumer as a stream error", async () => {
+    buildChromeMock();
+    const provider = createCursorHelpWebProvider();
+    const response = await provider.send({
+      sessionId: "session-transport-err",
+      step: 1,
+      route: createRoute(),
+      signal: new AbortController().signal,
+      payload: {
+        stream: true,
+        messages: [{ role: "user", content: "Trigger error" }],
+        tools: [],
+        tool_choice: "auto"
+      }
+    });
+
+    const requestId = getLastExecuteRequestId();
+    expect(requestId).not.toBe("");
+
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.debug",
+        requestId,
+        stage: "request_started",
+      }
+    });
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.transport_error",
+        requestId,
+        error: "network connection lost",
+      }
+    });
+
+    const result = await readResponseText(response).catch((err) => err);
+    expect(result).toBeInstanceOf(Error);
+    expect((result as Error).message).toBe("network connection lost");
+  });
+
+  it("aborts execution when the signal fires", async () => {
+    buildChromeMock();
+    const provider = createCursorHelpWebProvider();
+    const abortController = new AbortController();
+    const response = await provider.send({
+      sessionId: "session-abort",
+      step: 1,
+      route: createRoute(),
+      signal: abortController.signal,
+      payload: {
+        stream: true,
+        messages: [{ role: "user", content: "Abortable request" }],
+        tools: [],
+        tool_choice: "auto"
+      }
+    });
+
+    const requestId = getLastExecuteRequestId();
+    expect(requestId).not.toBe("");
+
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.debug",
+        requestId,
+        stage: "request_started",
+      }
+    });
+
+    abortController.abort();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const result = await readResponseText(response).catch((err) => err);
+    expect(result).toBeInstanceOf(Error);
+    expect((result as Error).message).toContain("aborted");
+
+    const sendMessage = chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>;
+    const abortCall = sendMessage.mock.calls.find(
+      ([, message]) => String((message as Record<string, unknown>).type || "") === "webchat.abort"
+    );
+    expect(abortCall).toBeTruthy();
+    expect((abortCall?.[1] as Record<string, unknown>)?.requestId).toBe(requestId);
+  });
+
+  it("rejects when sendTabMessageWithRetry exhausts all retries", async () => {
+    buildChromeMock();
+    const sendMessage = chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>;
+    sendMessage.mockImplementation(async (_tabId: number, message: Record<string, unknown>) => {
+      if (message.type === "webchat.inspect") {
+        return {
+          ok: true,
+          pageHookReady: true,
+          fetchHookReady: true,
+          senderReady: true,
+          canExecute: true,
+          url: "https://cursor.com/help",
+        };
+      }
+      if (message.type === "webchat.execute") {
+        throw new Error("Could not establish connection. Receiving end does not exist.");
+      }
+      return defaultExecuteResponse();
+    });
+
+    const provider = createCursorHelpWebProvider();
+    await expect(
+      provider.send({
+        sessionId: "session-retry-fail",
+        step: 1,
+        route: createRoute(),
+        signal: new AbortController().signal,
+        payload: {
+          stream: true,
+          messages: [{ role: "user", content: "Retry me" }],
+          tools: [],
+          tool_choice: "auto"
+        }
+      })
+    ).rejects.toThrow("Could not establish connection");
   });
 });

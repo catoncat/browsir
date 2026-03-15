@@ -1,7 +1,7 @@
 ---
 id: ISSUE-031
 title: "web-chat-executor MEDIUM 级改进 — lane 文档 / 重试策略 / 状态一致性"
-status: open
+status: done
 priority: p1
 source: "review/2026-03-15-round1-cursor-help-pool-review.md"
 created: 2026-03-15

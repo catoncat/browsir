@@ -112,7 +112,7 @@ const MIN_CURSOR_HELP_POOL_SLOT_COUNT = 2;
 const MAX_CURSOR_HELP_POOL_SLOT_COUNT = 6;
 const CURSOR_HELP_HEARTBEAT_INTERVAL_MS = 30_000;
 const CURSOR_HELP_HEARTBEAT_BACKOFF_MS = 60_000;
-const CURSOR_HELP_HEARTBEAT_RECOVERY_RETRY_MS = 1;
+const CURSOR_HELP_HEARTBEAT_RECOVERY_RETRY_MS = 500;
 const encoder = new TextEncoder();
 const CONTENT_SCRIPT_FILE = "assets/cursor-help-content.js";
 const PAGE_HOOK_SCRIPT_FILE = "assets/cursor-help-page-hook.js";
@@ -699,6 +699,7 @@ function enqueueHostedEvent(entry: PendingExecution, event: HostedChatTransportE
 function closeExecution(entry: PendingExecution): void {
   if (entry.closed) return;
   entry.closed = true;
+  entry.queue.length = 0;
   if (entry.timeoutHandle) {
     clearTimeout(entry.timeoutHandle);
     entry.timeoutHandle = null;
@@ -727,6 +728,7 @@ function closeExecution(entry: PendingExecution): void {
 function failExecution(entry: PendingExecution, error: string): void {
   if (entry.closed) return;
   entry.closed = true;
+  entry.queue.length = 0;
   if (entry.timeoutHandle) {
     clearTimeout(entry.timeoutHandle);
     entry.timeoutHandle = null;
@@ -1381,7 +1383,29 @@ async function attemptCursorHelpSlotSoftRecovery(
   }).catch(() => null);
 }
 
+let reconcilePoolMutex: Promise<CursorHelpPoolState> | null = null;
+
 async function reconcileCursorHelpPoolState(
+  slotCount: number,
+  options: {
+    allowAutoRebuildAfterRemoval?: boolean;
+  } = {},
+): Promise<CursorHelpPoolState> {
+  while (reconcilePoolMutex) {
+    await reconcilePoolMutex.catch(() => {});
+  }
+  const task = reconcileCursorHelpPoolStateUnsafe(slotCount, options);
+  reconcilePoolMutex = task;
+  try {
+    return await task;
+  } finally {
+    if (reconcilePoolMutex === task) {
+      reconcilePoolMutex = null;
+    }
+  }
+}
+
+async function reconcileCursorHelpPoolStateUnsafe(
   slotCount: number,
   options: {
     allowAutoRebuildAfterRemoval?: boolean;
@@ -1500,17 +1524,6 @@ async function markCursorHelpSlotBusy(
     windowId: slot.windowId,
     lastKnownUrl: slot.lastKnownUrl,
   });
-}
-
-function classifySlotStatusFromInspect(
-  inspect: CursorHelpInspectResult | null,
-): CursorHelpSlotRecord["status"] {
-  if (!inspect) return "stale";
-  if (inspect.runtimeMismatch) return "error";
-  if (canCursorHelpSlotBootExecute(inspect)) {
-    return inspect.senderReady ? "idle" : "warming";
-  }
-  return "warming";
 }
 
 async function ensureCursorHelpSlotUsable(
@@ -1850,10 +1863,9 @@ export async function rebuildCursorHelpPool(
 
 export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebugView> {
   const state = await loadCursorHelpPoolState();
-  const window =
-    state.windowId && (await chrome.windows.get(state.windowId).catch(() => null))
-      ? await chrome.windows.get(state.windowId).catch(() => null)
-      : null;
+  const window = state.windowId
+    ? await chrome.windows.get(state.windowId).catch(() => null)
+    : null;
   const windowRuntimeState = resolveCursorHelpWindowRuntimeState(state, window);
   const recoveryPreview = buildCursorHelpWindowRecoveryPreview(state);
   const decisionTrace = await collectCursorHelpTabDecisionTrace(state);
