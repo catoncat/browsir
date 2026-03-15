@@ -5,9 +5,6 @@
 import type {
   FailureReason,
   ToolRetryAction,
-  FailurePhase,
-  FailureCategory,
-  ResumeStrategy,
   BashExecOutcome,
   RuntimeErrorWithMeta,
 } from "./loop-shared-types";
@@ -243,10 +240,7 @@ export function attachFailureProtocol(
   options: {
     defaultRetryable?: boolean;
     errorReason?: FailureReason;
-    phase?: FailurePhase;
-    category?: FailureCategory;
     modeEscalation?: JsonRecord | null;
-    resumeStrategy?: ResumeStrategy;
     stepRef?: JsonRecord | null;
   } = {},
 ): JsonRecord {
@@ -294,21 +288,6 @@ export function attachFailureProtocol(
     retryHint,
   };
   if (modeEscalation) out.modeEscalation = modeEscalation;
-  const phase = options.phase;
-  const category = options.category;
-  if (phase || category) {
-    out.failureClass = {
-      ...(phase ? { phase } : {}),
-      ...(category ? { category } : {}),
-    };
-  }
-  const resumeStrategy = options.resumeStrategy;
-  if (resumeStrategy) {
-    out.resume = {
-      strategy: resumeStrategy,
-      action: resumeStrategy === "replan" ? "replan" : "resume_current_step",
-    };
-  }
   return out;
 }
 
@@ -439,10 +418,6 @@ export function buildBashExitFailureEnvelope(
           diagnosis: diagnosed.tag,
         },
       },
-      {
-        phase: "execute",
-        resumeStrategy: "replan",
-      },
     ),
     modeUsed: invoke.modeUsed,
     providerId: invoke.providerId || undefined,
@@ -491,11 +466,6 @@ export function buildSkillScriptSandboxFailureEnvelope(input: {
             missingRuntime,
           },
         },
-        {
-          phase: "execute",
-          category: "missing_target",
-          resumeStrategy: "replan",
-        },
       ),
       modeUsed: input.invoke.modeUsed,
       providerId: input.invoke.providerId || undefined,
@@ -518,10 +488,7 @@ export function buildStepFailureEnvelope(
   options: {
     defaultRetryable?: boolean;
     errorReason?: FailureReason;
-    phase?: FailurePhase;
-    category?: FailureCategory;
     modeEscalation?: JsonRecord | null;
-    resumeStrategy?: ResumeStrategy;
     stepRef?: JsonRecord | null;
   } = {},
 ): JsonRecord {

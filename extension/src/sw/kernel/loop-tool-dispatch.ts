@@ -521,11 +521,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
           supportedTools: Array.from(RUNTIME_EXECUTABLE_TOOL_NAMES),
         },
       },
-      {
-        phase: "plan",
-        category: "missing_target",
-        resumeStrategy: unsupported ? "replan" : "replan",
-      },
     );
   }
 
@@ -584,11 +579,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
               schemaRequired: requiredFields,
             },
           },
-          {
-            phase: "plan",
-            category: "missing_target",
-            resumeStrategy: "replan",
-          },
         ),
       };
     }
@@ -640,11 +630,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
               providedKeys: Object.keys(input.args),
             },
           },
-          {
-            phase: "plan",
-            category: "missing_target",
-            resumeStrategy: "retry_with_fresh_snapshot",
-          },
         ),
       };
     }
@@ -663,11 +648,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
             errorReason: "failed_execute",
             retryable: false,
             retryHint: "Provide non-empty value and retry fill_element_by_uid.",
-          },
-          {
-            phase: "plan",
-            category: "missing_target",
-            resumeStrategy: "replan",
           },
         ),
       };
@@ -699,11 +679,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryable: false,
                 retryHint: "Pass arguments as JSON object and retry.",
               },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "replan",
-              },
             ),
           };
         }
@@ -719,11 +694,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
               errorReason: "failed_execute",
               retryable: false,
               retryHint: "Fix JSON arguments and retry.",
-            },
-            {
-              phase: "plan",
-              category: "missing_target",
-              resumeStrategy: "replan",
             },
           ),
         };
@@ -844,11 +814,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
               retryable: true,
               retryHint: `Call get_all_tabs and retry ${toolName} with a valid tabId.`,
             },
-            {
-              phase: "plan",
-              category: "missing_target",
-              resumeStrategy: "retry_with_fresh_snapshot",
-            },
           ),
         };
       }
@@ -869,11 +834,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
               retryable: true,
               retryHint: `Call search_elements first, then retry ${toolName} using uid/ref.`,
             },
-            {
-              phase: "plan",
-              category: "missing_target",
-              resumeStrategy: "retry_with_fresh_snapshot",
-            },
           ),
         };
       }
@@ -889,11 +849,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
               errorReason: "failed_execute",
               retryable: false,
               retryHint: `Provide value and retry ${toolName}.`,
-            },
-            {
-              phase: "plan",
-              category: "missing_target",
-              resumeStrategy: "retry_with_fresh_snapshot",
             },
           ),
         };
@@ -947,11 +902,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
               retryable: true,
               retryHint: `Call get_all_tabs and retry ${toolName} with a valid tabId.`,
             },
-            {
-              phase: "plan",
-              category: "missing_target",
-              resumeStrategy: "retry_with_fresh_snapshot",
-            },
           ),
         };
       }
@@ -977,11 +927,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryable: false,
                 retryHint: "Provide key (e.g. Enter) and retry press_key.",
               },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "retry_with_fresh_snapshot",
-              },
             ),
           };
         }
@@ -1003,11 +948,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 errorReason: "failed_execute",
                 retryable: false,
                 retryHint: "Provide url and retry navigate_tab.",
-              },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "retry_with_fresh_snapshot",
               },
             ),
           };
@@ -1213,11 +1153,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryHint:
                   "Call get_all_tabs and retry get_tab_info with a valid tabId.",
               },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "retry_with_fresh_snapshot",
-              },
             ),
           };
         }
@@ -1272,11 +1207,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryable: true,
                 retryHint:
                   "Call get_all_tabs and retry search_elements with a valid tabId.",
-              },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "retry_with_fresh_snapshot",
               },
             ),
           };
@@ -1342,11 +1272,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryHint:
                   "Call get_all_tabs and retry get_page_metadata with a valid tabId.",
               },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "retry_with_fresh_snapshot",
-              },
             ),
           };
         }
@@ -1394,11 +1319,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryHint:
                   "Call get_all_tabs and retry highlight_element with a valid tabId.",
               },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "retry_with_fresh_snapshot",
-              },
             ),
           };
         }
@@ -1414,11 +1334,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 errorReason: "failed_execute",
                 retryable: false,
                 retryHint: "Provide selector and retry highlight_element.",
-              },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "retry_with_fresh_snapshot",
               },
             ),
           };
@@ -1483,11 +1398,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryHint:
                   "Call get_all_tabs and retry highlight_text_inline with a valid tabId.",
               },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "retry_with_fresh_snapshot",
-              },
             ),
           };
         }
@@ -1505,11 +1415,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryable: false,
                 retryHint:
                   "Provide selector + searchText and retry highlight_text_inline.",
-              },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "retry_with_fresh_snapshot",
               },
             ),
           };
@@ -1596,11 +1501,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryable: true,
                 retryHint: `Call get_all_tabs and retry ${requested} with a valid tabId.`,
               },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "retry_with_fresh_snapshot",
-              },
             ),
           };
         }
@@ -1642,11 +1542,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryHint:
                   "Provide a valid data:image URL and retry download_image.",
               },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "replan",
-              },
             ),
           };
         }
@@ -1663,11 +1558,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryable: true,
                 retryHint:
                   "Call get_all_tabs and retry download_image with a valid tabId.",
-              },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "retry_with_fresh_snapshot",
               },
             ),
           };
@@ -1739,11 +1629,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryHint:
                   "Provide messages[].parts[].imageData with data:image URL.",
               },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "replan",
-              },
             ),
           };
         }
@@ -1760,11 +1645,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryable: true,
                 retryHint:
                   "Call get_all_tabs and retry download_chat_images with a valid tabId.",
-              },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "retry_with_fresh_snapshot",
               },
             ),
           };
@@ -1793,11 +1673,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryHint:
                   "Call get_all_tabs and retry computer with a valid tabId.",
               },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "retry_with_fresh_snapshot",
-              },
             ),
           };
         }
@@ -1815,11 +1690,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 errorReason: "failed_execute",
                 retryable: false,
                 retryHint: "Provide action and retry computer.",
-              },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "replan",
               },
             ),
           };
@@ -1870,11 +1740,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryHint:
                   "Provide intervention type and retry get_intervention_info.",
               },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "replan",
-              },
             ),
           };
         }
@@ -1900,11 +1765,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryable: false,
                 retryHint:
                   "Provide intervention type and retry request_intervention.",
-              },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "replan",
               },
             ),
           };
@@ -1958,11 +1818,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryHint:
                   "Provide name(id optional) + description and retry create_skill.",
               },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "replan",
-              },
             ),
           };
         }
@@ -1989,11 +1844,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryable: false,
                 retryHint: "Provide skillName and retry get_skill_info.",
               },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "replan",
-              },
             ),
           };
         }
@@ -2018,11 +1868,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 errorReason: "failed_execute",
                 retryable: false,
                 retryHint: "Provide skill name and retry load_skill.",
-              },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "replan",
               },
             ),
           };
@@ -2051,11 +1896,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryable: false,
                 retryHint:
                   "Provide skillName + refPath and retry read_skill_reference.",
-              },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "replan",
               },
             ),
           };
@@ -2086,11 +1926,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryHint:
                   "Provide skillName + assetPath and retry get_skill_asset.",
               },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "replan",
-              },
             ),
           };
         }
@@ -2120,11 +1955,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryHint:
                   "Provide skillName + scriptPath and retry execute_skill_script.",
               },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "replan",
-              },
             ),
           };
         }
@@ -2153,11 +1983,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryable: true,
                 retryHint:
                   "Call get_all_tabs and retry fill_form with a valid tabId.",
-              },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "retry_with_fresh_snapshot",
               },
             ),
           };
@@ -2203,11 +2028,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryHint:
                   "Call search_elements and map each field to uid/ref before fill_form.",
               },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "retry_with_fresh_snapshot",
-              },
             ),
           };
         }
@@ -2241,11 +2061,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 retryHint:
                   "Call get_all_tabs and retry browser_verify with a valid tabId.",
               },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "retry_with_fresh_snapshot",
-              },
             ),
           };
         }
@@ -2262,11 +2077,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
                 errorReason: "failed_execute",
                 retryable: false,
                 retryHint: "Provide explicit expect and retry browser_verify.",
-              },
-              {
-                phase: "plan",
-                category: "missing_target",
-                resumeStrategy: "replan",
               },
             ),
           };

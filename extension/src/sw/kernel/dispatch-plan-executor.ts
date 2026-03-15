@@ -406,11 +406,6 @@ main().catch((error) => {
           ...(input.details || {}),
         },
       },
-      {
-        phase: "execute",
-        category: "missing_target",
-        resumeStrategy: "replan",
-      },
     );
   }
 
@@ -441,10 +436,6 @@ main().catch((error) => {
             out,
             `${plan.toolName} 执行失败`,
             `Retry ${plan.toolName} with valid arguments/capability provider.`,
-            {
-              phase: "execute",
-              resumeStrategy: "replan",
-            },
           );
         }
         return buildToolResponseEnvelope("invoke", out.data, {
@@ -502,11 +493,6 @@ main().catch((error) => {
               retryHint:
                 "Call get_all_tabs and retry get_tab_info with a valid tabId.",
             },
-            {
-              phase: "execute",
-              category: "missing_target",
-              resumeStrategy: "retry_with_fresh_snapshot",
-            },
           );
         }
         return buildToolResponseEnvelope("tab_info", {
@@ -533,11 +519,6 @@ main().catch((error) => {
               errorReason: "failed_execute",
               retryable: true,
               retryHint: "Call get_all_tabs then retry close_tab with tabId.",
-            },
-            {
-              phase: "execute",
-              category: "missing_target",
-              resumeStrategy: "retry_with_fresh_snapshot",
             },
           );
         }
@@ -598,11 +579,6 @@ main().catch((error) => {
               retryable: false,
               retryHint: "Use list_interventions and retry with valid type.",
             },
-            {
-              phase: "execute",
-              category: "missing_target",
-              resumeStrategy: "replan",
-            },
           );
         }
         return buildToolResponseEnvelope("get_intervention_info", {
@@ -621,11 +597,6 @@ main().catch((error) => {
               errorReason: "failed_execute",
               retryable: false,
               retryHint: "Use list_interventions and retry with valid type.",
-            },
-            {
-              phase: "execute",
-              category: "missing_target",
-              resumeStrategy: "replan",
             },
           );
         }
@@ -666,11 +637,6 @@ main().catch((error) => {
                 retryable: false,
                 retryHint:
                   "Use request_intervention result id or omit id to cancel pending queue.",
-              },
-              {
-                phase: "execute",
-                category: "missing_target",
-                resumeStrategy: "replan",
               },
             );
           }
@@ -728,11 +694,6 @@ main().catch((error) => {
               retryHint:
                 "Use list_skills then retry get_skill_info with valid skillName.",
             },
-            {
-              phase: "execute",
-              category: "missing_target",
-              resumeStrategy: "replan",
-            },
           );
         }
         const base = String(skill.location || "").replace(/\/[^/]*$/, "");
@@ -761,11 +722,6 @@ main().catch((error) => {
               retryHint:
                 "Use list_skills then retry load_skill with valid name.",
             },
-            {
-              phase: "execute",
-              category: "missing_target",
-              resumeStrategy: "replan",
-            },
           );
         }
         const content = await readTextByLocation(
@@ -790,11 +746,6 @@ main().catch((error) => {
               retryable: false,
               retryHint:
                 "Use list_skills then retry read_skill_reference with valid skillName.",
-            },
-            {
-              phase: "execute",
-              category: "missing_target",
-              resumeStrategy: "replan",
             },
           );
         }
@@ -826,11 +777,6 @@ main().catch((error) => {
               retryable: false,
               retryHint:
                 "Use list_skills then retry get_skill_asset with valid skillName.",
-            },
-            {
-              phase: "execute",
-              category: "missing_target",
-              resumeStrategy: "replan",
             },
           );
         }
@@ -865,11 +811,6 @@ main().catch((error) => {
               retryable: false,
               retryHint:
                 "Use list_skills then retry execute_skill_script with valid skillName.",
-            },
-            {
-              phase: "execute",
-              category: "missing_target",
-              resumeStrategy: "replan",
             },
           );
         }
@@ -916,11 +857,6 @@ main().catch((error) => {
                     scriptPath: normalizedScript,
                     runtime: runtimeHint,
                   },
-                },
-                {
-                  phase: "execute",
-                  category: "missing_target",
-                  resumeStrategy: "replan",
                 },
               );
             }
@@ -996,8 +932,6 @@ main().catch((error) => {
             "Check script path/runtime and retry execute_skill_script.",
             {
               defaultRetryable: true,
-              phase: "execute",
-              resumeStrategy: "replan",
             },
           );
         }
@@ -1052,8 +986,6 @@ main().catch((error) => {
             "Take a fresh snapshot and retry search_elements with a valid scope.",
             {
               defaultRetryable: true,
-              phase: "execute",
-              resumeStrategy: "retry_with_fresh_snapshot",
             },
           );
         }
@@ -1135,8 +1067,6 @@ main().catch((error) => {
             "Take a fresh snapshot and retry with updated ref/selector.",
             {
               defaultRetryable: true,
-              phase: "execute",
-              resumeStrategy: "retry_with_fresh_snapshot",
             },
           );
         }
@@ -1167,10 +1097,6 @@ main().catch((error) => {
                 verifyReason,
                 data: actionData,
               },
-            },
-            {
-              phase: "verify",
-              resumeStrategy: "retry_with_fresh_snapshot",
             },
           );
         }
@@ -1207,7 +1133,6 @@ main().catch((error) => {
                   "Re-observe page state and retry with updated selector/target.",
                 details: runtimeError.details,
               },
-              { phase: "execute", resumeStrategy: "retry_with_fresh_snapshot" },
             ),
           };
         });
@@ -1243,7 +1168,6 @@ main().catch((error) => {
                 retryHint: "Refine selector/expect and retry.",
                 details: verifyOut.data || verifyOut.errorDetails || null,
               },
-              { phase: "verify", resumeStrategy: "retry_with_fresh_snapshot" },
             );
           }
         }
@@ -1305,7 +1229,6 @@ main().catch((error) => {
                 retryHint: "Re-check tab focus/state and retry screenshot.",
                 details: runtimeError.details,
               },
-              { phase: "execute", resumeStrategy: "retry_with_fresh_snapshot" },
             ),
           };
         });
@@ -1323,7 +1246,6 @@ main().catch((error) => {
               retryable: true,
               retryHint: "Retry capture_screenshot after page settles.",
             },
-            { phase: "execute", resumeStrategy: "retry_with_fresh_snapshot" },
           );
         }
 
@@ -1585,11 +1507,6 @@ main().catch((error) => {
                   "Focus an editable target (input/textarea/contenteditable) and retry computer(type).",
                 details: payload,
               },
-              {
-                phase: "execute",
-                category: "missing_target",
-                resumeStrategy: "retry_with_fresh_snapshot",
-              },
             );
           }
           return buildToolResponseEnvelope("computer", result);
@@ -1609,7 +1526,6 @@ main().catch((error) => {
                 retryable: false,
                 retryHint: "Provide text key sequence and retry computer.",
               },
-              { phase: "execute", resumeStrategy: "replan" },
             );
           }
           for (const key of keys) {
@@ -1645,7 +1561,6 @@ main().catch((error) => {
                 retryable: false,
                 retryHint: "Provide uid/selector and retry computer scroll_to.",
               },
-              { phase: "execute", resumeStrategy: "replan" },
             );
           }
           const out = await executeStep({
@@ -1671,8 +1586,6 @@ main().catch((error) => {
               "Refresh target and retry computer scroll_to.",
               {
                 defaultRetryable: true,
-                phase: "execute",
-                resumeStrategy: "retry_with_fresh_snapshot",
               },
             );
           }
@@ -1694,7 +1607,6 @@ main().catch((error) => {
               retryable: false,
               retryHint: "Provide coordinate and retry computer.",
             },
-            { phase: "execute", resumeStrategy: "replan" },
           );
         }
         const [x, y] = coordinate || [0, 0];
@@ -1748,7 +1660,6 @@ main().catch((error) => {
                 retryable: false,
                 retryHint: "Provide both start_coordinate and coordinate.",
               },
-              { phase: "execute", resumeStrategy: "replan" },
             );
           }
           const [sx, sy] = startCoordinate;
@@ -1825,7 +1736,6 @@ main().catch((error) => {
             retryable: false,
             retryHint: "Use supported computer action and retry.",
           },
-          { phase: "execute", resumeStrategy: "replan" },
         );
       }
       case "step.fill_form": {
@@ -1865,10 +1775,6 @@ main().catch((error) => {
                   errorCode: out.errorCode || "",
                   errorDetails: out.errorDetails || null,
                 },
-              },
-              {
-                phase: "execute",
-                resumeStrategy: "retry_with_fresh_snapshot",
               },
             );
           }
@@ -1917,10 +1823,6 @@ main().catch((error) => {
                   errorCode: submitOut.errorCode || "",
                 },
               },
-              {
-                phase: "execute",
-                resumeStrategy: "retry_with_fresh_snapshot",
-              },
             );
           }
           itemResults.push({
@@ -1963,10 +1865,6 @@ main().catch((error) => {
                   verifyError: verifyOut.error || "",
                 },
               },
-              {
-                phase: "verify",
-                resumeStrategy: "retry_with_fresh_snapshot",
-              },
             );
           }
         }
@@ -2005,8 +1903,6 @@ main().catch((error) => {
             "Update verify expectation and run browser_verify again.",
             {
               defaultRetryable: true,
-              phase: "execute",
-              resumeStrategy: "retry_with_fresh_snapshot",
             },
           );
         }
@@ -2027,10 +1923,6 @@ main().catch((error) => {
               retryable: true,
               retryHint: "Refine expect conditions and re-run browser_verify.",
               details: verifyData,
-            },
-            {
-              phase: "verify",
-              resumeStrategy: "replan",
             },
           );
         }

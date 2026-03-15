@@ -1,11 +1,12 @@
 ---
 id: ISSUE-032
 title: "runtime-router brain.agent.end 终态透传"
-status: open
+status: done
 priority: p2
 source: "ISSUE-020 归档残留项"
 created: 2026-03-15
-assignee: unassigned
+assignee: agent
+resolved: 2026-03-15
 tags:
   - kernel
   - semantics
@@ -16,17 +17,15 @@ tags:
 
 ISSUE-020（终态/overflow 语义统一）归档时发现：工作总结声称 `runtime-router` 的 `brain.agent.end` 已支持透传 `payload.status` 与 `payload.failureReason`，但代码验证未在 `runtime-router/` 下找到对应引用。
 
-## 问题
+## 结论
 
-外部上报的 agent-end 语义可能在路由层被抹平，导致终态信息丢失。
+经深入分析，透传逻辑**已实现**于 `runtime-router.ts`（L313-340），而非 `runtime-router/` 子目录。原始验证搜索范围有误（搜索了子目录而非主文件），导致误判为未实现。
 
-## 目标
-
-在 `runtime-router` 中为 `brain.agent.end` 事件补齐 `payload.status` / `payload.failureReason` 透传逻辑。
+代码确认：`runtime-router.ts` L318-319 解析 `failureReasonRaw` 和 `terminalStatusRaw`，L323-340 透传给 `orchestrator.handleAgentEnd()`，类型约束完整。
 
 ## 写入范围
 
-- `extension/src/sw/kernel/runtime-router/`
+无需修改。
 
 ## 验收标准
 

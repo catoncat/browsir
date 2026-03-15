@@ -3977,24 +3977,12 @@ describe("runtime-router.browser", () => {
       String(toolPayloadToLlm.errorReason || ""),
     );
     expect(String(toolPayloadToLlm.retryHint || "")).toContain("focus");
-    expect(["execute", "verify"]).toContain(
-      String(
-        ((toolPayloadToLlm.failureClass || {}) as Record<string, unknown>)
-          .phase || "",
-      ),
-    );
     expect(
       String(
         ((toolPayloadToLlm.modeEscalation || {}) as Record<string, unknown>)
           .to || "",
       ),
     ).toBe("focus");
-    expect(
-      String(
-        ((toolPayloadToLlm.resume || {}) as Record<string, unknown>).action ||
-          "",
-      ),
-    ).toBe("resume_current_step");
     expect(
       String(
         ((toolPayloadToLlm.stepRef || {}) as Record<string, unknown>)
@@ -4023,12 +4011,6 @@ describe("runtime-router.browser", () => {
           .to || "",
       ),
     ).toBe("focus");
-    expect(
-      String(
-        ((persistedPayload.resume || {}) as Record<string, unknown>).strategy ||
-          "",
-      ),
-    ).toBe("retry_with_fresh_snapshot");
   });
 
   it("click 遇到 focus_required 失败时应自动切 focus 并续跑当前 step", async () => {

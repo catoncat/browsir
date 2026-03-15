@@ -95,18 +95,6 @@ acceptance_ref: docs/<某设计文档>.md
    - `priority: p2`
    - 说明：前置 `ISSUE-017` 已 done，可启动 transcript/overlay/editor/export 拆分。
 
-2. `ISSUE-032` [runtime-router brain.agent.end 终态透传](./2026-03-15-runtime-router-terminal-status-passthrough.md)
-   - `status: open`
-   - `priority: p2`
-   - 来源：ISSUE-020 归档残留项
-   - 说明：runtime-router 中 brain.agent.end 事件缺少 payload.status/failureReason 透传。
-
-3. `ISSUE-033` [失败信封瘦身 — attachFailureProtocol 精简](./2026-03-15-failure-envelope-slimming.md)
-   - `status: open`
-   - `priority: p2`
-   - 来源：ISSUE-022 Slice C 归档残留项
-   - 说明：attachFailureProtocol 输出过重，需精简为 errorCode + hint。
-
 ## 推荐领取顺序
 
 1. 先看是否有人正在持有 `panel-chat` 或 `kernel-loop` 单写者泳道。

@@ -151,22 +151,6 @@ export function resolveAgentEndDoneReason(input: {
 
 export type ToolRetryAction = "auto_replay" | "llm_replan" | "fail_fast";
 
-export type FailurePhase = "plan" | "execute" | "verify" | "progress_guard";
-
-export type FailureCategory =
-  | "timeout"
-  | "busy"
-  | "missing_target"
-  | "verify_failed"
-  | "focus_required"
-  | "no_progress"
-  | "unknown";
-
-export type ResumeStrategy =
-  | "retry_same_args"
-  | "retry_with_fresh_snapshot"
-  | "replan";
-
 export type NoProgressReason =
   | "repeat_signature"
   | "ping_pong"
