@@ -592,10 +592,10 @@ function buildDefaultProfile(idSeed: string): PanelLlmProfile {
   const id = normalizeProfileId(idSeed) || "profile-default";
   return {
     id,
-    provider: DEFAULT_PANEL_LLM_PROVIDER,
-    llmApiBase: DEFAULT_PANEL_LLM_API_BASE,
+    provider: "openai_compatible",
+    llmApiBase: "",
     llmApiKey: "",
-    llmModel: DEFAULT_PANEL_LLM_MODEL,
+    llmModel: "",
     providerOptions: {},
     llmTimeoutMs: Number(config.value.llmTimeoutMs || 120000),
     llmRetryMaxAttempts: Number(config.value.llmRetryMaxAttempts || 2),
@@ -774,6 +774,7 @@ async function handleSave(): Promise<void> {
 
 const cursorHelpPoolState = ref<Record<string, unknown> | null>(null);
 const cursorHelpPoolLoading = ref(false);
+const showCursorPoolDebug = ref(false);
 
 async function sendBrainMessage(message: Record<string, unknown>): Promise<Record<string, unknown> | null> {
   try {
@@ -958,10 +959,10 @@ onMounted(() => {
                   aria-hidden="true"
                 />
                 <span
-                  class="absolute left-1/2 -translate-x-1/2 top-full mt-1 z-50 hidden group-hover:block w-56 px-2.5 py-2 text-[11px] leading-relaxed text-ui-text bg-ui-surface border border-ui-border rounded-sm shadow-lg whitespace-normal"
+                  class="absolute left-0 top-full mt-1 z-50 hidden group-hover:block w-56 px-2.5 py-2 text-[11px] leading-relaxed text-ui-text bg-ui-surface border border-ui-border rounded-sm shadow-lg whitespace-normal"
                   role="tooltip"
                 >
-                  通过你已登录的 Cursor 页面发起请求，共享 Cursor 订阅额度，无需额外 API Key。副作用：后台会保持一个 Cursor 浏览器标签页；对话内容会出现在 Cursor 的聊天记录中。
+                  通过 Cursor Help 页面转发请求，无需 API Key。副作用：后台会保持一个浏览器窗口和页面。
                 </span>
               </span>
             </span>
@@ -1042,7 +1043,7 @@ onMounted(() => {
               Cursor
             </h3>
             <p class="text-[12px] text-ui-text-muted leading-relaxed">
-              通过已打开的 Cursor 页面发起宿主聊天。
+              内置免费模型，通过 Cursor Help 页面转发请求。
             </p>
             <p class="text-[11px] text-ui-text-muted/80">
               {{
@@ -1073,6 +1074,14 @@ onMounted(() => {
           v-if="cursorHelpPoolState"
           class="border-t border-ui-border pt-2 space-y-2"
         >
+          <button
+            type="button"
+            class="text-[11px] text-ui-text-muted/70 hover:text-ui-text"
+            @click="showCursorPoolDebug = !showCursorPoolDebug"
+          >
+            {{ showCursorPoolDebug ? '收起调试详情' : '调试详情' }}
+          </button>
+          <template v-if="showCursorPoolDebug">
           <div class="flex items-center justify-between">
             <span class="text-[11px] text-ui-text-muted font-medium">
               Help 运行池
@@ -1170,6 +1179,7 @@ onMounted(() => {
               {{ String(slot.lastError).slice(0, 40) }}
             </span>
           </div>
+          </template>
         </div>
       </section>
 
