@@ -866,37 +866,44 @@ async function bashFrame(args: JsonRecord, sessionId: string): Promise<JsonRecor
   });
 }
 
-// Commands that require `new Function()` and MUST go through the eval-bridge
-// iframe. Everything else can execute directly in the SW-side LIFO instance.
-const EVAL_REQUIRED_COMMANDS = new Set([
-  "node", "npm", "npx", "lifo", "pkg",
+// Shell builtins that LIFO handles via its shell parser directly, without
+// triggering lazy-loaded import() calls.  These can safely run in the
+// SW-side LIFO instance.  All other commands (ls, grep, whoami, …) are
+// lazily loaded via import() chunks, which Chrome SW blocks.
+const SW_DIRECT_BUILTINS = new Set([
+  "cd", "pwd", "echo", "clear", "export", "exit",
+  "true", "false", "jobs", "fg", "bg", "history",
+  "source", ".", "alias", "unalias", "test", "[",
 ]);
 
-// Patterns that indicate the command line invokes an eval-requiring program,
-// even when it appears mid-pipeline (e.g. `echo code | node -e ...`),
-// inside subshells (`$(node ...)`), or via env/path prefixes.
-const EVAL_COMMAND_PATTERN = /(?:^|[|;&(]\s*|`|\$\(\s*)(?:(?:\/[\w/.-]*\/)?(?:env\s+\S+=\S+\s+)*)?(?:node|npm|npx|lifo|pkg)\b/;
-
 /**
- * Determines whether a shell command string requires `new Function()` at
- * runtime and therefore must be dispatched through the eval-bridge iframe.
+ * Determines whether a shell command must be dispatched through the
+ * eval-bridge iframe rather than the SW-side LIFO instance.
  *
- * The check is intentionally conservative: if the command *might* invoke
- * node/npm anywhere in a pipeline, we send it to the iframe.  All other
- * commands (ls, grep, sed, curl, …) run directly in the SW LIFO instance
- * with zero message-passing overhead.
+ * In Chrome Service Workers, `import()` is disallowed.  LIFO lazy-loads
+ * every external command (ls, grep, sed, whoami, …) via `import()` chunks,
+ * so they all fail when executed directly in the SW.  Only shell builtins
+ * (cd, pwd, echo, …) are handled by the shell parser without triggering
+ * `import()`.
+ *
+ * Strategy: route everything through the eval-bridge **by default**.
+ * Only pure-builtin command lines (no pipes / chains to external commands)
+ * may skip the bridge for zero-overhead execution.
  */
 function commandRequiresEval(command: string): boolean {
   const trimmed = command.trim();
   if (!trimmed) return false;
 
-  // Fast path: first word (ignoring optional env prefix) is an eval-requiring command
   const firstWord = trimmed.split(/[\s;|&(]/)[0];
-  if (EVAL_REQUIRED_COMMANDS.has(firstWord)) return true;
 
-  // Slower path: check for eval commands anywhere in pipelines / logical chains /
-  // subshells / command substitutions.
-  return EVAL_COMMAND_PATTERN.test(trimmed);
+  // A pure builtin invocation with no pipes / chains / subshells that
+  // might invoke an external (lazy-loaded) command → safe for direct SW exec.
+  if (SW_DIRECT_BUILTINS.has(firstWord) && !/[|;&`]|\$\(/.test(trimmed.slice(firstWord.length))) {
+    return false;
+  }
+
+  // Everything else goes through eval-bridge where import() works.
+  return true;
 }
 
 // FNV-1a hash for fast string content dedup during eval-bridge sync.

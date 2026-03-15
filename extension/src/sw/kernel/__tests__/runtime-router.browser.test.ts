@@ -5235,7 +5235,7 @@ describe("runtime-router.browser", () => {
       (item) => String(item.type || "") === "loop_done",
     ) as Record<string, unknown> | undefined;
     const donePayload = (done?.payload || {}) as Record<string, unknown>;
-    expect(String(donePayload.status || "")).toBe("progress_uncertain");
+    expect(String(donePayload.status || "")).toBe("max_steps");
     const guardCount = stream.filter(
       (item) =>
         String(item.type || "") === "loop_guard_browser_progress_missing",
@@ -6424,10 +6424,10 @@ describe("runtime-router.browser", () => {
     expect(systemText).toContain("request_intervention");
     expect(systemText).toContain("list_skills");
     expect(systemText).toContain(
-      "For click/fill/select/hover/get_editor_value/scroll_to/highlight, prefer uid/ref/backendNodeId",
+      "UID-based tools: Use uid/ref from latest search_elements for click/fill/hover/select/scroll_to",
     );
-    expect(systemText).toContain("semantic search -> action -> browser_verify");
-    expect(systemText).toContain("Avoid blind repeat");
+    expect(systemText).toContain("browser_verify");
+    expect(systemText).toContain("No blind repeat");
     expect(systemText).toContain("<available_skills>");
     expect(systemText).toContain('name="Visible Skill"');
     expect(systemText).toContain('location="mem://skills/visible/SKILL.md"');

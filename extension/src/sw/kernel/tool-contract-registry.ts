@@ -83,10 +83,10 @@ const FILE_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "browser_bash",
     description:
-      "Execute command in browser virtual runtime (lifo sandbox over mem:// virtual files). " +
-      "Provides a full Linux-like shell with 60+ commands. " +
-      "Fast commands (ls, cat, grep, sed, awk, sort, head, tail, wc, find, tree, curl, wget, diff, tar, gzip, base64, bc, date, env) " +
-      "execute directly in the Service Worker with zero overhead. " +
+      "Execute command in browser virtual runtime (lifo sandbox). " +
+      "All file paths MUST use mem:// protocol (e.g. mem://mydir/file.txt), NOT Unix paths like /mem or /tmp. " +
+      "The working directory defaults to the session root; use relative paths or mem:// URIs. " +
+      "Provides a full Linux-like shell with 60+ commands (ls, cat, grep, sed, awk, sort, head, tail, wc, find, tree, curl, wget, diff, tar, gzip, base64, bc, date, env, whoami, etc.). " +
       "Supports pipes, redirects, variables, glob expansion, and control flow (if/for/while/case). " +
       "Use curl/wget for HTTP requests (via browser fetch, subject to CORS). " +
       "Use node -e 'code' to run JavaScript (routed to eval sandbox). " +

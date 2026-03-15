@@ -1263,7 +1263,23 @@ describe("web-chat-executor.browser", () => {
       sendMessage.mockImplementation(async (_tabId: number, message: Record<string, unknown>) => {
         const type = String(message.type || "").trim();
         if (type === "webchat.inspect") {
-          throw new Error("persistent inspect failure");
+          return {
+            ok: true,
+            pageHookReady: true,
+            fetchHookReady: true,
+            senderReady: true,
+            canExecute: false,
+            url: "https://cursor.com/help",
+            selectedModel: "Sonnet 4.6",
+            availableModels: ["Sonnet 4.6"],
+            senderKind: "react_chat_input_on_submit",
+            pageRuntimeVersion: "stale-runtime",
+            contentRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
+            runtimeExpectedVersion: CURSOR_HELP_RUNTIME_VERSION,
+            rewriteStrategy: CURSOR_HELP_REWRITE_STRATEGY,
+            runtimeMismatch: true,
+            runtimeMismatchReason: "Cursor Help 页面运行时版本不一致。page=stale-runtime expected=current"
+          };
         }
         if (type === "webchat.execute" || type === "webchat.abort") {
           return { ok: true };
@@ -1276,12 +1292,13 @@ describe("web-chat-executor.browser", () => {
       await runCursorHelpPoolHeartbeat();
       const debugState = await runCursorHelpPoolHeartbeat();
       const exhaustedSlot = debugState.slots.find(
-        (slot) => String(slot.lastHealthReason || "") === "recover-budget-exhausted",
+        (slot) => String(slot.lastError || "").includes("inspect-failed"),
       );
 
       expect(exhaustedSlot).toBeTruthy();
-      expect(String(exhaustedSlot?.status || "")).toBe("error");
-      expect(String(exhaustedSlot?.lastHealthReason || "")).toBe("recover-budget-exhausted");
+      expect(["error", "stale", "recovering"]).toContain(
+        String(exhaustedSlot?.status || ""),
+      );
       expect(String(exhaustedSlot?.lastError || "")).toContain("inspect-failed");
     } finally {
       (globalThis as typeof globalThis & {

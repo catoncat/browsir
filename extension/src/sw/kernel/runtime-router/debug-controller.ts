@@ -10,6 +10,7 @@ import { clampStepStream } from "./step-stream-utils";
 import {
   getCursorHelpPoolDebugState,
   ensureCursorHelpPoolReady,
+  runCursorHelpPoolHeartbeat,
   rebuildCursorHelpPool,
 } from "../web-chat-executor.browser";
 
@@ -395,6 +396,9 @@ export async function handleBrainDebug(
 
   if (action === "brain.debug.cursor_help_pool") {
     const subAction = String(payload.action || "").trim().toLowerCase();
+    if (subAction === "heartbeat") {
+      return ok(await runCursorHelpPoolHeartbeat());
+    }
     if (subAction === "rebuild") {
       const slotCount = Number(payload.slotCount || 0) || undefined;
       return ok(await rebuildCursorHelpPool(slotCount));

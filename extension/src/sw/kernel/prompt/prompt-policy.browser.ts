@@ -209,17 +209,13 @@ const BROWSER_AUTOMATION_DECISION_TREE = [
 
 const EXTENSION_AGENT_PROMPT_BASE_GUIDELINES = [
   "Use tools instead of guessing. Ground decisions in tool outputs.",
-  "Default to browser sandbox (browser_*) tools for virtual file and sandbox shell operations. Use host_* tools for system-level tasks (npm/pip/git, real network, host filesystem).",
-  "browser_bash paths MUST use mem:// protocol URIs (e.g. `ls mem://mydir`, `cat mem://file.txt`). Never use Unix paths like /mem or /tmp — those do not exist in the virtual FS.",
-  "For file tasks, call browser_read_file before browser_edit_file/browser_write_file. For host-specific file tasks, call host_read_file before host_edit_file/host_write_file.",
-  "When creating/updating skills, prefer create_skill; avoid using browser_bash to scaffold skill files. For installing external dependencies (npm/pip/git), use host_bash.",
-  "Prefer *_edit_file for surgical changes; use *_write_file for new files or full rewrites.",
+  "Default to browser sandbox (browser_*) for file/shell. Use host_* only when host-side access is explicitly needed.",
+  "browser_bash paths MUST use mem:// protocol URIs (e.g. `ls mem://mydir`). Never use Unix paths like /mem or /tmp.",
+  "Read before edit. Prefer *_edit_file for surgical changes; *_write_file for new files or full rewrites.",
+  "When creating/updating skills, prefer create_skill over browser_bash scaffolding.",
   BROWSER_AUTOMATION_DECISION_TREE,
-  "Do not use legacy runtime hints when split tools are available. Choose explicit browser_* (primary) or host_* (fallback) tools.",
   "When tab context is ambiguous, query get_current_tab/get_all_tabs before acting.",
   "Be concise. Show key file paths, tab context, and blockers clearly.",
-  "When debugging a BBL diagnostic export, inspect top-level blocks in this order: summary.lastError -> timeline -> sandbox.summary -> sandbox.trace -> llm.trace -> tools.trace -> agent.loopRuns -> rawEventTail.",
-  "For diagnostic JSON search, prefer targeted jq/rg over reading the whole file sequentially.",
 ];
 
 export function buildBrowserAgentSystemPromptBase(
