@@ -16,6 +16,8 @@ import { Sandbox } from "@lifo-sh/core";
 interface VfsFile {
   path: string;
   content: string;
+  /** FNV-1a hash from SW side. Used to skip re-writing unchanged files. */
+  hash?: number;
 }
 
 interface BashRequest {
@@ -51,6 +53,8 @@ type SandboxRequest = BashRequest | PingRequest | ResetRequest;
 // --- State ---
 
 let sandbox: Awaited<ReturnType<typeof Sandbox.create>> | null = null;
+/** Hash cache: tracks known file content hashes to skip redundant writes. */
+const knownHashes = new Map<string, number>();
 
 async function ensureSandbox(): Promise<Awaited<ReturnType<typeof Sandbox.create>>> {
   if (!sandbox) {
@@ -61,6 +65,7 @@ async function ensureSandbox(): Promise<Awaited<ReturnType<typeof Sandbox.create
 
 async function resetSandbox(): Promise<void> {
   sandbox = null;
+  knownHashes.clear();
 }
 
 // --- VFS helpers ---
@@ -72,12 +77,17 @@ async function writeFilesToSandbox(
   for (const file of files) {
     // Skip LIFO special mounts (read-only)
     if (file.path.startsWith("/proc/") || file.path.startsWith("/dev/")) continue;
+    // Skip files whose content hasn't changed (hash match)
+    if (file.hash != null && knownHashes.get(file.path) === file.hash) continue;
     try {
       const dir = file.path.replace(/\/[^/]+$/, "");
       if (dir && dir !== "/") {
         await sb.fs.mkdir(dir, { recursive: true });
       }
       await sb.fs.writeFile(file.path, file.content);
+      if (file.hash != null) {
+        knownHashes.set(file.path, file.hash);
+      }
     } catch {
       // Skip files that can't be written (e.g. special mounts)
     }
@@ -177,6 +187,14 @@ async function handleBash(req: BashRequest): Promise<BashResult> {
   // Snapshot VFS after execution and compute diff
   const after = await collectFiles(sb, "/");
   const vfsDiff = computeVfsDiff(before, after);
+
+  // Update hash cache to reflect post-execution VFS state
+  for (const d of vfsDiff) {
+    if (d.op === "delete") {
+      knownHashes.delete(d.path);
+    }
+    // add/modify entries will be re-synced with hash on the next call
+  }
 
   return {
     type: "sandbox-bash-result",

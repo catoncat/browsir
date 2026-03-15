@@ -83,11 +83,18 @@ const FILE_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "browser_bash",
     description:
-      "Execute command in browser virtual runtime (lifo sandbox over mem:// virtual files).",
+      "Execute command in browser virtual runtime (lifo sandbox over mem:// virtual files). " +
+      "Provides a full Linux-like shell with 60+ commands. " +
+      "Fast commands (ls, cat, grep, sed, awk, sort, head, tail, wc, find, tree, curl, wget, diff, tar, gzip, base64, bc, date, env) " +
+      "execute directly in the Service Worker with zero overhead. " +
+      "Supports pipes, redirects, variables, glob expansion, and control flow (if/for/while/case). " +
+      "Use curl/wget for HTTP requests (via browser fetch, subject to CORS). " +
+      "Use node -e 'code' to run JavaScript (routed to eval sandbox). " +
+      "Prefer this over host_bash when working with mem:// files or when host bridge is unavailable.",
     parameters: {
       type: "object",
       properties: {
-        command: { type: "string", description: "Virtual shell command to execute." },
+        command: { type: "string", description: "Shell command to execute. Supports pipes (|), redirects (>, >>), logical operators (&&, ||), and subshells." },
         timeoutMs: {
           type: "number",
           description: "Execution timeout in milliseconds."

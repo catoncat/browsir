@@ -10,6 +10,9 @@
 export interface VfsFile {
   path: string;
   content: string;
+  /** FNV-1a hash of content. When the iframe already holds a file with the
+   *  same path and hash, it can skip re-writing the content. */
+  hash?: number;
 }
 
 export interface SandboxBashInput {

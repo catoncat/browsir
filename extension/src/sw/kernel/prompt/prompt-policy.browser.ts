@@ -146,7 +146,7 @@ const EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS: Record<string, string> = {
   browser_edit_file:
     "Patch browser virtual files with exact replacements (no unified patch).",
   browser_bash:
-    "Execute limited virtual-shell commands against browser virtual FS.",
+    "Execute shell commands in browser virtual runtime. Full Linux-like shell with 60+ commands (ls, grep, sed, awk, curl, sort, find, tree, diff, tar, base64, bc). Supports pipes, redirects, variables, globs. Use curl/wget for HTTP requests. Use node -e for JavaScript execution.",
   get_all_tabs: "List currently open browser tabs.",
   get_current_tab: "Get the active browser tab context.",
   create_new_tab: "Open a new browser tab when task flow requires it.",

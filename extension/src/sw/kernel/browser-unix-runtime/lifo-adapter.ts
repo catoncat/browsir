@@ -1020,21 +1020,39 @@ async function bashFrame(args: JsonRecord, sessionId: string): Promise<JsonRecor
     let result: SandboxBashResult;
     if (_testBashExecutor) {
       result = await _testBashExecutor(sandbox, command, cwdResolved?.unixPath, timeoutMs);
+    } else if (!commandRequiresEval(command)) {
+      // SW 直执行：命令不需要 eval，直接在 SW 侧 LIFO 实例执行，
+      // 跳过 eval-bridge 的全量 VFS 同步 / 消息往返 / diff 开销。
+      const execResult = await runSandboxCommandWithTimeout(
+        sandbox, command, { cwd }, timeoutMs
+      );
+      result = {
+        ok: execResult.result.exitCode === 0,
+        stdout: execResult.result.stdout,
+        stderr: execResult.result.stderr,
+        exitCode: execResult.result.exitCode,
+        vfsDiff: [],
+      };
+      if (execResult.timeoutHit) {
+        result.stderr = result.stderr
+          ? `${result.stderr}\nCommand timed out after ${timeoutMs}ms`
+          : `Command timed out after ${timeoutMs}ms`;
+      }
     } else {
+      // eval-bridge 路径：命令包含 node/npm 等需要 new Function() 的程序
       const files = await collectVfsFilesForBridge(sandbox);
       result = await sandboxBash({ command, files, cwd, timeoutMs });
-    }
-
-    // Apply VFS diff back to the SW sandbox
-    for (const diff of result.vfsDiff) {
-      if (diff.op === "delete") {
-        try { await sandbox.fs.rm(diff.path); } catch { /* ignore */ }
-      } else if (diff.content != null) {
-        const dir = diff.path.replace(/\/[^/]+$/, "");
-        if (dir && dir !== "/") {
-          await sandbox.fs.mkdir(dir, { recursive: true });
+      // Apply VFS diff back to the SW sandbox
+      for (const diff of result.vfsDiff) {
+        if (diff.op === "delete") {
+          try { await sandbox.fs.rm(diff.path); } catch { /* ignore */ }
+        } else if (diff.content != null) {
+          const dir = diff.path.replace(/\/[^/]+$/, "");
+          if (dir && dir !== "/") {
+            await sandbox.fs.mkdir(dir, { recursive: true });
+          }
+          await sandbox.fs.writeFile(diff.path, diff.content);
         }
-        await sandbox.fs.writeFile(diff.path, diff.content);
       }
     }
 
@@ -1068,6 +1086,49 @@ async function bashFrame(args: JsonRecord, sessionId: string): Promise<JsonRecor
   });
 }
 
+// Commands that require `new Function()` and MUST go through the eval-bridge
+// iframe. Everything else can execute directly in the SW-side LIFO instance.
+const EVAL_REQUIRED_COMMANDS = new Set([
+  "node", "npm", "npx", "lifo", "pkg",
+]);
+
+// Patterns that indicate the command line invokes an eval-requiring program,
+// even when it appears mid-pipeline (e.g. `echo code | node -e ...`),
+// inside subshells (`$(node ...)`), or via env/path prefixes.
+const EVAL_COMMAND_PATTERN = /(?:^|[|;&(]\s*|`|\$\(\s*)(?:(?:\/[\w/.-]*\/)?(?:env\s+\S+=\S+\s+)*)?(?:node|npm|npx|lifo|pkg)\b/;
+
+/**
+ * Determines whether a shell command string requires `new Function()` at
+ * runtime and therefore must be dispatched through the eval-bridge iframe.
+ *
+ * The check is intentionally conservative: if the command *might* invoke
+ * node/npm anywhere in a pipeline, we send it to the iframe.  All other
+ * commands (ls, grep, sed, curl, …) run directly in the SW LIFO instance
+ * with zero message-passing overhead.
+ */
+function commandRequiresEval(command: string): boolean {
+  const trimmed = command.trim();
+  if (!trimmed) return false;
+
+  // Fast path: first word (ignoring optional env prefix) is an eval-requiring command
+  const firstWord = trimmed.split(/[\s;|&(]/)[0];
+  if (EVAL_REQUIRED_COMMANDS.has(firstWord)) return true;
+
+  // Slower path: check for eval commands anywhere in pipelines / logical chains /
+  // subshells / command substitutions.
+  return EVAL_COMMAND_PATTERN.test(trimmed);
+}
+
+// FNV-1a hash for fast string content dedup during eval-bridge sync.
+function fnv1aHash(str: string): number {
+  let hash = 0x811c9dc5; // FNV offset basis
+  for (let i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193); // FNV prime
+  }
+  return hash >>> 0; // unsigned 32-bit
+}
+
 async function collectVfsFilesForBridge(sandbox: Sandbox): Promise<VfsFile[]> {
   const files: VfsFile[] = [];
   // LIFO special mounts that are auto-created and read-only; skip them.
@@ -1089,7 +1150,7 @@ async function collectVfsFilesForBridge(sandbox: Sandbox): Promise<VfsFile[]> {
       } else if (entry.type === "file") {
         try {
           const content = String(await sandbox.fs.readFile(child));
-          files.push({ path: child, content });
+          files.push({ path: child, content, hash: fnv1aHash(content) });
         } catch { /* skip unreadable */ }
       }
     }
