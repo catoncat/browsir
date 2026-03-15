@@ -1,13 +1,19 @@
 ---
 id: ISSUE-021
-title: ChatView 二阶段深拆 — transcript / overlay / editor / export follow-up
+title: "ChatView 二阶段深拆 — transcript / overlay / editor / export follow-up"
 status: open
 priority: p2
-source: ISSUE-017 follow-up after ChatView controller split
+source: "ISSUE-017 follow-up after ChatView controller split"
 created: 2026-03-15
 assignee: unassigned
 kind: refactor
-tags: [panel, refactor, vue, composables, chat-view, follow-up]
+tags:
+  - panel
+  - refactor
+  - vue
+  - composables
+  - chat-view
+  - follow-up
 ---
 
 # ISSUE-021: ChatView 二阶段深拆 — transcript / overlay / editor / export follow-up

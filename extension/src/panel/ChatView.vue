@@ -25,6 +25,7 @@ import { useLlmStreaming } from "./composables/use-llm-streaming";
 import { useToolRunTracking } from "./composables/use-tool-run-tracking";
 import { useRuntimeMessages } from "./composables/use-runtime-messages";
 import { useChatScrollSync } from "./composables/use-chat-scroll-sync";
+import { useChatSessionEffects } from "./composables/use-chat-session-effects";
 import ChatMessage from "./components/ChatMessage.vue";
 import StreamingDraftContainer from "./components/StreamingDraftContainer.vue";
 import ChatInput from "./components/ChatInput.vue";
@@ -73,7 +74,6 @@ const creatingSession = ref(false);
 const moreMenuRef = ref(null);
 const exportMenuRef = ref(null);
 let createSessionTask: Promise<void> | null = null;
-const forkSourceResolvedTitle = ref("");
 
 onClickOutside(moreMenuRef, () => showMoreMenu.value = false);
 onClickOutside(exportMenuRef, () => showExportMenu.value = false);
@@ -372,6 +372,49 @@ const {
   loadConversation: (sessionId, options) => chatStore.loadConversation(sessionId, options),
   refreshSessions: () => chatStore.refreshSessions(),
 });
+const {
+  forkSourceResolvedTitle,
+} = useChatSessionEffects({
+  queuedPromptViewItems,
+  queuedPromotingIds,
+  isRunActive,
+  runPhase,
+  activeRunToken,
+  activeSessionId,
+  activeSession,
+  activeForkSourceSessionId,
+  activeForkSourceSession,
+  hasToolPendingActivity,
+  hasRunningToolPendingActivity,
+  llmStreamingActive,
+  llmStreamingText,
+  finalAssistantStreamingPhase,
+  pendingRegenerate,
+  userPendingRegenerate,
+  messages,
+  editingUserEntryId,
+  startRunPending,
+  clearToolPendingSteps,
+  clearActiveToolRun,
+  resetToolPendingCardHandoff,
+  dismissToolPendingCardWithHandoff,
+  startInitialToolSync,
+  stopInitialToolSync,
+  syncActiveToolRun,
+  resetLlmStreamingState,
+  clearRunHint,
+  setLlmRunHint,
+  resetEditingState,
+  isExpectedForkSwitch: isForkSceneExpectedSwitch,
+  bumpForkSceneToken,
+  resetForkSceneState,
+  setForkSessionHighlight,
+  runSafely,
+  notifyActiveSessionChanged: (nextId, prevId) =>
+    panelUiRuntime.notifyActiveSessionChanged(nextId, prevId),
+  emitUiSessionChanged: (payload) =>
+    panelUiRuntime.runHook("ui.session.changed", payload),
+});
 useChatScrollSync({
   scrollContainer,
   stableMessages,
@@ -429,168 +472,6 @@ const hasVisibleConversation = computed(() =>
   || shouldShowStreamingDraft.value
   || shouldShowToolPendingCard.value
   || shouldShowStartPendingDraft.value
-);
-
-watch(queuedPromptViewItems, (items) => {
-  if (!queuedPromotingIds.value.size) return;
-  const valid = new Set(items.map((item) => item.id));
-  let changed = false;
-  const next = new Set<string>();
-  for (const id of queuedPromotingIds.value) {
-    if (valid.has(id)) next.add(id);
-    else changed = true;
-  }
-  if (changed) {
-    queuedPromotingIds.value = next;
-  }
-});
-
-watch(isRunActive, (running, wasRunning) => {
-  if (running) {
-    startRunPending.value = false;
-    if (runPhase.value === "idle") {
-      runPhase.value = "llm";
-    }
-    resetToolPendingCardHandoff();
-    if (!wasRunning) {
-      activeRunToken.value += 1;
-      clearToolPendingSteps();
-    }
-    setLlmRunHint("思考中", "正在分析你的请求");
-    if (activeSessionId.value) {
-      void runSafely(
-        () => syncActiveToolRun(activeSessionId.value),
-        "同步工具运行状态失败"
-      );
-    }
-    startInitialToolSync();
-    return;
-  }
-  stopInitialToolSync();
-  resetToolPendingCardHandoff();
-  userPendingRegenerate.value = null;
-  runPhase.value = "idle";
-  clearActiveToolRun();
-  clearToolPendingSteps();
-  resetLlmStreamingState();
-  clearRunHint();
-});
-
-watch(activeSessionId, (nextSessionId, previousSessionId) => {
-  queuedPromotingIds.value = new Set();
-  stopInitialToolSync();
-  resetToolPendingCardHandoff();
-  runPhase.value = isRunActive.value ? "llm" : "idle";
-  const currentSessionId = String(activeSessionId.value || "").trim();
-  const isExpectedForkSwitch = isForkSceneExpectedSwitch(currentSessionId);
-  if (!isExpectedForkSwitch) {
-    bumpForkSceneToken();
-    resetForkSceneState();
-  }
-  clearActiveToolRun();
-  clearToolPendingSteps();
-  resetLlmStreamingState();
-  clearRunHint();
-  if (!activeSession.value?.forkedFrom?.sessionId) {
-    setForkSessionHighlight(false);
-  }
-  resetEditingState();
-  if (activeSessionId.value && isRunActive.value) {
-    void runSafely(
-      () => syncActiveToolRun(activeSessionId.value),
-      "同步工具运行状态失败"
-    );
-    startInitialToolSync();
-  }
-  const nextId = String(nextSessionId || "").trim();
-  const prevId = String(previousSessionId || "").trim();
-  void panelUiRuntime.notifyActiveSessionChanged(nextId || undefined, prevId || undefined);
-  void panelUiRuntime.runHook("ui.session.changed", {
-    sessionId: nextId,
-    previousSessionId: prevId,
-    reason: "active_session_changed"
-  });
-});
-
-watch(
-  [
-    isRunActive,
-    hasToolPendingActivity,
-    hasRunningToolPendingActivity,
-    llmStreamingActive,
-    llmStreamingText,
-    finalAssistantStreamingPhase
-  ],
-  ([running, hasActivity, hasRunningTool, streamingActive, streamingText, finalPhase]) => {
-    if (!running || !hasActivity) return;
-    if (hasRunningTool) {
-      resetToolPendingCardHandoff();
-      stopInitialToolSync();
-      return;
-    }
-    if (!finalPhase) return;
-    const hasStreaming = streamingActive || Boolean(String(streamingText || "").trim());
-    if (hasStreaming) {
-      dismissToolPendingCardWithHandoff();
-    }
-  }
-);
-
-watch(
-  [() => pendingRegenerate.value, () => userPendingRegenerate.value],
-  ([assistantPending, userPending]) => {
-    if (!assistantPending && !userPending) return;
-    resetToolPendingCardHandoff();
-    clearActiveToolRun();
-    clearToolPendingSteps();
-    finalAssistantStreamingPhase.value = false;
-    runPhase.value = "llm";
-    if (isRunActive.value) {
-      startInitialToolSync();
-    }
-  }
-);
-
-watch(
-  messages,
-  (list) => {
-    if (!editingUserEntryId.value) return;
-    const exists = list.some((item) => String(item?.entryId || "") === editingUserEntryId.value);
-    if (!exists) resetEditingState();
-  },
-  { deep: true }
-);
-
-watch(
-  [activeForkSourceSessionId, activeForkSourceSession],
-  async ([sourceId, sourceSession]) => {
-    const id = String(sourceId || "").trim();
-    if (!id) {
-      forkSourceResolvedTitle.value = "";
-      return;
-    }
-
-    const titleInList = String((sourceSession as { title?: string } | null)?.title || "").trim();
-    if (titleInList) {
-      forkSourceResolvedTitle.value = "";
-      return;
-    }
-
-    try {
-      const response = (await chrome.runtime.sendMessage({
-        type: "brain.session.get",
-        sessionId: id
-      })) as { ok?: boolean; data?: Record<string, unknown> };
-      if (response?.ok !== true) return;
-      const meta = toRecord(response.data?.meta);
-      const header = toRecord(meta.header);
-      const title = String(header.title || "").trim();
-      forkSourceResolvedTitle.value = title;
-    } catch {
-      // 忽略来源标题查询失败，继续使用兜底文案。
-    }
-  },
-  { immediate: true }
 );
 
 async function handleCreateSession() {
