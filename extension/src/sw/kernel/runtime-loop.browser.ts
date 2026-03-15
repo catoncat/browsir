@@ -48,10 +48,10 @@ import { createContextRefService } from "./context-ref/context-ref-service.brows
 import { createFilesystemInspectService } from "./context-ref/filesystem-inspect.browser";
 import {
   buildAvailableSkillsSystemMessage,
-  buildBrowserAgentSystemPromptBase,
   buildLlmMessagesFromContext,
   buildTaskProgressSystemMessage,
 } from "./prompt/prompt-policy.browser";
+import { createSystemPromptResolver } from "./prompt/prompt-resolver.browser";
 import {
   nowIso,
   type SessionEntry,
@@ -109,6 +109,7 @@ import {
 // ── Re-exports from shared modules (preserve public API) ────────────
 export {
   type FailureReason,
+  type LoopTerminalStatus,
   type ToolCallItem,
   type RuntimeErrorWithMeta,
   type RuntimeLoopController,
@@ -186,6 +187,7 @@ export {
 // ── Imports from shared modules (used within this file) ─────────────
 import {
   type FailureReason,
+  type LoopTerminalStatus,
   type ToolCallItem,
   type RuntimeErrorWithMeta,
   type RuntimeLoopController,
@@ -489,6 +491,10 @@ export function createRuntimeLoopController(
         truncated: data.truncated === true,
       };
     },
+  });
+
+  const systemPromptResolver = createSystemPromptResolver({
+    contextRefService,
   });
 
   orchestrator.onHook(
@@ -1799,56 +1805,6 @@ export function createRuntimeLoopController(
       });
   }
 
-  async function buildResolvedSystemPrompt(input: {
-    config: BridgeConfig;
-    sessionId: string;
-    sessionMeta: SessionMeta | null;
-    toolDefinitions?: ToolDefinition[];
-  }): Promise<string> {
-    const toolDefinitions = Array.isArray(input.toolDefinitions)
-      ? input.toolDefinitions
-      : [];
-    const overridePrompt = String(input.config.llmSystemPromptCustom || "");
-    if (!overridePrompt.trim()) {
-      return buildBrowserAgentSystemPromptBase(toolDefinitions);
-    }
-
-    const parsedRefs = extractPromptContextRefs(overridePrompt, "system_prompt");
-    if (parsedRefs.refs.length === 0) {
-      return overridePrompt;
-    }
-
-    const resolvedRefs = await contextRefService.resolveContextRefs({
-      sessionId: input.sessionId,
-      sessionMeta: input.sessionMeta,
-      refs: parsedRefs.refs,
-    });
-    const failureMessage =
-      contextRefService.buildContextRefFailureMessage(resolvedRefs);
-    if (failureMessage) {
-      throw new Error(failureMessage);
-    }
-
-    const materializedRefs = await contextRefService.materializeContextRefs({
-      sessionId: input.sessionId,
-      refs: resolvedRefs,
-    });
-    const contextPrefix = contextRefService.buildContextPromptPrefix({
-      refs: resolvedRefs,
-      materialized: materializedRefs,
-    });
-    const promptBody = rewritePromptWithContextRefPlaceholders(
-      overridePrompt,
-      resolvedRefs,
-    );
-    return [
-      contextPrefix,
-      `<system_prompt>\n${promptBody || "请结合以上 system prompt 上下文约束执行。"}\n</system_prompt>`,
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-  }
-
 
   async function runAgentLoop(
     sessionId: string,
@@ -1944,7 +1900,7 @@ export function createRuntimeLoopController(
 
     let llmStep = 0;
     let toolStep = 0;
-    let finalStatus = "done";
+    let finalStatus: LoopTerminalStatus = "done";
     const llmFailureBySignature = new Map<string, number>();
     const focusEscalationReplayKeys = new Set<string>();
     const noProgressHits = new Map<string, number>();
@@ -2042,7 +1998,7 @@ export function createRuntimeLoopController(
       }
       const actionFailures = getActionFailures(sessionId);
       const llmToolDefinitions = listRuntimeLlmToolDefinitions("all");
-      const systemPrompt = await buildResolvedSystemPrompt({
+      const systemPrompt = await systemPromptResolver.resolveSystemPrompt({
         config,
         sessionId,
         sessionMeta: meta,
@@ -3293,7 +3249,7 @@ export function createRuntimeLoopController(
     async getSystemPromptPreview(): Promise<string> {
       const cfgRaw = await callInfra(infra, { type: "config.get" });
       const cfg = extractLlmConfig(cfgRaw);
-      return await buildResolvedSystemPrompt({
+      return await systemPromptResolver.resolveSystemPrompt({
         config: cfg,
         sessionId: "system-prompt-preview",
         sessionMeta: null,

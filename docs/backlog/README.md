@@ -67,3 +67,39 @@ acceptance_ref: docs/<某设计文档>.md
 4. **跨会话交接**：新 agent 进入时可扫描本目录了解未完成工作
 
 项目内也可以通过 repo skill `auto-claim-issues` 自动认领符合条件的 backlog slice。
+
+## 当前未完成项（2026-03-15）
+
+以下清单用于快速派工；后续 agent 进入仓库时，优先看本节，不必先遍历整个目录。
+
+### 进行中
+
+1. `ISSUE-017` [ChatView 主控拆分](./2026-03-14-app-vue-chat-view-extraction.md)
+   - `status: in-progress`
+   - `priority: p0`
+   - `parallel_group: panel-chat`
+   - 说明：当前 panel 侧最直接主线；目标是继续从 `ChatView.vue` 剥离 controller / action / watch glue。
+
+### 可立即开工
+
+（当前无可立即开工的 issue）
+
+### 暂不应启动
+
+1. `ISSUE-021` [ChatView 二阶段深拆 follow-up](./2026-03-15-app-vue-decomposition.md)
+   - `status: open`
+   - `priority: p2`
+   - 阻塞：依赖 `ISSUE-017` 首轮 controller 解耦完成
+   - 说明：这是 follow-up，不替代 `ISSUE-017`，默认不要提前启动。
+
+## 推荐领取顺序
+
+1. 先看是否有人正在持有 `panel-chat` 或 `kernel-loop` 单写者泳道。
+2. `panel-chat` 侧当前仍是 `ISSUE-017` 单写者，默认不要重复认领。
+3. `kernel-loop` 侧当前 `ISSUE-019` 已完成，暂无后续 open slice。
+4. `ISSUE-021` 必须排在 `ISSUE-017` 后，并且仅在一阶段拆分后仍有明显厚度时才启动。
+
+## 维护规则
+
+- 任何 agent 完成一次 backlog 扫描后，如果结论发生变化，应先更新本 README 的“当前未完成项”与“推荐领取顺序”。
+- 任何 agent 修改某个 issue 的 `status`、依赖或推荐顺序时，应同步更新本 README，保持这里始终是首选入口。
