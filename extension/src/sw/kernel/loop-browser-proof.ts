@@ -1,11 +1,10 @@
 import type { CapabilityExecutionPolicy } from "./capability-policy";
 import type { JsonRecord } from "./types";
 import {
-  BROWSER_PROOF_REQUIRED_TOOL_NAMES,
   normalizeFailureReasonValue,
 } from "./loop-shared-types";
 import { toRecord } from "./loop-shared-utils";
-import { parseToolCallArgs } from "./loop-tool-display";
+
 
 // ── Observe / Verify ────────────────────────────────────────────────
 
@@ -116,42 +115,6 @@ export function shouldAcquireLease(
   if (leasePolicy === "none") return false;
   if (leasePolicy === "required") return true;
   return actionRequiresLease(kind);
-}
-
-// ── Browser Proof ───────────────────────────────────────────────────
-
-export function isToolCallRequiringBrowserProof(
-  toolCallArgs: string,
-  canonicalToolName: string,
-): boolean {
-  if (!BROWSER_PROOF_REQUIRED_TOOL_NAMES.has(canonicalToolName)) {
-    return false;
-  }
-  if (canonicalToolName !== "computer") return true;
-  const args = parseToolCallArgs(toolCallArgs);
-  const action = String(args?.action || "")
-    .trim()
-    .toLowerCase();
-  if (!action) return false;
-  return !["wait", "hover", "scroll", "scroll_to"].includes(action);
-}
-
-export function didToolProvideBrowserProof(
-  toolName: string,
-  responsePayload: JsonRecord,
-): boolean {
-  const normalized = String(toolName || "")
-    .trim()
-    .toLowerCase();
-  const directVerified =
-    responsePayload.verified === true ||
-    String(responsePayload.verifyReason || "") === "verified";
-  if (directVerified) return true;
-  if (normalized === "browser_verify") {
-    return toRecord(responsePayload.data).ok === true;
-  }
-  const nestedVerify = toRecord(toRecord(responsePayload.data).verify);
-  return nestedVerify.ok === true;
 }
 
 // ── Terminal Status Mapping ─────────────────────────────────────────

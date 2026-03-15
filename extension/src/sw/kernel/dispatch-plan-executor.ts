@@ -1143,7 +1143,7 @@ main().catch((error) => {
         if (expect) {
           const verifyOut = await executeStep({
             sessionId,
-            capability: CAPABILITIES.browserVerify,
+            mode: "cdp",
             action: "verify",
             args: {
               tabId: plan.tabId,
@@ -1836,7 +1836,7 @@ main().catch((error) => {
         if (Object.keys(plan.expect || {}).length > 0) {
           const verifyOut = await executeStep({
             sessionId,
-            capability: CAPABILITIES.browserVerify,
+            mode: "cdp",
             action: "verify",
             args: {
               tabId: plan.tabId,
@@ -1881,57 +1881,6 @@ main().catch((error) => {
             modeUsed: "cdp",
           },
         );
-      }
-      case "step.browser_verify": {
-        const out = await executeStep({
-          sessionId,
-          capability: plan.capability,
-          action: "verify",
-          args: {
-            tabId: plan.tabId,
-            action: {
-              expect: plan.verifyExpect,
-            },
-          },
-          verifyPolicy: "off",
-        });
-        if (!out.ok) {
-          return buildStepFailureEnvelope(
-            "browser_verify",
-            out,
-            "browser_verify 执行失败",
-            "Update verify expectation and run browser_verify again.",
-            {
-              defaultRetryable: true,
-            },
-          );
-        }
-        const providerVerify = toRecord(out.data);
-        const verified =
-          typeof providerVerify.verified === "boolean"
-            ? providerVerify.verified
-            : out.verified;
-        const verifyData =
-          providerVerify.data !== undefined ? providerVerify.data : out.data;
-        if (!verified) {
-          return attachFailureProtocol(
-            "browser_verify",
-            {
-              error: "browser_verify 未通过",
-              errorCode: "E_VERIFY_FAILED",
-              errorReason: mapVerifyReasonToFailureReason(out.verifyReason),
-              retryable: true,
-              retryHint: "Refine expect conditions and re-run browser_verify.",
-              details: verifyData,
-            },
-          );
-        }
-        return buildToolResponseEnvelope("cdp", verifyData, {
-          capabilityUsed: out.capabilityUsed || plan.capability,
-          modeUsed: out.modeUsed,
-          providerId: out.providerId,
-          fallbackFrom: out.fallbackFrom,
-        });
       }
       default:
         return { error: "未知工具执行计划", errorCode: "E_TOOL_PLAN" };

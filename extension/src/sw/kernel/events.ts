@@ -43,7 +43,6 @@ export type BrainEventType =
   | "loop_enqueue_skipped"
   | "loop_follow_up_queued"
   | "loop_follow_up_start"
-  | "loop_guard_browser_progress_missing"
   | "message.queued"
   | "message.dequeued"
   | "step_planned"

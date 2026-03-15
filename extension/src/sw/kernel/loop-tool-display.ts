@@ -261,7 +261,6 @@ export function summarizeToolTarget(
     const name = pick("skillName");
     return name ? `读取技能详情 · ${clipText(name, 160)}` : "读取技能详情";
   }
-  if (normalized === "browser_verify") return "页面验证";
   if (normalized === "get_all_tabs") return "读取标签页列表";
   if (normalized === "get_current_tab") return "读取当前标签页";
   if (raw) return `参数：${clipText(raw, 220)}`;

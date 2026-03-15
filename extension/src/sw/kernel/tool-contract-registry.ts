@@ -451,22 +451,7 @@ const BROWSER_TOOL_CONTRACTS: ToolContract[] = [
     }
   },
   {
-    name: "browser_verify",
-    description:
-      "Run explicit browser verification checks. Always provide expect with at least one concrete assertion; empty-check verify is invalid.",
-    parameters: {
-      type: "object",
-      properties: {
-        tabId: { type: "number", description: "Target tab id." },
-        expect: {
-          type: "object",
-          description: "At least one check: expectUrlContains/titleContains/urlChanged/textIncludes/selectorExists."
-        }
-      },
-      required: ["expect"]
-    }
-  },
-  {
+
     name: "computer",
     description:
       "Coordinate-based browser interaction toolcall. Use only when semantic element targeting is insufficient (canvas/visual UIs).",

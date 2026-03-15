@@ -219,7 +219,7 @@ function formatDetail(raw: string, payload: unknown, parsed: boolean, toolName: 
   if (truncated === true) metrics.push("TRUNCATED");
   const verified = pickBooleanFromRecords(records, "verified");
   if (verified === true) metrics.push("VERIFIED");
-  if (verified === false && ["browser_action", "browser_verify"].includes(String(toolName || "").trim().toLowerCase())) {
+  if (verified === false && ["browser_action"].includes(String(toolName || "").trim().toLowerCase())) {
     metrics.push("NOT_VERIFIED");
   }
   if (metrics.length) sections.push(metrics.join(" · "));
@@ -467,7 +467,7 @@ export function resolveToolRender(input: ResolveToolRenderInput): ToolRenderResu
   if (toolName === "list_tabs") return renderListTabs(payload, detail);
   if (toolName === "open_tab") return renderOpenTab(payload, detail);
   if (toolName === "request_intervention") return renderIntervention(payload, detail);
-  if (toolName === "browser_action" || toolName === "browser_verify") return renderBrowser(payload, detail);
+  if (toolName === "browser_action") return renderBrowser(payload, detail);
   if (INVOKE_TOOL_NAMES.has(toolName)) {
     return renderInvoke(toolName, callId, payload, detail);
   }

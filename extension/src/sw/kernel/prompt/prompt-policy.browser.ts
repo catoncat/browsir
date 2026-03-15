@@ -131,7 +131,6 @@ const EXTENSION_AGENT_PROMPT_TOOL_ORDER = [
   "get_skill_asset",
   "list_skills",
   "get_skill_info",
-  "browser_verify",
 ] as const;
 
 const EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS: Record<string, string> = {
@@ -194,8 +193,6 @@ const EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS: Record<string, string> = {
   get_skill_asset: "Read skill asset under assets/.",
   list_skills: "List installed skills.",
   get_skill_info: "Get detailed skill metadata.",
-  browser_verify:
-    "Assert URL/title/text/selector to confirm the task actually progressed.",
 };
 
 const BROWSER_AUTOMATION_DECISION_TREE = [
@@ -203,7 +200,7 @@ const BROWSER_AUTOMATION_DECISION_TREE = [
   "P1 search_elements: ALWAYS try first. Use semantic user-visible query (placeholder/label/text). Supports | for OR (e.g. 'Login | Sign in'). Change query strategy before blind repeat.",
   "P2 UID-based tools: Use uid/ref from latest search_elements for click/fill/hover/select/scroll_to. Never use selector as sole target. For typing, target editable elements only (input/textarea/contenteditable/role=textbox).",
   "P3 capture_screenshot + computer: ONLY after 2 failed search_elements with different queries, or for pixel-level interaction (canvas/drag/slider).",
-  "Verify: For state-changing actions, call browser_verify with explicit expect (url/title/text/selector). Never claim done when verify failed/skipped/empty.",
+  "Verify: For state-changing actions, verify with explicit expect (url/title/text/selector). Never claim done when verify failed/skipped/empty.",
   "Anti-patterns: No blind repeat (same query+selector). No blind click on toggles (read current state first). No invented selectors/URLs/tab state (re-observe when uncertain). If not typable, re-search with typing intent and switch target.",
   "Escalation: If search_elements returns no match, try broader query or different wording (2 attempts minimum). Only escalate to computer after exhausting P1+P2. If computer action fails verification, fall back to search_elements with fresh query.",
 ].join("\n");

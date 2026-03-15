@@ -77,7 +77,6 @@ export function prettyToolAction(action: string): string {
     list_tabs: "检索标签页",
     open_tab: "打开标签页",
     browser_action: "执行浏览器动作",
-    browser_verify: "执行页面验证",
     host_read_file: "读取主机文件",
     browser_read_file: "读取浏览器文件",
     host_write_file: "写入主机文件",
@@ -160,9 +159,6 @@ export function formatToolPendingDetail(action: string, argsRaw: string): string
     const target = toScalarText(args?.url) || toScalarText(args?.ref) || toScalarText(args?.selector);
     if (kind && target) return `${kind} · ${clipText(target, 88)}`;
     if (kind) return `动作：${kind}`;
-  }
-  if (normalized === "browser_verify") {
-    return "正在校验页面状态";
   }
 
   if (raw) return `参数：${clipText(raw, 110)}`;

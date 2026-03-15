@@ -280,12 +280,6 @@ export type ToolPlan =
       }>;
       submit: JsonRecord | null;
       expect: JsonRecord;
-    }
-  | {
-      kind: "step.browser_verify";
-      capability: ExecuteCapability;
-      tabId: number;
-      verifyExpect: JsonRecord;
     };
 
 
@@ -2046,51 +2040,6 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
           },
         };
       }
-      case "browser_verify": {
-        const tabId = await resolveRunScopeTabId(sessionId, args.tabId);
-        if (!tabId) {
-          return {
-            ok: false,
-            error: attachFailureProtocol(
-              "browser_verify",
-              {
-                error: "browser_verify 需要 tabId，当前无可用 tab",
-                errorCode: "E_NO_TAB",
-                errorReason: "failed_execute",
-                retryable: true,
-                retryHint:
-                  "Call get_all_tabs and retry browser_verify with a valid tabId.",
-              },
-            ),
-          };
-        }
-        const verifyExpect = normalizeVerifyExpect(args.expect || args) || {};
-        if (Object.keys(verifyExpect).length === 0) {
-          return {
-            ok: false,
-            error: attachFailureProtocol(
-              "browser_verify",
-              {
-                error:
-                  "browser_verify 需要明确 expect（如 url/title/text/selector/urlChanged）",
-                errorCode: "E_ARGS",
-                errorReason: "failed_execute",
-                retryable: false,
-                retryHint: "Provide explicit expect and retry browser_verify.",
-              },
-            ),
-          };
-        }
-        return {
-          ok: true,
-          plan: {
-            kind: "step.browser_verify",
-            capability: CAPABILITIES.browserVerify,
-            tabId,
-            verifyExpect,
-          },
-        };
-      }
       default:
         if (context.customExecution) {
           return {
@@ -2134,8 +2083,7 @@ export function createToolDispatcher(deps: ToolDispatchDeps) {
       plan.kind === "step.download_image" ||
       plan.kind === "step.download_chat_images" ||
       plan.kind === "step.computer" ||
-      plan.kind === "step.fill_form" ||
-      plan.kind === "step.browser_verify"
+      plan.kind === "step.fill_form"
     ) {
       return Number.isInteger(plan.tabId) ? Number(plan.tabId) : null;
     }

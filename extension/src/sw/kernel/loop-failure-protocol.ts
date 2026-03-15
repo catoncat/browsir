@@ -201,7 +201,6 @@ function inferModeEscalationDirective(input: {
       "highlight_text_inline",
       "fill_form",
       "computer",
-      "browser_verify",
     ].includes(
       String(input.toolName || "")
         .trim()
@@ -321,7 +320,7 @@ function diagnoseBashExitFailure(input: {
       tag: "dom_global_unavailable",
       error: `browser_bash 执行失败：sandbox shell 不是页面 DOM 上下文，window/document 不可用（exitCode=${input.exitCode}）。`,
       retryHint:
-        "需要页面 DOM 时改用 browser.action/browser_verify/script_action；仅执行命令时请移除 window/document 后重试。",
+        "需要页面 DOM 时改用 browser.action/script_action；仅执行命令时请移除 window/document 后重试。",
     };
   }
   if (

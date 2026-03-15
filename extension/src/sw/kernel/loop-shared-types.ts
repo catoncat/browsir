@@ -153,8 +153,7 @@ export type ToolRetryAction = "auto_replay" | "llm_replan" | "fail_fast";
 
 export type NoProgressReason =
   | "repeat_signature"
-  | "ping_pong"
-  | "browser_proof_guard";
+  | "ping_pong";
 
 // ── Internal input interfaces ───────────────────────────────────────
 
@@ -205,7 +204,6 @@ export const CAPABILITIES = {
   fsEdit: "fs.edit",
   browserSnapshot: "browser.snapshot",
   browserAction: "browser.action",
-  browserVerify: "browser.verify",
 } as const;
 
 export const CANONICAL_BROWSER_TOOL_NAMES = [
@@ -225,7 +223,6 @@ export const CANONICAL_BROWSER_TOOL_NAMES = [
   "scroll_page",
   "navigate_tab",
   "fill_form",
-  "browser_verify",
   "computer",
   "get_page_metadata",
   "scroll_to_element",
@@ -264,29 +261,9 @@ export const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
 export const NO_PROGRESS_CONTINUE_BUDGET: Record<NoProgressReason, number> = {
   repeat_signature: 1,
   ping_pong: 0,
-  browser_proof_guard: 4,
 };
 
-export const BROWSER_PROOF_REQUIRED_TOOL_NAMES = new Set([
-  "click",
-  "fill_element_by_uid",
-  "select_option_by_uid",
-  "hover_element_by_uid",
-  "press_key",
-  "scroll_page",
-  "navigate_tab",
-  "fill_form",
-  "browser_verify",
-  "computer",
-  "scroll_to_element",
-  "highlight_element",
-  "highlight_text_inline",
-  "capture_screenshot",
-  "capture_tab_screenshot",
-  "capture_screenshot_with_highlight",
-  "download_image",
-  "download_chat_images",
-]);
+
 
 // ── Internal constants (used only by runtime-loop) ──────────────────
 

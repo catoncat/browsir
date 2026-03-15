@@ -88,8 +88,6 @@ import {
   buildObserveProgressVerify,
   shouldVerifyStep,
   shouldAcquireLease,
-  isToolCallRequiringBrowserProof,
-  didToolProvideBrowserProof,
 } from "./loop-browser-proof";
 import {
   buildFocusEscalationToolCall,
@@ -117,7 +115,6 @@ export {
   CANONICAL_BROWSER_TOOL_NAMES,
   RUNTIME_EXECUTABLE_TOOL_NAMES,
   NO_PROGRESS_CONTINUE_BUDGET,
-  BROWSER_PROOF_REQUIRED_TOOL_NAMES,
   MAX_LLM_RETRIES,
   MAX_DEBUG_CHARS,
   SESSION_TITLE_MIN,
@@ -189,7 +186,6 @@ import {
   CANONICAL_BROWSER_TOOL_NAMES,
   RUNTIME_EXECUTABLE_TOOL_NAMES,
   NO_PROGRESS_CONTINUE_BUDGET,
-  BROWSER_PROOF_REQUIRED_TOOL_NAMES,
   DEFAULT_BASH_TIMEOUT_MS,
   MAX_BASH_TIMEOUT_MS,
   MAX_LLM_RETRIES,
@@ -920,42 +916,6 @@ export function createRuntimeLoopController(
     };
   };
 
-  const invokeBrowserVerifyCapability = async (stepInput: {
-    sessionId: string;
-    action: string;
-    args: JsonRecord;
-  }): Promise<unknown> => {
-    const payload = toRecord(stepInput.args);
-    const tabId = parsePositiveInt(
-      payload.tabId || toRecord(payload.action).tabId,
-    );
-    if (!tabId) {
-      throw createRuntimeError("browser_verify 需要有效 tabId", {
-        code: "E_NO_TAB",
-        retryable: true,
-      });
-    }
-    const verifyAction = Object.keys(toRecord(payload.action)).length
-      ? toRecord(payload.action)
-      : {
-          expect: Object.keys(toRecord(payload.expect)).length
-            ? toRecord(payload.expect)
-            : payload,
-        };
-    const verifyData = await callInfra(infra, {
-      type: "cdp.verify",
-      tabId,
-      action: verifyAction,
-      result: payload.result || null,
-    });
-    const verified = toRecord(verifyData).ok === true;
-    return {
-      data: verifyData,
-      verified,
-      verifyReason: verified ? "verified" : "verify_failed",
-    };
-  };
-
   const sessionActionFailures = new Map<string, Map<string, number>>();
 
   const trackActionFailure = (sessionId: string, targetUid: string) => {
@@ -999,7 +959,10 @@ export function createRuntimeLoopController(
           if (item.capability === CAPABILITIES.browserAction) {
             return await invokeBrowserActionCapability(input);
           }
-          return await invokeBrowserVerifyCapability(input);
+          throw createRuntimeError(`unknown browser capability: ${item.capability}`, {
+            code: "E_TOOL",
+            retryable: false,
+          });
         },
       });
     }
@@ -1207,13 +1170,6 @@ export function createRuntimeLoopController(
         providerId:
           "runtime.builtin.plugin.capability.browser.action.cdp.provider",
         invoke: invokeBrowserActionCapability,
-      },
-      {
-        pluginId: "runtime.builtin.plugin.capability.browser.verify.cdp",
-        pluginName: "builtin-browser-verify-cdp",
-        capability: CAPABILITIES.browserVerify,
-        providerId: "runtime.builtin.capability.browser.verify.cdp",
-        invoke: invokeBrowserVerifyCapability,
       },
     ];
 
@@ -1933,8 +1889,6 @@ export function createRuntimeLoopController(
     }> = [];
     const lastEvidenceFingerprintBySignature = new Map<string, string>();
     let noProgressTerminalNotified = false;
-    let browserProofRequired = false;
-    let browserProofSuccessCount = 0;
 
     const buildToolCallSignature = (toolCalls: ToolCallItem[]): string => {
       return toolCalls
@@ -1965,7 +1919,7 @@ export function createRuntimeLoopController(
     const onNoProgressSignal = async (
       reason: NoProgressReason,
       details: JsonRecord,
-      options: { emitBrowserGuard?: boolean; scopeKey?: string } = {},
+      options: { scopeKey?: string } = {},
     ): Promise<boolean> => {
       const scopeKey =
         String(options.scopeKey || details.signature || details.reasonDetail || "default").trim() ||
@@ -1985,13 +1939,6 @@ export function createRuntimeLoopController(
         ...details,
       };
       orchestrator.events.emit("loop_no_progress", sessionId, payload);
-      if (options.emitBrowserGuard === true) {
-        orchestrator.events.emit(
-          "loop_guard_browser_progress_missing",
-          sessionId,
-          payload,
-        );
-      }
       if (decision.decision === "stop") {
         finalStatus = "progress_uncertain";
         if (!noProgressTerminalNotified) {
@@ -2270,28 +2217,6 @@ export function createRuntimeLoopController(
         });
 
         if (toolCalls.length === 0) {
-          if (browserProofRequired && browserProofSuccessCount === 0) {
-            const shouldStop = await onNoProgressSignal(
-              "browser_proof_guard",
-              {
-                step: llmStep,
-                reasonDetail: "final_answer_without_browser_proof",
-              },
-              {
-                emitBrowserGuard: true,
-                scopeKey: "final_answer_without_browser_proof",
-              },
-            );
-            if (shouldStop) {
-              break;
-            }
-            messages.push({
-              role: "user",
-              content:
-                "WARNING: You attempted to finish but your browser actions were not verified. Call browser_verify with a concrete expect assertion (url/title/text/selector) before giving your final answer. If you used coordinate-based computer tool, switch to search_elements + click for more reliable targeting.",
-            });
-            continue;
-          }
           // 仅在最终回答阶段（无工具调用）写入 assistant 文本。
           // 含 tool_calls 的中间思考阶段只通过流式态和工具步骤卡展示，避免正文被切碎成多段。
           await orchestrator.sessions.appendMessage({
@@ -2312,9 +2237,6 @@ export function createRuntimeLoopController(
         const previousEvidenceFingerprint = toolCallSignature
           ? lastEvidenceFingerprintBySignature.get(toolCallSignature) || ""
           : "";
-        let stepUsedBrowserProofRequiredTool = false;
-        let stepUsedComputerTool = false;
-        let stepObservedBrowserProof = false;
         const stepEvidenceParts: string[] = [];
         let skipRemainingToolCallsBySteer = false;
         for (
@@ -2343,13 +2265,6 @@ export function createRuntimeLoopController(
           )
             .trim()
             .toLowerCase();
-          if (isToolCallRequiringBrowserProof(tc.function.arguments || "", canonicalToolName)) {
-            browserProofRequired = true;
-            stepUsedBrowserProofRequiredTool = true;
-            if (canonicalToolName === "computer") {
-              stepUsedComputerTool = true;
-            }
-          }
           toolStep += 1;
           orchestrator.events.emit("step_planned", sessionId, {
             step: toolStep,
@@ -2504,10 +2419,6 @@ export function createRuntimeLoopController(
           }
 
           const responsePayload = toRecord(result.response);
-          if (didToolProvideBrowserProof(canonicalToolName, responsePayload)) {
-            stepObservedBrowserProof = true;
-            browserProofSuccessCount += 1;
-          }
           const rawToolData = responsePayload.data ?? result;
           const shapedToolData = shapeSnapshotForLlm(
             shapeScreenshotForLlm(rawToolData, canonicalToolName),
@@ -2584,52 +2495,11 @@ export function createRuntimeLoopController(
           );
         }
 
-        if (stepObservedBrowserProof) {
-          toolCallSignatureHistory.length = 0;
-          clearNoProgressHits(
-            "repeat_signature",
-            "ping_pong",
-            "browser_proof_guard",
-          );
-        } else if (stepFreshEvidence) {
-          clearNoProgressHits("repeat_signature", "browser_proof_guard");
+        if (stepFreshEvidence) {
+          clearNoProgressHits("repeat_signature");
         }
 
-        let browserGuardSignaled = false;
-        if (
-          stepUsedBrowserProofRequiredTool &&
-          !stepObservedBrowserProof &&
-          !stepFreshEvidence
-        ) {
-          browserGuardSignaled = true;
-          const shouldStop = await onNoProgressSignal(
-            "browser_proof_guard",
-            {
-              step: llmStep,
-              toolStep,
-              signature: toolCallSignature,
-              evidenceHash: stableHash(stepEvidenceFingerprint),
-              evidenceFresh: false,
-            },
-            {
-              emitBrowserGuard: true,
-              scopeKey:
-                toolCallSignature ||
-                `step:${llmStep}:tool:${toolStep}:browser_proof_guard`,
-            },
-          );
-          if (shouldStop) {
-            break;
-          }
-          messages.push({
-            role: "user",
-            content: stepUsedComputerTool
-              ? "WARNING: Your coordinate-based browser action (computer) had no verification. Prefer search_elements to find targets by semantic query, then use click/fill_element_by_uid with the returned uid. Use computer only when search_elements fails twice with different queries. Call browser_verify with a concrete expect assertion to confirm progress."
-              : "WARNING: Your last browser action had no verification. Use browser_verify with a concrete expect (url/title/text/selector) to confirm the action succeeded before proceeding.",
-          });
-        }
-
-        if (!browserGuardSignaled && toolCallSignature) {
+        if (toolCallSignature) {
           toolCallSignatureHistory.push({
             signature: toolCallSignature,
             evidenceFingerprint: stepEvidenceFingerprint,

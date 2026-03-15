@@ -6,8 +6,6 @@ import {
   shouldVerifyStep,
   actionRequiresLease,
   shouldAcquireLease,
-  isToolCallRequiringBrowserProof,
-  didToolProvideBrowserProof,
   mapToolErrorReasonToTerminalStatus,
 } from "../loop-browser-proof";
 
@@ -94,44 +92,6 @@ describe("loop-browser-proof", () => {
     it("delegates to actionRequiresLease on auto", () => {
       expect(shouldAcquireLease("click", { leasePolicy: "auto" } as any)).toBe(true);
       expect(shouldAcquireLease("observe", { leasePolicy: "auto" } as any)).toBe(false);
-    });
-  });
-
-  describe("isToolCallRequiringBrowserProof", () => {
-    it("returns true for browser proof tool names", () => {
-      expect(isToolCallRequiringBrowserProof("{}", "click")).toBe(true);
-    });
-
-    it("returns false for non-proof tools", () => {
-      expect(isToolCallRequiringBrowserProof("{}", "get_page_metadata")).toBe(false);
-    });
-
-    it("filters computer tool by action", () => {
-      expect(isToolCallRequiringBrowserProof('{"action":"click"}', "computer")).toBe(true);
-      expect(isToolCallRequiringBrowserProof('{"action":"wait"}', "computer")).toBe(false);
-      expect(isToolCallRequiringBrowserProof('{"action":"scroll"}', "computer")).toBe(false);
-    });
-  });
-
-  describe("didToolProvideBrowserProof", () => {
-    it("detects direct verified flag", () => {
-      expect(didToolProvideBrowserProof("click", { verified: true })).toBe(true);
-    });
-
-    it("detects verifyReason=verified", () => {
-      expect(didToolProvideBrowserProof("click", { verifyReason: "verified" })).toBe(true);
-    });
-
-    it("detects browser_verify ok=true", () => {
-      expect(didToolProvideBrowserProof("browser_verify", { data: { ok: true } })).toBe(true);
-    });
-
-    it("detects nested verify ok=true", () => {
-      expect(didToolProvideBrowserProof("click", { data: { verify: { ok: true } } })).toBe(true);
-    });
-
-    it("returns false when no proof present", () => {
-      expect(didToolProvideBrowserProof("click", {})).toBe(false);
     });
   });
 
