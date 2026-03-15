@@ -20,8 +20,7 @@ import {
 } from "./loop-shared-utils";
 import { type SessionMeta } from "./types";
 import { parseLlmMessageFromBody } from "./loop-llm-stream";
-import { resolveAuxiliaryNonHostedLlmRoute } from "./loop-llm-route";
-import { resolveRouteRuntimeKind } from "./loop-llm-stream";
+import { resolveAuxiliaryLlmRoute } from "./loop-llm-route";
 
 export function normalizeSessionTitle(value: unknown, fallback = ""): string {
   const compact = String(value || "")
@@ -93,6 +92,7 @@ export function parseLlmContent(message: unknown): string {
 }
 
 export async function requestSessionTitleFromLlm(input: {
+  sessionId: string;
   providerRegistry: LlmProviderRegistry;
   route: LlmResolvedRoute;
   messages: { role: string; content: string }[];
@@ -124,8 +124,9 @@ export async function requestSessionTitleFromLlm(input: {
     );
     try {
       const response = await provider.send({
-        sessionId: "title-generator",
+        sessionId: String(input.sessionId || "").trim() || "title-generator",
         step: 0,
+        lane: "title",
         route,
         signal: ctrl.signal,
         payload: {
@@ -189,10 +190,9 @@ export async function refreshSessionTitleAuto(
 
   const cfgRaw = await callInfra(infra, { type: "config.get" });
   const config = extractLlmConfig(cfgRaw);
-  const resolvedRoute = resolveAuxiliaryNonHostedLlmRoute(config);
+  const resolvedRoute = resolveAuxiliaryLlmRoute(config);
   if (!resolvedRoute.ok) return;
   const route = resolvedRoute.route;
-  if (resolveRouteRuntimeKind(route) === "hosted_chat") return;
   const interval = config.autoTitleInterval;
 
   const isDefaultTitle =
@@ -205,6 +205,7 @@ export async function refreshSessionTitleAuto(
   if (!shouldRefresh) return;
 
   const derived = await requestSessionTitleFromLlm({
+    sessionId,
     providerRegistry,
     route,
     messages: contextMessages,

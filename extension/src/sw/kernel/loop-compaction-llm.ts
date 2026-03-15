@@ -6,7 +6,7 @@ import {
   computeRetryDelayMs,
   extractRetryDelayHintMs,
   isRetryableLlmStatus,
-  resolveAuxiliaryNonHostedLlmRoute,
+  resolveAuxiliaryLlmRoute,
 } from "./loop-llm-route";
 import {
   parseLlmMessageFromBody,
@@ -79,22 +79,11 @@ export async function requestCompactionSummaryFromLlm(
 ): Promise<string> {
   const cfgRaw = await callInfra(input.infra, { type: "config.get" });
   const config = extractLlmConfig(cfgRaw);
-  const resolvedRoute = resolveAuxiliaryNonHostedLlmRoute(config);
+  const resolvedRoute = resolveAuxiliaryLlmRoute(config);
   if (!resolvedRoute.ok) {
     throw new Error(resolvedRoute.message);
   }
   const route = resolvedRoute.route;
-  if (resolveRouteRuntimeKind(route) === "hosted_chat") {
-    throw createNonRetryableRuntimeError(
-      "E_LLM_ROUTE_UNSUPPORTED",
-      "compaction summary 需要非网页 LLM 路由；请为 llmAuxProfile 或 fallback 配置 model_llm provider。",
-      {
-        profile: route.profile,
-        provider: route.provider,
-        runtimeKind: route.runtimeKind || "hosted_chat",
-      },
-    );
-  }
   const provider = input.providerRegistry.get(
     String(route.provider || "").trim(),
   );
@@ -213,6 +202,7 @@ export async function requestCompactionSummaryFromLlm(
         response = await provider.send({
           sessionId: input.sessionId,
           step: 0,
+          lane: "compaction",
           route,
           requestUrl,
           signal: ctrl.signal,

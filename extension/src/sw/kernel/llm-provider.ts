@@ -6,6 +6,7 @@ type JsonRecord = Record<string, unknown>;
 export const DEFAULT_LLM_PROVIDER_ID = "openai_compatible";
 export const DEFAULT_LLM_PROFILE_ID = "default";
 export const DEFAULT_LLM_ROLE = "worker";
+export type LlmProviderExecutionLane = "primary" | "compaction" | "title";
 
 export interface LlmResolvedRoute {
   profile: string;
@@ -27,6 +28,7 @@ export interface LlmResolvedRoute {
 export interface LlmProviderSendInput {
   sessionId?: string;
   step?: number;
+  lane?: LlmProviderExecutionLane;
   route: LlmResolvedRoute;
   payload: JsonRecord;
   signal: AbortSignal;

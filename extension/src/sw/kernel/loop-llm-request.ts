@@ -218,6 +218,7 @@ export async function requestLlmWithRetry(
       const resp = await provider.send({
         sessionId,
         step,
+        lane: "primary",
         route,
         requestUrl,
         payload: requestPayload,
