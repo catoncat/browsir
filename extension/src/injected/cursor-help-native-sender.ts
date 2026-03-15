@@ -69,6 +69,57 @@ function isVisibleEditableElement(element: Element): element is HTMLElement {
   return rect.width > 0 && rect.height > 0;
 }
 
+function describeEditableElement(element: HTMLElement | null | undefined): string {
+  if (!element) return "none";
+  const parts = [element.tagName.toLowerCase()];
+  const role = String(element.getAttribute("role") || "").trim();
+  const ariaLabel = String(element.getAttribute("aria-label") || "").trim();
+  const placeholder = String(element.getAttribute("placeholder") || "").trim();
+  const testId = String(element.getAttribute("data-testid") || "").trim();
+  const contentEditable = String(element.getAttribute("contenteditable") || "").trim();
+  if (role) parts.push(`role=${role}`);
+  if (ariaLabel) parts.push(`aria=${ariaLabel}`);
+  if (placeholder) parts.push(`placeholder=${placeholder}`);
+  if (testId) parts.push(`testid=${testId}`);
+  if (contentEditable) parts.push(`contenteditable=${contentEditable}`);
+  return parts.join("|");
+}
+
+function listEditableElements(root: ParentNode = document): HTMLElement[] {
+  return Array.from(root.querySelectorAll(EDITABLE_SELECTOR)).filter(
+    (element): element is HTMLElement => element instanceof HTMLElement,
+  );
+}
+
+function formatEditableDiscoverySummary(
+  root: ParentNode,
+  scoredCandidates: HTMLElement[],
+): string {
+  const allEditable = listEditableElements(root);
+  const visibleEditable = allEditable.filter(isVisibleEditableElement).filter(
+    (element) => !element.hasAttribute("disabled") && element.getAttribute("aria-disabled") !== "true",
+  );
+  const topSignals = visibleEditable
+    .slice(0, 3)
+    .map((element) => `${describeEditableElement(element)}#score=${scoreEditableElement(element)}`)
+    .join(" || ");
+  const activeElement =
+    document.activeElement instanceof HTMLElement
+      ? describeEditableElement(document.activeElement)
+      : String(document.activeElement?.nodeName || "none").toLowerCase();
+  return [
+    `editable=${allEditable.length}`,
+    `visible=${visibleEditable.length}`,
+    `scored=${scoredCandidates.length}`,
+    `active=${activeElement}`,
+    `visibility=${document.visibilityState}`,
+    `focus=${document.hasFocus() ? "1" : "0"}`,
+    topSignals ? `top=${topSignals}` : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
 function scoreEditableElement(element: HTMLElement): number {
   const rect = element.getBoundingClientRect();
   const text = [
@@ -90,7 +141,7 @@ function scoreEditableElement(element: HTMLElement): number {
 }
 
 function listEditableCandidates(root: ParentNode = document): HTMLElement[] {
-  const nodes = Array.from(root.querySelectorAll(EDITABLE_SELECTOR))
+  const nodes = listEditableElements(root)
     .filter(isVisibleEditableElement)
     .filter((element) => !element.hasAttribute("disabled") && element.getAttribute("aria-disabled") !== "true");
   const unique = Array.from(new Set(nodes));
@@ -196,10 +247,11 @@ export function locateCursorHelpNativeSender(
   root: ParentNode = document
 ): { sender: NativeSender | null; error: string; probeCount: number } {
   const candidates = listEditableCandidates(root).filter((element) => scoreEditableElement(element) >= 100);
+  const discoverySummary = formatEditableDiscoverySummary(root, candidates);
   if (candidates.length <= 0) {
     return {
       sender: null,
-      error: "未找到 Cursor Help 聊天输入组件",
+      error: `未找到 Cursor Help 聊天输入组件（${discoverySummary}）`,
       probeCount: 0
     };
   }
@@ -221,7 +273,7 @@ export function locateCursorHelpNativeSender(
 
   return {
     sender: null,
-    error: `Cursor Help 内部发送入口未定位（已探测 ${candidates.length} 个输入组件）`,
+    error: `Cursor Help 内部发送入口未定位（已探测 ${candidates.length} 个输入组件；${discoverySummary}）`,
     probeCount: candidates.length
   };
 }

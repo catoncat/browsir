@@ -57,6 +57,7 @@ export interface CursorHelpRewritePlan {
   requestedModel: string;
   detectedModel?: string;
   rewriteStrategy?: string;
+  desiredConversationKey?: string;
 }
 
 export interface CursorHelpNativeEnvelope {
@@ -86,6 +87,8 @@ export interface CursorHelpRewriteDebug {
   originalTargetLength: number;
   rewrittenTargetHash: string | null;
   rewrittenTargetLength: number;
+  conversationControlMode: "implicit" | "new" | "keyed";
+  forcedConversationId: string | null;
 }
 
 export const CURSOR_HELP_PRIMARY_REQUEST_PATH = "/api/chat";
@@ -497,13 +500,13 @@ function upsertInjectedSystemMessage(
 export function deriveCursorHelpSessionKey(rawBody: unknown, requestUrl = ""): string {
   const body = toRecord(rawBody);
   const directIdCandidates = [
-    body.id,
-    body.requestId,
-    body.request_id,
     body.conversationId,
     body.conversation_id,
     body.sessionId,
-    body.session_id
+    body.session_id,
+    body.id,
+    body.requestId,
+    body.request_id
   ];
   for (const candidate of directIdCandidates) {
     const normalized = String(candidate || "").trim();
@@ -526,6 +529,51 @@ export function deriveCursorHelpSessionKey(rawBody: unknown, requestUrl = ""): s
   })();
   const seed = [urlPath, messageIdSeed, pointer?.existingText.slice(0, 160) || ""].join("|");
   return `cursor-help:derived:${stableHash(seed)}`;
+}
+
+function extractDesiredCursorHelpConversationId(rawConversationKey: unknown): string {
+  const conversationKey = String(rawConversationKey || "").trim();
+  if (!conversationKey.startsWith("cursor-help:")) return "";
+  const rawId = conversationKey.slice("cursor-help:".length).trim();
+  if (!rawId || rawId.startsWith("derived:")) return "";
+  return rawId;
+}
+
+function applyDesiredConversationKey(
+  body: JsonRecord,
+  desiredConversationKey: unknown
+): { changed: boolean; mode: "implicit" | "new" | "keyed"; forcedConversationId: string | null } {
+  const desiredConversationId = extractDesiredCursorHelpConversationId(desiredConversationKey);
+  if (!desiredConversationId) {
+    const hadConversationId = "conversationId" in body || "conversation_id" in body;
+    if ("conversationId" in body) {
+      delete body.conversationId;
+    }
+    if ("conversation_id" in body) {
+      delete body.conversation_id;
+    }
+    return {
+      changed: hadConversationId,
+      mode: hadConversationId ? "new" : "implicit",
+      forcedConversationId: null
+    };
+  }
+
+  let changed = false;
+  if (String(body.conversationId || "").trim() !== desiredConversationId) {
+    body.conversationId = desiredConversationId;
+    changed = true;
+  }
+  if ("conversation_id" in body && String(body.conversation_id || "").trim() !== desiredConversationId) {
+    body.conversation_id = desiredConversationId;
+    changed = true;
+  }
+
+  return {
+    changed,
+    mode: "keyed",
+    forcedConversationId: desiredConversationId
+  };
 }
 
 export function rewriteCursorHelpNativeRequestBody(rawBody: unknown, rewritePlan: CursorHelpRewritePlan): CursorHelpNativeEnvelope {
@@ -566,6 +614,9 @@ export function rewriteCursorHelpNativeRequestBody(rawBody: unknown, rewritePlan
     body.model = resolveCursorHelpApiModel(rewritePlan.requestedModel, rewritePlan.detectedModel || String(body.model || ""));
   }
 
+  const conversationControl = applyDesiredConversationKey(body, rewritePlan.desiredConversationKey);
+  rewritten = rewritten || conversationControl.changed;
+
   const sessionKey = deriveCursorHelpSessionKey(body);
 
   return {
@@ -585,7 +636,9 @@ export function rewriteCursorHelpNativeRequestBody(rawBody: unknown, rewritePlan
       originalTargetHash: pointer ? stableHash(pointer.existingText) : null,
       originalTargetLength: pointer ? pointer.existingText.length : 0,
       rewrittenTargetHash: pointer ? stableHash(rewrittenTargetText) : null,
-      rewrittenTargetLength: pointer ? rewrittenTargetText.length : 0
+      rewrittenTargetLength: pointer ? rewrittenTargetText.length : 0,
+      conversationControlMode: conversationControl.mode,
+      forcedConversationId: conversationControl.forcedConversationId
     }
   };
 }

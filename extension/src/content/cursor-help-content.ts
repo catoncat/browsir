@@ -579,6 +579,7 @@ function handleHostedTransportPayload(payload: Record<string, unknown>): void {
       detail: "网页宿主会话已发出请求",
       meta: {
         sessionKey: String(payload.sessionKey || "").trim() || undefined,
+        conversationKey: String(payload.conversationKey || "").trim() || undefined,
         rewriteDebug:
           payload.rewriteDebug && typeof payload.rewriteDebug === "object"
             ? payload.rewriteDebug
@@ -669,6 +670,32 @@ function getButtonSignal(button: HTMLButtonElement): string {
   ).toLowerCase();
 }
 
+function summarizeChatUiProbe(): string {
+  const inputCandidates = Array.from(document.querySelectorAll(CHAT_INPUT_SELECTOR)).filter(
+    (node): node is HTMLElement => node instanceof HTMLElement
+  );
+  const visibleInputs = inputCandidates.filter((node) => isElementVisible(node));
+  const buttons = Array.from(document.querySelectorAll("button")).filter(
+    (node): node is HTMLButtonElement => node instanceof HTMLButtonElement
+  );
+  const visibleButtons = buttons.filter((button) => isElementVisible(button) && !button.disabled);
+  const activeElement =
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement.tagName.toLowerCase()
+      : String(document.activeElement?.nodeName || "none").toLowerCase();
+  return [
+    `inputs=${inputCandidates.length}`,
+    `visibleInputs=${visibleInputs.length}`,
+    `buttons=${buttons.length}`,
+    `visibleButtons=${visibleButtons.length}`,
+    `openChat=${findOpenChatButton() ? "1" : "0"}`,
+    `expandChat=${findExpandChatSidebarButton() ? "1" : "0"}`,
+    `visibility=${document.visibilityState}`,
+    `focus=${document.hasFocus() ? "1" : "0"}`,
+    `active=${activeElement}`
+  ].join(", ");
+}
+
 function isLikelyModelText(text: string): boolean {
   const normalized = normalizeModelText(text);
   if (!normalized || normalized.length < 2 || normalized.length > 40) return false;
@@ -738,13 +765,44 @@ async function ensureCursorHelpChatReady(): Promise<void> {
     expandButton.click();
     if (await waitForChatInput(1_500)) return;
   }
+
+  emitDemoLog("content.chat_ui", "failed", `聊天入口仍未就绪 (${summarizeChatUiProbe()})`);
 }
 
 async function inspectPageSender(timeoutMs = 1_500): Promise<JsonRecord> {
-  return (await callPage("WEBCHAT_INSPECT", {}, timeoutMs).catch(() => ({} as JsonRecord))) as JsonRecord;
+  try {
+    return (await callPage("WEBCHAT_INSPECT", {}, timeoutMs)) as JsonRecord;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    emitDemoLog("content.inspect", "failed", message);
+    return {
+      rpcError: message,
+      pageHookReady: pageReady || document.documentElement?.getAttribute(PAGE_HOOK_READY_ATTR) === "1",
+      fetchHookReady: false,
+      senderReady: false,
+      canExecute: false,
+      lastSenderError: message,
+    } satisfies JsonRecord;
+  }
+}
+
+function summarizePageInspect(pageInspect: JsonRecord): string {
+  return [
+    `pageHookReady=${pageInspect.pageHookReady === true ? 1 : 0}`,
+    `fetchHookReady=${pageInspect.fetchHookReady === true ? 1 : 0}`,
+    `senderReady=${pageInspect.senderReady === true ? 1 : 0}`,
+    `runtimeMismatch=${pageInspect.runtimeMismatch === true ? 1 : 0}`,
+    pageInspect.rpcError ? `rpcError=${String(pageInspect.rpcError)}` : "",
+    pageInspect.lastSenderError ? `lastSenderError=${String(pageInspect.lastSenderError)}` : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
 }
 
 function formatSenderNotReadyError(pageInspect: JsonRecord): string {
+  if (pageInspect.rpcError) {
+    return `Cursor Help 页面 inspect 未响应。 ${String(pageInspect.rpcError || "")}`.trim();
+  }
   if (pageInspect.pageHookReady !== true) {
     return "Cursor Help 页面 hook 未就绪，请稍后重试。";
   }
@@ -777,6 +835,11 @@ async function waitForPageSenderReady(timeoutMs = PAGE_SENDER_READY_TIMEOUT_MS):
     }
     await sleep(150);
   }
+  emitDemoLog(
+    "content.sender_probe",
+    "failed",
+    `sender 未就绪 (${summarizeChatUiProbe()}; last=${formatSenderNotReadyError(lastInspect)})`
+  );
   return lastInspect;
 }
 
@@ -909,17 +972,15 @@ if (!contentScope[CONTENT_INSTALLED_FLAG]) {
             try {
               emitDemoLog("content.execute", "running", "收到 webchat.execute");
               await ensurePageHookInjected();
-              await ensureCursorHelpChatReady();
-              const pageInspect = await waitForPageSenderReady();
-              if (pageInspect.fetchHookReady !== true || pageInspect.senderReady !== true) {
-                const error = formatSenderNotReadyError(pageInspect);
-                emitDemoLog("content.execute", "failed", error);
-                sendResponse({
-                  ok: false,
-                  error
-                });
-                return;
-              }
+              await ensureCursorHelpChatReady().catch(() => {
+                // best effort only; execute path relies on page-hook's own sender wait
+              });
+              const preflightInspect = await inspectPageSender(800);
+              emitDemoLog(
+                "content.execute.preflight",
+                preflightInspect.rpcError ? "failed" : "done",
+                summarizePageInspect(preflightInspect),
+              );
               const requestId = String(message.requestId || "").trim();
               const sessionId = String(message.sessionId || "").trim() || "default";
               const compiledPrompt = String(message.compiledPrompt || "");
@@ -927,14 +988,26 @@ if (!contentScope[CONTENT_INSTALLED_FLAG]) {
               const requestedModel = String(message.requestedModel || "auto").trim() || "auto";
               const lane = String(message.lane || "primary").trim() || "primary";
               const slotId = String(message.slotId || "").trim();
-              const result = await callPage("WEBCHAT_EXECUTE", {
-                requestId,
-                sessionId,
-                compiledPrompt,
-                latestUserPrompt,
-                requestedModel,
-                lane,
-                slotId
+              const conversationKey = String(message.conversationKey || "").trim();
+              const result = await callPage(
+                "WEBCHAT_EXECUTE",
+                {
+                  requestId,
+                  sessionId,
+                  compiledPrompt,
+                  latestUserPrompt,
+                  requestedModel,
+                  lane,
+                  slotId,
+                  conversationKey,
+                },
+                PAGE_RPC_TIMEOUT_MS,
+              ).catch(async (error) => {
+                const message = error instanceof Error ? error.message : String(error);
+                const lastInspect = await inspectPageSender(800);
+                throw new Error(
+                  `${message} | preflight=${summarizePageInspect(preflightInspect)} | last=${summarizePageInspect(lastInspect)}`,
+                );
               });
               emitDemoLog(
                 "content.execute",
@@ -970,12 +1043,14 @@ if (!contentScope[CONTENT_INSTALLED_FLAG]) {
           void (async () => {
             try {
               await ensurePageHookInjected();
-              await ensureCursorHelpChatReady();
             } catch {
               // return current state even if page hook is not ready yet
             }
 
-            const pageInspect = await waitForPageSenderReady(2_000);
+            // Inspect should not require a visible/focused chat input. In pooled
+            // background tabs we only need page-hook/fetch-hook/runtime state;
+            // sender readiness is allowed to converge later during execute.
+            const pageInspect = await inspectPageSender(1_200);
             const info = collectModelInfo();
             const selectedModel = String(pageInspect.selectedModel || info.selectedModel || "").trim();
             const availableModels = new Set<string>(

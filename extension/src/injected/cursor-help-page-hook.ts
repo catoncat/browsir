@@ -15,6 +15,7 @@ const CURSOR_HELP_REWRITE_STRATEGY = "system_message+user_prefix";
 const CURSOR_HELP_REWRITE_STRATEGY_OVERRIDE_STORAGE_KEY = "__bblCursorHelpRewriteStrategy";
 const CURSOR_HELP_PAGE_RUNTIME_VERSION_ATTR = "data-bbl-cursor-help-runtime-version";
 const CURSOR_HELP_PAGE_REWRITE_STRATEGY_ATTR = "data-bbl-cursor-help-rewrite-strategy";
+const EXECUTE_RPC_TIMEOUT_MS = 3_500;
 
 type JsonRecord = Record<string, unknown>;
 type CursorHelpRewriteStrategy = "system_message" | "user_prefix" | "system_message+user_prefix";
@@ -32,6 +33,9 @@ interface CursorHelpExecutionPayload {
   compiledPrompt: string;
   latestUserPrompt: string;
   requestedModel: string;
+  lane?: "primary" | "compaction" | "title";
+  slotId?: string;
+  conversationKey?: string;
 }
 
 interface CursorHelpSenderInspect {
@@ -58,6 +62,7 @@ interface CursorHelpRewritePlan {
   requestedModel: string;
   detectedModel?: string;
   rewriteStrategy?: string;
+  desiredConversationKey?: string;
 }
 
 interface CursorHelpNativeEnvelope {
@@ -87,6 +92,8 @@ interface CursorHelpRewriteDebug {
   originalTargetLength: number;
   rewrittenTargetHash: string | null;
   rewrittenTargetLength: number;
+  conversationControlMode: "implicit" | "new" | "keyed";
+  forcedConversationId: string | null;
 }
 
 interface PendingExecution extends CursorHelpExecutionPayload {
@@ -519,13 +526,13 @@ function upsertInjectedSystemMessage(
 function deriveCursorHelpSessionKey(rawBody: unknown, requestUrl = ""): string {
   const body = toRecord(rawBody);
   const directIdCandidates = [
-    body.id,
-    body.requestId,
-    body.request_id,
     body.conversationId,
     body.conversation_id,
     body.sessionId,
-    body.session_id
+    body.session_id,
+    body.id,
+    body.requestId,
+    body.request_id
   ];
   for (const candidate of directIdCandidates) {
     const normalized = String(candidate || "").trim();
@@ -548,6 +555,51 @@ function deriveCursorHelpSessionKey(rawBody: unknown, requestUrl = ""): string {
   })();
   const seed = [urlPath, messageIdSeed, pointer?.existingText.slice(0, 160) || ""].join("|");
   return `cursor-help:derived:${stableHash(seed)}`;
+}
+
+function extractDesiredCursorHelpConversationId(rawConversationKey: unknown): string {
+  const conversationKey = String(rawConversationKey || "").trim();
+  if (!conversationKey.startsWith("cursor-help:")) return "";
+  const rawId = conversationKey.slice("cursor-help:".length).trim();
+  if (!rawId || rawId.startsWith("derived:")) return "";
+  return rawId;
+}
+
+function applyDesiredConversationKey(
+  body: JsonRecord,
+  desiredConversationKey: unknown
+): { changed: boolean; mode: "implicit" | "new" | "keyed"; forcedConversationId: string | null } {
+  const desiredConversationId = extractDesiredCursorHelpConversationId(desiredConversationKey);
+  if (!desiredConversationId) {
+    const hadConversationId = "conversationId" in body || "conversation_id" in body;
+    if ("conversationId" in body) {
+      delete body.conversationId;
+    }
+    if ("conversation_id" in body) {
+      delete body.conversation_id;
+    }
+    return {
+      changed: hadConversationId,
+      mode: hadConversationId ? "new" : "implicit",
+      forcedConversationId: null
+    };
+  }
+
+  let changed = false;
+  if (String(body.conversationId || "").trim() !== desiredConversationId) {
+    body.conversationId = desiredConversationId;
+    changed = true;
+  }
+  if ("conversation_id" in body && String(body.conversation_id || "").trim() !== desiredConversationId) {
+    body.conversation_id = desiredConversationId;
+    changed = true;
+  }
+
+  return {
+    changed,
+    mode: "keyed",
+    forcedConversationId: desiredConversationId
+  };
 }
 
 function rewriteCursorHelpNativeRequestBody(rawBody: unknown, rewritePlan: CursorHelpRewritePlan): CursorHelpNativeEnvelope {
@@ -588,6 +640,9 @@ function rewriteCursorHelpNativeRequestBody(rawBody: unknown, rewritePlan: Curso
     body.model = resolveCursorHelpApiModel(rewritePlan.requestedModel, rewritePlan.detectedModel || String(body.model || ""));
   }
 
+  const conversationControl = applyDesiredConversationKey(body, rewritePlan.desiredConversationKey);
+  rewritten = rewritten || conversationControl.changed;
+
   const sessionKey = deriveCursorHelpSessionKey(body);
 
   return {
@@ -607,7 +662,9 @@ function rewriteCursorHelpNativeRequestBody(rawBody: unknown, rewritePlan: Curso
       originalTargetHash: pointer ? stableHash(pointer.existingText) : null,
       originalTargetLength: pointer ? pointer.existingText.length : 0,
       rewrittenTargetHash: pointer ? stableHash(rewrittenTargetText) : null,
-      rewrittenTargetLength: pointer ? rewrittenTargetText.length : 0
+      rewrittenTargetLength: pointer ? rewrittenTargetText.length : 0,
+      conversationControlMode: conversationControl.mode,
+      forcedConversationId: conversationControl.forcedConversationId
     }
   };
 }
@@ -870,7 +927,8 @@ function installFetchHook(): void {
         latestUserPrompt: execution.latestUserPrompt,
         requestedModel: execution.requestedModel,
         detectedModel: "",
-        rewriteStrategy
+        rewriteStrategy,
+        desiredConversationKey: execution.conversationKey
       });
       if (!rewritten.rewritten) {
         throw new Error("Cursor Help 原生请求体无法定位目标消息");
@@ -895,6 +953,7 @@ function installFetchHook(): void {
     emitTransportEvent(execution.requestId, "request_started", {
       url: requestUrl,
       sessionKey: execution.sessionKey || undefined,
+      conversationKey: execution.conversationKey || undefined,
       runtimeVersion: CURSOR_HELP_RUNTIME_VERSION,
       rewriteStrategy,
       rewriteDebug: rewriteDebug || undefined
@@ -957,13 +1016,16 @@ function installFetchHook(): void {
 }
 
 async function executeNativeSend(payload: CursorHelpExecutionPayload): Promise<Record<string, unknown>> {
+  logToContent("execute.sender_wait", "running", `等待 native sender requestId=${payload.requestId}`);
   const sender = await waitForNativeSender();
   if (!sender) {
+    logToContent("execute.sender_wait", "failed", lastSenderError || "内部入口未就绪");
     return {
       ok: false,
       error: lastSenderError || "内部入口未就绪"
     };
   }
+  logToContent("execute.sender_wait", "done", `native sender ready requestId=${payload.requestId}`);
 
   pendingExecutions.set(payload.requestId, {
     ...payload,
@@ -1031,6 +1093,9 @@ function installPageMessageBridge(): void {
       const compiledPrompt = String(payload.compiledPrompt || "");
       const latestUserPrompt = String(payload.latestUserPrompt || "").trim() || "Continue";
       const requestedModel = String(payload.requestedModel || "auto").trim() || "auto";
+      const lane = String(payload.lane || "primary").trim() || "primary";
+      const slotId = String(payload.slotId || "").trim();
+      const conversationKey = String(payload.conversationKey || "").trim();
       if (!rpcId || !requestId || !compiledPrompt) {
         replyRpc(rpcId, {
           ok: false,
@@ -1039,14 +1104,45 @@ function installPageMessageBridge(): void {
         return;
       }
       logToContent("execute", "running", `调用 native sender requestId=${requestId}`);
+      let replied = false;
+      const replyOnce = (result: Record<string, unknown>) => {
+        if (replied) return;
+        replied = true;
+        replyRpc(rpcId, result);
+      };
+      const timeout = window.setTimeout(() => {
+        logToContent("execute.rpc", "failed", `WEBCHAT_EXECUTE page bridge 超时 requestId=${requestId}`);
+        replyOnce({
+          ok: false,
+          error: `WEBCHAT_EXECUTE page bridge timeout (${EXECUTE_RPC_TIMEOUT_MS}ms)`
+        });
+      }, EXECUTE_RPC_TIMEOUT_MS);
       void executeNativeSend({
         requestId,
         sessionId,
         compiledPrompt,
         latestUserPrompt,
-        requestedModel
+        requestedModel,
+        lane: lane === "compaction" || lane === "title" ? lane : "primary",
+        slotId,
+        conversationKey
       }).then((result) => {
-        replyRpc(rpcId, result);
+        window.clearTimeout(timeout);
+        logToContent(
+          "execute.rpc",
+          result.ok === true ? "done" : "failed",
+          result.ok === true ? `WEBCHAT_EXECUTE 已返回 requestId=${requestId}` : String(result.error || "内部入口未就绪")
+        );
+        replyOnce(result);
+      }).catch((error) => {
+        window.clearTimeout(timeout);
+        const message = error instanceof Error ? error.message : String(error);
+        lastSenderError = message;
+        logToContent("execute.rpc", "failed", `executeNativeSend 未返回结果: ${message}`);
+        replyOnce({
+          ok: false,
+          error: message
+        });
       });
       return;
     }
@@ -1054,10 +1150,27 @@ function installPageMessageBridge(): void {
     if (data.type === "WEBCHAT_INSPECT") {
       const payload = toRecord(data.payload);
       const rpcId = String(payload.rpcId || "").trim();
-      replyRpc(rpcId, {
-        ok: true,
-        ...inspectSender()
-      });
+      try {
+        replyRpc(rpcId, {
+          ok: true,
+          ...inspectSender()
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        lastSenderError = message;
+        logToContent("inspect", "failed", message);
+        replyRpc(rpcId, {
+          ok: false,
+          error: message,
+          pageHookReady: true,
+          fetchHookReady: document.documentElement?.getAttribute(FETCH_HOOK_READY_ATTR) === "1",
+          senderReady: false,
+          canExecute: false,
+          lastSenderError: message,
+          pageRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
+          rewriteStrategy: resolveCursorHelpRewriteStrategy()
+        });
+      }
       return;
     }
 

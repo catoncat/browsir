@@ -1,7 +1,12 @@
 import "./test-setup";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createCursorHelpWebProvider, handleWebChatRuntimeMessage } from "../web-chat-executor.browser";
+import {
+  createCursorHelpWebProvider,
+  ensureCursorHelpPoolReady,
+  getCursorHelpPoolDebugState,
+  handleWebChatRuntimeMessage,
+} from "../web-chat-executor.browser";
 import type { LlmResolvedRoute } from "../llm-provider";
 import {
   parseHostedChatTransportEvent,
@@ -9,7 +14,7 @@ import {
 } from "../../../shared/cursor-help-web-shared";
 import { CURSOR_HELP_REWRITE_STRATEGY, CURSOR_HELP_RUNTIME_VERSION } from "../../../shared/cursor-help-runtime-meta";
 
-const CURSOR_HELP_SESSION_SLOT_STORAGE_KEY = "cursor_help_web.session_slots";
+const CURSOR_HELP_POOL_STORAGE_KEY = "cursor_help_web.pool.v1";
 
 function createRoute(): LlmResolvedRoute {
   return {
@@ -35,6 +40,34 @@ function createRoute(): LlmResolvedRoute {
 
 function buildChromeMock() {
   const tabRemovedListeners: Array<(tabId: number, removeInfo: { windowId: number; isWindowClosing: boolean }) => void> = [];
+  const windowRemovedListeners: Array<(windowId: number) => void> = [];
+  const tabsById = new Map<number, Record<string, unknown>>();
+  const windowsById = new Map<number, Record<string, unknown>>();
+  let nextTabId = 7;
+  let nextWindowId = 2;
+
+  const cloneTab = (tabId: number) => {
+    const tab = tabsById.get(tabId);
+    return tab ? { ...tab } : null;
+  };
+
+  const cloneWindow = (windowId: number) => {
+    const window = windowsById.get(windowId);
+    if (!window) return null;
+    const tabIds = Array.isArray(window.tabs) ? (window.tabs as number[]) : [];
+    return {
+      ...window,
+      tabs: tabIds.map((tabId) => cloneTab(tabId)).filter(Boolean)
+    };
+  };
+
+  const createTabRecord = (tabId: number, windowId: number, url = "https://cursor.com/help") => ({
+    id: tabId,
+    status: "complete",
+    url,
+    windowId
+  });
+
   const sendMessage = vi.fn(async (_tabId: number, message: Record<string, unknown>) => {
     const type = String(message.type || "").trim();
     if (type === "webchat.inspect") {
@@ -62,15 +95,37 @@ function buildChromeMock() {
   });
 
   (chrome as unknown as Record<string, unknown>).tabs = {
-    get: vi.fn(async (tabId: number) => ({
-      id: tabId,
-      status: "complete",
-      url: "https://cursor.com/help",
-      windowId: 2
-    })),
+    get: vi.fn(async (tabId: number) => cloneTab(tabId)),
+    create: vi.fn(async (createProperties: Record<string, unknown>) => {
+      const tabId = nextTabId++;
+      const windowId = Number(createProperties.windowId || 0) || 2;
+      const tab = createTabRecord(tabId, windowId, String(createProperties.url || "https://cursor.com/help"));
+      tabsById.set(tabId, tab);
+      const window = windowsById.get(windowId) || {
+        id: windowId,
+        focused: false,
+        state: "normal",
+        type: "normal",
+        tabs: [] as number[]
+      };
+      const nextTabs = Array.isArray(window.tabs) ? [...(window.tabs as number[]), tabId] : [tabId];
+      windowsById.set(windowId, {
+        ...window,
+        tabs: nextTabs
+      });
+      return { ...tab };
+    }),
     query: vi.fn(async () => []),
     sendMessage,
-    update: vi.fn(async (tabId: number) => ({ id: tabId })),
+    update: vi.fn(async (tabId: number, updateProperties: Record<string, unknown> = {}) => {
+      const current = tabsById.get(tabId) || createTabRecord(tabId, 2);
+      const next = {
+        ...current,
+        ...updateProperties
+      };
+      tabsById.set(tabId, next);
+      return { ...next };
+    }),
     onRemoved: {
       addListener: vi.fn((listener: (tabId: number, removeInfo: { windowId: number; isWindowClosing: boolean }) => void) => {
         tabRemovedListeners.push(listener);
@@ -78,8 +133,44 @@ function buildChromeMock() {
     }
   };
   (chrome as unknown as Record<string, unknown>).windows = {
-    create: vi.fn(),
-    update: vi.fn(async () => ({}))
+    create: vi.fn(async (createData: Record<string, unknown>) => {
+      const windowId = nextWindowId++;
+      const firstTabId = nextTabId++;
+      const firstTab = createTabRecord(firstTabId, windowId, String(createData.url || "https://cursor.com/help"));
+      tabsById.set(firstTabId, firstTab);
+      windowsById.set(windowId, {
+        id: windowId,
+        focused: false,
+        state: "normal",
+        type: String(createData.type || "normal"),
+        tabs: [firstTabId]
+      });
+      return cloneWindow(windowId);
+    }),
+    get: vi.fn(async (windowId: number) => cloneWindow(windowId)),
+    remove: vi.fn(async (windowId: number) => {
+      windowsById.delete(windowId);
+    }),
+    update: vi.fn(async (windowId: number, updateProperties: Record<string, unknown> = {}) => {
+      const current = windowsById.get(windowId) || {
+        id: windowId,
+        focused: false,
+        state: "normal",
+        type: "normal",
+        tabs: [] as number[]
+      };
+      const next = {
+        ...current,
+        ...updateProperties
+      };
+      windowsById.set(windowId, next);
+      return cloneWindow(windowId);
+    }),
+    onRemoved: {
+      addListener: vi.fn((listener: (windowId: number) => void) => {
+        windowRemovedListeners.push(listener);
+      })
+    }
   };
   (chrome as unknown as Record<string, unknown>).scripting = {
     executeScript: vi.fn(async () => [])
@@ -87,11 +178,25 @@ function buildChromeMock() {
   return {
     sendMessage,
     emitTabRemoved(tabId: number, windowId = 2) {
+      tabsById.delete(tabId);
+      const currentWindow = windowsById.get(windowId);
+      if (currentWindow && Array.isArray(currentWindow.tabs)) {
+        windowsById.set(windowId, {
+          ...currentWindow,
+          tabs: (currentWindow.tabs as number[]).filter((id) => id !== tabId)
+        });
+      }
       for (const listener of tabRemovedListeners) {
         listener(tabId, {
           windowId,
           isWindowClosing: false
         });
+      }
+    },
+    emitWindowRemoved(windowId: number) {
+      windowsById.delete(windowId);
+      for (const listener of windowRemovedListeners) {
+        listener(windowId);
       }
     }
   };
@@ -110,11 +215,15 @@ async function readHostedEvents(response: Response): Promise<HostedChatTransport
 }
 
 function getLastExecuteRequestId(): string {
+  const executeCall = getExecuteCalls().at(-1) || {};
+  return String(executeCall.requestId || "");
+}
+
+function getExecuteCalls(): Array<Record<string, unknown>> {
   const sendMessage = (chrome.tabs as unknown as Record<string, unknown>).sendMessage as ReturnType<typeof vi.fn>;
-  const executeCall = sendMessage.mock.calls.find(
-    ([, message]) => String((message as Record<string, unknown>).type || "") === "webchat.execute"
-  );
-  return String(((executeCall?.[1] as Record<string, unknown>) || {}).requestId || "");
+  return sendMessage.mock.calls
+    .filter(([, message]) => String((message as Record<string, unknown>).type || "") === "webchat.execute")
+    .map(([, message]) => ((message as Record<string, unknown>) || {}));
 }
 
 describe("web-chat-executor.browser", () => {
@@ -613,7 +722,7 @@ describe("web-chat-executor.browser", () => {
           tool_choice: "auto"
         }
       })
-    ).rejects.toThrow("会话 session-a 已有执行中的网页 provider 请求");
+    ).rejects.toThrow("会话 session-a 已有执行中的");
 
     const requestId = getLastExecuteRequestId();
     await handleWebChatRuntimeMessage({
@@ -640,18 +749,132 @@ describe("web-chat-executor.browser", () => {
     await readResponseText(first);
   });
 
+  it("reuses the last session conversationKey on the next execute request", async () => {
+    const provider = createCursorHelpWebProvider();
+    const first = await provider.send({
+      sessionId: "session-conversation-affinity",
+      step: 1,
+      route: createRoute(),
+      signal: new AbortController().signal,
+      payload: {
+        stream: true,
+        messages: [{ role: "user", content: "First turn" }],
+        tools: [],
+        tool_choice: "auto"
+      }
+    });
+
+    const firstRequestId = getLastExecuteRequestId();
+    const firstExecuteCall = getExecuteCalls().at(-1) || {};
+    expect(firstExecuteCall.conversationKey).toBeUndefined();
+
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.debug",
+        requestId: firstRequestId,
+        stage: "request_started",
+        meta: {
+          sessionKey: "cursor-help:conv-1"
+        }
+      }
+    });
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.turn_resolved",
+        requestId: firstRequestId,
+        result: {
+          assistantText: "done",
+          toolCalls: [],
+          finishReason: "stop",
+          meta: {}
+        }
+      }
+    });
+    await readResponseText(first);
+
+    const second = await provider.send({
+      sessionId: "session-conversation-affinity",
+      step: 2,
+      route: createRoute(),
+      signal: new AbortController().signal,
+      payload: {
+        stream: true,
+        messages: [{ role: "user", content: "Second turn" }],
+        tools: [],
+        tool_choice: "auto"
+      }
+    });
+
+    const secondRequestId = getLastExecuteRequestId();
+    const secondExecuteCall = getExecuteCalls().at(-1) || {};
+    expect(secondExecuteCall.conversationKey).toBe("cursor-help:conv-1");
+
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.debug",
+        requestId: secondRequestId,
+        stage: "request_started",
+        meta: {
+          sessionKey: "cursor-help:conv-1"
+        }
+      }
+    });
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.turn_resolved",
+        requestId: secondRequestId,
+        result: {
+          assistantText: "done-again",
+          toolCalls: [],
+          finishReason: "stop",
+          meta: {}
+        }
+      }
+    });
+    await readResponseText(second);
+  });
+
+  it("records external-tab adoption in pool debug state", async () => {
+    const chromeMock = buildChromeMock();
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        id: 41,
+        status: "complete",
+        url: "https://cursor.com/help",
+        windowId: 9,
+      },
+    ]);
+
+    await ensureCursorHelpPoolReady(3);
+
+    const debugState = await getCursorHelpPoolDebugState();
+    expect(debugState.summary.windowMode).toBe("external-tabs");
+    expect(debugState.summary.lastWindowEvent).toBe("adopt_existing_tabs");
+    expect(debugState.summary.lastWindowEventReason).toContain("adopted=1");
+    expect(debugState.window).toBeNull();
+    expect(chromeMock.sendMessage).toHaveBeenCalled();
+  });
+
+  it("records pool window removal reason in debug state", async () => {
+    const chromeMock = buildChromeMock();
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    createCursorHelpWebProvider();
+    await ensureCursorHelpPoolReady(3);
+    chromeMock.emitWindowRemoved(2);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const debugState = await getCursorHelpPoolDebugState();
+    expect(debugState.summary.lastWindowEvent).toBe("pool_window_removed");
+    expect(debugState.summary.lastWindowEventReason).toContain("windowId=2");
+  });
+
   it("rejects stale runtime version before execute", async () => {
     const sendMessage = (chrome.tabs as unknown as Record<string, unknown>).sendMessage as ReturnType<typeof vi.fn>;
-    (chrome.windows as unknown as Record<string, unknown>).create = vi.fn(async () => ({
-      tabs: [
-        {
-          id: 11,
-          status: "complete",
-          url: "https://cursor.com/help",
-          windowId: 3
-        }
-      ]
-    }));
     sendMessage.mockImplementation(async (_tabId: number, message: Record<string, unknown>) => {
       const type = String(message.type || "").trim();
       if (type === "webchat.inspect") {
@@ -707,36 +930,54 @@ describe("web-chat-executor.browser", () => {
     createCursorHelpWebProvider();
 
     await chrome.storage.local.set({
-      [CURSOR_HELP_SESSION_SLOT_STORAGE_KEY]: {
-        "session-stale": {
-          sessionId: "session-stale",
-          tabId: 7,
-          windowId: 2,
-          lastKnownUrl: "https://cursor.com/help",
-          lastReadyAt: 1
-        },
-        "session-keep": {
-          sessionId: "session-keep",
-          tabId: 9,
-          windowId: 2,
-          lastKnownUrl: "https://cursor.com/help",
-          lastReadyAt: 1
-        }
+      [CURSOR_HELP_POOL_STORAGE_KEY]: {
+        version: 1,
+        windowId: 2,
+        updatedAt: 1,
+        slots: [
+          {
+            slotId: "slot-stale",
+            tabId: 7,
+            windowId: 2,
+            lanePreference: "primary",
+            status: "idle",
+            lastKnownUrl: "https://cursor.com/help",
+            lastReadyAt: 1,
+            lastUsedAt: 1
+          },
+          {
+            slotId: "slot-keep",
+            tabId: 9,
+            windowId: 2,
+            lanePreference: "auxiliary",
+            status: "idle",
+            lastKnownUrl: "https://cursor.com/help",
+            lastReadyAt: 1,
+            lastUsedAt: 1
+          }
+        ]
       }
     });
 
     emitTabRemoved(7);
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    const stored = await chrome.storage.local.get(CURSOR_HELP_SESSION_SLOT_STORAGE_KEY);
-    expect(stored[CURSOR_HELP_SESSION_SLOT_STORAGE_KEY]).toEqual({
-      "session-keep": {
-        sessionId: "session-keep",
-        tabId: 9,
-        windowId: 2,
-        lastKnownUrl: "https://cursor.com/help",
-        lastReadyAt: 1
-      }
+    const stored = await chrome.storage.local.get(CURSOR_HELP_POOL_STORAGE_KEY);
+    expect(stored[CURSOR_HELP_POOL_STORAGE_KEY]).toMatchObject({
+      version: 1,
+      windowId: 2,
+      slots: [
+        {
+          slotId: "slot-keep",
+          tabId: 9,
+          windowId: 2,
+          lanePreference: "auxiliary",
+          status: "idle",
+          lastKnownUrl: "https://cursor.com/help",
+          lastReadyAt: 1,
+          lastUsedAt: 1
+        }
+      ]
     });
   });
 
@@ -749,18 +990,6 @@ describe("web-chat-executor.browser", () => {
         realSetTimeout(handler, 0, ...args)) as typeof setTimeout;
       buildChromeMock();
       const provider = createCursorHelpWebProvider();
-
-      await chrome.storage.local.set({
-        [CURSOR_HELP_SESSION_SLOT_STORAGE_KEY]: {
-          "session-stale": {
-            sessionId: "session-stale",
-            tabId: 7,
-            windowId: 2,
-            lastKnownUrl: "https://cursor.com/help",
-            lastReadyAt: 1
-          }
-        }
-      });
 
       const response = await provider.send({
         sessionId: "session-stale",
@@ -782,8 +1011,19 @@ describe("web-chat-executor.browser", () => {
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toContain("网页 provider 请求未启动");
 
-      const stored = await chrome.storage.local.get(CURSOR_HELP_SESSION_SLOT_STORAGE_KEY);
-      expect(stored[CURSOR_HELP_SESSION_SLOT_STORAGE_KEY]).toEqual({});
+      const stored = await chrome.storage.local.get(CURSOR_HELP_POOL_STORAGE_KEY);
+      expect(stored[CURSOR_HELP_POOL_STORAGE_KEY]).toMatchObject({
+        version: 1,
+        windowId: 2,
+      });
+      expect(
+        Array.isArray(stored[CURSOR_HELP_POOL_STORAGE_KEY]?.slots) &&
+          stored[CURSOR_HELP_POOL_STORAGE_KEY].slots.some(
+            (slot: Record<string, unknown>) =>
+              String(slot.status || "") === "stale" &&
+              String(slot.lastError || "").includes("网页 provider 请求未启动")
+          )
+      ).toBe(true);
     } finally {
       (globalThis as typeof globalThis & {
         setTimeout: typeof setTimeout;

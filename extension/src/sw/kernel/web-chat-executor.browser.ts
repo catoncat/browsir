@@ -50,6 +50,10 @@ interface CursorHelpPoolState {
   version: 1;
   windowId?: number;
   slots: CursorHelpSlotRecord[];
+  windowMode?: "none" | "external-tabs" | "pool-window";
+  lastWindowEvent?: string;
+  lastWindowEventAt?: number;
+  lastWindowEventReason?: string;
   updatedAt: number;
 }
 
@@ -57,6 +61,7 @@ interface CursorHelpInspectResult extends CursorHelpSenderInspect {
   url: string;
   selectedModel?: string;
   availableModels?: string[];
+  canBootExecute?: boolean;
 }
 
 interface CursorHelpPoolDebugView {
@@ -74,6 +79,7 @@ const ACTIVE_REQUEST_ID_BY_TAB = new Map<number, string>();
 const ACTIVE_REQUEST_ID_BY_SESSION_LANE = new Map<string, string>();
 const PREFERRED_SLOT_ID_BY_SESSION = new Map<string, string>();
 const PREFERRED_SLOT_ID_BY_CONVERSATION = new Map<string, string>();
+const LAST_CONVERSATION_KEY_BY_SESSION = new Map<string, string>();
 const EXECUTION_BOOT_TIMEOUT_MS = 20_000;
 const EXECUTION_STALE_MS = 90_000;
 const SLOT_WAIT_POLL_MS = 200;
@@ -206,10 +212,18 @@ function normalizePoolState(value: unknown): CursorHelpPoolState {
         .filter((item): item is CursorHelpSlotRecord => Boolean(item))
     : [];
   const windowId = Number(row.windowId);
+  const windowModeText = String(row.windowMode || "").trim();
   return {
     version: 1,
     windowId: Number.isInteger(windowId) && windowId > 0 ? windowId : undefined,
     slots,
+    windowMode:
+      windowModeText === "external-tabs" || windowModeText === "pool-window"
+        ? (windowModeText as CursorHelpPoolState["windowMode"])
+        : "none",
+    lastWindowEvent: String(row.lastWindowEvent || "").trim() || undefined,
+    lastWindowEventAt: Math.max(0, Number(row.lastWindowEventAt || 0)),
+    lastWindowEventReason: String(row.lastWindowEventReason || "").trim() || undefined,
     updatedAt: Math.max(0, Number(row.updatedAt || 0)),
   };
 }
@@ -243,10 +257,31 @@ async function saveCursorHelpPoolState(
     version: 1,
     windowId: state.windowId,
     slots: state.slots.map((slot) => cloneSlotRecord(slot)),
+    windowMode: state.windowMode || "none",
+    lastWindowEvent: state.lastWindowEvent,
+    lastWindowEventAt: Math.max(0, Number(state.lastWindowEventAt || 0)),
+    lastWindowEventReason: state.lastWindowEventReason,
     updatedAt: nowMs(),
   };
   await persistCursorHelpPoolState(next);
   return next;
+}
+
+function withWindowEvent(
+  state: CursorHelpPoolState,
+  event: string,
+  options: {
+    mode?: CursorHelpPoolState["windowMode"];
+    reason?: string;
+  } = {},
+): CursorHelpPoolState {
+  return {
+    ...state,
+    windowMode: options.mode || state.windowMode || "none",
+    lastWindowEvent: String(event || "").trim() || undefined,
+    lastWindowEventAt: nowMs(),
+    lastWindowEventReason: String(options.reason || "").trim() || undefined,
+  };
 }
 
 function sortSlotsForDisplay(
@@ -282,6 +317,7 @@ async function patchCursorHelpSlotState(
 function clearSlotPreferences(slotId: string): void {
   const normalizedSlotId = String(slotId || "").trim();
   if (!normalizedSlotId) return;
+  const removedConversationKeys = new Set<string>();
   for (const [sessionId, preferredSlotId] of PREFERRED_SLOT_ID_BY_SESSION) {
     if (preferredSlotId === normalizedSlotId) {
       PREFERRED_SLOT_ID_BY_SESSION.delete(sessionId);
@@ -289,7 +325,13 @@ function clearSlotPreferences(slotId: string): void {
   }
   for (const [conversationKey, preferredSlotId] of PREFERRED_SLOT_ID_BY_CONVERSATION) {
     if (preferredSlotId === normalizedSlotId) {
+      removedConversationKeys.add(conversationKey);
       PREFERRED_SLOT_ID_BY_CONVERSATION.delete(conversationKey);
+    }
+  }
+  for (const [sessionId, conversationKey] of LAST_CONVERSATION_KEY_BY_SESSION) {
+    if (removedConversationKeys.has(conversationKey)) {
+      LAST_CONVERSATION_KEY_BY_SESSION.delete(sessionId);
     }
   }
 }
@@ -414,8 +456,20 @@ function clearStaleExecution(slotId: string, tabId: number): void {
       ACTIVE_REQUEST_ID_BY_TAB.delete(tabId);
       continue;
     }
+    if (entry.startedAt === null && Date.now() - entry.createdAt >= EXECUTION_BOOT_TIMEOUT_MS) {
+      failExecution(entry, "网页 provider 请求启动超时，已自动回收旧执行");
+      continue;
+    }
     if (Date.now() - entry.lastEventAt < EXECUTION_STALE_MS) continue;
     failExecution(entry, "网页 provider 请求已超时，已自动回收旧执行");
+  }
+}
+
+function reapStaleExecutionsForSlots(
+  slots: CursorHelpSlotRecord[],
+): void {
+  for (const slot of slots) {
+    clearStaleExecution(slot.slotId, slot.tabId);
   }
 }
 
@@ -441,13 +495,15 @@ async function inspectCursorTab(tabId: number): Promise<CursorHelpInspectResult 
   const fetchHookReady = row.fetchHookReady === true;
   const senderReady = row.senderReady === true;
   const runtimeMismatch = row.runtimeMismatch === true;
+  const canBootExecute = pageHookReady && fetchHookReady && !runtimeMismatch;
   return {
     pageHookReady,
     fetchHookReady,
     senderReady,
+    canBootExecute,
     canExecute:
       row.canExecute === true ||
-      (!("canExecute" in row) && pageHookReady && fetchHookReady && senderReady && !runtimeMismatch),
+      (!("canExecute" in row) && canBootExecute && senderReady),
     url: String(row.url || ""),
     selectedModel: String(row.selectedModel || "").trim() || undefined,
     availableModels: Array.isArray(row.availableModels)
@@ -462,6 +518,17 @@ async function inspectCursorTab(tabId: number): Promise<CursorHelpInspectResult 
     runtimeMismatch,
     runtimeMismatchReason: String(row.runtimeMismatchReason || "").trim() || undefined
   };
+}
+
+function canCursorHelpSlotBootExecute(
+  inspect: CursorHelpInspectResult | null,
+): boolean {
+  return Boolean(
+    inspect &&
+      inspect.pageHookReady &&
+      inspect.fetchHookReady &&
+      !inspect.runtimeMismatch,
+  );
 }
 
 async function injectCursorHelpScripts(tabId: number): Promise<void> {
@@ -543,10 +610,64 @@ function buildCursorHelpSlotRecord(
   };
 }
 
+async function tryAdoptExistingCursorHelpSlots(
+  slotCount: number,
+): Promise<CursorHelpPoolState | null> {
+  const desiredSlotCount = normalizePoolSlotCount(slotCount);
+  const existingTabs = await chrome.tabs
+    .query({ url: [...CURSOR_TAB_PATTERNS] })
+    .catch(() => [] as chrome.tabs.Tab[]);
+  const adoptedSlots: CursorHelpSlotRecord[] = [];
+
+  for (const tab of existingTabs) {
+    if (!tab?.id) continue;
+    await markCursorHelpTabStable(tab.id);
+    try {
+      await waitForCursorHelpTabReady(tab.id, 5_000);
+    } catch {
+      continue;
+    }
+    const inspect = await inspectCursorTabEnsured(tab.id);
+    if (!canCursorHelpSlotBootExecute(inspect)) continue;
+    adoptedSlots.push({
+      slotId: randomSlotId(),
+      tabId: tab.id,
+      windowId:
+        typeof tab.windowId === "number" && tab.windowId > 0
+          ? tab.windowId
+          : undefined,
+      lanePreference: adoptedSlots.length === 0 ? "primary" : "auxiliary",
+      status: "idle",
+      lastKnownUrl: String(inspect.url || tab.url || CURSOR_HELP_URL),
+      lastReadyAt: nowMs(),
+      lastUsedAt: 0,
+      lastError: undefined,
+    });
+    if (adoptedSlots.length >= Math.min(desiredSlotCount, 1)) break;
+  }
+
+  if (adoptedSlots.length <= 0) return null;
+  await clearLegacySessionSlots();
+  return await saveCursorHelpPoolState(withWindowEvent({
+    version: 1,
+    windowId: undefined,
+    slots: sortSlotsForDisplay(adoptedSlots),
+    windowMode: "external-tabs",
+    updatedAt: nowMs(),
+  }, "adopt_existing_tabs", {
+    mode: "external-tabs",
+    reason: `adopted=${adoptedSlots.length}`,
+  }));
+}
+
 async function createCursorHelpPoolWindow(
   slotCount: number,
 ): Promise<CursorHelpPoolState> {
   const desiredSlotCount = normalizePoolSlotCount(slotCount);
+  const adopted = await tryAdoptExistingCursorHelpSlots(desiredSlotCount);
+  if (adopted) {
+    return adopted;
+  }
   const createdWindow = await chrome.windows
     .create({
       url: CURSOR_HELP_URL,
@@ -587,12 +708,16 @@ async function createCursorHelpPoolWindow(
 
   await minimizeCursorHelpWindow(createdWindow.id);
   await clearLegacySessionSlots();
-  return await saveCursorHelpPoolState({
+  return await saveCursorHelpPoolState(withWindowEvent({
     version: 1,
     windowId: createdWindow.id,
     slots: sortSlotsForDisplay(slots),
+    windowMode: "pool-window",
     updatedAt: nowMs(),
-  });
+  }, "create_pool_window", {
+    mode: "pool-window",
+    reason: `slots=${slots.length}`,
+  }));
 }
 
 async function readLiveCursorHelpSlot(
@@ -639,7 +764,18 @@ async function reconcileCursorHelpPoolState(
   ).filter((slot): slot is CursorHelpSlotRecord => Boolean(slot));
 
   if (!windowId && slots.length > 0) {
-    windowId = slots[0].windowId;
+    const nextState = await saveCursorHelpPoolState(withWindowEvent({
+      version: 1,
+      windowId: undefined,
+      slots: sortSlotsForDisplay(slots),
+      windowMode: "external-tabs",
+      updatedAt: nowMs(),
+    }, "reuse_external_tabs", {
+      mode: "external-tabs",
+      reason: `slots=${slots.length}`,
+    }));
+    await clearLegacySessionSlots();
+    return nextState;
   }
 
   if (!windowId) {
@@ -688,12 +824,17 @@ function classifySlotStatusFromInspect(
 ): CursorHelpSlotRecord["status"] {
   if (!inspect) return "stale";
   if (inspect.runtimeMismatch) return "error";
-  if (inspect.canExecute) return "idle";
+  if (canCursorHelpSlotBootExecute(inspect)) {
+    return inspect.senderReady ? "idle" : "warming";
+  }
   return "warming";
 }
 
 async function ensureCursorHelpSlotUsable(
   slot: CursorHelpSlotRecord,
+  options: {
+    throwOnRuntimeMismatch?: boolean;
+  } = {},
 ): Promise<{ slot: CursorHelpSlotRecord; inspect: CursorHelpInspectResult } | null> {
   const tab = await chrome.tabs.get(slot.tabId).catch(() => null);
   if (!tab?.id || !isCursorHelpUrl(tab.url)) {
@@ -722,11 +863,16 @@ async function ensureCursorHelpSlotUsable(
     status,
     windowId: typeof tab.windowId === "number" ? tab.windowId : slot.windowId,
     lastKnownUrl: String(inspect?.url || tab.url || slot.lastKnownUrl || ""),
-    lastReadyAt: inspect?.canExecute ? nowMs() : slot.lastReadyAt,
+    lastReadyAt: canCursorHelpSlotBootExecute(inspect) ? nowMs() : slot.lastReadyAt,
     lastError:
-      inspect?.canExecute === true ? "" : formatInspectFailure(inspect),
+      canCursorHelpSlotBootExecute(inspect) ? "" : formatInspectFailure(inspect),
   });
-  if (!inspect?.canExecute) return null;
+  if (!canCursorHelpSlotBootExecute(inspect)) {
+    if (options.throwOnRuntimeMismatch && inspect?.runtimeMismatch) {
+      throw new Error(formatInspectFailure(inspect));
+    }
+    return null;
+  }
   return {
     slot: {
       ...slot,
@@ -774,38 +920,75 @@ function chooseCursorHelpSlot(
   return sorted[0] || null;
 }
 
+function resolveConversationKeyForSession(
+  sessionId: string,
+  payload: JsonRecord,
+): string {
+  const explicitConversationKey = String(payload.conversationKey || "").trim();
+  if (explicitConversationKey) return explicitConversationKey;
+  return String(LAST_CONVERSATION_KEY_BY_SESSION.get(sessionId) || "").trim();
+}
+
 async function waitForCursorHelpSlot(
   input: LlmProviderSendInput,
   lane: LlmProviderExecutionLane,
-): Promise<{ sessionId: string; slot: CursorHelpSlotRecord; inspect: CursorHelpInspectResult }> {
+): Promise<{
+  sessionId: string;
+  slot: CursorHelpSlotRecord;
+  inspect: CursorHelpInspectResult;
+  conversationKey: string;
+}> {
   const sessionId = String(input.sessionId || "").trim() || "default";
-  const conversationKey = String(
-    toRecord(input.payload).conversationKey || "",
-  ).trim();
+  const conversationKey = resolveConversationKeyForSession(
+    sessionId,
+    toRecord(input.payload),
+  );
   const deadline =
     nowMs() + (lane === "primary" ? PRIMARY_SLOT_WAIT_MS : AUXILIARY_SLOT_WAIT_MS);
   const desiredSlotCount = readRequestedPoolSlotCount(input);
+  let sawBusyCandidates = false;
+  let lastUnavailableReason = "";
 
   while (nowMs() < deadline) {
     const state = await reconcileCursorHelpPoolState(desiredSlotCount);
+    reapStaleExecutionsForSlots(state.slots);
     const chosen = chooseCursorHelpSlot(state.slots, lane, sessionId, conversationKey);
     if (chosen) {
-      const usable = await ensureCursorHelpSlotUsable(chosen);
+      sawBusyCandidates = false;
+      const usable = await ensureCursorHelpSlotUsable(chosen, {
+        throwOnRuntimeMismatch: true,
+      });
       if (usable) {
         return {
           sessionId,
           slot: usable.slot,
           inspect: usable.inspect,
+          conversationKey,
         };
       }
+      lastUnavailableReason = String(chosen.lastError || "").trim() || "Cursor Help 页面尚未完成启动";
+    } else {
+      sawBusyCandidates = state.slots.length > 0;
+      lastUnavailableReason = sawBusyCandidates
+        ? "当前所有槽位都有活动中的网页 provider 请求"
+        : "暂无可用的 Cursor Help 槽位";
     }
     await new Promise((resolve) => setTimeout(resolve, SLOT_WAIT_POLL_MS));
   }
 
+  if (sawBusyCandidates) {
+    throw new Error(
+      lane === "primary"
+        ? "Cursor Help 主执行槽位繁忙，请稍后重试。"
+        : "Cursor Help 辅助执行槽位繁忙，请稍后重试。",
+    );
+  }
+
+  const prefix = lane === "primary"
+    ? "Cursor Help 主执行槽位未就绪"
+    : "Cursor Help 辅助执行槽位未就绪";
   throw new Error(
-    lane === "primary"
-      ? "Cursor Help 主执行槽位繁忙，请稍后重试。"
-      : "Cursor Help 辅助执行槽位繁忙，请稍后重试。",
+    lastUnavailableReason ? `${prefix}：${lastUnavailableReason}` : prefix,
   );
 }
 
@@ -846,7 +1029,11 @@ async function removeCursorHelpSlotsByWindowId(windowId: number): Promise<void> 
   if (current.windowId === windowId) {
     current.windowId = undefined;
   }
-  await saveCursorHelpPoolState(current);
+  const nextState = withWindowEvent(current, "pool_window_removed", {
+    mode: current.slots.some((slot) => slot.windowId) ? current.windowMode : "none",
+    reason: `windowId=${windowId}`,
+  });
+  await saveCursorHelpPoolState(nextState);
 }
 
 function ensureCursorHelpSlotLifecycle(): void {
@@ -946,6 +1133,10 @@ export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebug
       readyCount,
       busyCount,
       errorCount,
+      windowMode: state.windowMode || "none",
+      lastWindowEvent: state.lastWindowEvent || "",
+      lastWindowEventAt: state.lastWindowEventAt || 0,
+      lastWindowEventReason: state.lastWindowEventReason || "",
     },
     window: window
       ? {
@@ -954,6 +1145,10 @@ export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebug
           state: String(window.state || ""),
           type: String(window.type || ""),
           tabCount: Array.isArray(window.tabs) ? window.tabs.length : undefined,
+          mode: state.windowMode || "none",
+          lastEvent: state.lastWindowEvent || "",
+          lastEventAt: state.lastWindowEventAt || 0,
+          lastEventReason: state.lastWindowEventReason || "",
         }
       : null,
     slots,
@@ -1004,7 +1199,7 @@ export function createCursorHelpWebProvider() {
       );
 
       const resolved = await waitForCursorHelpSlot(input, lane);
-      const { sessionId, slot, inspect } = resolved;
+      const { sessionId, slot, inspect, conversationKey } = resolved;
       emitProviderDebugLog(
         "provider.resolve_slot",
         "done",
@@ -1052,7 +1247,7 @@ export function createCursorHelpWebProvider() {
         controller: null,
         queue: [],
         firstDeltaLogged: false,
-        conversationKey: null,
+        conversationKey: conversationKey || null,
         closed: false,
       };
 
@@ -1108,6 +1303,7 @@ export function createCursorHelpWebProvider() {
           requestedModel,
           lane,
           slotId: slot.slotId,
+          conversationKey: conversationKey || undefined,
         });
         const row = toRecord(response);
         if (row.ok !== true) {
@@ -1175,10 +1371,16 @@ export async function handleWebChatRuntimeMessage(message: unknown, senderTabId?
     if (event.stage === "request_started") {
       entry.startedAt = nowMs();
       armExecutionWatchdog(entry, EXECUTION_STALE_MS, "网页 provider 请求长时间未结束");
+      const requestedConversationKey = String(toRecord(event.meta).conversationKey || "").trim();
+      if (requestedConversationKey && !entry.conversationKey) {
+        entry.conversationKey = requestedConversationKey;
+      }
       const sessionKey = String(toRecord(event.meta).sessionKey || "").trim();
-      if (sessionKey && !entry.conversationKey) {
+      if (sessionKey) {
         entry.conversationKey = sessionKey;
+        LAST_CONVERSATION_KEY_BY_SESSION.set(entry.sessionId, sessionKey);
         PREFERRED_SLOT_ID_BY_CONVERSATION.set(sessionKey, entry.slotId);
+        PREFERRED_SLOT_ID_BY_SESSION.set(entry.sessionId, entry.slotId);
       }
       emitProviderDebugLog(
         "provider.request_started",

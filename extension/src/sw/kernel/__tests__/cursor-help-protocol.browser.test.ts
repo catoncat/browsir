@@ -47,10 +47,10 @@ describe("cursor-help-protocol", () => {
     expect(rewritten.sessionKey).toBe("cursor-help:req-1");
     expect(rewritten.body).toMatchObject({
       id: "req-1",
-      conversationId: "conv-1",
       trigger: "submit-message",
       context: [{ type: "file", filePath: "/tmp/demo.ts" }]
     });
+    expect(rewritten.body).not.toHaveProperty("conversationId");
     expect((rewritten.body.messages as Array<Record<string, unknown>>)[0]).toMatchObject({
       role: "system"
     });
@@ -70,6 +70,68 @@ describe("cursor-help-protocol", () => {
     expect(rewritten.rewriteDebug.strippedNativeControlMessageCount).toBe(0);
     expect(rewritten.rewriteDebug.userPromptInjected).toBe(true);
     expect(rewritten.rewriteDebug.compiledPromptHash).toMatch(/^[a-f0-9]{8}$/);
+    expect(rewritten.rewriteDebug.conversationControlMode).toBe("new");
+    expect(rewritten.rewriteDebug.forcedConversationId).toBeNull();
+  });
+
+  it("forces a specific conversationId when a keyed conversationKey is provided", () => {
+    const rewritten = rewriteCursorHelpNativeRequestBody(
+      {
+        id: "req-force-conversation",
+        conversationId: "conv-stale",
+        messages: [
+          {
+            id: "msg-1",
+            role: "user",
+            parts: [{ type: "text", text: "hello" }]
+          }
+        ]
+      },
+      {
+        requestId: "req-force-conversation",
+        compiledPrompt: "compiled transcript",
+        latestUserPrompt: "hello",
+        requestedModel: "auto",
+        desiredConversationKey: "cursor-help:conv-target"
+      }
+    );
+
+    expect(rewritten.body).toMatchObject({
+      conversationId: "conv-target"
+    });
+    expect(rewritten.sessionKey).toBe("cursor-help:conv-target");
+    expect(rewritten.rewriteDebug.conversationControlMode).toBe("keyed");
+    expect(rewritten.rewriteDebug.forcedConversationId).toBe("conv-target");
+  });
+
+  it("removes stale conversationId when no conversationKey is supplied", () => {
+    const rewritten = rewriteCursorHelpNativeRequestBody(
+      {
+        id: "req-new-conversation",
+        conversationId: "conv-stale",
+        conversation_id: "conv-stale",
+        messages: [
+          {
+            id: "msg-1",
+            role: "user",
+            parts: [{ type: "text", text: "hello" }]
+          }
+        ]
+      },
+      {
+        requestId: "req-new-conversation",
+        compiledPrompt: "compiled transcript",
+        latestUserPrompt: "hello",
+        requestedModel: "auto",
+        desiredConversationKey: ""
+      }
+    );
+
+    expect(rewritten.body).not.toHaveProperty("conversationId");
+    expect(rewritten.body).not.toHaveProperty("conversation_id");
+    expect(rewritten.sessionKey).toBe("cursor-help:req-new-conversation");
+    expect(rewritten.rewriteDebug.conversationControlMode).toBe("new");
+    expect(rewritten.rewriteDebug.forcedConversationId).toBeNull();
   });
 
   it("keeps prompt injection idempotent for repeated rewrites", () => {
