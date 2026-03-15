@@ -212,6 +212,50 @@ function buildSessionLaneKey(
   return `${String(sessionId || "").trim()}::${lane}`;
 }
 
+function resolveSessionLaneConflict(
+  sessionId: string,
+  lane: LlmProviderExecutionLane,
+): {
+  kind: "none" | "same-lane-busy" | "lane-rule-reject";
+  reason: string;
+  message?: string;
+} {
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) {
+    return { kind: "none", reason: "missing-session" };
+  }
+
+  const activeEntries = Array.from(ACTIVE_BY_REQUEST_ID.values()).filter(
+    (entry) => !entry.closed && entry.sessionId === normalizedSessionId,
+  );
+  if (activeEntries.length <= 0) {
+    return { kind: "none", reason: "no-active-session-lanes" };
+  }
+
+  const sameLane = activeEntries.find((entry) => entry.lane === lane);
+  if (sameLane) {
+    return {
+      kind: "same-lane-busy",
+      reason: `same-lane:${lane}`,
+      message: `会话 ${normalizedSessionId} 已有执行中的 ${lane} 网页 provider 请求`,
+    };
+  }
+
+  if (lane === "title") {
+    const blocking = activeEntries[0];
+    return {
+      kind: "lane-rule-reject",
+      reason: `title-waits-for:${blocking.lane}`,
+      message: `会话 ${normalizedSessionId} 的 title lane 需等待 ${blocking.lane} 完成后再执行`,
+    };
+  }
+
+  return {
+    kind: "none",
+    reason: "parallel-allowed",
+  };
+}
+
 function isCursorHelpUrl(raw: unknown): boolean {
   return String(raw || "").startsWith(CURSOR_HELP_URL);
 }
@@ -1062,6 +1106,40 @@ async function createAdditionalPoolSlot(
   return buildCursorHelpSlotRecord(tab, lanePreference, existingSlotId);
 }
 
+async function collectCursorHelpTabDecisionTrace(
+  state: CursorHelpPoolState,
+): Promise<{
+  liveCursorHelpTabCount: number;
+  managedCursorHelpTabCount: number;
+  unmanagedCursorHelpTabCount: number;
+}> {
+  const liveTabs = await chrome.tabs
+    .query({ url: [...CURSOR_TAB_PATTERNS] })
+    .catch(() => [] as chrome.tabs.Tab[]);
+  const managedTabIds = new Set(
+    state.slots
+      .map((slot) => Number(slot.tabId || 0))
+      .filter((tabId) => Number.isInteger(tabId) && tabId > 0),
+  );
+  let managedCursorHelpTabCount = 0;
+  let unmanagedCursorHelpTabCount = 0;
+
+  for (const tab of liveTabs) {
+    if (!tab?.id) continue;
+    if (managedTabIds.has(tab.id)) {
+      managedCursorHelpTabCount += 1;
+    } else {
+      unmanagedCursorHelpTabCount += 1;
+    }
+  }
+
+  return {
+    liveCursorHelpTabCount: liveTabs.length,
+    managedCursorHelpTabCount,
+    unmanagedCursorHelpTabCount,
+  };
+}
+
 async function attemptCursorHelpSlotRecovery(
   slot: CursorHelpSlotRecord,
 ): Promise<void> {
@@ -1744,10 +1822,14 @@ export function createCursorHelpWebProvider() {
       clearStaleExecution(slot.slotId, slot.tabId);
 
       const sessionLaneKey = buildSessionLaneKey(sessionId, lane);
-      if (lane === "primary" && ACTIVE_REQUEST_ID_BY_SESSION_LANE.has(sessionLaneKey)) {
-        throw new Error(
-          `会话 ${sessionId} 已有执行中的 ${lane} 网页 provider 请求`,
+      const laneConflict = resolveSessionLaneConflict(sessionId, lane);
+      if (laneConflict.kind !== "none") {
+        emitProviderDebugLog(
+          "provider.lane_conflict",
+          "failed",
+          `session=${sessionId} lane=${lane} kind=${laneConflict.kind} reason=${laneConflict.reason}`,
         );
+        throw new Error(laneConflict.message || `会话 ${sessionId} 的 ${lane} lane 当前不可用`);
       }
       if (ACTIVE_REQUEST_ID_BY_SLOT.has(slot.slotId)) {
         throw new Error(

@@ -770,6 +770,122 @@ describe("web-chat-executor.browser", () => {
     await readResponseText(first);
   });
 
+  it("allows same-session compaction while primary is active", async () => {
+    const provider = createCursorHelpWebProvider();
+    const primary = await provider.send({
+      sessionId: "session-lane-parallel",
+      step: 1,
+      lane: "primary",
+      route: createRoute(),
+      signal: new AbortController().signal,
+      payload: {
+        stream: true,
+        messages: [{ role: "user", content: "Say hello" }],
+        tools: [],
+        tool_choice: "auto",
+      },
+    });
+
+    const compaction = await provider.send({
+      sessionId: "session-lane-parallel",
+      step: 2,
+      lane: "compaction",
+      route: createRoute(),
+      signal: new AbortController().signal,
+      payload: {
+        stream: true,
+        messages: [{ role: "user", content: "Compact this" }],
+        tools: [],
+        tool_choice: "auto",
+      },
+    });
+
+    const requestIds = getExecuteCalls().slice(-2).map((call) => String(call.requestId || ""));
+    for (const requestId of requestIds) {
+      await handleWebChatRuntimeMessage({
+        type: "webchat.transport",
+        envelope: {
+          type: "hosted_chat.debug",
+          requestId,
+          stage: "request_started",
+        },
+      });
+      await handleWebChatRuntimeMessage({
+        type: "webchat.transport",
+        envelope: {
+          type: "hosted_chat.turn_resolved",
+          requestId,
+          result: {
+            assistantText: "",
+            toolCalls: [],
+            finishReason: "stop",
+            meta: {},
+          },
+        },
+      });
+    }
+
+    await readResponseText(primary);
+    await readResponseText(compaction);
+  });
+
+  it("rejects same-session title while primary is active", async () => {
+    const provider = createCursorHelpWebProvider();
+    const primary = await provider.send({
+      sessionId: "session-title-conflict",
+      step: 1,
+      lane: "primary",
+      route: createRoute(),
+      signal: new AbortController().signal,
+      payload: {
+        stream: true,
+        messages: [{ role: "user", content: "Say hello" }],
+        tools: [],
+        tool_choice: "auto",
+      },
+    });
+
+    await expect(
+      provider.send({
+        sessionId: "session-title-conflict",
+        step: 2,
+        lane: "title",
+        route: createRoute(),
+        signal: new AbortController().signal,
+        payload: {
+          stream: true,
+          messages: [{ role: "user", content: "Generate title" }],
+          tools: [],
+          tool_choice: "auto",
+        },
+      }),
+    ).rejects.toThrow("title lane 需等待 primary 完成后再执行");
+
+    const requestId = getLastExecuteRequestId();
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.debug",
+        requestId,
+        stage: "request_started",
+      },
+    });
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.turn_resolved",
+        requestId,
+        result: {
+          assistantText: "",
+          toolCalls: [],
+          finishReason: "stop",
+          meta: {},
+        },
+      },
+    });
+    await readResponseText(primary);
+  });
+
   it("reuses the last session conversationKey on the next execute request", async () => {
     const provider = createCursorHelpWebProvider();
     const first = await provider.send({
