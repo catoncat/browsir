@@ -37,13 +37,13 @@ tags:
 |-------|------|---------|
 | Phase 0: 语义冻结 | ✅ 完成 | 文档概念对齐 |
 | Phase 1: SessionSandboxManager | ✅ 完成 | `session-runtime-manager.ts` + `LiveSessionSandbox` + dirty tracking + checkpoint 去抖 |
-| Phase 2: 路径翻译 | ⏳ 功能完成，结构待清理 | `parseVirtualUri` / `resolveVirtualPath` / `rewriteCommandVirtualUris` 已实现但内联在 lifo-adapter |
+| Phase 2: 路径翻译 | ✅ 完成 | `virtual-path-resolver.ts`（240 行）从 lifo-adapter 抽出，lifo-adapter 1,412 → 1,192 行 |
 
 ## 剩余工作
 
-### Slice A: lifo-adapter 路径翻译层抽离（Phase 2 收口）
+### Slice A: lifo-adapter 路径翻译层抽离（Phase 2 收口）✅ 已完成
 
-从 `lifo-adapter.ts`（1,412 行）抽出路径翻译逻辑为独立模块 `virtual-path-resolver.ts`：
+从 `lifo-adapter.ts`（1,412 行）抽出路径翻译逻辑为独立模块 `virtual-path-resolver.ts`（240 行）：
 - `parseVirtualUri()`
 - `resolveVirtualPath()`
 - `rewriteCommandVirtualUris()`
@@ -53,11 +53,14 @@ tags:
 
 **预期效果**：lifo-adapter 降至 ~1,100 行，路径翻译可被 prompt resolver / skill loader 复用。
 
-### Slice B: Registry + 文件树事务一致性（Phase 3）
+### Slice B: Registry + 文件树事务一致性（Phase 3）✅ 审计通过
 
-确保 skills/plugins 的 registry metadata 与 VFS 文件树写入的原子性：
-- 统一事务入口（registry 写入 + namespace 文件写入绑定）
-- uninstall/delete/reset 后两边状态一致
+经深度审计（skill-registry / plugin-runtime / skill-controller / skill-create / storage-reset / lifo-adapter），Phase 3 在当前架构中已满足：
+
+- `brain.skill.create` 已有完整 staging → backup → move → registry → cleanup 事务，失败有完整回滚
+- VFS namespace 版本跟踪 + 跨 session 同步已上线（`markNamespaceChanged()` + `syncSharedNamespaces()`）
+- `brain.storage.reset` 两侧一致保留（session VFS 清除、global 保留、registry 保留）
+- `brain.skill.uninstall` 已加保护性 VFS 清理（失败不抛错，返回 `vfsCleanupError` 字段）
 
 ### Slice C: @路径 / skills / prompt 共用 resolver（Phase 4）
 

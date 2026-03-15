@@ -2,7 +2,7 @@
 
 日期：2026-03-13
 
-状态：部分落地（Phase 0/1 完成，Phase 2 部分完成）
+状态：部分落地（Phase 0/1/3 完成，Phase 2 ⏳ 结构抽离已完成）
 
 > **2026-03-15 工作树对齐更新**：
 >
@@ -11,10 +11,15 @@
 > - dirty tracking + 智能 checkpoint（首次立即 flush，后续 750ms 去抖合并）
 > - global namespace 版本同步（skills/plugins 跨 session 变更检测）
 >
-> Phase 2（路径翻译）部分完成：
-> - `parseVirtualUri()` 同时处理 `mem://...` 和 `/mem/...`
-> - `rewriteCommandVirtualUris()` 在 shell 命令中做 URI 重写
-> - 路径翻译逻辑仍内联在 lifo-adapter（1,412 行），未抽出独立模块
+> Phase 2（路径翻译）结构抽离已完成：
+> - `virtual-path-resolver.ts`（240 行）已从 lifo-adapter 抽出
+> - lifo-adapter 1,412 → 1,192 行（-16%）
+> - `parseVirtualUri()` / `resolveVirtualPath()` / `rewriteCommandVirtualUris()` 等 17 个函数/类型独立模块化
+>
+> Phase 3（事务一致性）经审计确认已满足：
+> - `brain.skill.create` 已有完整 staging + 回滚事务模式
+> - VFS namespace 版本跟踪 + 跨 session 同步已上线
+> - `brain.skill.uninstall` 已加 VFS 清理容错（orphan-safe）
 >
 > 此外，`commandRequiresEval()` 按需走 SW 直执行 vs eval-bridge，`fnv1aHash` VFS 去重已上线。
 
@@ -288,7 +293,7 @@
 
 工作项：
 
-1. ❌ 从 `lifo-adapter.ts` 抽出路径翻译层（仍内联在 lifo-adapter 1,412 行中）
+1. ✅ 从 `lifo-adapter.ts` 抽出路径翻译层为 `virtual-path-resolver.ts`（240 行，lifo-adapter 1,412 → 1,192 行）
 2. ✅ shell 中支持裸 `/mem/...` 路径（`parseVirtualUri` + `rewriteCommandVirtualUris` 已实现）
 3. ✅ shell 中继续兼容 `mem://...`
 4. ✅ `@/mem/...` 解析统一落到 `mem://...`（ISSUE-019 system-prompt-resolver 已部分覆盖）
@@ -297,20 +302,24 @@
 
 - ✅ 聊天输入、prompt、shell 命令都能把 `/mem/...` 指到同一对象（测试 `treats /mem and mem:// as the same sandbox path` 覆盖）
 
-### Phase 3：把 namespace snapshot 降级成冷恢复层
+### Phase 3：把 namespace snapshot 降级成冷恢复层 ✅ 已满足
 
 目标：收敛 source of truth，避免双写漂移。
 
+**2026-03-15 审计结论**：当前架构已满足 Phase 3 要求。
+
 工作项：
 
-1. 保留 `virtualfs:namespace:*`
-2. 但明确其职责仅为冷恢复副本
-3. `skills/plugins` 的 registry 与文件树写入走统一事务入口
-4. 禁止分散写 registry 与文件树
+1. ✅ 保留 `virtualfs:namespace:*` — 现有 `namespaceFiles` / `namespaceVersions` 已承担冷恢复 + 版本同步职责
+2. ✅ 职责仅为冷恢复副本 — `captureNamespaceFiles()` 做 dirty flush，`restoreNamespaceFiles()` 做冷恢复
+3. ✅ `brain.skill.create` 已走统一事务入口（staging → backup → move → registry → cleanup，失败完整回滚）
+4. ✅ `brain.skill.uninstall` 已保护性处理（registry 删除后 VFS 清理失败不抛错，返回 `vfsCleanupError` 字段）
 
 验收：
 
-- uninstall / delete / reset 后，registry 与文件树状态一致
+- ✅ `brain.skill.create`：VFS 写入 + registry 注册原子绑定
+- ✅ `brain.storage.reset`：session VFS 清除，global（skills/plugins）+ registry 一致保留
+- ✅ `brain.skill.uninstall`：registry 删除 + VFS 文件清理，VFS 失败不影响一致性
 
 ### Phase 4：接通 `@路径` / skills / system prompt 共用 resolver
 

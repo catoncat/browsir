@@ -803,13 +803,19 @@ export async function handleBrainSkill(
       : "";
     const removed = await orchestrator.uninstallSkill(skillId);
     if (!removed) return fail(`skill 不存在: ${skillId}`);
+    let vfsCleanupError: string | undefined;
     if (cleanupPath) {
-      await removeVirtualPathRecursively(cleanupPath, sessionId);
+      try {
+        await removeVirtualPathRecursively(cleanupPath, sessionId);
+      } catch (error) {
+        vfsCleanupError = error instanceof Error ? error.message : String(error);
+      }
     }
     return ok({
       skillId,
       removed,
       ...(cleanupPath ? { removedPath: cleanupPath } : {}),
+      ...(vfsCleanupError ? { vfsCleanupError } : {}),
     });
   }
 
