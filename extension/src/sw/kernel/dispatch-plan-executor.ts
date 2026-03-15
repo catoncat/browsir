@@ -29,6 +29,7 @@ import {
   buildToolRetryHint,
 } from "./loop-failure-protocol";
 import { formatNodeCompact } from "./infra-snapshot-helpers";
+import { getAutomationMode } from "./automation-mode";
 import {
   CAPABILITIES,
   type RuntimeErrorWithMeta,
@@ -465,9 +466,10 @@ main().catch((error) => {
         });
       }
       case "local.create_new_tab": {
+        const autoMode = await getAutomationMode();
         const created = await chrome.tabs.create({
           url: String(plan.args.url || ""),
-          active: plan.args.active !== false,
+          active: autoMode === "background" ? false : plan.args.active !== false,
         });
         return buildToolResponseEnvelope("tabs", {
           opened: true,

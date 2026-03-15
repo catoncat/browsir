@@ -55,9 +55,10 @@ export interface RuntimeHealth {
   systemPromptPreview: string;
 }
 
-export const DEFAULT_PANEL_LLM_PROVIDER = "openai_compatible";
-export const DEFAULT_PANEL_LLM_API_BASE = "https://ai.chen.rs/v1";
-export const DEFAULT_PANEL_LLM_MODEL = "gpt-5.3-codex";
+export const DEFAULT_PANEL_LLM_PROVIDER = "cursor_help_web";
+export const DEFAULT_PANEL_LLM_API_BASE = "";
+export const DEFAULT_PANEL_LLM_MODEL = "auto";
+export const BUILTIN_CURSOR_HELP_PROFILE_ID = "built-in";
 
 interface LlmProfileDefaults {
   id: string;
@@ -66,21 +67,26 @@ interface LlmProfileDefaults {
   llmMaxRetryDelayMs: number;
 }
 
+export function createBuiltinCursorHelpProfile(
+  defaults?: Partial<LlmProfileDefaults>,
+): PanelLlmProfile {
+  return {
+    id: BUILTIN_CURSOR_HELP_PROFILE_ID,
+    provider: "cursor_help_web",
+    llmApiBase: "",
+    llmApiKey: "",
+    llmModel: "auto",
+    providerOptions: { targetSite: "cursor_help" },
+    llmTimeoutMs: defaults?.llmTimeoutMs ?? 120000,
+    llmRetryMaxAttempts: defaults?.llmRetryMaxAttempts ?? 1,
+    llmMaxRetryDelayMs: defaults?.llmMaxRetryDelayMs ?? 60000,
+  };
+}
+
 function createDefaultLlmProfile(
   defaults: LlmProfileDefaults,
 ): PanelLlmProfile {
-  const id = String(defaults.id || "default").trim() || "default";
-  return {
-    id,
-    provider: DEFAULT_PANEL_LLM_PROVIDER,
-    llmApiBase: DEFAULT_PANEL_LLM_API_BASE,
-    llmApiKey: "",
-    llmModel: DEFAULT_PANEL_LLM_MODEL,
-    providerOptions: {},
-    llmTimeoutMs: defaults.llmTimeoutMs,
-    llmRetryMaxAttempts: defaults.llmRetryMaxAttempts,
-    llmMaxRetryDelayMs: defaults.llmMaxRetryDelayMs,
-  };
+  return createBuiltinCursorHelpProfile(defaults);
 }
 
 function normalizeSingleLlmProfile(
@@ -165,7 +171,7 @@ export function normalizeConfig(
     300_000,
   );
   const defaultProfile =
-    String(raw?.llmDefaultProfile || "default").trim() || "default";
+    String(raw?.llmDefaultProfile || BUILTIN_CURSOR_HELP_PROFILE_ID).trim() || BUILTIN_CURSOR_HELP_PROFILE_ID;
 
   const llmProfiles = normalizeLlmProfiles(raw?.llmProfiles, {
     id: defaultProfile,
@@ -173,6 +179,13 @@ export function normalizeConfig(
     llmRetryMaxAttempts,
     llmMaxRetryDelayMs,
   });
+
+  // Ensure the built-in cursor_help_web profile always exists
+  if (!llmProfiles.some((p) => p.id === BUILTIN_CURSOR_HELP_PROFILE_ID)) {
+    llmProfiles.unshift(
+      createBuiltinCursorHelpProfile({ llmTimeoutMs, llmRetryMaxAttempts, llmMaxRetryDelayMs }),
+    );
+  }
   const validProfileIds = new Set(llmProfiles.map((item) => item.id));
   const llmDefaultProfile = validProfileIds.has(defaultProfile)
     ? defaultProfile

@@ -67,6 +67,7 @@ function emptyCursorHelpRuntimeState(): CursorHelpRuntimeState {
     fetchHookReady: false,
     senderReady: false,
     selectedModel: "",
+    availableModels: [],
     senderKind: "",
     lastSenderError: "",
     url: "",
@@ -755,7 +756,7 @@ async function handleSave(): Promise<void> {
       if (isCursorHelpWebProvider(profile) && !runtimeState(profile).canExecute) {
         await ensureCursorHelpTab(profile, false);
         if (!runtimeState(profile).canExecute) {
-          localError.value = `Cursor Help 连接探测失败（profile: ${String(profile.label || profile.id || "").trim() || "unnamed"}），请先确认页面可用后再保存。`;
+          localError.value = `Cursor Help 连接探测失败（profile: ${String(profile.id || "").trim() || "unnamed"}），请先确认页面可用后再保存。`;
           return;
         }
       }

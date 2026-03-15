@@ -29,6 +29,7 @@ import {
   normalizeBrowserRuntimeStrategy,
   resolveBrowserRuntimeHint,
 } from "./browser-runtime-strategy";
+import { getAutomationMode } from "./automation-mode";
 import { normalizeSkillCreateRequest } from "./skill-create";
 import {
   dedupePromptContextRefs,
@@ -1749,8 +1750,16 @@ export function createRuntimeLoopController(
     executeStep,
   });
 
+  const BACKGROUND_FILTERED_TOOLS = new Set([
+    "computer",
+    "capture_screenshot",
+    "capture_tab_screenshot",
+    "capture_screenshot_with_highlight",
+  ]);
+
   function listRuntimeLlmToolDefinitions(
     toolScope: "all" | "browser_only" = "all",
+    opts?: { automationMode?: "focus" | "background" },
   ): ToolDefinition[] {
     return orchestrator
       .listLlmToolDefinitions()
@@ -1781,6 +1790,13 @@ export function createRuntimeLoopController(
         if (!execution) return false;
         if (execution.mode === "cdp") return true;
         return String(execution.capability || "").startsWith("browser.");
+      })
+      .filter((definition) => {
+        if (opts?.automationMode !== "background") return true;
+        const toolName = String(definition.function?.name || "").trim();
+        const contract = orchestrator.resolveToolContract(toolName);
+        const canonical = String(contract?.name || toolName).trim();
+        return !BACKGROUND_FILTERED_TOOLS.has(canonical) && !canonical.includes("screenshot");
       });
   }
 
@@ -1967,7 +1983,8 @@ export function createRuntimeLoopController(
         availableSkillsPrompt = "";
       }
       const actionFailures = getActionFailures(sessionId);
-      const llmToolDefinitions = listRuntimeLlmToolDefinitions("all");
+      const automationMode = await getAutomationMode();
+      const llmToolDefinitions = listRuntimeLlmToolDefinitions("all", { automationMode });
       const isHostedChatPath = resolveRouteRuntimeKind(activeRoute) === "hosted_chat";
       const systemPrompt = await systemPromptResolver.resolveSystemPrompt({
         config,
@@ -2078,7 +2095,7 @@ export function createRuntimeLoopController(
         try {
           message = await requestLlmWithRetry({
             orchestrator,
-            listToolDefinitions: listRuntimeLlmToolDefinitions,
+            listToolDefinitions: (scope) => listRuntimeLlmToolDefinitions(scope, { automationMode }),
             summarizeLlmRequestPayload,
             buildLlmRawTracePayload,
             sessionId,
@@ -3164,11 +3181,12 @@ export function createRuntimeLoopController(
     async getSystemPromptPreview(): Promise<string> {
       const cfgRaw = await callInfra(infra, { type: "config.get" });
       const cfg = extractLlmConfig(cfgRaw);
+      const mode = await getAutomationMode();
       return await systemPromptResolver.resolveSystemPrompt({
         config: cfg,
         sessionId: "system-prompt-preview",
         sessionMeta: null,
-        toolDefinitions: listRuntimeLlmToolDefinitions("all"),
+        toolDefinitions: listRuntimeLlmToolDefinitions("all", { automationMode: mode }),
       });
     },
   };

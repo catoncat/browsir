@@ -154,11 +154,14 @@ export default defineConfig({
         "sandbox-host": fileURLToPath(new URL("./sandbox-host.html", import.meta.url)),
         "service-worker": fileURLToPath(new URL("./src/background/sw-main.ts", import.meta.url)),
         "cursor-help-content": fileURLToPath(new URL("./src/content/cursor-help-content.ts", import.meta.url)),
+        "dom-snapshot-collector": fileURLToPath(new URL("./src/content/dom-snapshot-collector.ts", import.meta.url)),
         "cursor-help-page-hook": fileURLToPath(new URL("./src/injected/cursor-help-page-hook.ts", import.meta.url))
       },
       output: {
         entryFileNames: (chunkInfo) =>
-          chunkInfo.name === "service-worker" ? "service-worker.js" : "assets/[name].js",
+          chunkInfo.name === "service-worker" ? "service-worker.js" :
+          chunkInfo.name === "dom-snapshot-collector" ? "content/[name].js" :
+          "assets/[name].js",
         chunkFileNames: "assets/[name].js",
         assetFileNames: "assets/[name][extname]"
       }

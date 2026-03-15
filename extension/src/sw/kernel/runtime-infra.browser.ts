@@ -3,6 +3,8 @@ import {
   createBridgeClient,
 } from "./infra-bridge-client";
 import { createCdpActionExecutor } from "./infra-cdp-action";
+import { getAutomationMode } from "./automation-mode";
+import { DomLocator } from "./dom-locator";
 export type { BridgeConfig } from "./infra-bridge-client";
 import {
   snapshotKey,
@@ -1197,15 +1199,148 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
     };
   }
 
+  /**
+   * Background-mode snapshot: collect DOM tree via content-script message.
+   * No CDP / debugger attachment required.
+   */
+  async function takeSnapshotByDom(
+    tabId: number,
+    options: JsonRecord,
+    base: JsonRecord,
+    state: SnapshotState,
+    key: string,
+    snapshotId: string,
+  ): Promise<JsonRecord> {
+    const response = await new Promise<JsonRecord>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("E_CONTENT_SCRIPT_NOT_READY: dom-snapshot-collector did not respond within 10 s")),
+        10_000,
+      );
+      chrome.tabs.sendMessage(
+        tabId,
+        { type: "brain:collect-dom-snapshot", options: { maxTextLength: 160 } },
+        (res: unknown) => {
+          clearTimeout(timer);
+          if (chrome.runtime.lastError) {
+            reject(new Error(`E_CONTENT_SCRIPT_NOT_READY: ${chrome.runtime.lastError.message}`));
+            return;
+          }
+          resolve(asRecord(res));
+        },
+      );
+    });
+
+    if (response.success !== true) {
+      throw new Error(`dom snapshot failed: ${String(response.error || "unknown")}`);
+    }
+
+    const data = asRecord(response.data);
+    const idToNode = asRecord(data.idToNode);
+    const nodeEntries = Object.values(idToNode) as JsonRecord[];
+
+    // Convert DomSnapshotNode[] → the flat node format expected by the rest of the pipeline
+    const rawNodes: JsonRecord[] = nodeEntries
+      .filter((n) => {
+        const role = String(n.role || "").toLowerCase();
+        return role !== "rootwebarea" && role !== "statictext" && !isSkipRole(role);
+      })
+      .map((n) => ({
+        role: String(n.role || "generic"),
+        name: String(n.name || ""),
+        value: String(n.value || ""),
+        brainUid: String(n.id || ""),
+        tag: String(n.tagName || ""),
+        disabled: n.disabled === true,
+        focused: n.focused === true,
+        checked: n.checked,
+        selected: n.selected,
+        expanded: n.expanded,
+        placeholder: String(n.placeholder || ""),
+        editable: ["textbox", "searchbox", "combobox", "textarea"].includes(
+          String(n.role || "").toLowerCase(),
+        ),
+        visible: true,
+        selector: `[data-brain-uid="${String(n.id || "")}"]`,
+      }));
+
+    const maxNodes = Number(options.maxNodes || 120);
+    const nodes = (await enrichmentPipeline.run(
+      enrichSnapshotNodes(state, rawNodes.slice(0, maxNodes), key, snapshotId, "dom-background"),
+      {
+        sessionId: String(base.sessionId || ""),
+        origin: String(data.metadata ? asRecord(asRecord(data.metadata)).url || "" : ""),
+        location: String(data.metadata ? asRecord(asRecord(data.metadata)).url || "" : ""),
+        failureCounts: state.failureCounts,
+      },
+    )) as JsonRecord[];
+
+    const meta = asRecord(data.metadata);
+    return {
+      ...base,
+      url: String(meta.url || ""),
+      title: String(meta.title || ""),
+      count: nodes.length,
+      nodes,
+      truncated: rawNodes.length > maxNodes,
+      source: "dom-background",
+      hash: hashText(
+        nodes.map((node) => summarizeSnapshotNode(node)).join("\n"),
+      ),
+    };
+  }
+
   async function takeSnapshot(
     tabId: number,
     rawOptions: JsonRecord = {},
   ): Promise<JsonRecord> {
-    await ensureDebugger(tabId);
+    const automationMode = await getAutomationMode();
     const options = normalizeSnapshotOptions(rawOptions, toPositiveInt);
     const key = snapshotKey(options);
     const state = getSnapshotState(tabId);
     const previous = state.byKey.get(key) || null;
+
+    const snapshotId = randomId("snap");
+    const base: JsonRecord = {
+      snapshotId,
+      ts: nowIso(),
+      tabId,
+      mode: options.mode,
+      filter: options.filter,
+      selector: options.selector,
+      depth: options.depth,
+      maxTokens: options.maxTokens,
+      url: "",
+      title: "",
+      format: options.format,
+    };
+
+    // ── Background mode: content-script DOM snapshot (no CDP) ──
+    if (automationMode === "background") {
+      let snapshot: JsonRecord;
+      try {
+        snapshot = await takeSnapshotByDom(tabId, options, base, state, key, snapshotId);
+      } catch (error) {
+        snapshot = {
+          ...base,
+          count: 0,
+          nodes: [],
+          source: "dom-background-error",
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+      state.byKey.set(key, snapshot);
+      state.lastSnapshotId = snapshotId;
+      const diff = options.diff === true ? { hasPrevious: !!previous } : null;
+      return {
+        ...snapshot,
+        diff,
+        compact: buildCompactSnapshot(snapshot),
+        stats: { key, hasPrevious: !!previous },
+      };
+    }
+
+    // ── Focus mode: CDP path (existing behaviour) ──
+    await ensureDebugger(tabId);
 
     if (options.noAnimations === true) {
       await sendCdpCommand(tabId, "Runtime.evaluate", {
@@ -1223,21 +1358,6 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         awaitPromise: true,
       });
     }
-
-    const snapshotId = randomId("snap");
-    const base: JsonRecord = {
-      snapshotId,
-      ts: nowIso(),
-      tabId,
-      mode: options.mode,
-      filter: options.filter,
-      selector: options.selector,
-      depth: options.depth,
-      maxTokens: options.maxTokens,
-      url: "",
-      title: "",
-      format: options.format,
-    };
 
     let snapshot: JsonRecord;
     if (options.mode === "text") {
@@ -1417,6 +1537,53 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         const tabId = toValidTabId(msg.tabId);
         if (!tabId) return fail("cdp.action 需要有效 tabId");
         const action = asRecord(msg.action);
+        const kind = normalizeActionKind(action.kind);
+
+        // ── Background mode: use DomLocator instead of CDP ──
+        const actionMode = await getAutomationMode();
+        if (actionMode === "background") {
+          const locator = new DomLocator(tabId);
+          const uid = String(action.ref || action.uid || action.brainUid || "");
+          if (!uid) return fail("background mode action requires a uid/ref");
+
+          let result: { success: boolean; error?: string; data?: unknown };
+          switch (kind) {
+            case "click":
+              result = await locator.click(uid, {
+                count: Number(action.count || 1),
+              });
+              break;
+            case "fill":
+            case "type":
+              result = await locator.fill(uid, {
+                value: String(action.value || ""),
+              });
+              break;
+            case "hover":
+              result = await locator.hover(uid);
+              break;
+            default:
+              return fail(`background mode does not support action kind: ${kind}`);
+          }
+          if (!result.success) {
+            return fail(
+              toRuntimeError(result.error || "dom action failed", {
+                code: "E_DOM_ACTION_FAILED",
+                retryable: true,
+                details: { tabId, kind, uid, mode: "background" },
+              }),
+            );
+          }
+          return ok({
+            ok: true,
+            kind,
+            uid,
+            mode: "background",
+            hint: "action executed via DOM synthetic events (background mode)",
+          });
+        }
+
+        // ── Focus mode: existing CDP path ──
         if (action.requireFocus === true && action.forceFocus !== true) {
           return fail(
             toRuntimeError("action requires focused tab", {
@@ -1429,7 +1596,6 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         if (action.forceFocus === true) {
           await focusTabBeforeAction(tabId);
         }
-        const kind = normalizeActionKind(action.kind);
         if (actionRequiresLease(kind)) {
           ensureLeaseForWrite(tabId, resolveOwnerFromMessage(msg));
         }

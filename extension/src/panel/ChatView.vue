@@ -32,8 +32,15 @@ import StreamingDraftContainer from "./components/StreamingDraftContainer.vue";
 import ChatInput from "./components/ChatInput.vue";
 import {
   Loader2, Plus, Settings, Activity, History, MoreVertical, FileText,
-  Download, ExternalLink, Copy, GitBranch, RefreshCcw, Wrench, Server, Plug, Bug
+  Download, ExternalLink, Copy, GitBranch, RefreshCcw, Wrench, Server, Plug, Bug,
+  Monitor, MonitorOff,
 } from "lucide-vue-next";
+
+import {
+  getAutomationMode,
+  setAutomationMode,
+  onAutomationModeChange,
+} from "../sw/kernel/automation-mode";
 
 const props = defineProps<{
   listOpen: boolean;
@@ -74,6 +81,19 @@ const showToolHistory = ref(true);
 const creatingSession = ref(false);
 const moreMenuRef = ref(null);
 const exportMenuRef = ref(null);
+const automationMode = ref<"focus" | "background">("focus");
+
+// Load initial mode and subscribe to changes
+getAutomationMode().then((m) => { automationMode.value = m; });
+const unsubMode = onAutomationModeChange((m) => { automationMode.value = m; });
+onUnmounted(() => { unsubMode(); });
+const isBackgroundMode = computed(() => automationMode.value === "background");
+
+async function toggleAutomationMode() {
+  const next = automationMode.value === "focus" ? "background" : "focus";
+  await setAutomationMode(next);
+  automationMode.value = next;
+}
 
 onClickOutside(moreMenuRef, () => showMoreMenu.value = false);
 
@@ -582,6 +602,19 @@ defineExpose({ handleCreateSession, sessionListRenderState });
       </div>
 
       <div class="flex items-center gap-0.5 shrink-0" role="toolbar" aria-label="会话操作">
+        <button
+          class="p-2 rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+          :class="isBackgroundMode
+            ? 'bg-amber-500/15 text-amber-600 hover:bg-amber-500/25'
+            : 'text-ui-text hover:bg-ui-surface'"
+          :title="isBackgroundMode ? '当前：后台模式（不抢焦点）' : '当前：前台模式（标准 CDP）'"
+          :aria-label="isBackgroundMode ? '切换到前台模式' : '切换到后台模式'"
+          :aria-pressed="isBackgroundMode"
+          @click="toggleAutomationMode"
+        >
+          <MonitorOff v-if="isBackgroundMode" :size="18" aria-hidden="true" />
+          <Monitor v-else :size="18" aria-hidden="true" />
+        </button>
         <button
           class="p-2 hover:bg-ui-surface rounded-full text-ui-text transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
           title="新建对话"
