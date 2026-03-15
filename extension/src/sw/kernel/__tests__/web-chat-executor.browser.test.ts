@@ -911,6 +911,7 @@ describe("web-chat-executor.browser", () => {
     expect(debugState.summary.requiresAttention).toBe(true);
     expect(debugState.summary.recoveryCooldownActive).toBe(true);
     expect(Number(debugState.summary.recoveryCooldownUntil || 0)).toBeGreaterThan(0);
+    expect(debugState.summary.recoveryAction).toBe("skip-cooldown");
     expect(debugState.summary.lastWindowEvent).toBe("pool_window_removed");
     expect(debugState.summary.lastWindowEventReason).toContain("windowId=2");
   });
@@ -985,6 +986,7 @@ describe("web-chat-executor.browser", () => {
     expect(debugState.summary.windowStatus).toBe("missing");
     expect(debugState.summary.shouldRebuildWindow).toBe(true);
     expect(debugState.summary.recoveryCooldownActive).toBe(false);
+    expect(debugState.summary.recoveryAction).toBe("await-manual");
     expect(debugState.summary.lastWindowEvent).toBe("await_manual_rebuild");
     expect(debugState.summary.lastWindowEventReason).toBe("window_removed");
   });
@@ -1242,6 +1244,50 @@ describe("web-chat-executor.browser", () => {
     const debugState = await runCursorHelpPoolHeartbeat();
     expect(Number(debugState.summary.errorCount || 0)).toBe(0);
     expect(String(debugState.slots[0]?.lastHealthReason || "")).toBe("ready");
+  });
+
+  it("heartbeat downgrades to error after inspect-failed recovery budget is exhausted", async () => {
+    const realSetTimeout = globalThis.setTimeout;
+    try {
+      (globalThis as typeof globalThis & {
+        setTimeout: typeof setTimeout;
+      }).setTimeout = ((handler: TimerHandler, _timeout?: number, ...args: unknown[]) =>
+        realSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+
+      buildChromeMock();
+      (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+      await ensureCursorHelpPoolReady(3);
+
+      const sendMessage = chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>;
+      sendMessage.mockImplementation(async (_tabId: number, message: Record<string, unknown>) => {
+        const type = String(message.type || "").trim();
+        if (type === "webchat.inspect") {
+          throw new Error("persistent inspect failure");
+        }
+        if (type === "webchat.execute" || type === "webchat.abort") {
+          return { ok: true };
+        }
+        throw new Error(`unexpected tab message: ${type}`);
+      });
+
+      await runCursorHelpPoolHeartbeat();
+      await runCursorHelpPoolHeartbeat();
+      await runCursorHelpPoolHeartbeat();
+      const debugState = await runCursorHelpPoolHeartbeat();
+      const exhaustedSlot = debugState.slots.find(
+        (slot) => String(slot.lastHealthReason || "") === "recover-budget-exhausted",
+      );
+
+      expect(exhaustedSlot).toBeTruthy();
+      expect(String(exhaustedSlot?.status || "")).toBe("error");
+      expect(String(exhaustedSlot?.lastHealthReason || "")).toBe("recover-budget-exhausted");
+      expect(String(exhaustedSlot?.lastError || "")).toContain("inspect-failed");
+    } finally {
+      (globalThis as typeof globalThis & {
+        setTimeout: typeof setTimeout;
+      }).setTimeout = realSetTimeout;
+    }
   });
 
   it("rejects stale runtime version before execute", async () => {

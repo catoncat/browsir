@@ -45,6 +45,8 @@ interface CursorHelpSlotRecord {
   lastUsedAt: number;
   lastHealthCheckedAt: number;
   lastHealthReason?: string;
+  recoveryAttemptCount: number;
+  lastRecoveryReason?: string;
   lastError?: string;
 }
 
@@ -110,7 +112,7 @@ const MIN_CURSOR_HELP_POOL_SLOT_COUNT = 2;
 const MAX_CURSOR_HELP_POOL_SLOT_COUNT = 6;
 const CURSOR_HELP_HEARTBEAT_INTERVAL_MS = 30_000;
 const CURSOR_HELP_HEARTBEAT_BACKOFF_MS = 60_000;
-const CURSOR_HELP_HEARTBEAT_RECOVERY_RETRY_MS = 25;
+const CURSOR_HELP_HEARTBEAT_RECOVERY_RETRY_MS = 1;
 const encoder = new TextEncoder();
 const CONTENT_SCRIPT_FILE = "assets/cursor-help-content.js";
 const PAGE_HOOK_SCRIPT_FILE = "assets/cursor-help-page-hook.js";
@@ -232,6 +234,8 @@ function normalizeSlotRecord(value: unknown): CursorHelpSlotRecord | null {
     lastUsedAt: Math.max(0, Number(row.lastUsedAt || 0)),
     lastHealthCheckedAt: Math.max(0, Number(row.lastHealthCheckedAt || 0)),
     lastHealthReason: String(row.lastHealthReason || "").trim() || undefined,
+    recoveryAttemptCount: Math.max(0, Number(row.recoveryAttemptCount || 0)),
+    lastRecoveryReason: String(row.lastRecoveryReason || "").trim() || undefined,
     lastError: String(row.lastError || "").trim() || undefined,
   };
 }
@@ -430,7 +434,8 @@ function resolveMissingPoolWindowRecoveryAction(
   }
   if (
     state.windowMode === "pool-window" &&
-    state.lastWindowEvent === "pool_window_removed" &&
+    (state.lastWindowEvent === "pool_window_removed" ||
+      state.lastWindowEvent === "await_manual_rebuild") &&
     options.allowAutoRebuildAfterRemoval !== true
   ) {
     return {
@@ -442,6 +447,20 @@ function resolveMissingPoolWindowRecoveryAction(
     action: "auto-rebuild",
     reason: "auto-rebuild-allowed",
   };
+}
+
+function buildCursorHelpWindowRecoveryPreview(
+  state: CursorHelpPoolState,
+): {
+  action: "none" | "skip-cooldown" | "await-manual" | "auto-rebuild";
+  reason: string;
+} {
+  if (state.windowMode !== "pool-window") {
+    return { action: "none", reason: "not-a-managed-pool-window" };
+  }
+  return resolveMissingPoolWindowRecoveryAction(state, {
+    allowAutoRebuildAfterRemoval: false,
+  });
 }
 
 function sortSlotsForDisplay(
@@ -773,8 +792,18 @@ function buildCursorHelpSlotRecord(
     lastUsedAt: 0,
     lastHealthCheckedAt: 0,
     lastHealthReason: undefined,
+    recoveryAttemptCount: 0,
+    lastRecoveryReason: undefined,
     lastError: undefined,
   };
+}
+
+function getRecoveryBudget(reason: string): number {
+  const normalized = String(reason || "").trim();
+  if (normalized === "page-not-ready") return 3;
+  if (normalized === "inspect-failed") return 2;
+  if (normalized === "tab-missing") return 2;
+  return 1;
 }
 
 function buildSlotHealthSnapshot(
@@ -1017,8 +1046,20 @@ async function attemptCursorHelpSlotRecovery(
   if (!slot.windowId || !Number.isInteger(slot.windowId) || slot.windowId <= 0) return;
   const windowAlive = await isCursorHelpWindowAlive(slot.windowId);
   if (!windowAlive) return;
+  const nextAttemptCount = Number(slot.recoveryAttemptCount || 0) + 1;
+  const recoveryReason = "tab-missing";
+  if (nextAttemptCount > getRecoveryBudget(recoveryReason)) {
+    await patchCursorHelpSlotState(slot.slotId, {
+      ...buildSlotHealthSnapshot("error", "recover-budget-exhausted", `recovery budget exhausted for ${recoveryReason}`),
+      recoveryAttemptCount: nextAttemptCount,
+      lastRecoveryReason: recoveryReason,
+    });
+    return;
+  }
   await patchCursorHelpSlotState(slot.slotId, {
     ...buildSlotHealthSnapshot("recovering", "recovering", "auto-recovering slot"),
+    recoveryAttemptCount: nextAttemptCount,
+    lastRecoveryReason: recoveryReason,
   });
   const replacement = await createAdditionalPoolSlot(
     slot.windowId,
@@ -1037,6 +1078,8 @@ async function attemptCursorHelpSlotRecovery(
     lanePreference: replacement.lanePreference,
     lastKnownUrl: replacement.lastKnownUrl,
     ...buildSlotHealthSnapshot("recovering", "recovering", "auto-recovering slot"),
+    recoveryAttemptCount: nextAttemptCount,
+    lastRecoveryReason: recoveryReason,
   });
   await ensureCursorHelpSlotUsable({
     ...slot,
@@ -1048,8 +1091,20 @@ async function attemptCursorHelpSlotRecovery(
 async function attemptCursorHelpSlotSoftRecovery(
   slot: CursorHelpSlotRecord,
 ): Promise<void> {
+  const recoveryReason = String(slot.lastHealthReason || "").trim() || "inspect-failed";
+  const nextAttemptCount = Number(slot.recoveryAttemptCount || 0) + 1;
+  if (nextAttemptCount > getRecoveryBudget(recoveryReason)) {
+    await patchCursorHelpSlotState(slot.slotId, {
+      ...buildSlotHealthSnapshot("error", "recover-budget-exhausted", `recovery budget exhausted for ${recoveryReason}`),
+      recoveryAttemptCount: nextAttemptCount,
+      lastRecoveryReason: recoveryReason,
+    });
+    return;
+  }
   await patchCursorHelpSlotState(slot.slotId, {
     ...buildSlotHealthSnapshot("recovering", "recovering", "retrying slot health"),
+    recoveryAttemptCount: nextAttemptCount,
+    lastRecoveryReason: recoveryReason,
   });
   await injectCursorHelpScripts(slot.tabId).catch(() => {
     // noop
@@ -1236,6 +1291,12 @@ async function ensureCursorHelpSlotUsable(
       String(health.lastHealthReason || ""),
       String(health.lastError || ""),
     ),
+    recoveryAttemptCount: canCursorHelpSlotBootExecute(inspect)
+      ? 0
+      : slot.recoveryAttemptCount,
+    lastRecoveryReason: canCursorHelpSlotBootExecute(inspect)
+      ? undefined
+      : slot.lastRecoveryReason,
     windowId: typeof tab.windowId === "number" ? tab.windowId : slot.windowId,
     lastKnownUrl: String(inspect?.url || tab.url || slot.lastKnownUrl || ""),
     lastReadyAt: canCursorHelpSlotBootExecute(inspect) ? nowMs() : slot.lastReadyAt,
@@ -1523,6 +1584,7 @@ export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebug
       ? await chrome.windows.get(state.windowId).catch(() => null)
       : null;
   const windowRuntimeState = resolveCursorHelpWindowRuntimeState(state, window);
+  const recoveryPreview = buildCursorHelpWindowRecoveryPreview(state);
   const slots = sortSlotsForDisplay(state.slots).map((slot) => {
     const activeRequestId = String(
       ACTIVE_REQUEST_ID_BY_SLOT.get(slot.slotId) || "",
@@ -1571,6 +1633,8 @@ export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebug
       recoveryCooldownActive: windowRuntimeState.recoveryCooldownActive,
       recoveryCooldownUntil: windowRuntimeState.recoveryCooldownUntil || 0,
       backgroundBlockedReason: windowRuntimeState.backgroundBlockedReason || "",
+      recoveryAction: recoveryPreview.action,
+      recoveryReason: recoveryPreview.reason,
       lastHeartbeatAt: cursorHelpHeartbeatLastAt,
       lastHeartbeatDelayMs: cursorHelpHeartbeatLastDelayMs,
       lastHeartbeatReason: cursorHelpHeartbeatLastReason,
@@ -1594,6 +1658,8 @@ export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebug
           recoveryCooldownActive: windowRuntimeState.recoveryCooldownActive,
           recoveryCooldownUntil: windowRuntimeState.recoveryCooldownUntil || 0,
           backgroundBlockedReason: windowRuntimeState.backgroundBlockedReason || "",
+          recoveryAction: recoveryPreview.action,
+          recoveryReason: recoveryPreview.reason,
           lastEvent: state.lastWindowEvent || "",
           lastEventAt: state.lastWindowEventAt || 0,
           lastEventReason: state.lastWindowEventReason || "",
