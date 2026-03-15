@@ -33,7 +33,6 @@ function createSandboxIframe(): HTMLIFrameElement {
   const el = document.createElement("iframe");
   el.src = SANDBOX_URL;
   el.style.display = "none";
-  el.setAttribute("sandbox", "allow-scripts");
   document.body.appendChild(el);
   return el;
 }

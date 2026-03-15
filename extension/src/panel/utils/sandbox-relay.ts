@@ -29,7 +29,6 @@ function createSandboxIframe(): HTMLIFrameElement {
   const el = document.createElement("iframe");
   el.src = SANDBOX_URL;
   el.style.display = "none";
-  el.setAttribute("sandbox", "allow-scripts");
   el.setAttribute("aria-hidden", "true");
   document.body.appendChild(el);
   return el;
