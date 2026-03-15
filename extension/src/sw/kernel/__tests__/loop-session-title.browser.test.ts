@@ -94,6 +94,7 @@ describe("loop-session-title", () => {
     registry.register(provider);
 
     const title = await requestSessionTitleFromLlm({
+      sessionId: "test-session",
       providerRegistry: registry,
       route: createRoute(),
       messages: [

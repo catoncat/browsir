@@ -7,6 +7,11 @@ import { readUiExtensionDescriptors } from "./plugin-ui-extensions";
 import { getRuntimeDebugSnapshot } from "./runtime-debug-store";
 import { buildConversationView } from "./session-utils";
 import { clampStepStream } from "./step-stream-utils";
+import {
+  getCursorHelpPoolDebugState,
+  ensureCursorHelpPoolReady,
+  rebuildCursorHelpPool,
+} from "../web-chat-executor.browser";
 
 type RuntimeOk<T = unknown> = { ok: true; data: T };
 type RuntimeErr = { ok: false; error: string };
@@ -362,7 +367,8 @@ export async function handleBrainDebug(
         runtime: await buildRuntimeSnapshot(orchestrator, sessionId, payload, pluginId),
         sandbox: getLifoDiagnostics(sessionId),
         plugins: await buildPluginSnapshot(orchestrator, pluginId),
-        skills: await buildSkillSnapshot(orchestrator)
+        skills: await buildSkillSnapshot(orchestrator),
+        cursorHelpPool: await getCursorHelpPoolDebugState().catch(() => null),
       }
     });
   }
@@ -385,6 +391,19 @@ export async function handleBrainDebug(
       scope,
       data: await buildDebugSnapshot(orchestrator, scope, sessionId, payload, pluginId)
     });
+  }
+
+  if (action === "brain.debug.cursor_help_pool") {
+    const subAction = String(payload.action || "").trim().toLowerCase();
+    if (subAction === "rebuild") {
+      const slotCount = Number(payload.slotCount || 0) || undefined;
+      return ok(await rebuildCursorHelpPool(slotCount));
+    }
+    if (subAction === "ensure") {
+      const slotCount = Number(payload.slotCount || 0) || undefined;
+      return ok(await ensureCursorHelpPoolReady(slotCount));
+    }
+    return ok(await getCursorHelpPoolDebugState());
   }
 
   return fail(`unsupported brain.debug action: ${action}`);

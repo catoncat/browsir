@@ -6,7 +6,6 @@ import {
   type HostedChatTransportEvent
 } from "../../shared/cursor-help-web-shared";
 import {
-  type CursorHelpExecutionPayload,
   type CursorHelpSenderInspect,
 } from "../../shared/cursor-help-protocol";
 import { CURSOR_HELP_RUNTIME_VERSION } from "../../shared/cursor-help-runtime-meta";
@@ -989,144 +988,6 @@ function formatInspectFailure(inspect: CursorHelpInspectResult | null): string {
   return "Cursor Help 页面暂不可执行正式链路。";
 }
 
-function shouldPropagateInspectFailure(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error || "");
-  return /运行时版本不一致/i.test(message);
-}
-
-async function tryUseTabForSession(
-  sessionId: string,
-  tabId: number
-): Promise<{ tabId: number; inspect: CursorHelpInspectResult; windowId?: number } | null> {
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
-  if (!tab?.id) return null;
-  await waitForCursorHelpTabReady(tab.id);
-  const inspect = await inspectCursorTabEnsured(tab.id);
-  if (inspect?.runtimeMismatch) {
-    throw new Error(formatInspectFailure(inspect));
-  }
-  if (!inspect?.canExecute) return null;
-  await saveSessionSlot({
-    sessionId,
-    tabId: tab.id,
-    windowId: typeof tab.windowId === "number" ? tab.windowId : undefined,
-    lastKnownUrl: inspect.url,
-    lastReadyAt: Date.now()
-  });
-  return {
-    tabId: tab.id,
-    inspect,
-    windowId: typeof tab.windowId === "number" ? tab.windowId : undefined
-  };
-}
-
-async function resolveTargetSlot(
-  input: LlmProviderSendInput
-): Promise<{ sessionId: string; tabId: number; inspect: CursorHelpInspectResult }> {
-  const sessionId = String(input.sessionId || "").trim() || "default";
-  const options = toRecord(input.route.providerOptions);
-  const slots = await loadSessionSlots();
-  const boundTabIds = new Set<number>(
-    Object.values(slots)
-      .map((slot) => Number(slot.tabId))
-      .filter((tabId) => Number.isInteger(tabId) && tabId > 0)
-  );
-
-  const existingSlot = slots[sessionId];
-  if (existingSlot?.tabId) {
-    const resolved = await tryUseTabForSession(sessionId, existingSlot.tabId).catch((error) => {
-      if (shouldPropagateInspectFailure(error)) throw error;
-      return null;
-    });
-    if (resolved) {
-      return {
-        sessionId,
-        tabId: resolved.tabId,
-        inspect: resolved.inspect
-      };
-    }
-    await clearSessionSlot(sessionId);
-  }
-
-  const preferredTabId = Number(options.targetTabId);
-  if (Number.isInteger(preferredTabId) && preferredTabId > 0) {
-    const alreadyBoundSession = Object.values(slots).find(
-      (slot) => slot.sessionId !== sessionId && slot.tabId === preferredTabId
-    );
-    if (!alreadyBoundSession) {
-      const resolved = await tryUseTabForSession(sessionId, preferredTabId).catch((error) => {
-        if (shouldPropagateInspectFailure(error)) throw error;
-        return null;
-      });
-      if (resolved) {
-        return {
-          sessionId,
-          tabId: resolved.tabId,
-          inspect: resolved.inspect
-        };
-      }
-    }
-  }
-
-  const existingTabs = await chrome.tabs.query({ url: [...CURSOR_TAB_PATTERNS] });
-  for (const tab of existingTabs) {
-    if (!tab.id) continue;
-    if (boundTabIds.has(tab.id)) continue;
-    const resolved = await tryUseTabForSession(sessionId, tab.id).catch((error) => {
-      if (shouldPropagateInspectFailure(error)) throw error;
-      return null;
-    });
-    if (resolved) {
-      return {
-        sessionId,
-        tabId: resolved.tabId,
-        inspect: resolved.inspect
-      };
-    }
-  }
-
-  const createdWindow = await chrome.windows.create({
-    url: CURSOR_HELP_URL,
-    focused: false,
-    type: "popup",
-    width: CURSOR_HELP_CONTAINER_WIDTH,
-    height: CURSOR_HELP_CONTAINER_HEIGHT
-  }).catch(async () => {
-    return chrome.windows.create({
-      url: CURSOR_HELP_URL,
-      focused: false,
-      width: CURSOR_HELP_CONTAINER_WIDTH,
-      height: CURSOR_HELP_CONTAINER_HEIGHT
-    });
-  });
-  const created = Array.isArray(createdWindow?.tabs) ? createdWindow.tabs[0] : null;
-  if (!created?.id) {
-    throw new Error("cursor_help_web 无法打开 Cursor Help 页面");
-  }
-  await chrome.tabs.update(created.id, {
-    autoDiscardable: false
-  }).catch(() => {
-    // noop
-  });
-  await waitForCursorHelpTabReady(created.id);
-  const inspect = await inspectCursorTabEnsured(created.id);
-  if (inspect?.canExecute) {
-    await saveSessionSlot({
-      sessionId,
-      tabId: created.id,
-      windowId: typeof created.windowId === "number" ? created.windowId : undefined,
-      lastKnownUrl: inspect.url,
-      lastReadyAt: Date.now()
-    });
-    return {
-      sessionId,
-      tabId: created.id,
-      inspect
-    };
-  }
-  throw new Error(formatInspectFailure(inspect));
-}
-
 export function createCursorHelpWebProvider() {
   ensureCursorHelpSlotLifecycle();
   return {
@@ -1135,38 +996,64 @@ export function createCursorHelpWebProvider() {
       return "browser-brain-loop://hosted-chat/cursor-help-web";
     },
     async send(input: LlmProviderSendInput): Promise<Response> {
-      emitProviderDebugLog("provider.resolve_slot", "running", "开始解析目标 Cursor Help 会话槽位");
-      const resolved = await resolveTargetSlot(input);
-      emitProviderDebugLog("provider.resolve_slot", "done", `session=${resolved.sessionId} 命中 tab=${resolved.tabId}`);
-      clearStaleExecution(resolved.sessionId, resolved.tabId);
+      const lane = normalizeExecutionLane(input.lane);
+      emitProviderDebugLog(
+        "provider.resolve_slot",
+        "running",
+        `lane=${lane} 开始解析目标 Cursor Help 执行槽位`,
+      );
 
-      if (ACTIVE_REQUEST_ID_BY_SESSION.has(resolved.sessionId)) {
-        throw new Error(`会话 ${resolved.sessionId} 已有执行中的网页 provider 请求`);
+      const resolved = await waitForCursorHelpSlot(input, lane);
+      const { sessionId, slot, inspect } = resolved;
+      emitProviderDebugLog(
+        "provider.resolve_slot",
+        "done",
+        `session=${sessionId} slot=${slot.slotId} tab=${slot.tabId} lane=${lane}`,
+      );
+      clearStaleExecution(slot.slotId, slot.tabId);
+
+      const sessionLaneKey = buildSessionLaneKey(sessionId, lane);
+      if (lane === "primary" && ACTIVE_REQUEST_ID_BY_SESSION_LANE.has(sessionLaneKey)) {
+        throw new Error(
+          `会话 ${sessionId} 已有执行中的 ${lane} 网页 provider 请求`,
+        );
       }
-      if (ACTIVE_REQUEST_ID_BY_TAB.has(resolved.tabId)) {
-        throw new Error(`目标标签页 ${resolved.tabId} 正在执行网页 provider 请求`);
+      if (ACTIVE_REQUEST_ID_BY_SLOT.has(slot.slotId)) {
+        throw new Error(
+          `槽位 ${slot.slotId} 正在执行网页 provider 请求`,
+        );
+      }
+      if (ACTIVE_REQUEST_ID_BY_TAB.has(slot.tabId)) {
+        throw new Error(
+          `目标标签页 ${slot.tabId} 正在执行网页 provider 请求`,
+        );
       }
 
       const requestId = `cursor-help-${crypto.randomUUID()}`;
       const compiledPrompt = buildCursorHelpCompiledPrompt(
         input.payload.messages,
         input.payload.tools,
-        input.payload.tool_choice
+        input.payload.tool_choice,
       );
       const latestUserPrompt = extractLastUserMessage(input.payload.messages);
-      const requestedModel = String(input.route.llmModel || "").trim() || "auto";
+      const requestedModel =
+        String(input.route.llmModel || "").trim() || "auto";
       const entry: PendingExecution = {
         requestId,
-        sessionId: resolved.sessionId,
-        tabId: resolved.tabId,
-        createdAt: Date.now(),
-        lastEventAt: Date.now(),
+        sessionId,
+        slotId: slot.slotId,
+        lane,
+        tabId: slot.tabId,
+        windowId: slot.windowId,
+        createdAt: nowMs(),
+        lastEventAt: nowMs(),
         startedAt: null,
         timeoutHandle: null,
         controller: null,
         queue: [],
         firstDeltaLogged: false,
-        closed: false
+        conversationKey: null,
+        closed: false,
       };
 
       const stream = new ReadableStream<Uint8Array>({
@@ -1178,56 +1065,86 @@ export function createCursorHelpWebProvider() {
         },
         cancel() {
           closeExecution(entry);
-        }
+        },
       });
 
       ACTIVE_BY_REQUEST_ID.set(requestId, entry);
-      ACTIVE_REQUEST_ID_BY_TAB.set(resolved.tabId, requestId);
-      ACTIVE_REQUEST_ID_BY_SESSION.set(resolved.sessionId, requestId);
-      armExecutionWatchdog(entry, EXECUTION_BOOT_TIMEOUT_MS, "网页 provider 请求未启动，请确认 Cursor Help 页面已加载完成");
-      emitProviderDebugLog("provider.execute", "running", `向 tab=${resolved.tabId} 发送 webchat.execute`);
+      await markCursorHelpSlotBusy(slot, entry);
+      PREFERRED_SLOT_ID_BY_SESSION.set(sessionId, slot.slotId);
+      armExecutionWatchdog(
+        entry,
+        EXECUTION_BOOT_TIMEOUT_MS,
+        "网页 provider 请求未启动，请确认 Cursor Help 页面已加载完成",
+      );
+      emitProviderDebugLog(
+        "provider.execute",
+        "running",
+        `向 slot=${slot.slotId} tab=${slot.tabId} 发送 webchat.execute lane=${lane}`,
+      );
 
       input.signal.addEventListener(
         "abort",
         () => {
-          void chrome.tabs.sendMessage(resolved.tabId, {
-            type: "webchat.abort",
-            requestId
-          }).catch(() => {
-            // noop
-          });
+          void chrome.tabs
+            .sendMessage(slot.tabId, {
+              type: "webchat.abort",
+              requestId,
+            })
+            .catch(() => {
+              // noop
+            });
           failExecution(entry, "webchat provider aborted");
         },
-        { once: true }
+        { once: true },
       );
 
       try {
-        const response = await sendTabMessageWithRetry(resolved.tabId, {
+        const response = await sendTabMessageWithRetry(slot.tabId, {
           type: "webchat.execute",
           requestId,
-          sessionId: resolved.sessionId,
+          sessionId,
           compiledPrompt,
           latestUserPrompt,
-          requestedModel
+          requestedModel,
+          lane,
+          slotId: slot.slotId,
         });
         const row = toRecord(response);
         if (row.ok !== true) {
-          emitProviderDebugLog("provider.execute", "failed", String(row.error || "目标网页执行器未就绪"));
-          throw new Error(String(row.error || "目标网页执行器未就绪"));
+          emitProviderDebugLog(
+            "provider.execute",
+            "failed",
+            String(row.error || "目标网页执行器未就绪"),
+          );
+          throw new Error(
+            String(row.error || "目标网页执行器未就绪"),
+          );
         }
         emitProviderDebugLog(
           "provider.execute",
           "done",
-          `content script 已确认接收 execute 请求${row.senderKind ? ` (${String(row.senderKind)})` : ""}`
+          `content script 已确认接收 execute 请求${
+            row.senderKind ? ` (${String(row.senderKind)})` : ""
+          }`,
         );
       } catch (error) {
         ACTIVE_BY_REQUEST_ID.delete(requestId);
-        ACTIVE_REQUEST_ID_BY_TAB.delete(resolved.tabId);
-        ACTIVE_REQUEST_ID_BY_SESSION.delete(resolved.sessionId);
-        void clearSessionSlotIfMatches(resolved.sessionId, resolved.tabId).catch(() => {
+        ACTIVE_REQUEST_ID_BY_SLOT.delete(slot.slotId);
+        ACTIVE_REQUEST_ID_BY_TAB.delete(slot.tabId);
+        ACTIVE_REQUEST_ID_BY_SESSION_LANE.delete(sessionLaneKey);
+        void patchCursorHelpSlotState(slot.slotId, {
+          status: "stale",
+          lastUsedAt: nowMs(),
+          lastError:
+            error instanceof Error ? error.message : String(error),
+        }).catch(() => {
           // noop
         });
-        emitProviderDebugLog("provider.execute", "failed", error instanceof Error ? error.message : String(error));
+        emitProviderDebugLog(
+          "provider.execute",
+          "failed",
+          error instanceof Error ? error.message : String(error),
+        );
         throw error instanceof Error ? error : new Error(String(error));
       }
 
@@ -1235,10 +1152,10 @@ export function createCursorHelpWebProvider() {
         status: 200,
         headers: {
           "content-type": HOSTED_CHAT_RESPONSE_CONTENT_TYPE,
-          "cache-control": "no-cache"
-        }
+          "cache-control": "no-cache",
+        },
       });
-    }
+    },
   };
 }
 
@@ -1256,13 +1173,17 @@ export async function handleWebChatRuntimeMessage(message: unknown, senderTabId?
   if (event.type === "hosted_chat.debug") {
     enqueueHostedEvent(entry, event);
     if (event.stage === "request_started") {
-      entry.startedAt = Date.now();
+      entry.startedAt = nowMs();
       armExecutionWatchdog(entry, EXECUTION_STALE_MS, "网页 provider 请求长时间未结束");
       const sessionKey = String(toRecord(event.meta).sessionKey || "").trim();
+      if (sessionKey && !entry.conversationKey) {
+        entry.conversationKey = sessionKey;
+        PREFERRED_SLOT_ID_BY_CONVERSATION.set(sessionKey, entry.slotId);
+      }
       emitProviderDebugLog(
         "provider.request_started",
         "done",
-        `tab=${entry.tabId} 页面内聊天请求已发出${sessionKey ? ` sessionKey=${sessionKey}` : ""}`
+        `slot=${entry.slotId} tab=${entry.tabId} lane=${entry.lane} 页面内聊天请求已发出${sessionKey ? ` sessionKey=${sessionKey}` : ""}`,
       );
       const rewriteSummary = formatRewriteDebugSummary(toRecord(event.meta).rewriteDebug);
       if (rewriteSummary) {

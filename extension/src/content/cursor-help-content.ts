@@ -925,12 +925,16 @@ if (!contentScope[CONTENT_INSTALLED_FLAG]) {
               const compiledPrompt = String(message.compiledPrompt || "");
               const latestUserPrompt = String(message.latestUserPrompt || "").trim() || "Continue";
               const requestedModel = String(message.requestedModel || "auto").trim() || "auto";
+              const lane = String(message.lane || "primary").trim() || "primary";
+              const slotId = String(message.slotId || "").trim();
               const result = await callPage("WEBCHAT_EXECUTE", {
                 requestId,
                 sessionId,
                 compiledPrompt,
                 latestUserPrompt,
-                requestedModel
+                requestedModel,
+                lane,
+                slotId
               });
               emitDemoLog(
                 "content.execute",

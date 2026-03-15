@@ -26,6 +26,9 @@ export interface CursorHelpExecutionPayload {
   compiledPrompt: string;
   latestUserPrompt: string;
   requestedModel: string;
+  lane?: "primary" | "compaction" | "title";
+  slotId?: string;
+  conversationKey?: string;
 }
 
 export interface CursorHelpSenderInspect {
@@ -43,6 +46,8 @@ export interface CursorHelpSenderInspect {
   rewriteStrategy?: string;
   runtimeMismatch?: boolean;
   runtimeMismatchReason?: string;
+  conversationMode?: "implicit" | "keyed";
+  supportsConcurrentConversations?: boolean;
 }
 
 export interface CursorHelpRewritePlan {

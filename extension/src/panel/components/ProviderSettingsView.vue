@@ -762,6 +762,85 @@ async function handleSave(): Promise<void> {
   }
 }
 
+const cursorHelpPoolState = ref<Record<string, unknown> | null>(null);
+const cursorHelpPoolLoading = ref(false);
+
+async function sendBrainMessage(message: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+  try {
+    const result = await chrome.runtime.sendMessage(message);
+    if (result && typeof result === "object") return result as Record<string, unknown>;
+  } catch {
+    // extension context may be unavailable
+  }
+  return null;
+}
+
+async function refreshCursorHelpPool(): Promise<void> {
+  cursorHelpPoolLoading.value = true;
+  try {
+    const result = await sendBrainMessage({ type: "brain.debug.cursor_help_pool" });
+    if (result?.ok && result.data) {
+      cursorHelpPoolState.value = result.data as Record<string, unknown>;
+    }
+  } finally {
+    cursorHelpPoolLoading.value = false;
+  }
+}
+
+async function rebuildCursorHelpPoolFromUI(): Promise<void> {
+  cursorHelpPoolLoading.value = true;
+  localError.value = "";
+  try {
+    const result = await sendBrainMessage({
+      type: "brain.debug.cursor_help_pool",
+      action: "rebuild",
+    });
+    if (result?.ok && result.data) {
+      cursorHelpPoolState.value = result.data as Record<string, unknown>;
+    } else {
+      localError.value = String((result as Record<string, unknown>)?.error || "重建运行池失败");
+    }
+  } catch (err) {
+    localError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    cursorHelpPoolLoading.value = false;
+  }
+}
+
+function poolSummary(): Record<string, unknown> {
+  const pool = cursorHelpPoolState.value;
+  if (!pool || typeof pool !== "object") return {};
+  const summary = (pool as Record<string, unknown>).summary;
+  return summary && typeof summary === "object" ? summary as Record<string, unknown> : {};
+}
+
+function poolSlots(): Array<Record<string, unknown>> {
+  const pool = cursorHelpPoolState.value;
+  if (!pool || typeof pool !== "object") return [];
+  const slots = (pool as Record<string, unknown>).slots;
+  return Array.isArray(slots) ? slots as Array<Record<string, unknown>> : [];
+}
+
+function slotStatusColor(status: unknown): string {
+  const s = String(status || "").trim();
+  if (s === "idle") return "text-emerald-500";
+  if (s === "busy") return "text-amber-500";
+  if (s === "warming") return "text-sky-400";
+  if (s === "error" || s === "stale") return "text-red-500";
+  return "text-ui-text-muted";
+}
+
+function slotStatusLabel(status: unknown): string {
+  const s = String(status || "").trim();
+  if (s === "idle") return "就绪";
+  if (s === "busy") return "执行中";
+  if (s === "warming") return "预热中";
+  if (s === "error") return "异常";
+  if (s === "stale") return "过期";
+  if (s === "cold") return "冷启动";
+  return s || "未知";
+}
+
 onMounted(() => {
   ensureProfiles();
   for (const profile of config.value.llmProfiles) {
@@ -777,6 +856,7 @@ onMounted(() => {
       }
     });
   }
+  void refreshCursorHelpPool();
   dialogRef.value?.focus();
 });
 </script>
@@ -926,6 +1006,73 @@ onMounted(() => {
               findCursorWebProfile() ? "重新连接" : "连接 Cursor"
             }}</span>
           </button>
+        </div>
+        <div
+          v-if="cursorHelpPoolState"
+          class="border-t border-ui-border pt-2 space-y-2"
+        >
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] text-ui-text-muted font-medium">
+              Help 运行池
+              <span class="ml-1 tabular-nums">
+                {{ poolSummary().readyCount || 0 }}就绪
+                /{{ poolSummary().busyCount || 0 }}执行中
+                /{{ poolSummary().errorCount || 0 }}异常
+              </span>
+            </span>
+            <div class="flex items-center gap-1.5">
+              <button
+                type="button"
+                class="text-[11px] text-ui-text-muted hover:text-ui-text px-1.5 py-0.5 border border-ui-border rounded-sm"
+                :disabled="cursorHelpPoolLoading"
+                @click="refreshCursorHelpPool"
+                aria-label="刷新运行池状态"
+              >
+                刷新
+              </button>
+              <button
+                type="button"
+                class="text-[11px] text-ui-text-muted hover:text-ui-text px-1.5 py-0.5 border border-ui-border rounded-sm"
+                :disabled="cursorHelpPoolLoading"
+                @click="rebuildCursorHelpPoolFromUI"
+                aria-label="重建运行池"
+              >
+                <Loader2
+                  v-if="cursorHelpPoolLoading"
+                  class="animate-spin inline-block"
+                  :size="10"
+                  aria-hidden="true"
+                />
+                重建
+              </button>
+            </div>
+          </div>
+          <div
+            v-for="slot in poolSlots()"
+            :key="String(slot.slotId || '')"
+            class="flex items-center gap-2 text-[11px] px-1"
+          >
+            <span
+              :class="slotStatusColor(slot.status)"
+              class="font-medium w-[3.5em] shrink-0"
+            >
+              {{ slotStatusLabel(slot.status) }}
+            </span>
+            <span class="text-ui-text-muted/70 truncate">
+              {{ slot.lanePreference === 'primary' ? '主' : '辅' }}
+              tab={{ slot.tabId }}
+              <template v-if="slot.activeLane">
+                lane={{ slot.activeLane }}
+              </template>
+            </span>
+            <span
+              v-if="slot.lastError"
+              class="text-red-400 truncate"
+              :title="String(slot.lastError)"
+            >
+              {{ String(slot.lastError).slice(0, 40) }}
+            </span>
+          </div>
         </div>
       </section>
 
