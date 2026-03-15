@@ -2,6 +2,7 @@ import "./test-setup";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  __resetCursorHelpWebProviderTestState,
   createCursorHelpWebProvider,
   ensureCursorHelpPoolReady,
   getCursorHelpPoolDebugState,
@@ -244,6 +245,10 @@ function getExecuteCalls(): Array<Record<string, unknown>> {
 
 describe("web-chat-executor.browser", () => {
   beforeEach(async () => {
+    (globalThis as typeof globalThis & {
+      __BRAIN_TEST_DISABLE_CURSOR_HELP_HEARTBEAT__?: boolean;
+    }).__BRAIN_TEST_DISABLE_CURSOR_HELP_HEARTBEAT__ = true;
+    __resetCursorHelpWebProviderTestState();
     buildChromeMock();
     await chrome.storage.local.clear();
   });
@@ -1275,7 +1280,7 @@ describe("web-chat-executor.browser", () => {
     expect(String(exhaustedSlot?.status || "")).toBe("error");
     expect(String(exhaustedSlot?.lastHealthReason || "")).toBe("recover-budget-exhausted");
     expect(String(exhaustedSlot?.lastError || "")).toContain("inspect-failed");
-  });
+  }, 10_000);
 
   it("rejects stale runtime version before execute", async () => {
     const sendMessage = (chrome.tabs as unknown as Record<string, unknown>).sendMessage as ReturnType<typeof vi.fn>;

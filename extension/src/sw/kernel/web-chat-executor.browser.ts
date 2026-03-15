@@ -130,6 +130,25 @@ let cursorHelpHeartbeatLastAt = 0;
 let cursorHelpHeartbeatLastDelayMs = 0;
 let cursorHelpHeartbeatLastReason = "";
 
+function isCursorHelpHeartbeatAutoSchedulingDisabledForTests(): boolean {
+  return Boolean(
+    (globalThis as typeof globalThis & {
+      __BRAIN_TEST_DISABLE_CURSOR_HELP_HEARTBEAT__?: boolean;
+    }).__BRAIN_TEST_DISABLE_CURSOR_HELP_HEARTBEAT__,
+  );
+}
+
+export function __resetCursorHelpWebProviderTestState(): void {
+  if (cursorHelpHeartbeatTimer) {
+    clearTimeout(cursorHelpHeartbeatTimer);
+    cursorHelpHeartbeatTimer = null;
+  }
+  cursorHelpHeartbeatInFlight = false;
+  cursorHelpHeartbeatLastAt = 0;
+  cursorHelpHeartbeatLastDelayMs = 0;
+  cursorHelpHeartbeatLastReason = "";
+}
+
 function emitProviderDebugLog(step: string, status: "running" | "done" | "failed", detail: string): void {
   void chrome.runtime.sendMessage({
     type: "cursor-help-demo.log",
@@ -871,6 +890,9 @@ function resolveHeartbeatDelay(debugState: CursorHelpPoolDebugView): {
 function scheduleCursorHelpPoolHeartbeat(delayMs = CURSOR_HELP_HEARTBEAT_INTERVAL_MS): void {
   if (cursorHelpHeartbeatTimer) return;
   cursorHelpHeartbeatLastDelayMs = delayMs;
+  if (isCursorHelpHeartbeatAutoSchedulingDisabledForTests()) {
+    return;
+  }
   cursorHelpHeartbeatTimer = setTimeout(async () => {
     cursorHelpHeartbeatTimer = null;
     if (cursorHelpHeartbeatInFlight) {
