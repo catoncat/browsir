@@ -86,14 +86,14 @@ export function buildAvailableSkillsSystemMessage(skills: SkillMetadata[]): stri
 }
 
 const EXTENSION_AGENT_PROMPT_TOOL_ORDER = [
-  "host_read_file",
-  "host_write_file",
-  "host_edit_file",
-  "host_bash",
   "browser_read_file",
   "browser_write_file",
   "browser_edit_file",
   "browser_bash",
+  "host_read_file",
+  "host_write_file",
+  "host_edit_file",
+  "host_bash",
   "get_all_tabs",
   "get_current_tab",
   "create_new_tab",
@@ -135,18 +135,18 @@ const EXTENSION_AGENT_PROMPT_TOOL_ORDER = [
 ] as const;
 
 const EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS: Record<string, string> = {
+  browser_read_file:
+    "Read file contents from browser sandbox FS (mem://). Use for virtual filesystem operations.",
+  browser_write_file: "Create or overwrite files on browser sandbox FS.",
+  browser_edit_file:
+    "Patch browser sandbox files with exact replacements.",
+  browser_bash:
+    "Execute shell commands in browser sandbox runtime. Sandboxed Linux-like shell with 60+ commands (ls, grep, sed, awk, sort, find, tree, diff, tar, base64, bc). Supports pipes, redirects, variables, globs. No real network access, no host filesystem — use host_bash for system-level operations.",
   host_read_file: "Read file contents from host filesystem.",
   host_write_file: "Create or overwrite files on host filesystem.",
   host_edit_file:
     "Patch host files with exact replacements (and unified patch where supported).",
-  host_bash: "Execute shell commands on host runtime via bridge bash.exec.",
-  browser_read_file:
-    "Read file contents from browser lifo sandbox FS (mem://).",
-  browser_write_file: "Create or overwrite files on browser virtual FS.",
-  browser_edit_file:
-    "Patch browser virtual files with exact replacements (no unified patch).",
-  browser_bash:
-    "Execute shell commands in browser virtual runtime. Full Linux-like shell with 60+ commands (ls, grep, sed, awk, curl, sort, find, tree, diff, tar, base64, bc). Supports pipes, redirects, variables, globs. Use curl/wget for HTTP requests. Use node -e for JavaScript execution.",
+  host_bash: "Execute shell commands on host runtime via bridge. Use for npm/pip/git, real network access, and system-level operations.",
   get_all_tabs: "List currently open browser tabs.",
   get_current_tab: "Get the active browser tab context.",
   create_new_tab: "Open a new browser tab when task flow requires it.",
@@ -209,12 +209,13 @@ const BROWSER_AUTOMATION_DECISION_TREE = [
 
 const EXTENSION_AGENT_PROMPT_BASE_GUIDELINES = [
   "Use tools instead of guessing. Ground decisions in tool outputs.",
-  "For host file tasks, call host_read_file before host_edit_file/host_write_file.",
-  "For virtual file tasks, call browser_read_file before browser_edit_file/browser_write_file.",
-  "When creating/updating skills, prefer create_skill; avoid using browser_bash to scaffold skill files.",
+  "Default to browser sandbox (browser_*) tools for virtual file and sandbox shell operations. Use host_* tools for system-level tasks (npm/pip/git, real network, host filesystem).",
+  "browser_bash paths MUST use mem:// protocol URIs (e.g. `ls mem://mydir`, `cat mem://file.txt`). Never use Unix paths like /mem or /tmp — those do not exist in the virtual FS.",
+  "For file tasks, call browser_read_file before browser_edit_file/browser_write_file. For host-specific file tasks, call host_read_file before host_edit_file/host_write_file.",
+  "When creating/updating skills, prefer create_skill; avoid using browser_bash to scaffold skill files. For installing external dependencies (npm/pip/git), use host_bash.",
   "Prefer *_edit_file for surgical changes; use *_write_file for new files or full rewrites.",
   BROWSER_AUTOMATION_DECISION_TREE,
-  "Do not use legacy runtime hints when split tools are available. Choose explicit host_* or browser_* tools.",
+  "Do not use legacy runtime hints when split tools are available. Choose explicit browser_* (primary) or host_* (fallback) tools.",
   "When tab context is ambiguous, query get_current_tab/get_all_tabs before acting.",
   "Be concise. Show key file paths, tab context, and blockers clearly.",
   "When debugging a BBL diagnostic export, inspect top-level blocks in this order: summary.lastError -> timeline -> sandbox.summary -> sandbox.trace -> llm.trace -> tools.trace -> agent.loopRuns -> rawEventTail.",
@@ -251,7 +252,8 @@ export function buildBrowserAgentSystemPromptBase(
     "You help users by reading files, executing commands, editing code, writing files, and operating browser tabs.",
     "",
     "Environment:",
-    "- Planner + loop engine run in Chrome extension sidepanel/service worker.",
+    "- Primary runtime is the browser sandbox (mem:// filesystem + browser_bash shell). Use browser_* tools for virtual file and shell operations.",
+    "- Host filesystem and shell are available via host_* tools for system-level tasks (npm/pip/git, real network, host filesystem access).",
     "- Local WebSocket bridge is execution-only (file/shell proxy), not task planner.",
     "- You can operate live browser tabs via browser tools.",
     "",
@@ -355,7 +357,7 @@ export async function buildLlmMessagesFromContext(
       "4) A short task progress note will be provided each round via system message.",
       "5) For browser tasks, prefer actions grounded in observed page state and tool results.",
       "6) Do not invent site selectors/URLs; re-observe when uncertain.",
-      "7) Prefer explicit split tools: host_* for host execution, browser_* for virtual-fs execution.",
+      "7) Default to browser_* (sandbox) tools. Use host_* tools only when host-side access is explicitly required.",
       "8) Temporary policy: do NOT run tests (e.g., bun test/pnpm test/npm test/pytest/go test) unless the user explicitly requests tests.",
     ].join("\n"),
   });

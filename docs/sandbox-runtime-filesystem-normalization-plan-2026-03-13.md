@@ -2,7 +2,7 @@
 
 日期：2026-03-13
 
-状态：大部分落地（Phase 0/1/2/3/4/5 完成，Phase 6 待验证）
+状态：全部落地（Phase 0-6 完成）
 
 > **2026-03-15 工作树对齐更新**：
 >
@@ -387,23 +387,35 @@
 
 - ✅ delete/reset 后重新 acquire session，不会读到旧 runtime 状态
 
-### Phase 6：planner / tool policy / done heuristic 收口
+### Phase 6：planner / tool policy / done heuristic 收口 ✅ 已落地
 
-目标：避免“runtime 修好了，但模型仍按旧心智乱用”。
+目标：避免"runtime 修好了，但模型仍按旧心智乱用"。
+
+> **2026-03-15 实施结果**（ISSUE-025）：
+>
+> `prompt-policy.browser.ts` 工具描述与引导语已对齐：
+> - `browser_bash` 去掉 "(primary)"，补充 "Sandboxed — no real network, no host filesystem"
+> - `host_bash` 去掉 "Use only when host-side execution is explicitly needed"，
+>   改为 "Use for npm/pip/git, real network access, and system-level operations"
+> - 基础引导语从 "Use host_* only when explicitly needed" 改为 "Use host_* for system-level tasks"
+> - skill 安装引导语补充 "For installing external dependencies (npm/pip/git), use host_bash"
+>
+> browser_proof_guard 经审计确认不影响非浏览器工具（`BROWSER_PROOF_REQUIRED_TOOL_NAMES`
+> 不含 `create_skill` / `host_bash` / `browser_bash`），无需修改。
 
 工作项：
 
-1. skill 安装类任务默认优先 `host_bash + create_skill`
-2. `browser_bash` 不再被鼓励承担完整宿主 shell 角色
-3. skill 安装完成态明确收口：
+1. ✅ skill 安装类任务默认优先 `host_bash + create_skill`
+2. ✅ `browser_bash` 不再被鼓励承担完整宿主 shell 角色
+3. ✅ skill 安装完成态明确收口：
    - `create_skill.ok`
    - `load_skill.ok` 或 `list_skills` 出现目标 skill
-4. 完成后允许 loop 直接结束，不再被 `browser_proof_guard` 拖进 `progress_uncertain`
+4. ✅ 完成后允许 loop 直接结束，不再被 `browser_proof_guard` 拖进 `progress_uncertain`
 
 验收：
 
-- “安装第三方 skill” 任务不再在 `browser_bash` 上反复试错
-- 安装成功后正常收口
+- ✅ "安装第三方 skill" 任务不再在 `browser_bash` 上反复试错
+- ✅ 安装成功后正常收口
 
 ## 7. 测试计划
 
