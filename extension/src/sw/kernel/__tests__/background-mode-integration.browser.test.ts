@@ -330,36 +330,73 @@ describe("background-mode integration", () => {
       expect(result.error).toContain("element not found");
     });
 
-    it("rejects unsupported action kinds in background mode", async () => {
-      await setAutomationMode("background");
+    it("falls through to CDP for unsupported action kinds in background mode (mixed fallback)", async () => {
+      // First take a focus-mode snapshot to populate CDP ref store
+      await setAutomationMode("focus");
       const infra = createRuntimeInfraHandler();
+
+      await infra.handleMessage({
+        type: "lease.acquire",
+        tabId: 10,
+        owner: "runner-bg",
+      });
+
+      await infra.handleMessage({
+        type: "cdp.snapshot",
+        tabId: 10,
+        options: { mode: "interactive" },
+      });
+
+      // Now switch to background and send unsupported action kind
+      await setAutomationMode("background");
 
       const result = await infra.handleMessage({
         type: "cdp.action",
         tabId: 10,
         owner: "runner-bg",
-        action: { kind: "scroll", ref: "uid-btn-1" },
+        action: { kind: "scroll", ref: "bn-101" },
       });
 
-      expect(result?.ok).toBe(false);
-      if (result?.ok !== false) return;
-      expect(result.error).toContain("does not support action kind");
+      // Should succeed via CDP fallback, not fail with "unsupported action kind"
+      expect(result?.ok).toBe(true);
+      if (!result || result.ok !== true) return;
+      const data = result.data as Record<string, unknown>;
+      expect(data.mode).toBe("background-cdp-fallback");
+      expect(String(data.hint || "")).toContain("CDP fallback");
     });
 
-    it("requires uid/ref in background mode", async () => {
-      await setAutomationMode("background");
+    it("falls through to CDP when no uid is provided in background mode (mixed fallback)", async () => {
+      // Take a focus-mode snapshot first to populate CDP ref store
+      await setAutomationMode("focus");
       const infra = createRuntimeInfraHandler();
+
+      await infra.handleMessage({
+        type: "lease.acquire",
+        tabId: 10,
+        owner: "runner-bg",
+      });
+
+      await infra.handleMessage({
+        type: "cdp.snapshot",
+        tabId: 10,
+        options: { mode: "interactive" },
+      });
+
+      // Switch to background, send click with CDP-style selector (no uid/ref)
+      await setAutomationMode("background");
 
       const result = await infra.handleMessage({
         type: "cdp.action",
         tabId: 10,
         owner: "runner-bg",
-        action: { kind: "click" },
+        action: { kind: "click", selector: "#focus-btn" },
       });
 
-      expect(result?.ok).toBe(false);
-      if (result?.ok !== false) return;
-      expect(result.error).toContain("requires a uid/ref");
+      // Should fall through to CDP since there's no uid for DomLocator
+      expect(result?.ok).toBe(true);
+      if (!result || result.ok !== true) return;
+      const data = result.data as Record<string, unknown>;
+      expect(data.mode).toBe("background-cdp-fallback");
     });
 
     it("uses CDP path in focus mode", async () => {

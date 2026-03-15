@@ -1328,7 +1328,9 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       let snapshot: JsonRecord;
       try {
         snapshot = await takeSnapshotByDom(tabId, options, base, state, key, snapshotId);
+        recordBackgroundSuccess(tabId);
       } catch (error) {
+        recordBackgroundFailure(tabId);
         snapshot = {
           ...base,
           count: 0,
@@ -1340,11 +1342,13 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       state.byKey.set(key, snapshot);
       state.lastSnapshotId = snapshotId;
       const diff = options.diff === true ? { hasPrevious: !!previous } : null;
+      const upgradeHint = buildUpgradeHint(tabId);
       return {
         ...snapshot,
         diff,
         compact: buildCompactSnapshot(snapshot),
         stats: { key, hasPrevious: !!previous },
+        ...(upgradeHint ? { upgradeHint } : {}),
       };
     }
 
@@ -1548,51 +1552,59 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         const action = asRecord(msg.action);
         const kind = normalizeActionKind(action.kind);
 
-        // ── Background mode: use DomLocator instead of CDP ──
+        // ── Background mode: use DomLocator when possible, CDP fallback for unsupported actions ──
         const actionMode = await getAutomationMode();
+        let cdpFallbackFromBackground = false;
         if (actionMode === "background") {
-          const locator = new DomLocator(tabId);
           const uid = String(action.ref || action.uid || action.brainUid || "");
-          if (!uid) return fail("background mode action requires a uid/ref");
+          const domActionSupported = !!uid && ["click", "fill", "type", "hover"].includes(kind);
 
-          let result: { success: boolean; error?: string; data?: unknown };
-          switch (kind) {
-            case "click":
-              result = await locator.click(uid, {
-                count: Number(action.count || 1),
-              });
-              break;
-            case "fill":
-            case "type":
-              result = await locator.fill(uid, {
-                value: String(action.value || ""),
-              });
-              break;
-            case "hover":
-              result = await locator.hover(uid);
-              break;
-            default:
-              return fail(`background mode does not support action kind: ${kind}`);
+          if (domActionSupported) {
+            const locator = new DomLocator(tabId);
+            let result: { success: boolean; error?: string; data?: unknown };
+            switch (kind) {
+              case "click":
+                result = await locator.click(uid, {
+                  count: Number(action.count || 1),
+                });
+                break;
+              case "fill":
+              case "type":
+                result = await locator.fill(uid, {
+                  value: String(action.value || ""),
+                });
+                break;
+              default: // hover
+                result = await locator.hover(uid);
+                break;
+            }
+            if (!result.success) {
+              recordBackgroundFailure(tabId);
+              const upgradeHint = buildUpgradeHint(tabId);
+              return fail(
+                toRuntimeError(result.error || "dom action failed", {
+                  code: "E_DOM_ACTION_FAILED",
+                  retryable: true,
+                  details: { tabId, kind, uid, mode: "background", ...(upgradeHint ? { upgradeHint } : {}) },
+                }),
+              );
+            }
+            recordBackgroundSuccess(tabId);
+            const actionUpgradeHint = buildUpgradeHint(tabId);
+            return ok({
+              ok: true,
+              kind,
+              uid,
+              mode: "background",
+              hint: "action executed via DOM synthetic events (background mode)",
+              ...(actionUpgradeHint ? { upgradeHint: actionUpgradeHint } : {}),
+            });
           }
-          if (!result.success) {
-            return fail(
-              toRuntimeError(result.error || "dom action failed", {
-                code: "E_DOM_ACTION_FAILED",
-                retryable: true,
-                details: { tabId, kind, uid, mode: "background" },
-              }),
-            );
-          }
-          return ok({
-            ok: true,
-            kind,
-            uid,
-            mode: "background",
-            hint: "action executed via DOM synthetic events (background mode)",
-          });
+          // Unsupported action kind or missing uid → fall through to CDP (mixed fallback)
+          cdpFallbackFromBackground = true;
         }
 
-        // ── Focus mode: existing CDP path ──
+        // ── Focus mode / mixed fallback: CDP path ──
         if (action.requireFocus === true && action.forceFocus !== true) {
           return fail(
             toRuntimeError("action requires focused tab", {
@@ -1608,7 +1620,15 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
         if (actionRequiresLease(kind)) {
           ensureLeaseForWrite(tabId, resolveOwnerFromMessage(msg));
         }
-        return ok(await cdpAction.executeRefActionByCDP(tabId, action));
+        const cdpResult = await cdpAction.executeRefActionByCDP(tabId, action);
+        if (cdpFallbackFromBackground) {
+          return ok({
+            ...(typeof cdpResult === "object" && cdpResult !== null ? cdpResult : { result: cdpResult }),
+            mode: "background-cdp-fallback",
+            hint: `action kind "${kind}" not supported by DOM path; executed via CDP fallback`,
+          });
+        }
+        return ok(cdpResult);
       }
       if (type === "cdp.execute") {
         const tabId = toValidTabId(msg.tabId);
