@@ -121,6 +121,9 @@ const CURSOR_HELP_POOL_STORAGE_KEY = "cursor_help_web.pool.v1";
 const CURSOR_HELP_CONTAINER_WIDTH = 1280;
 const CURSOR_HELP_CONTAINER_HEIGHT = 900;
 const CURSOR_HELP_WINDOW_REBUILD_COOLDOWN_MS = 15_000;
+const AUTOSCALE_EXPAND_COOLDOWN_MS = 10_000;
+const AUTOSCALE_SHRINK_COOLDOWN_MS = 60_000;
+const AUTOSCALE_IDLE_THRESHOLD_MS = 120_000;
 const HOSTED_CHAT_RESPONSE_CONTENT_TYPE = "application/x-browser-brain-loop-hosted-chat+jsonl";
 let cursorHelpSlotLifecycleBoundTabs: typeof chrome.tabs | null = null;
 let cursorHelpSlotLifecycleBoundWindows: typeof chrome.windows | null = null;
@@ -129,6 +132,10 @@ let cursorHelpHeartbeatInFlight = false;
 let cursorHelpHeartbeatLastAt = 0;
 let cursorHelpHeartbeatLastDelayMs = 0;
 let cursorHelpHeartbeatLastReason = "";
+let lastAutoExpandAt = 0;
+let lastAutoShrinkAt = 0;
+let lastAutoExpandReason = "";
+let lastAutoShrinkReason = "";
 
 function isCursorHelpHeartbeatAutoSchedulingDisabledForTests(): boolean {
   return Boolean(
@@ -1236,6 +1243,84 @@ async function createAdditionalPoolSlot(
   return buildCursorHelpSlotRecord(tab, lanePreference, existingSlotId);
 }
 
+function hasSlotAffinity(slotId: string): boolean {
+  for (const preferredSlotId of PREFERRED_SLOT_ID_BY_SESSION.values()) {
+    if (preferredSlotId === slotId) return true;
+  }
+  for (const preferredSlotId of PREFERRED_SLOT_ID_BY_CONVERSATION.values()) {
+    if (preferredSlotId === slotId) return true;
+  }
+  return false;
+}
+
+async function tryAutoExpandPool(
+  state: CursorHelpPoolState,
+): Promise<CursorHelpSlotRecord | null> {
+  if (state.slots.length >= MAX_CURSOR_HELP_POOL_SLOT_COUNT) return null;
+  if (nowMs() - lastAutoExpandAt < AUTOSCALE_EXPAND_COOLDOWN_MS) return null;
+  const windowId = state.windowId;
+  if (!windowId) return null;
+  const windowAlive = await isCursorHelpWindowAlive(windowId);
+  if (!windowAlive) return null;
+  const newSlot = await createAdditionalPoolSlot(windowId, "auxiliary");
+  if (!newSlot) return null;
+  const inspect = await waitForCursorHelpInspectReady(newSlot.tabId, 8_000).catch(() => null);
+  if (inspect && canCursorHelpSlotBootExecute(inspect)) {
+    newSlot.status = "idle";
+    newSlot.lastReadyAt = nowMs();
+    newSlot.lastHealthCheckedAt = nowMs();
+    newSlot.lastHealthReason = "ready";
+    newSlot.lastError = undefined;
+  }
+  state.slots.push(newSlot);
+  const reason = `slots=${state.slots.length - 1}→${state.slots.length}`;
+  await saveCursorHelpPoolState(withWindowEvent({
+    ...state,
+    slots: sortSlotsForDisplay(state.slots),
+    updatedAt: nowMs(),
+  }, "autoscale_expand", {
+    mode: state.windowMode || "pool-window",
+    reason,
+  }));
+  lastAutoExpandAt = nowMs();
+  lastAutoExpandReason = reason;
+  return newSlot;
+}
+
+async function tryAutoShrinkPool(
+  state: CursorHelpPoolState,
+): Promise<boolean> {
+  if (state.slots.length <= MIN_CURSOR_HELP_POOL_SLOT_COUNT) return false;
+  if (nowMs() - lastAutoShrinkAt < AUTOSCALE_SHRINK_COOLDOWN_MS) return false;
+  const now = nowMs();
+  const shrinkCandidates = state.slots.filter((slot) => {
+    if (slot.status !== "idle") return false;
+    if (ACTIVE_REQUEST_ID_BY_SLOT.has(slot.slotId)) return false;
+    if (hasSlotAffinity(slot.slotId)) return false;
+    const idleDuration = now - Math.max(slot.lastUsedAt || 0, slot.lastReadyAt || 0);
+    return idleDuration >= AUTOSCALE_IDLE_THRESHOLD_MS;
+  });
+  if (shrinkCandidates.length <= 0) return false;
+  shrinkCandidates.sort((a, b) => (a.lastUsedAt || 0) - (b.lastUsedAt || 0));
+  const target = shrinkCandidates[0];
+  closeActiveRequestForSlot(target.slotId, "autoscale_shrink");
+  clearSlotPreferences(target.slotId);
+  await chrome.tabs.remove(target.tabId).catch(() => {});
+  state.slots = state.slots.filter((s) => s.slotId !== target.slotId);
+  const reason = `slots=${state.slots.length + 1}→${state.slots.length} removed=${target.slotId}`;
+  await saveCursorHelpPoolState(withWindowEvent({
+    ...state,
+    slots: sortSlotsForDisplay(state.slots),
+    updatedAt: nowMs(),
+  }, "autoscale_shrink", {
+    mode: state.windowMode || "pool-window",
+    reason,
+  }));
+  lastAutoShrinkAt = nowMs();
+  lastAutoShrinkReason = reason;
+  return true;
+}
+
 async function collectCursorHelpTabDecisionTrace(
   state: CursorHelpPoolState,
 ): Promise<{
@@ -1678,6 +1763,22 @@ async function waitForCursorHelpSlot(
       lastUnavailableReason = String(chosen.lastError || "").trim() || "Cursor Help 页面尚未完成启动";
     } else {
       sawBusyCandidates = state.slots.length > 0;
+      if (sawBusyCandidates) {
+        const expanded = await tryAutoExpandPool(state);
+        if (expanded) {
+          const usable = await ensureCursorHelpSlotUsable(expanded, {
+            throwOnRuntimeMismatch: true,
+          });
+          if (usable) {
+            return {
+              sessionId,
+              slot: usable.slot,
+              inspect: usable.inspect,
+              conversationKey,
+            };
+          }
+        }
+      }
       lastUnavailableReason = sawBusyCandidates
         ? "当前所有槽位都有活动中的网页 provider 请求"
         : "暂无可用的 Cursor Help 槽位";
@@ -1821,6 +1922,8 @@ export async function runCursorHelpPoolHeartbeat(): Promise<CursorHelpPoolDebugV
       await attemptCursorHelpSlotSoftRecovery(refreshed);
     }
   }
+  const latestState = await loadCursorHelpPoolState();
+  await tryAutoShrinkPool(latestState);
   const debugState = await getCursorHelpPoolDebugState();
   cursorHelpHeartbeatLastAt = nowMs();
   const next = resolveHeartbeatDelay(debugState);
@@ -1935,6 +2038,10 @@ export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebug
       lastWindowEvent: state.lastWindowEvent || "",
       lastWindowEventAt: state.lastWindowEventAt || 0,
       lastWindowEventReason: state.lastWindowEventReason || "",
+      autoscaleLastExpandAt: lastAutoExpandAt,
+      autoscaleLastExpandReason: lastAutoExpandReason,
+      autoscaleLastShrinkAt: lastAutoShrinkAt,
+      autoscaleLastShrinkReason: lastAutoShrinkReason,
     },
     window: window
       ? {
