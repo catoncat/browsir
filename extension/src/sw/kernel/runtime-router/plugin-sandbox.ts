@@ -21,6 +21,17 @@ function clonePlain(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function normalizeModuleSource(source) {
+  const text = String(source || "");
+  if (!/(^|\n)\s*export\s+default\b/.test(text)) {
+    return text;
+  }
+  return text.replace(
+    /(^|\n)([ \t]*)export\s+default\b/,
+    (_match, prefix, indent) => prefix + indent + "module.exports =",
+  );
+}
+
 function emit(payload) {
   process.stdout.write(RESULT_PREFIX + JSON.stringify(payload) + "\n");
 }
@@ -31,8 +42,8 @@ async function loadFactory(modulePath, exportName) {
     process.env.BBL_PLUGIN_MODULE_SOURCE_BASE64 || "",
   ).trim();
   if (moduleSourceBase64) {
-    const moduleSource = Buffer.from(moduleSourceBase64, "base64").toString(
-      "utf8",
+    const moduleSource = normalizeModuleSource(
+      Buffer.from(moduleSourceBase64, "base64").toString("utf8"),
     );
     const module = {
       exports: {},
