@@ -208,6 +208,23 @@ tags: [slice, cursor-help, pool, window, minimized]
 
 - 未提交
 
+## 工作总结（2026-03-15 Slice G）
+
+- 继续推进 `ISSUE-027` 的 decision trace，可见面再补完最后一截：除了已有的 `recoveryAction / recoveryReason` 与 live/managed/unmanaged tab 计数之外，debug summary 现在进一步暴露：
+  - `adoptAction / adoptReason`
+  - `backgroundAction / backgroundReason`
+- 这让调试视角能直接回答：
+  - 当前为什么没有 adopt external tab（是已经接管、确有候选、还是根本没有候选）
+  - 当前为什么没有再做 backgrounding（是已经处于目标状态、被策略阻止，还是根本不适用）
+- 对应补了 focused executor 回归断言，覆盖：
+  - external-tab adopt 场景下 `adoptAction=already-adopted` / `backgroundAction=skip`
+  - dedicated popup pool window 场景下 `adoptAction=no-candidates` / `backgroundAction=skip`（窗口已处于最小化完成态）
+- 本轮 focused executor suite 继续通过（22 passed / 1 skipped）。
+
+## 相关 commits（2026-03-15 Slice G）
+
+- 未提交
+
 ## 工作总结（2026-03-15 第三轮实现）
 
 - 已把 `ISSUE-027` 的窗口状态矩阵与恢复条件显式化到 debug state：

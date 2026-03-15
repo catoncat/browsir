@@ -535,6 +535,52 @@ function buildCursorHelpWindowRecoveryPreview(
   });
 }
 
+function buildCursorHelpAdoptDecisionPreview(
+  state: CursorHelpPoolState,
+  trace: {
+    managedCursorHelpTabCount: number;
+    unmanagedCursorHelpTabCount: number;
+  },
+): {
+  action: "already-adopted" | "adopt-available" | "no-candidates";
+  reason: string;
+} {
+  if (state.windowMode === "external-tabs" && trace.managedCursorHelpTabCount > 0) {
+    return {
+      action: "already-adopted",
+      reason: `managed=${trace.managedCursorHelpTabCount}`,
+    };
+  }
+  if (trace.unmanagedCursorHelpTabCount > 0) {
+    return {
+      action: "adopt-available",
+      reason: `unmanaged=${trace.unmanagedCursorHelpTabCount}`,
+    };
+  }
+  return {
+    action: "no-candidates",
+    reason: "no-unmanaged-cursor-help-tabs",
+  };
+}
+
+function buildCursorHelpBackgroundDecisionPreview(
+  windowRuntimeState: ReturnType<typeof resolveCursorHelpWindowRuntimeState>,
+): {
+  action: "background" | "skip";
+  reason: string;
+} {
+  if (windowRuntimeState.allowBackgrounding) {
+    return {
+      action: "background",
+      reason: "managed-popup-window",
+    };
+  }
+  return {
+    action: "skip",
+    reason: windowRuntimeState.backgroundBlockedReason || "not-applicable",
+  };
+}
+
 function sortSlotsForDisplay(
   slots: CursorHelpSlotRecord[],
 ): CursorHelpSlotRecord[] {
@@ -585,6 +631,15 @@ function clearSlotPreferences(slotId: string): void {
       LAST_CONVERSATION_KEY_BY_SESSION.delete(sessionId);
     }
   }
+}
+
+export function clearSessionPreferences(sessionId: string): void {
+  const conversationKey = LAST_CONVERSATION_KEY_BY_SESSION.get(sessionId);
+  if (conversationKey) {
+    PREFERRED_SLOT_ID_BY_CONVERSATION.delete(conversationKey);
+    LAST_CONVERSATION_KEY_BY_SESSION.delete(sessionId);
+  }
+  PREFERRED_SLOT_ID_BY_SESSION.delete(sessionId);
 }
 
 function formatRewriteDebugSummary(raw: unknown): string {
@@ -737,6 +792,22 @@ async function waitForCursorHelpTabReady(tabId: number, timeoutMs = 20_000): Pro
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error("等待 Cursor Help 页面加载超时");
+}
+
+async function waitForCursorHelpInspectReady(
+  tabId: number,
+  timeoutMs = 10_000,
+): Promise<CursorHelpInspectResult | null> {
+  const startedAt = Date.now();
+  let lastInspect: CursorHelpInspectResult | null = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    lastInspect = await inspectCursorTabEnsured(tabId).catch(() => lastInspect);
+    if (lastInspect) {
+      return lastInspect;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return lastInspect;
 }
 
 async function inspectCursorTab(tabId: number): Promise<CursorHelpInspectResult | null> {
@@ -991,7 +1062,7 @@ async function tryAdoptExistingCursorHelpSlots(
     } catch {
       continue;
     }
-    const inspect = await inspectCursorTabEnsured(tab.id);
+    const inspect = await waitForCursorHelpInspectReady(tab.id, 8_000);
     if (!canCursorHelpSlotBootExecute(inspect)) continue;
     adoptedSlots.push({
       slotId: randomSlotId(),
@@ -1005,6 +1076,10 @@ async function tryAdoptExistingCursorHelpSlots(
       lastKnownUrl: String(inspect.url || tab.url || CURSOR_HELP_URL),
       lastReadyAt: nowMs(),
       lastUsedAt: 0,
+      lastHealthCheckedAt: nowMs(),
+      lastHealthReason: "ready",
+      recoveryAttemptCount: 0,
+      lastRecoveryReason: undefined,
       lastError: undefined,
     });
     if (adoptedSlots.length >= Math.min(desiredSlotCount, 1)) break;
@@ -1057,7 +1132,16 @@ async function createCursorHelpPoolWindow(
 
   const slots: CursorHelpSlotRecord[] = [];
   await markCursorHelpTabStable(firstTab.id);
-  slots.push(buildCursorHelpSlotRecord(firstTab, "primary"));
+  const firstSlot = buildCursorHelpSlotRecord(firstTab, "primary");
+  const firstInspect = await waitForCursorHelpInspectReady(firstTab.id, 8_000);
+  if (canCursorHelpSlotBootExecute(firstInspect)) {
+    firstSlot.status = "idle";
+    firstSlot.lastReadyAt = nowMs();
+    firstSlot.lastHealthCheckedAt = nowMs();
+    firstSlot.lastHealthReason = "ready";
+    firstSlot.lastError = undefined;
+  }
+  slots.push(firstSlot);
 
   for (let index = 1; index < desiredSlotCount; index += 1) {
     const tab = await chrome.tabs.create({
@@ -1067,7 +1151,16 @@ async function createCursorHelpPoolWindow(
     });
     if (!tab?.id) continue;
     await markCursorHelpTabStable(tab.id);
-    slots.push(buildCursorHelpSlotRecord(tab, "auxiliary"));
+    const slot = buildCursorHelpSlotRecord(tab, "auxiliary");
+    const inspect = await waitForCursorHelpInspectReady(tab.id, 8_000);
+    if (canCursorHelpSlotBootExecute(inspect)) {
+      slot.status = "idle";
+      slot.lastReadyAt = nowMs();
+      slot.lastHealthCheckedAt = nowMs();
+      slot.lastHealthReason = "ready";
+      slot.lastError = undefined;
+    }
+    slots.push(slot);
   }
 
   const createdWindowType = String(createdWindow.type || "").trim() || "unknown";
@@ -1698,6 +1791,8 @@ export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebug
   const windowRuntimeState = resolveCursorHelpWindowRuntimeState(state, window);
   const recoveryPreview = buildCursorHelpWindowRecoveryPreview(state);
   const decisionTrace = await collectCursorHelpTabDecisionTrace(state);
+  const adoptPreview = buildCursorHelpAdoptDecisionPreview(state, decisionTrace);
+  const backgroundPreview = buildCursorHelpBackgroundDecisionPreview(windowRuntimeState);
   const slots = sortSlotsForDisplay(state.slots).map((slot) => {
     const activeRequestId = String(
       ACTIVE_REQUEST_ID_BY_SLOT.get(slot.slotId) || "",
@@ -1751,6 +1846,10 @@ export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebug
       liveCursorHelpTabCount: decisionTrace.liveCursorHelpTabCount,
       managedCursorHelpTabCount: decisionTrace.managedCursorHelpTabCount,
       unmanagedCursorHelpTabCount: decisionTrace.unmanagedCursorHelpTabCount,
+      adoptAction: adoptPreview.action,
+      adoptReason: adoptPreview.reason,
+      backgroundAction: backgroundPreview.action,
+      backgroundReason: backgroundPreview.reason,
       lastHeartbeatAt: cursorHelpHeartbeatLastAt,
       lastHeartbeatDelayMs: cursorHelpHeartbeatLastDelayMs,
       lastHeartbeatReason: cursorHelpHeartbeatLastReason,

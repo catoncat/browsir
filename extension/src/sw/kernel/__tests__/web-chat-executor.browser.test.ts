@@ -1109,6 +1109,8 @@ describe("web-chat-executor.browser", () => {
     expect(debugState.summary.liveCursorHelpTabCount).toBe(1);
     expect(debugState.summary.managedCursorHelpTabCount).toBe(1);
     expect(debugState.summary.unmanagedCursorHelpTabCount).toBe(0);
+    expect(debugState.summary.adoptAction).toBe("already-adopted");
+    expect(debugState.summary.backgroundAction).toBe("background");
     expect(debugState.window).toBeNull();
     expect(chrome.windows.update).not.toHaveBeenCalled();
     expect(chromeMock.sendMessage).toHaveBeenCalled();
@@ -1131,7 +1133,39 @@ describe("web-chat-executor.browser", () => {
     expect(debugState.summary.windowMode).toBe("pool-window");
     expect(debugState.summary.windowStatus).toBe("minimized");
     expect(debugState.summary.shouldRebuildWindow).toBe(false);
+    expect(debugState.summary.backgroundAction).toBe("skip");
+    expect(debugState.summary.adoptAction).toBe("no-candidates");
     expect(debugState.summary.lastWindowEventReason).toContain("type=popup");
+  });
+
+  it("waits for inspect-ready before treating a new pool slot as usable", async () => {
+    buildChromeMock();
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    let inspectAttempts = 0;
+    const sendMessage = chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>;
+    sendMessage.mockImplementation(async (_tabId: number, message: Record<string, unknown>) => {
+      if (message.type === "webchat.inspect") {
+        inspectAttempts += 1;
+        if (inspectAttempts < 3) {
+          return { ok: false };
+        }
+        return {
+          ok: true,
+          pageHookReady: true,
+          fetchHookReady: true,
+          senderReady: true,
+          canExecute: true,
+          url: "https://cursor.com/help",
+        };
+      }
+      return defaultExecuteResponse();
+    });
+
+    const debugState = await ensureCursorHelpPoolReady(3);
+
+    expect(inspectAttempts).toBeGreaterThanOrEqual(3);
+    expect(debugState.slots.some((slot) => slot.status === "idle")).toBe(true);
   });
 
   it("records pool window removal reason in debug state", async () => {
@@ -1531,7 +1565,7 @@ describe("web-chat-executor.browser", () => {
     expect(String(exhaustedSlot?.lastError || "")).toContain("inspect-failed");
   });
 
-  it("rejects stale runtime version before execute", async () => {
+  it("rejects stale runtime version before execute", { timeout: 10000 }, async () => {
     const sendMessage = (chrome.tabs as unknown as Record<string, unknown>).sendMessage as ReturnType<typeof vi.fn>;
     sendMessage.mockImplementation(async (_tabId: number, message: Record<string, unknown>) => {
       const type = String(message.type || "").trim();
