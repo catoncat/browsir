@@ -1,0 +1,55 @@
+{
+  "id": "BHV-CDP-BACKGROUND-STEALTH-TAB",
+  "intent": "background 模式下创建的新 tab 放入 minimized popup 窗口（stealth window），对用户完全不可见，保留完整 content script 和 CDP 能力",
+  "context": {
+    "surface": "sidepanel.chat.loop",
+    "module": "stealth-tab.ts",
+    "integration_point": "dispatch-plan-executor.ts → local.create_new_tab",
+    "window_type": "popup",
+    "window_state": "minimized"
+  },
+  "steps": [
+    "on_create_new_tab_in_background_mode",
+    "ensure_stealth_window_exists_or_create_minimized_popup",
+    "create_tab_in_stealth_window_with_active_false",
+    "track_tab_id_in_stealth_tabs_set",
+    "annotate_response_with_stealth_true",
+    "on_tab_removed_clean_up_tracking_state",
+    "auto_close_stealth_window_when_empty"
+  ],
+  "observables": [
+    "stealth_tab_created_in_minimized_window",
+    "stealth_window_reused_across_multiple_tabs",
+    "stealth_window_created_with_focused_false",
+    "blank_tab_from_new_window_removed",
+    "isStealthTab_returns_true_for_tracked_tabs",
+    "response_contains_stealth_true_annotation",
+    "stealth_window_auto_closes_when_last_tab_removed",
+    "external_tab_removal_triggers_cleanup",
+    "focus_mode_creates_normal_tabs"
+  ],
+  "risk": "low",
+  "allowed_side_effects": [
+    "chrome.windows.create(type:popup, state:minimized)",
+    "chrome.tabs.create(windowId, active:false)",
+    "chrome.tabs.remove (blank tab cleanup)",
+    "chrome.windows.remove (auto-close empty window)"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit"],
+    "min_layers": 1
+  },
+  "degrade_policy": {
+    "on_window_creation_failure": [
+      "throw_error_with_descriptive_message"
+    ],
+    "on_external_window_close": [
+      "recreate_stealth_window_on_next_createStealthTab_call"
+    ]
+  },
+  "rollback_or_compensation": [
+    "closeStealthWindow_removes_window_and_clears_state",
+    "resetStealthState_clears_all_in_memory_state"
+  ],
+  "version": "1.0.0"
+}

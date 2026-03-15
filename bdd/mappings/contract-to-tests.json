@@ -471,6 +471,24 @@
       ]
     },
     {
+      "contractId": "BHV-CDP-BACKGROUND-FAILURE-TRACKER",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/__tests__/background-failure-tracker.browser.test.ts::background-failure-tracker"
+        }
+      ]
+    },
+    {
+      "contractId": "BHV-CDP-BACKGROUND-STEALTH-TAB",
+      "proofs": [
+        {
+          "layer": "unit",
+          "target": "extension/src/sw/kernel/__tests__/stealth-tab.browser.test.ts::stealth-tab"
+        }
+      ]
+    },
+    {
       "contractId": "BHV-CHAT-DONE-SEMANTICS-STRICT",
       "proofs": [
         {

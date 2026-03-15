@@ -35,6 +35,14 @@
       "category": "cdp"
     },
     {
+      "contractId": "BHV-CDP-BACKGROUND-FAILURE-TRACKER",
+      "category": "cdp"
+    },
+    {
+      "contractId": "BHV-CDP-BACKGROUND-STEALTH-TAB",
+      "category": "cdp"
+    },
+    {
       "contractId": "BHV-CHAT-AUTO-REPAIR-BOUNDARY",
       "category": "runtime-loop"
     },

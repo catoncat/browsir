@@ -1,0 +1,47 @@
+{
+  "id": "BHV-CDP-BACKGROUND-FAILURE-TRACKER",
+  "intent": "background 模式下追踪连续失败次数，达到阈值后在工具响应中附加 upgradeHint 建议切换到 focus 模式，不自动切换以保留用户控制权",
+  "context": {
+    "surface": "sidepanel.chat.loop",
+    "module": "background-failure-tracker.ts",
+    "threshold": 3,
+    "tracked_operations": ["snapshot", "action"],
+    "scope": "per-tab"
+  },
+  "steps": [
+    "on_operation_failure_call_recordBackgroundFailure_with_tabId",
+    "increment_per_tab_consecutive_failure_counter",
+    "on_operation_success_call_recordBackgroundSuccess_with_tabId",
+    "reset_consecutive_failure_counter_to_zero",
+    "after_operation_call_buildUpgradeHint_with_tabId",
+    "if_failures_ge_threshold_return_upgradeHint_object",
+    "attach_upgradeHint_to_tool_response_payload"
+  ],
+  "observables": [
+    "consecutive_failures_below_threshold_returns_null_hint",
+    "consecutive_failures_at_threshold_returns_upgrade_hint",
+    "success_resets_consecutive_failure_counter",
+    "failure_tracking_is_per_tab_independent",
+    "upgrade_hint_includes_recommendation_text",
+    "upgrade_hint_attached_to_snapshot_response",
+    "upgrade_hint_attached_to_action_error_details",
+    "no_automatic_mode_switch"
+  ],
+  "risk": "low",
+  "allowed_side_effects": [
+    "in-memory counter state mutation"
+  ],
+  "proof_requirements": {
+    "required_layers": ["unit"],
+    "min_layers": 1
+  },
+  "degrade_policy": {
+    "on_tab_closed": [
+      "clear_tab_failure_state"
+    ]
+  },
+  "rollback_or_compensation": [
+    "resetAllFailureState_clears_all_tracking"
+  ],
+  "version": "1.0.0"
+}

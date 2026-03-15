@@ -14,24 +14,26 @@
   },
   "steps": [
     "read_automation_mode_from_chrome_storage",
-    "if_background_create_dom_locator_instance",
+    "if_background_check_dom_action_supported",
+    "if_supported_create_dom_locator_and_execute",
     "resolve_uid_from_action_ref_or_uid_or_brainUid",
-    "reject_if_uid_is_empty",
     "inject_runDomAction_via_chrome_scripting_executeScript",
     "locate_element_by_data_brain_uid_selector",
     "dispatch_synthetic_events_for_action_kind",
-    "return_result_with_mode_background"
+    "if_unsupported_or_no_uid_fallback_to_cdp_path",
+    "return_result_with_mode_annotation"
   ],
   "observables": [
     "background_action_result_has_mode_background",
     "background_click_dispatches_mousedown_mouseup_click",
     "background_fill_dispatches_focus_input_change_blur",
     "background_hover_dispatches_mouseover_mouseenter",
-    "missing_uid_returns_explicit_error",
-    "unsupported_action_kind_returns_explicit_error",
+    "unsupported_action_kind_falls_through_to_cdp",
+    "cdp_fallback_response_has_mode_background_cdp_fallback",
+    "missing_uid_falls_through_to_cdp",
     "element_not_found_returns_retryable_error",
     "focus_mode_action_uses_cdp_path",
-    "no_debugger_attach_in_background_action"
+    "no_debugger_attach_for_dom_locator_actions"
   ],
   "risk": "medium",
   "allowed_side_effects": [
@@ -51,8 +53,9 @@
       "suggest_new_snapshot"
     ],
     "on_unsupported_action_kind": [
-      "reject_with_explicit_message",
-      "do_not_fallback_to_cdp"
+      "fallback_to_cdp_path_transparently",
+      "annotate_response_mode_background_cdp_fallback",
+      "include_hint_with_fallback_reason"
     ],
     "on_isTrusted_rejection": [
       "action_may_silently_fail_on_security_sensitive_sites",

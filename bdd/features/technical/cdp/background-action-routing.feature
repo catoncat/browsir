@@ -21,18 +21,18 @@ Feature: Background mode action routing via DomLocator synthetic events
     Then mouseover and mouseenter events should be dispatched
     And result should have mode "background"
 
-  Scenario: Missing uid is rejected in background mode
+  Scenario: Missing uid falls through to CDP path (mixed fallback)
     Given automation mode is set to "background"
     When action is issued without uid or ref
-    Then result should be an error
-    And error should indicate uid/ref is required
+    Then action should fall through to CDP path
+    And result should have mode "background-cdp-fallback"
 
-  Scenario: Unsupported action kind is rejected in background mode
+  Scenario: Unsupported action kind falls through to CDP (mixed fallback)
     Given automation mode is set to "background"
     When action kind is not click, fill, type, or hover
-    Then result should be an error
-    And error should indicate the kind is not supported
-    And action should not fallback to CDP
+    Then action should fall through to CDP path
+    And result should have mode "background-cdp-fallback"
+    And hint should indicate CDP fallback reason
 
   Scenario: Element not found returns retryable error
     Given automation mode is set to "background"
