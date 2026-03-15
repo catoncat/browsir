@@ -6,7 +6,8 @@ import { useRuntimeStore } from "./stores/runtime";
 import { useChatStore } from "./stores/chat-store";
 import { useConfigStore } from "./stores/config-store";
 import { useMessageActions } from "./utils/message-actions";
-import { publishDebugLinkToBridge } from "./utils/debug-link";
+import { useConversationExport } from "./composables/use-conversation-export";
+import { useChatSendAction } from "./composables/use-chat-send-action";
 import type {
   ViewMode,
   DisplayMessage,
@@ -68,15 +69,12 @@ const prompt = ref("");
 const scrollContainer = ref<HTMLElement | null>(null);
 const chatSceneOverlayRef = ref<HTMLElement | null>(null);
 const showMoreMenu = ref(false);
-const showExportMenu = ref(false);
 const showToolHistory = ref(true);
 const creatingSession = ref(false);
 const moreMenuRef = ref(null);
 const exportMenuRef = ref(null);
-let createSessionTask: Promise<void> | null = null;
 
 onClickOutside(moreMenuRef, () => showMoreMenu.value = false);
-onClickOutside(exportMenuRef, () => showExportMenu.value = false);
 
 const runtimeLifecycle = computed(() => {
   const lifecycle = String(runtime.value?.lifecycle || "").trim().toLowerCase();
@@ -113,7 +111,6 @@ const queuedPromptViewItems = computed<QueuedPromptViewItem[]>(() => {
   return out.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 });
 const showBridgeOfflineDot = computed(() => bridgeConnectionStatus.value === "disconnected");
-const publishingDebugLink = ref(false);
 const activeSession = computed(() => sessions.value.find((item) => item.id === activeSessionId.value) || null);
 
 const activeSessionTitle = computed(() => {
@@ -215,21 +212,6 @@ const {
   onError: setErrorMessage,
 });
 const queuedPromotingIds = ref<Set<string>>(new Set());
-
-function setQueuedPromptPromoting(id: string, active: boolean) {
-  const normalizedId = String(id || "").trim();
-  if (!normalizedId) return;
-  const next = new Set(queuedPromotingIds.value);
-  if (active) next.add(normalizedId);
-  else next.delete(normalizedId);
-  queuedPromotingIds.value = next;
-}
-
-function isQueuedPromptPromoting(id: string): boolean {
-  const normalizedId = String(id || "").trim();
-  if (!normalizedId) return false;
-  return queuedPromotingIds.value.has(normalizedId);
-}
 const {
   runPhase,
   activeToolRun,
@@ -426,6 +408,52 @@ useChatScrollSync({
   isRunActive,
   toolPendingStepStates,
 });
+const {
+  showExportMenu,
+  publishingDebugLink,
+  handleCopyMarkdown,
+  handleCopyDebugLink,
+  handleExport,
+} = useConversationExport({
+  activeSessionId,
+  activeSessionTitle,
+  messages,
+  config,
+  recentRuntimeEvents,
+  showActionNoticeWithPlugins,
+  setErrorMessage,
+});
+onClickOutside(exportMenuRef, () => showExportMenu.value = false);
+const {
+  handleCreateSession,
+  handleJumpToForkSourceSession,
+  handleRefreshSession,
+  handleStopRun,
+  handlePromoteQueuedPromptToSteer,
+  handleSend,
+} = useChatSendAction({
+  activeSessionId,
+  sessions,
+  prompt,
+  creatingSession,
+  startRunPending,
+  isRunActive,
+  activeForkSourceSessionId,
+  queuedPromotingIds,
+  runSafely,
+  setErrorMessage,
+  showActionNoticeWithPlugins,
+  normalizeUiChatInputPayload,
+  panelUiRunHook: (hook, payload) => panelUiRuntime.runHook(hook, payload),
+  chatStoreCreateSession: () => chatStore.createSession(),
+  chatStoreRefreshSessions: () => chatStore.refreshSessions(),
+  chatStoreRefreshSessionTitle: (id) => chatStore.refreshSessionTitle(id),
+  chatStoreRunAction: (action) => chatStore.runAction(action),
+  chatStorePromoteQueuedPromptToSteer: (id) => chatStore.promoteQueuedPromptToSteer(id),
+  chatStoreSendPrompt: (text, opts) => chatStore.sendPrompt(text, opts),
+  playForkSceneSwitch,
+  emitUpdateListOpen: (open) => emit("update:list-open", open),
+});
 
 watch(
   [baseConversationMessages, uiRenderEpoch],
@@ -473,199 +501,6 @@ const hasVisibleConversation = computed(() =>
   || shouldShowToolPendingCard.value
   || shouldShowStartPendingDraft.value
 );
-
-async function handleCreateSession() {
-  if (createSessionTask) {
-    await createSessionTask;
-    return;
-  }
-  creatingSession.value = true;
-  createSessionTask = runSafely(async () => {
-    await chatStore.createSession();
-    emit("update:list-open", false);
-  }, "新建会话失败").finally(() => {
-    creatingSession.value = false;
-    createSessionTask = null;
-  });
-  await createSessionTask;
-}
-
-async function handleJumpToForkSourceSession() {
-  const sourceId = activeForkSourceSessionId.value;
-  if (!sourceId) return;
-  await runSafely(async () => {
-    if (!sessions.value.some((item) => item.id === sourceId)) {
-      await chatStore.refreshSessions();
-    }
-    await playForkSceneSwitch(sourceId);
-  }, "跳转分叉来源失败");
-}
-
-async function handleRefreshSession(id: string) {
-  await runSafely(() => chatStore.refreshSessionTitle(id), "刷新标题失败");
-}
-
-async function handleStopRun() {
-  await runSafely(() => chatStore.runAction("brain.run.stop"), "停止任务失败");
-}
-
-async function handlePromoteQueuedPromptToSteer(queuedPromptId: string) {
-  const id = String(queuedPromptId || "").trim();
-  if (!id) return;
-  if (!activeSessionId.value) return;
-  if (isQueuedPromptPromoting(id)) return;
-  setQueuedPromptPromoting(id, true);
-  try {
-    await chatStore.promoteQueuedPromptToSteer(id);
-  } catch (err) {
-    setErrorMessage(err, "直接插入失败");
-  } finally {
-    setQueuedPromptPromoting(id, false);
-  }
-}
-
-async function handleSend(payload: { text: string; tabIds: number[]; skillIds: string[]; contextRefs: Array<Record<string, unknown>>; mode: "normal" | "steer" | "followUp" }) {
-  if (createSessionTask) {
-    await createSessionTask;
-  }
-  if (startRunPending.value && !isRunActive.value) return;
-  const currentSessionId = String(activeSessionId.value || "").trim();
-  const beforeSend = await panelUiRuntime.runHook(
-    "ui.chat_input.before_send",
-    normalizeUiChatInputPayload({
-      ...payload,
-      sessionId: currentSessionId || undefined
-    })
-  );
-  if (beforeSend.blocked) {
-    await showActionNoticeWithPlugins({
-      type: "error",
-      message: String(beforeSend.reason || "").trim() || "发送已被插件阻止",
-      source: "ui.plugin"
-    });
-    return;
-  }
-
-  const sendInput = normalizeUiChatInputPayload(beforeSend.value);
-  const text = String(sendInput.text || "");
-  if (!text.trim() && sendInput.skillIds.length === 0 && sendInput.contextRefs.length === 0) return;
-  const isNew = !currentSessionId;
-  const shouldExpectRunStart = !isRunActive.value;
-
-  try {
-    if (shouldExpectRunStart) {
-      startRunPending.value = true;
-    }
-    await chatStore.sendPrompt(text, {
-      newSession: isNew,
-      tabIds: sendInput.tabIds,
-      skillIds: sendInput.skillIds,
-      contextRefs: sendInput.contextRefs,
-      streamingBehavior: sendInput.mode === "normal" ? undefined : sendInput.mode
-    });
-    const sessionIdAfterSend = String(activeSessionId.value || "").trim() || sendInput.sessionId;
-    void panelUiRuntime.runHook("ui.chat_input.after_send", {
-      ...sendInput,
-      sessionId: sessionIdAfterSend || undefined
-    });
-    prompt.value = "";
-  } catch (err) {
-    startRunPending.value = false;
-    setErrorMessage(err, "发送失败");
-  } finally {
-    if (shouldExpectRunStart || !isRunActive.value) {
-      startRunPending.value = false;
-    }
-  }
-}
-
-function generateMarkdown() {
-  const title = activeSessionTitle.value;
-  let md = `# ${title}\n\n`;
-  
-  messages.value.forEach(msg => {
-    if (msg.role === 'user') {
-      md += `**User**: ${msg.content}\n\n`;
-    } else if (msg.role === 'assistant') {
-      const content = msg.content.trim();
-      if (content) {
-        md += `**Assistant**: ${content}\n\n`;
-      }
-    }
-  });
-  
-  return md;
-}
-
-async function handleCopyMarkdown() {
-  const md = generateMarkdown();
-  try {
-    await navigator.clipboard.writeText(md);
-    await showActionNoticeWithPlugins({
-      type: "success",
-      message: "已复制到剪贴板",
-      source: "panel.copy_markdown"
-    });
-  } catch (err) {
-    setErrorMessage(err, '复制失败');
-  }
-  showExportMenu.value = false;
-}
-
-async function handleCopyDebugLink() {
-  if (publishingDebugLink.value) return;
-  publishingDebugLink.value = true;
-  try {
-    const sessionId = String(activeSessionId.value || "").trim();
-    const { downloadUrl } = await publishDebugLinkToBridge({
-      bridgeUrl: config.value.bridgeUrl,
-      bridgeToken: config.value.bridgeToken,
-      title: activeSessionTitle.value,
-      target: {
-        kind: "session",
-        sessionId: sessionId || undefined,
-      },
-      clientPayload: {
-        recentEvents: recentRuntimeEvents.value.map((item) => ({
-          source: item.source,
-          ts: item.ts,
-          type: item.type,
-          preview: item.preview,
-          sessionId: item.sessionId
-        }))
-      }
-    });
-    await navigator.clipboard.writeText(downloadUrl);
-    await showActionNoticeWithPlugins({
-      type: "success",
-      message: "调试链接已复制",
-      source: "panel.publish_debug_link"
-    });
-  } catch (err) {
-    setErrorMessage(err, "发布调试链接失败");
-  } finally {
-    publishingDebugLink.value = false;
-  }
-}
-
-function handleExport(mode: 'download' | 'open') {
-  const md = generateMarkdown();
-  const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  
-  if (mode === 'download') {
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${activeSessionTitle.value.replace(/\s+/g, '_')}.md`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  } else {
-    chrome.tabs.create({ url });
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
-  }
-  
-  showExportMenu.value = false;
-}
 
 onUnmounted(() => {
   cleanupUiPipeline();
