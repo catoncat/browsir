@@ -5,6 +5,11 @@ import {
 import { createCdpActionExecutor } from "./infra-cdp-action";
 import { getAutomationMode } from "./automation-mode";
 import { DomLocator } from "./dom-locator";
+import {
+  recordBackgroundSuccess,
+  recordBackgroundFailure,
+  buildUpgradeHint,
+} from "./background-failure-tracker";
 export type { BridgeConfig } from "./infra-bridge-client";
 import {
   snapshotKey,
@@ -868,6 +873,10 @@ export function createRuntimeInfraHandler(): RuntimeInfraHandler {
       returnByValue: true,
     })) as JsonRecord;
     const page = asRecord(asRecord(pageResult.result).value);
+
+    // Enable Accessibility domain — required for Chrome to fully compute
+    // the accessibility tree, including nodes inside Shadow DOM.
+    await sendCdpCommand(tabId, "Accessibility.enable", {});
 
     const frameIds = await listFrameIdsForSnapshot(tabId);
     const treeBuckets: Array<{ frameId: string; nodes: JsonRecord[] }> = [];
