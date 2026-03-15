@@ -280,7 +280,7 @@ export const RUNTIME_EXECUTABLE_TOOL_NAMES = new Set([
 export const NO_PROGRESS_CONTINUE_BUDGET: Record<NoProgressReason, number> = {
   repeat_signature: 1,
   ping_pong: 0,
-  browser_proof_guard: Infinity,
+  browser_proof_guard: 4,
 };
 
 export const BROWSER_PROOF_REQUIRED_TOOL_NAMES = new Set([

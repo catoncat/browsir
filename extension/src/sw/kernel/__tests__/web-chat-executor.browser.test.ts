@@ -1247,64 +1247,34 @@ describe("web-chat-executor.browser", () => {
   });
 
   it("heartbeat downgrades to error after inspect-failed recovery budget is exhausted", async () => {
-    const realSetTimeout = globalThis.setTimeout;
-    try {
-      (globalThis as typeof globalThis & {
-        setTimeout: typeof setTimeout;
-      }).setTimeout = ((handler: TimerHandler, _timeout?: number, ...args: unknown[]) =>
-        realSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+    buildChromeMock();
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
-      buildChromeMock();
-      (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    await ensureCursorHelpPoolReady(3);
 
-      await ensureCursorHelpPoolReady(3);
+    const sendMessage = chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>;
+    sendMessage.mockImplementation(async (_tabId: number, message: Record<string, unknown>) => {
+      const type = String(message.type || "").trim();
+      if (type === "webchat.inspect") {
+        throw new Error("persistent inspect failure");
+      }
+      if (type === "webchat.execute" || type === "webchat.abort") {
+        return { ok: true };
+      }
+      throw new Error(`unexpected tab message: ${type}`);
+    });
 
-      const sendMessage = chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>;
-      sendMessage.mockImplementation(async (_tabId: number, message: Record<string, unknown>) => {
-        const type = String(message.type || "").trim();
-        if (type === "webchat.inspect") {
-          return {
-            ok: true,
-            pageHookReady: true,
-            fetchHookReady: true,
-            senderReady: true,
-            canExecute: false,
-            url: "https://cursor.com/help",
-            selectedModel: "Sonnet 4.6",
-            availableModels: ["Sonnet 4.6"],
-            senderKind: "react_chat_input_on_submit",
-            pageRuntimeVersion: "stale-runtime",
-            contentRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
-            runtimeExpectedVersion: CURSOR_HELP_RUNTIME_VERSION,
-            rewriteStrategy: CURSOR_HELP_REWRITE_STRATEGY,
-            runtimeMismatch: true,
-            runtimeMismatchReason: "Cursor Help 页面运行时版本不一致。page=stale-runtime expected=current"
-          };
-        }
-        if (type === "webchat.execute" || type === "webchat.abort") {
-          return { ok: true };
-        }
-        throw new Error(`unexpected tab message: ${type}`);
-      });
+    await runCursorHelpPoolHeartbeat();
+    await runCursorHelpPoolHeartbeat();
+    const debugState = await runCursorHelpPoolHeartbeat();
+    const exhaustedSlot = debugState.slots.find(
+      (slot) => String(slot.lastHealthReason || "") === "recover-budget-exhausted",
+    );
 
-      await runCursorHelpPoolHeartbeat();
-      await runCursorHelpPoolHeartbeat();
-      await runCursorHelpPoolHeartbeat();
-      const debugState = await runCursorHelpPoolHeartbeat();
-      const exhaustedSlot = debugState.slots.find(
-        (slot) => String(slot.lastError || "").includes("inspect-failed"),
-      );
-
-      expect(exhaustedSlot).toBeTruthy();
-      expect(["error", "stale", "recovering"]).toContain(
-        String(exhaustedSlot?.status || ""),
-      );
-      expect(String(exhaustedSlot?.lastError || "")).toContain("inspect-failed");
-    } finally {
-      (globalThis as typeof globalThis & {
-        setTimeout: typeof setTimeout;
-      }).setTimeout = realSetTimeout;
-    }
+    expect(exhaustedSlot).toBeTruthy();
+    expect(String(exhaustedSlot?.status || "")).toBe("error");
+    expect(String(exhaustedSlot?.lastHealthReason || "")).toBe("recover-budget-exhausted");
+    expect(String(exhaustedSlot?.lastError || "")).toContain("inspect-failed");
   });
 
   it("rejects stale runtime version before execute", async () => {
