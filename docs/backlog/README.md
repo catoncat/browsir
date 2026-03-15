@@ -68,56 +68,44 @@ acceptance_ref: docs/<某设计文档>.md
 
 项目内也可以通过 repo skill `auto-claim-issues` 自动认领符合条件的 backlog slice。
 
-## 当前未完成项（2026-03-15）
+## 当前未完成项（2026-03-15 更新）
 
 以下清单用于快速派工；后续 agent 进入仓库时，优先看本节，不必先遍历整个目录。
 
+已完成的 26 项 backlog 已归档至 `archive/` 子目录。
+
 ### 进行中
 
-1. `ISSUE-017` [ChatView 主控拆分](./2026-03-14-app-vue-chat-view-extraction.md)
-   - `status: in-progress`
-   - `priority: p0`
-   - `parallel_group: panel-chat`
-   - 说明：当前 panel 侧最直接主线；目标是继续从 `ChatView.vue` 剥离 controller / action / watch glue。
-
-2. `ISSUE-023` [cursor_help_web Pool 架构后续](./2026-03-15-cursor-help-pool-followup.md)
+1. `ISSUE-023` [cursor_help_web Pool 架构后续](./2026-03-15-cursor-help-pool-followup.md)
   - `status: in-progress`
   - `priority: p1`
   - `parallel_group: cursor-help`
-  - 说明：当前 Cursor Help 方向仍在处理中；其中 Provider 连通性由 human 继续接手，其他 agent 默认不要再并行改 `web-chat-executor.browser.ts` / `cursor-help-content.ts` / `cursor-help-page-hook.ts`，除非先明确重新分工。
+  - 说明：Provider 连通性由 human 接手，其他 agent 默认不要并行改 `web-chat-executor.browser.ts` / `cursor-help-content.ts` / `cursor-help-page-hook.ts`，除非先明确重新分工。
 
-3. `ISSUE-024` [Cursor Help pool slot 自动扩缩容](./2026-03-15-cursor-help-pool-autoscaling.md)
+2. `ISSUE-024` [Cursor Help pool slot 自动扩缩容](./2026-03-15-cursor-help-pool-autoscaling.md)
   - `status: in-progress`
   - `priority: p2`
   - `parallel_group: cursor-help`
-  - 说明：`ISSUE-026` 收尾后，当前队列中的最后一张 cursor-help card 已开始推进 autoscaling。
+  - 说明：依赖 `ISSUE-025`/`ISSUE-026` 已满足，autoscaling 6 项开工清单均未完成。
 
 ### 可立即开工
-
-（当前无可立即开工的 issue）
-
-### 暂不应启动
 
 1. `ISSUE-021` [ChatView 二阶段深拆 follow-up](./2026-03-15-app-vue-decomposition.md)
    - `status: open`
    - `priority: p2`
-   - 阻塞：依赖 `ISSUE-017` 首轮 controller 解耦完成
-   - 说明：这是 follow-up，不替代 `ISSUE-017`，默认不要提前启动。
+   - 说明：前置 `ISSUE-017` 已 done，可启动 transcript/overlay/editor/export 拆分。
 
-2. `ISSUE-025` [Cursor Help pool slot 健康检查心跳](./2026-03-15-cursor-help-pool-heartbeat.md)
-  - `status: done`
-  - `priority: p1`
-  - 说明：已完成 heartbeat / health reason / soft recovery / retry budget 收口。
+2. `ISSUE-032` [runtime-router brain.agent.end 终态透传](./2026-03-15-runtime-router-terminal-status-passthrough.md)
+   - `status: open`
+   - `priority: p2`
+   - 来源：ISSUE-020 归档残留项
+   - 说明：runtime-router 中 brain.agent.end 事件缺少 payload.status/failureReason 透传。
 
-3. `ISSUE-026` [Cursor Help pool lane 并发冲突细化](./2026-03-15-cursor-help-pool-lane-conflict-refinement.md)
-  - `status: done`
-  - `priority: p2`
-  - 说明：已完成 lane conflict 集中判定与关键组合测试覆盖。
-
-4. `ISSUE-024` [Cursor Help pool slot 自动扩缩容](./2026-03-15-cursor-help-pool-autoscaling.md)
-  - `status: in-progress`
-  - `priority: p2`
-  - 说明：依赖 `ISSUE-025` 与 `ISSUE-026` 已满足，当前已正式进入 autoscaling 实施阶段。
+3. `ISSUE-033` [失败信封瘦身 — attachFailureProtocol 精简](./2026-03-15-failure-envelope-slimming.md)
+   - `status: open`
+   - `priority: p2`
+   - 来源：ISSUE-022 Slice C 归档残留项
+   - 说明：attachFailureProtocol 输出过重，需精简为 errorCode + hint。
 
 ## 推荐领取顺序
 

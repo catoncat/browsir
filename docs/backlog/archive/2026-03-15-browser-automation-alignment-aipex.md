@@ -235,3 +235,14 @@ AIPex **完全没有自动验证**。动作执行完返回结果，LLM 自己决
 - Agent loop: `packages/core/src/agent/aipex.ts`
 - 编排策略: `skill/SKILL.md`, `skill/references/tools-reference.md`
 - 截图 shaping: `packages/core/src/utils/screenshot-shaping.ts`
+
+## 归档注记（2026-03-15）
+
+代码验证结果：5 个 Slice 中 3 个已确认落地：
+- **Slice A** ✅：`SKIP_ROLES` 角色过滤已存在于 `infra-snapshot-helpers.ts`
+- **Slice B** ✅：verify 默认策略已改为 `off`（`loop-browser-proof.ts`）
+- **Slice D** ✅：`BROWSER_AUTOMATION_DECISION_TREE` 三级优先级决策树已存在于 `prompt-policy.browser.ts`
+
+**残留项**：
+- **Slice C**（失败信封瘦身）未实现 — `attachFailureProtocol` 仍保留完整 `failureClass`/`modeEscalation`/`resume` 结构。已创建 `ISSUE-033` 跟进。
+- **Slice E**（截图 shaping）标注为可选/低优先级，未实现。

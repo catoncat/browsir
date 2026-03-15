@@ -96,3 +96,9 @@ ISSUE-018（同泳道串行）
 ## 相关 commits（2026-03-15 09:48 +08:00）
 
 - 未提交
+
+## 归档注记（2026-03-15）
+
+代码验证结果：核心改动（canonical 类型 `LoopTerminalStatus`/`FailureReason`/helper、`orchestrator.handleAgentEnd()` 复用 canonical helper、`runtime-loop` 收口到 `LoopTerminalStatus`）已确认存在于代码库中。
+
+**残留项**：`runtime-router` 中 `brain.agent.end` 的 `payload.status` / `payload.failureReason` 透传声称已实现，但代码验证未发现对应引用。已创建 `ISSUE-032` 跟进。
