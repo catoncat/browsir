@@ -25,6 +25,8 @@
    - Browser sandbox runtime 持久化、`/mem` 语义、skills/system prompt/@路径 对齐计划。
 5. `docs/plugin-ui-widget-api-plan-2026-03-14.md`
    - Panel 插件自带 UI 的 widget API 方案：slot、生命周期、`mission-hud-dog` 迁移与验收口径。
+6. `docs/cursor-toolbox-reference-2026-03-15.md`
+   - `Cursor-Toolbox` 外部参考：帮助页 `sessionKey/conversationKey`、多对话归档、continuation 聚合、page hook 请求改写。
 
 ## 3. 架构与专题参考
 
