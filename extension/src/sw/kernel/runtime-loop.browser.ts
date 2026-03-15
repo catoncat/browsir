@@ -2768,6 +2768,7 @@ export function createRuntimeLoopController(
           },
         );
       }
+      clearActionFailures(sessionId);
       orchestrator.setRunning(sessionId, false);
       orchestrator.events.emit("loop_done", sessionId, {
         status: finalStatus,

@@ -144,21 +144,25 @@ export async function readLlmMessageFromSseStream(
     }
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let lineBreak = buffer.indexOf("\n");
-    while (lineBreak >= 0) {
-      const line = buffer.slice(0, lineBreak).replace(/\r$/, "");
-      buffer = buffer.slice(lineBreak + 1);
-      processLine(line);
-      lineBreak = buffer.indexOf("\n");
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let lineBreak = buffer.indexOf("\n");
+      while (lineBreak >= 0) {
+        const line = buffer.slice(0, lineBreak).replace(/\r$/, "");
+        buffer = buffer.slice(lineBreak + 1);
+        processLine(line);
+        lineBreak = buffer.indexOf("\n");
+      }
     }
-  }
 
-  const tail = buffer + decoder.decode();
-  if (tail.trim()) processLine(tail.replace(/\r$/, ""));
+    const tail = buffer + decoder.decode();
+    if (tail.trim()) processLine(tail.replace(/\r$/, ""));
+  } finally {
+    reader.releaseLock();
+  }
 
   return {
     message: {
@@ -205,21 +209,25 @@ export async function readHostedChatTurnFromTransportStream(
     }
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let lineBreak = buffer.indexOf("\n");
-    while (lineBreak >= 0) {
-      const line = buffer.slice(0, lineBreak).replace(/\r$/, "");
-      buffer = buffer.slice(lineBreak + 1);
-      processLine(line);
-      lineBreak = buffer.indexOf("\n");
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let lineBreak = buffer.indexOf("\n");
+      while (lineBreak >= 0) {
+        const line = buffer.slice(0, lineBreak).replace(/\r$/, "");
+        buffer = buffer.slice(lineBreak + 1);
+        processLine(line);
+        lineBreak = buffer.indexOf("\n");
+      }
     }
-  }
 
-  const tail = buffer + decoder.decode();
-  if (tail.trim()) processLine(tail.replace(/\r$/, ""));
+    const tail = buffer + decoder.decode();
+    if (tail.trim()) processLine(tail.replace(/\r$/, ""));
+  } finally {
+    reader.releaseLock();
+  }
 
   const latestTransportError = transportError as {
     message: string;

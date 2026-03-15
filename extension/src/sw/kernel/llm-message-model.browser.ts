@@ -501,6 +501,16 @@ export function transformMessagesForLlm(rawMessages: unknown[]): JsonRecord[] {
   return finalMessages.map((item) => toSerializableMessage(item));
 }
 
+const TOOL_CONTENT_MAX_CHARS_FOR_LLM = 12_000;
+
+function clipToolContentForLlm(text: string): string {
+  if (text.length <= TOOL_CONTENT_MAX_CHARS_FOR_LLM) return text;
+  const marker = `\n...[clipped ${text.length - TOOL_CONTENT_MAX_CHARS_FOR_LLM} chars]...\n`;
+  const headChars = Math.ceil((TOOL_CONTENT_MAX_CHARS_FOR_LLM - marker.length) * 0.7);
+  const tailChars = TOOL_CONTENT_MAX_CHARS_FOR_LLM - marker.length - headChars;
+  return `${text.slice(0, headChars)}${marker}${text.slice(text.length - tailChars)}`;
+}
+
 export function convertSessionContextMessagesToLlm(messages: SessionContextMessageLike[]): JsonRecord[] {
   const out: JsonRecord[] = [];
   for (let i = 0; i < messages.length; i += 1) {
@@ -520,17 +530,18 @@ export function convertSessionContextMessagesToLlm(messages: SessionContextMessa
     if (role === "tool") {
       const toolCallId = String(item.toolCallId || "").trim();
       const toolName = String(item.toolName || "").trim();
+      const clippedContent = clipToolContentForLlm(content);
       if (toolCallId) {
         out.push({
           role: "tool",
           tool_call_id: toolCallId,
           name: toolName || undefined,
-          content
+          content: clippedContent
         });
       } else {
         out.push({
           role: "user",
-          content: `Tool result (${toolName || "unknown"}):\n${content}`
+          content: `Tool result (${toolName || "unknown"}):\n${clippedContent}`
         });
       }
       continue;

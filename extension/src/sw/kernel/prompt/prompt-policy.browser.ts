@@ -360,23 +360,21 @@ export async function buildLlmMessagesFromContext(
   },
 ): Promise<JsonRecord[]> {
   const out: JsonRecord[] = [];
+  const toolRetryPolicy = [
+    "",
+    "Tool retry policy:",
+    "1) For transient tool errors (retryable=true), retry the same goal with adjusted parameters.",
+    "2) host_bash/browser_bash support optional timeoutMs (milliseconds). Increase timeoutMs when timeout-related failures happen.",
+    "3) For non-retryable errors, stop retrying and explain the blocker clearly.",
+    "4) A short task progress note will be provided each round via system message.",
+    "5) For browser tasks, prefer actions grounded in observed page state and tool results.",
+    "6) Do not invent site selectors/URLs; re-observe when uncertain.",
+    "7) Default to browser_* (sandbox) tools. Use host_* tools only when host-side access is explicitly required.",
+    "8) Temporary policy: do NOT run tests (e.g., bun test/pnpm test/npm test/pytest/go test) unless the user explicitly requests tests.",
+  ].join("\n");
   out.push({
     role: "system",
-    content: systemPrompt,
-  });
-  out.push({
-    role: "system",
-    content: [
-      "Tool retry policy:",
-      "1) For transient tool errors (retryable=true), retry the same goal with adjusted parameters.",
-      "2) host_bash/browser_bash support optional timeoutMs (milliseconds). Increase timeoutMs when timeout-related failures happen.",
-      "3) For non-retryable errors, stop retrying and explain the blocker clearly.",
-      "4) A short task progress note will be provided each round via system message.",
-      "5) For browser tasks, prefer actions grounded in observed page state and tool results.",
-      "6) Do not invent site selectors/URLs; re-observe when uncertain.",
-      "7) Default to browser_* (sandbox) tools. Use host_* tools only when host-side access is explicitly required.",
-      "8) Temporary policy: do NOT run tests (e.g., bun test/pnpm test/npm test/pytest/go test) unless the user explicitly requests tests.",
-    ].join("\n"),
+    content: `${systemPrompt}\n${toolRetryPolicy}`,
   });
   const metadata = toRecord(meta?.header?.metadata);
   const sharedTabsContext = buildSharedTabsContextMessage(metadata.sharedTabs);

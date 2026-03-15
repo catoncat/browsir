@@ -17,12 +17,12 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
   const llmStreamingPendingText = ref("");
 
   let llmStreamFlushRaf: number | null = null;
-  let llmStreamingDeltaBuffer = "";
+  let llmStreamingDeltaBuffer: string[] = [];
 
   function flushLlmStreamingDeltaBuffer() {
-    if (!llmStreamingDeltaBuffer) return;
-    llmStreamingPendingText.value = `${llmStreamingPendingText.value}${llmStreamingDeltaBuffer}`;
-    llmStreamingDeltaBuffer = "";
+    if (llmStreamingDeltaBuffer.length === 0) return;
+    llmStreamingPendingText.value += llmStreamingDeltaBuffer.join("");
+    llmStreamingDeltaBuffer = [];
   }
 
   function scheduleLlmStreamingFlush() {
@@ -36,7 +36,7 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
   function appendLlmStreamingDelta(chunk: string) {
     const text = String(chunk || "");
     if (!text) return;
-    llmStreamingDeltaBuffer += text;
+    llmStreamingDeltaBuffer.push(text);
     scheduleLlmStreamingFlush();
   }
 
@@ -51,7 +51,7 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
       cancelAnimationFrame(llmStreamFlushRaf);
       llmStreamFlushRaf = null;
     }
-    llmStreamingDeltaBuffer = "";
+    llmStreamingDeltaBuffer = [];
     llmStreamingPendingText.value = "";
     llmStreamingText.value = "";
     llmStreamingSessionId.value = "";
@@ -105,7 +105,7 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
       cancelAnimationFrame(llmStreamFlushRaf);
       llmStreamFlushRaf = null;
     }
-    llmStreamingDeltaBuffer = "";
+    llmStreamingDeltaBuffer = [];
   }
 
   return {
