@@ -2,7 +2,21 @@
 
 日期：2026-03-13
 
-状态：提案
+状态：部分落地（Phase 0/1 完成，Phase 2 部分完成）
+
+> **2026-03-15 工作树对齐更新**：
+>
+> Phase 0（语义冻结）和 Phase 1（SessionSandboxManager）已在工作树中落地：
+> - `SessionRuntimeManager<LiveSessionSandbox>` 按 sessionId 复用 sandbox（惰性创建 + 5min idle TTL + LRU 8 上限）
+> - dirty tracking + 智能 checkpoint（首次立即 flush，后续 750ms 去抖合并）
+> - global namespace 版本同步（skills/plugins 跨 session 变更检测）
+>
+> Phase 2（路径翻译）部分完成：
+> - `parseVirtualUri()` 同时处理 `mem://...` 和 `/mem/...`
+> - `rewriteCommandVirtualUris()` 在 shell 命令中做 URI 重写
+> - 路径翻译逻辑仍内联在 lifo-adapter（1,412 行），未抽出独立模块
+>
+> 此外，`commandRequiresEval()` 按需走 SW 直执行 vs eval-bridge，`fnv1aHash` VFS 去重已上线。
 
 ## 1. 背景
 
@@ -12,11 +26,13 @@
 2. `/mem` / `mem://` 语义统一
 3. skills、system prompt、聊天输入 `@路径`、`execute_skill_script` 的统一 resolver / materializer 管线
 
-但当前实现里，沙盒 runtime 的持久化语义仍然偏离目标态：
+~~但当前实现里，沙盒 runtime 的持久化语义仍然偏离目标态：~~
 
-- 现有 `lifo-adapter` 每次调用都会 `Sandbox.create({ persist: false })`
-- 执行后立即 `destroy()`
-- 只把 namespace 文件做 restore / capture
+~~- 现有 `lifo-adapter` 每次调用都会 `Sandbox.create({ persist: false })`~~
+~~- 执行后立即 `destroy()`~~
+~~- 只把 namespace 文件做 restore / capture~~
+
+**（2026-03-15 注：上述问题已在 Phase 1 中修正，`SessionRuntimeManager` 按 session 复用实例。）**
 
 这意味着现在做到的是“文件快照跨调用恢复”，不是“按 session 持续存在的 browser sandbox runtime”。
 
@@ -199,18 +215,22 @@
 
 ### 5.2 新增核心模块
 
-建议新增：
+~~建议新增：~~
 
-- `extension/src/sw/kernel/browser-unix-runtime/session-sandbox-manager.ts`
+~~- `extension/src/sw/kernel/browser-unix-runtime/session-sandbox-manager.ts`~~
 
-核心接口：
+**（2026-03-15 注：已落地为 `session-runtime-manager.ts`（泛型），lifo-adapter 中实例化为 `SessionRuntimeManager<LiveSessionSandbox>`。）**
+
+核心接口（已实现）：
 
 - `acquire(sessionId)`
 - `dispose(sessionId, reason)`
 - `disposeAll(reason)`
 - `flush(sessionId)`
 - `flushAll()`
-- `snapshotAndDispose(sessionId, reason)`
+- `flushIfDue(sessionId, minIntervalMs, reason)`
+- `markDirty(sessionId)`
+- `reapExpired(reason)`
 
 建议策略：
 
@@ -221,52 +241,61 @@
 
 ## 6. 详细实施计划
 
-### Phase 0：语义冻结
+### Phase 0：语义冻结 ✅ 已完成
 
 目标：先冻结概念边界，避免实现继续沿错误口径扩散。
 
 工作项：
 
-1. 明确 `browser sandbox` 的目标态是 session runtime
-2. 明确 `/mem` 是用户面唯一 browser path 语法
-3. 明确 `mem://` 仅是 canonical URI
-4. 明确 namespace snapshot 只是冷恢复层
+1. ✅ 明确 `browser sandbox` 的目标态是 session runtime
+2. ✅ 明确 `/mem` 是用户面唯一 browser path 语法
+3. ✅ 明确 `mem://` 仅是 canonical URI
+4. ✅ 明确 namespace snapshot 只是冷恢复层
 
 验收：
 
-- 文档中不再把“文件快照恢复”表述成“sandbox runtime persistence”
+- ✅ 文档中不再把"文件快照恢复"表述成"sandbox runtime persistence"
 
-### Phase 1：落地 SessionSandboxManager
+### Phase 1：落地 SessionSandboxManager ✅ 已完成
 
 目标：把 `Sandbox.create({ persist: false })` 每次新建的模型改成按 session 复用。
 
+**实现为** `SessionRuntimeManager<T>`（泛型，`session-runtime-manager.ts`）+ `LiveSessionSandbox`（lifo-adapter.ts 内）。
+
 工作项：
 
-1. 在 `browser-unix-runtime` 内引入 manager
-2. `withSessionSandbox()` 改为从 manager 获取 runtime
-3. restore 只在 cold start 时执行
-4. capture 不再每次命令后都做，改为 flush/dispose 时做
-5. 支持 `dispose(sessionId)` 和 `disposeAll()`
+1. ✅ 在 `browser-unix-runtime` 内引入 manager
+2. ✅ `withSessionSandbox()` 改为从 manager 获取 runtime
+3. ✅ restore 只在 cold start 时执行
+4. ✅ capture 改为 dirty tracking + `checkpointSessionSandbox`（首次立即 flush，后续 750ms 去抖）
+5. ✅ 支持 `dispose(sessionId)` 和 `disposeAll()`
+
+额外落地能力：
+- idle TTL 5min 回收 + LRU 8 session 上限
+- global namespace 版本同步（`syncSharedNamespaces()`）
+- 完整遥测（`SandboxTelemetrySummary` + 32 条 event tail）
 
 验收：
 
-- 同 session 两次 `browser_bash`，第二次能看到第一次创建的目录和文件
-- 不同 session 互不污染
+- ✅ 同 session 两次 `browser_bash`，第二次能看到第一次创建的目录和文件（测试 `persists shell state across invocations`）
+- ✅ 不同 session 互不污染（测试 `isolates files by session namespace`）
 
 ### Phase 2：统一路径翻译层
+
+### Phase 2：统一路径翻译层 ⏳ 部分完成
 
 目标：把 `/mem/...`、`mem://...`、sandbox unix path 三层映射统一。
 
 工作项：
 
-1. 从 `lifo-adapter.ts` 抽出路径翻译层
-2. shell 中支持裸 `/mem/...` 路径
-3. shell 中继续兼容 `mem://...`
-4. `@/mem/...` 解析统一落到 `mem://...`
+1. ❌ 从 `lifo-adapter.ts` 抽出路径翻译层（仍内联在 lifo-adapter 1,412 行中）
+2. ✅ shell 中支持裸 `/mem/...` 路径（`parseVirtualUri` + `rewriteCommandVirtualUris` 已实现）
+3. ✅ shell 中继续兼容 `mem://...`
+4. ✅ `@/mem/...` 解析统一落到 `mem://...`（ISSUE-019 system-prompt-resolver 已部分覆盖）
 
 验收：
 
-- 聊天输入、prompt、shell 命令都能把 `/mem/...` 指到同一对象
+- ✅ 聊天输入、prompt、shell 命令都能把 `/mem/...` 指到同一对象（测试 `treats /mem and mem:// as the same sandbox path` 覆盖）
 
 ### Phase 3：把 namespace snapshot 降级成冷恢复层
 
