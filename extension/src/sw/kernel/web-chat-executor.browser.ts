@@ -43,6 +43,8 @@ interface CursorHelpSlotRecord {
   lastKnownUrl: string;
   lastReadyAt: number;
   lastUsedAt: number;
+  lastHealthCheckedAt: number;
+  lastHealthReason?: string;
   lastError?: string;
 }
 
@@ -51,6 +53,7 @@ interface CursorHelpPoolState {
   windowId?: number;
   slots: CursorHelpSlotRecord[];
   windowMode?: "none" | "external-tabs" | "pool-window";
+  windowRecoveryCooldownUntil?: number;
   lastWindowEvent?: string;
   lastWindowEventAt?: number;
   lastWindowEventReason?: string;
@@ -68,6 +71,23 @@ interface CursorHelpPoolDebugView {
   summary: JsonRecord;
   window: JsonRecord | null;
   slots: JsonRecord[];
+}
+
+type CursorHelpWindowStatus =
+  | "none"
+  | "external-tabs"
+  | "normal"
+  | "minimized"
+  | "missing";
+
+interface CursorHelpWindowPolicyState {
+  windowStatus: CursorHelpWindowStatus;
+  shouldRebuildWindow: boolean;
+  requiresAttention: boolean;
+  shouldBackgroundWindow: boolean;
+  recoveryCooldownActive: boolean;
+  recoveryCooldownUntil?: number;
+  backgroundBlockedReason?: string;
 }
 
 const PROVIDER_ID = "cursor_help_web";
@@ -88,6 +108,8 @@ const AUXILIARY_SLOT_WAIT_MS = 10_000;
 const DEFAULT_CURSOR_HELP_POOL_SLOT_COUNT = 3;
 const MIN_CURSOR_HELP_POOL_SLOT_COUNT = 2;
 const MAX_CURSOR_HELP_POOL_SLOT_COUNT = 6;
+const CURSOR_HELP_HEARTBEAT_INTERVAL_MS = 30_000;
+const CURSOR_HELP_HEARTBEAT_BACKOFF_MS = 60_000;
 const encoder = new TextEncoder();
 const CONTENT_SCRIPT_FILE = "assets/cursor-help-content.js";
 const PAGE_HOOK_SCRIPT_FILE = "assets/cursor-help-page-hook.js";
@@ -95,9 +117,15 @@ const CURSOR_HELP_SESSION_SLOT_STORAGE_KEY = "cursor_help_web.session_slots";
 const CURSOR_HELP_POOL_STORAGE_KEY = "cursor_help_web.pool.v1";
 const CURSOR_HELP_CONTAINER_WIDTH = 1280;
 const CURSOR_HELP_CONTAINER_HEIGHT = 900;
+const CURSOR_HELP_WINDOW_REBUILD_COOLDOWN_MS = 15_000;
 const HOSTED_CHAT_RESPONSE_CONTENT_TYPE = "application/x-browser-brain-loop-hosted-chat+jsonl";
 let cursorHelpSlotLifecycleBoundTabs: typeof chrome.tabs | null = null;
 let cursorHelpSlotLifecycleBoundWindows: typeof chrome.windows | null = null;
+let cursorHelpHeartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+let cursorHelpHeartbeatInFlight = false;
+let cursorHelpHeartbeatLastAt = 0;
+let cursorHelpHeartbeatLastDelayMs = 0;
+let cursorHelpHeartbeatLastReason = "";
 
 function emitProviderDebugLog(step: string, status: "running" | "done" | "failed", detail: string): void {
   void chrome.runtime.sendMessage({
@@ -200,6 +228,8 @@ function normalizeSlotRecord(value: unknown): CursorHelpSlotRecord | null {
     lastKnownUrl: String(row.lastKnownUrl || ""),
     lastReadyAt: Math.max(0, Number(row.lastReadyAt || 0)),
     lastUsedAt: Math.max(0, Number(row.lastUsedAt || 0)),
+    lastHealthCheckedAt: Math.max(0, Number(row.lastHealthCheckedAt || 0)),
+    lastHealthReason: String(row.lastHealthReason || "").trim() || undefined,
     lastError: String(row.lastError || "").trim() || undefined,
   };
 }
@@ -221,6 +251,7 @@ function normalizePoolState(value: unknown): CursorHelpPoolState {
       windowModeText === "external-tabs" || windowModeText === "pool-window"
         ? (windowModeText as CursorHelpPoolState["windowMode"])
         : "none",
+    windowRecoveryCooldownUntil: Math.max(0, Number(row.windowRecoveryCooldownUntil || 0)) || undefined,
     lastWindowEvent: String(row.lastWindowEvent || "").trim() || undefined,
     lastWindowEventAt: Math.max(0, Number(row.lastWindowEventAt || 0)),
     lastWindowEventReason: String(row.lastWindowEventReason || "").trim() || undefined,
@@ -258,6 +289,7 @@ async function saveCursorHelpPoolState(
     windowId: state.windowId,
     slots: state.slots.map((slot) => cloneSlotRecord(slot)),
     windowMode: state.windowMode || "none",
+    windowRecoveryCooldownUntil: state.windowRecoveryCooldownUntil,
     lastWindowEvent: state.lastWindowEvent,
     lastWindowEventAt: Math.max(0, Number(state.lastWindowEventAt || 0)),
     lastWindowEventReason: state.lastWindowEventReason,
@@ -273,14 +305,111 @@ function withWindowEvent(
   options: {
     mode?: CursorHelpPoolState["windowMode"];
     reason?: string;
+    recoveryCooldownUntil?: number;
   } = {},
 ): CursorHelpPoolState {
   return {
     ...state,
     windowMode: options.mode || state.windowMode || "none",
+    windowRecoveryCooldownUntil:
+      typeof options.recoveryCooldownUntil === "number"
+        ? options.recoveryCooldownUntil
+        : state.windowRecoveryCooldownUntil,
     lastWindowEvent: String(event || "").trim() || undefined,
     lastWindowEventAt: nowMs(),
     lastWindowEventReason: String(options.reason || "").trim() || undefined,
+  };
+}
+
+function buildCursorHelpWindowPolicyState(
+  state: CursorHelpPoolState,
+  liveWindow: chrome.windows.Window | null,
+): CursorHelpWindowPolicyState {
+  const hasExternalTabs =
+    state.windowMode === "external-tabs" &&
+    state.slots.some((slot) => !slot.windowId);
+  if (hasExternalTabs) {
+    return {
+      windowStatus: "external-tabs",
+      shouldRebuildWindow: false,
+      requiresAttention: false,
+      shouldBackgroundWindow: false,
+      recoveryCooldownActive: false,
+      recoveryCooldownUntil: undefined,
+      backgroundBlockedReason: "external-tabs-are-user-owned",
+    };
+  }
+
+  if (state.windowMode === "pool-window") {
+    const recoveryCooldownUntil = Math.max(
+      0,
+      Number(state.windowRecoveryCooldownUntil || 0),
+    );
+    const recoveryCooldownActive = recoveryCooldownUntil > nowMs();
+    if (!liveWindow?.id) {
+      return {
+        windowStatus: "missing",
+        shouldRebuildWindow: !recoveryCooldownActive,
+        requiresAttention: true,
+        shouldBackgroundWindow: false,
+        recoveryCooldownActive,
+        recoveryCooldownUntil:
+          recoveryCooldownUntil > 0 ? recoveryCooldownUntil : undefined,
+        backgroundBlockedReason: recoveryCooldownActive
+          ? "rebuild-cooldown-active"
+          : "pool-window-missing",
+      };
+    }
+    const windowType = String(liveWindow.type || "").trim() || "normal";
+    const isPopup = windowType === "popup";
+    const isMinimized = String(liveWindow.state || "").trim() === "minimized";
+    return {
+      windowStatus: isMinimized ? "minimized" : "normal",
+      shouldRebuildWindow: false,
+      requiresAttention: false,
+      shouldBackgroundWindow: isPopup && !isMinimized,
+      recoveryCooldownActive: false,
+      recoveryCooldownUntil: undefined,
+      backgroundBlockedReason: isPopup
+        ? isMinimized
+          ? "already-minimized"
+          : undefined
+        : `window-type=${windowType}`,
+    };
+  }
+
+  return {
+    windowStatus: "none",
+    shouldRebuildWindow: false,
+    requiresAttention: false,
+    shouldBackgroundWindow: false,
+    recoveryCooldownActive: false,
+    recoveryCooldownUntil: undefined,
+    backgroundBlockedReason: "no-managed-window",
+  };
+}
+
+function resolveCursorHelpWindowRuntimeState(
+  state: CursorHelpPoolState,
+  window: chrome.windows.Window | null,
+): {
+  status: "none" | "external-tabs" | "minimized" | "normal" | "missing";
+  shouldRebuild: boolean;
+  allowBackgrounding: boolean;
+  requiresAttention: boolean;
+  recoveryCooldownActive: boolean;
+  recoveryCooldownUntil?: number;
+  backgroundBlockedReason?: string;
+} {
+  const policy = buildCursorHelpWindowPolicyState(state, window);
+  return {
+    status: policy.windowStatus,
+    shouldRebuild: policy.shouldRebuildWindow,
+    allowBackgrounding: policy.shouldBackgroundWindow,
+    requiresAttention: policy.requiresAttention,
+    recoveryCooldownActive: policy.recoveryCooldownActive,
+    recoveryCooldownUntil: policy.recoveryCooldownUntil,
+    backgroundBlockedReason: policy.backgroundBlockedReason,
   };
 }
 
@@ -570,13 +699,18 @@ async function isCursorHelpWindowAlive(
 
 async function minimizeCursorHelpWindow(
   windowId: number | undefined,
-): Promise<void> {
-  if (!Number.isInteger(windowId) || Number(windowId) <= 0) return;
+): Promise<boolean> {
+  if (!Number.isInteger(windowId) || Number(windowId) <= 0) return false;
+  const found = await chrome.windows.get(Number(windowId)).catch(() => null);
+  if (!found?.id) return false;
+  const windowType = String(found.type || "").trim();
+  if (windowType && windowType !== "popup") return false;
   await chrome.windows
     .update(Number(windowId), { state: "minimized" })
     .catch(() => {
       // noop
     });
+  return true;
 }
 
 async function markCursorHelpTabStable(tabId: number): Promise<void> {
@@ -606,8 +740,100 @@ function buildCursorHelpSlotRecord(
     lastKnownUrl: String(tab.url || ""),
     lastReadyAt: 0,
     lastUsedAt: 0,
+    lastHealthCheckedAt: 0,
+    lastHealthReason: undefined,
     lastError: undefined,
   };
+}
+
+function buildSlotHealthSnapshot(
+  status: CursorHelpSlotRecord["status"],
+  reason: string,
+  error = "",
+): Pick<CursorHelpSlotRecord, "status" | "lastHealthCheckedAt" | "lastHealthReason" | "lastError"> {
+  return {
+    status,
+    lastHealthCheckedAt: nowMs(),
+    lastHealthReason: String(reason || "").trim() || undefined,
+    lastError: String(error || "").trim() || undefined,
+  };
+}
+
+function classifyInspectHealth(
+  inspect: CursorHelpInspectResult | null,
+): Pick<CursorHelpSlotRecord, "status" | "lastHealthReason" | "lastError"> {
+  if (!inspect) {
+    return {
+      status: "stale",
+      lastHealthReason: "inspect-failed",
+      lastError: "未找到可用的 Cursor Help 页面。请确认页面已完成加载。",
+    };
+  }
+  if (inspect.runtimeMismatch) {
+    return {
+      status: "error",
+      lastHealthReason: "runtime-mismatch",
+      lastError: formatInspectFailure(inspect),
+    };
+  }
+  if (!canCursorHelpSlotBootExecute(inspect)) {
+    return {
+      status: "warming",
+      lastHealthReason: "page-not-ready",
+      lastError: formatInspectFailure(inspect),
+    };
+  }
+  return {
+    status: "idle",
+    lastHealthReason: "ready",
+    lastError: "",
+  };
+}
+
+function resolveHeartbeatDelay(debugState: CursorHelpPoolDebugView): {
+  delayMs: number;
+  reason: string;
+} {
+  const summary = toRecord(debugState.summary);
+  const errorCount = Number(summary.errorCount || 0);
+  if (summary.shouldRebuildWindow || summary.requiresAttention || errorCount > 0) {
+    return {
+      delayMs: CURSOR_HELP_HEARTBEAT_BACKOFF_MS,
+      reason: "attention",
+    };
+  }
+  return {
+    delayMs: CURSOR_HELP_HEARTBEAT_INTERVAL_MS,
+    reason: "steady",
+  };
+}
+
+function scheduleCursorHelpPoolHeartbeat(delayMs = CURSOR_HELP_HEARTBEAT_INTERVAL_MS): void {
+  if (cursorHelpHeartbeatTimer) return;
+  cursorHelpHeartbeatLastDelayMs = delayMs;
+  cursorHelpHeartbeatTimer = setTimeout(async () => {
+    cursorHelpHeartbeatTimer = null;
+    if (cursorHelpHeartbeatInFlight) {
+      scheduleCursorHelpPoolHeartbeat(delayMs);
+      return;
+    }
+    cursorHelpHeartbeatInFlight = true;
+    try {
+      const debugState = await runCursorHelpPoolHeartbeat();
+      const next = resolveHeartbeatDelay(debugState);
+      cursorHelpHeartbeatLastReason = `scheduled:${next.reason}`;
+      scheduleCursorHelpPoolHeartbeat(next.delayMs);
+    } catch {
+      cursorHelpHeartbeatLastReason = "scheduled:error";
+      scheduleCursorHelpPoolHeartbeat(CURSOR_HELP_HEARTBEAT_BACKOFF_MS);
+    } finally {
+      cursorHelpHeartbeatInFlight = false;
+    }
+  }, delayMs);
+  const nodeTimer = cursorHelpHeartbeatTimer as ReturnType<typeof setTimeout> & { unref?: () => void };
+  if (typeof nodeTimer?.unref === "function") {
+    nodeTimer.unref();
+  }
 }
 
 async function tryAdoptExistingCursorHelpSlots(
@@ -672,6 +898,7 @@ async function createCursorHelpPoolWindow(
     .create({
       url: CURSOR_HELP_URL,
       focused: false,
+      type: "popup",
       width: CURSOR_HELP_CONTAINER_WIDTH,
       height: CURSOR_HELP_CONTAINER_HEIGHT,
     })
@@ -679,7 +906,6 @@ async function createCursorHelpPoolWindow(
       return chrome.windows.create({
         url: CURSOR_HELP_URL,
         focused: false,
-        type: "popup",
         width: CURSOR_HELP_CONTAINER_WIDTH,
         height: CURSOR_HELP_CONTAINER_HEIGHT,
       });
@@ -706,7 +932,8 @@ async function createCursorHelpPoolWindow(
     slots.push(buildCursorHelpSlotRecord(tab, "auxiliary"));
   }
 
-  await minimizeCursorHelpWindow(createdWindow.id);
+  const createdWindowType = String(createdWindow.type || "").trim() || "unknown";
+  const minimized = await minimizeCursorHelpWindow(createdWindow.id);
   await clearLegacySessionSlots();
   return await saveCursorHelpPoolState(withWindowEvent({
     version: 1,
@@ -716,7 +943,7 @@ async function createCursorHelpPoolWindow(
     updatedAt: nowMs(),
   }, "create_pool_window", {
     mode: "pool-window",
-    reason: `slots=${slots.length}`,
+    reason: `slots=${slots.length} type=${createdWindowType} minimized=${minimized ? 1 : 0}`,
   }));
 }
 
@@ -754,6 +981,9 @@ async function createAdditionalPoolSlot(
 
 async function reconcileCursorHelpPoolState(
   slotCount: number,
+  options: {
+    allowAutoRebuildAfterRemoval?: boolean;
+  } = {},
 ): Promise<CursorHelpPoolState> {
   const desiredSlotCount = normalizePoolSlotCount(slotCount);
   const current = await loadCursorHelpPoolState();
@@ -769,10 +999,56 @@ async function reconcileCursorHelpPoolState(
       windowId: undefined,
       slots: sortSlotsForDisplay(slots),
       windowMode: "external-tabs",
+      windowRecoveryCooldownUntil: undefined,
       updatedAt: nowMs(),
     }, "reuse_external_tabs", {
       mode: "external-tabs",
       reason: `slots=${slots.length}`,
+      recoveryCooldownUntil: 0,
+    }));
+    await clearLegacySessionSlots();
+    return nextState;
+  }
+
+  const missingWindowPolicy = buildCursorHelpWindowPolicyState(current, null);
+
+  if (
+    !windowId &&
+    slots.length <= 0 &&
+    current.windowMode === "pool-window" &&
+    missingWindowPolicy.recoveryCooldownActive
+  ) {
+    const nextState = await saveCursorHelpPoolState(withWindowEvent({
+      ...current,
+      windowId: undefined,
+      slots: [],
+      windowMode: "pool-window",
+      updatedAt: nowMs(),
+    }, "skip_window_rebuild_cooldown", {
+      mode: "pool-window",
+      reason: `until=${missingWindowPolicy.recoveryCooldownUntil || 0}`,
+      recoveryCooldownUntil: missingWindowPolicy.recoveryCooldownUntil || 0,
+    }));
+    await clearLegacySessionSlots();
+    return nextState;
+  }
+
+  if (
+    !windowId &&
+    slots.length <= 0 &&
+    current.windowMode === "pool-window" &&
+    current.lastWindowEvent === "pool_window_removed" &&
+    options.allowAutoRebuildAfterRemoval === false
+  ) {
+    const nextState = await saveCursorHelpPoolState(withWindowEvent({
+      ...current,
+      windowId: undefined,
+      slots: [],
+      windowMode: "pool-window",
+      updatedAt: nowMs(),
+    }, "await_manual_rebuild", {
+      mode: "pool-window",
+      reason: "window_removed",
     }));
     await clearLegacySessionSlots();
     return nextState;
@@ -793,9 +1069,24 @@ async function reconcileCursorHelpPoolState(
     version: 1,
     windowId,
     slots: sortSlotsForDisplay(slots),
+    windowMode: "pool-window",
     updatedAt: nowMs(),
   });
-  await minimizeCursorHelpWindow(windowId);
+  const liveWindow = await chrome.windows.get(windowId).catch(() => null);
+  const liveWindowPolicy = buildCursorHelpWindowPolicyState(nextState, liveWindow);
+  if (!liveWindowPolicy.shouldBackgroundWindow) {
+    return await saveCursorHelpPoolState(withWindowEvent(nextState, "skip_window_backgrounding", {
+      mode: "pool-window",
+      reason: liveWindowPolicy.backgroundBlockedReason || `windowId=${windowId}`,
+    }));
+  }
+  const minimized = await minimizeCursorHelpWindow(windowId);
+  if (!minimized) {
+    return await saveCursorHelpPoolState(withWindowEvent(nextState, "skip_window_backgrounding", {
+      mode: "pool-window",
+      reason: `windowId=${windowId} minimize-returned-false`,
+    }));
+  }
   await clearLegacySessionSlots();
   return nextState;
 }
@@ -839,8 +1130,7 @@ async function ensureCursorHelpSlotUsable(
   const tab = await chrome.tabs.get(slot.tabId).catch(() => null);
   if (!tab?.id || !isCursorHelpUrl(tab.url)) {
     await patchCursorHelpSlotState(slot.slotId, {
-      status: "stale",
-      lastError: "slot tab missing",
+      ...buildSlotHealthSnapshot("stale", "tab-missing", "slot tab missing"),
     });
     clearSlotPreferences(slot.slotId);
     return null;
@@ -850,22 +1140,27 @@ async function ensureCursorHelpSlotUsable(
     await waitForCursorHelpTabReady(tab.id);
   } catch (error) {
     await patchCursorHelpSlotState(slot.slotId, {
-      status: "stale",
-      lastError: error instanceof Error ? error.message : String(error),
+      ...buildSlotHealthSnapshot(
+        "stale",
+        "page-not-ready",
+        error instanceof Error ? error.message : String(error),
+      ),
       windowId: typeof tab.windowId === "number" ? tab.windowId : slot.windowId,
       lastKnownUrl: String(tab.url || slot.lastKnownUrl || ""),
     });
     return null;
   }
   const inspect = await inspectCursorTabEnsured(tab.id);
-  const status = classifySlotStatusFromInspect(inspect);
+  const health = classifyInspectHealth(inspect);
   await patchCursorHelpSlotState(slot.slotId, {
-    status,
+    ...buildSlotHealthSnapshot(
+      health.status,
+      String(health.lastHealthReason || ""),
+      String(health.lastError || ""),
+    ),
     windowId: typeof tab.windowId === "number" ? tab.windowId : slot.windowId,
     lastKnownUrl: String(inspect?.url || tab.url || slot.lastKnownUrl || ""),
     lastReadyAt: canCursorHelpSlotBootExecute(inspect) ? nowMs() : slot.lastReadyAt,
-    lastError:
-      canCursorHelpSlotBootExecute(inspect) ? "" : formatInspectFailure(inspect),
   });
   if (!canCursorHelpSlotBootExecute(inspect)) {
     if (options.throwOnRuntimeMismatch && inspect?.runtimeMismatch) {
@@ -950,7 +1245,9 @@ async function waitForCursorHelpSlot(
   let lastUnavailableReason = "";
 
   while (nowMs() < deadline) {
-    const state = await reconcileCursorHelpPoolState(desiredSlotCount);
+    const state = await reconcileCursorHelpPoolState(desiredSlotCount, {
+      allowAutoRebuildAfterRemoval: true,
+    });
     reapStaleExecutionsForSlots(state.slots);
     const chosen = chooseCursorHelpSlot(state.slots, lane, sessionId, conversationKey);
     if (chosen) {
@@ -1020,7 +1317,8 @@ async function removeCursorHelpSlotsByWindowId(windowId: number): Promise<void> 
   if (!Number.isInteger(windowId) || windowId <= 0) return;
   const current = await loadCursorHelpPoolState();
   const removedSlots = current.slots.filter((slot) => slot.windowId === windowId);
-  if (removedSlots.length <= 0 && current.windowId !== windowId) return;
+  const removedPrimaryPoolWindow = current.windowId === windowId;
+  if (removedSlots.length <= 0 && !removedPrimaryPoolWindow) return;
   for (const slot of removedSlots) {
     closeActiveRequestForSlot(slot.slotId, "Cursor Help 专用窗口已关闭");
     clearSlotPreferences(slot.slotId);
@@ -1030,8 +1328,15 @@ async function removeCursorHelpSlotsByWindowId(windowId: number): Promise<void> 
     current.windowId = undefined;
   }
   const nextState = withWindowEvent(current, "pool_window_removed", {
-    mode: current.slots.some((slot) => slot.windowId) ? current.windowMode : "none",
+    mode: removedPrimaryPoolWindow
+      ? "pool-window"
+      : current.slots.some((slot) => slot.windowId)
+        ? current.windowMode
+        : "none",
     reason: `windowId=${windowId}`,
+    recoveryCooldownUntil: removedPrimaryPoolWindow
+      ? nowMs() + CURSOR_HELP_WINDOW_REBUILD_COOLDOWN_MS
+      : current.windowRecoveryCooldownUntil || 0,
   });
   await saveCursorHelpPoolState(nextState);
 }
@@ -1060,11 +1365,41 @@ export async function ensureCursorHelpPoolReady(
   slotCount = DEFAULT_CURSOR_HELP_POOL_SLOT_COUNT,
 ): Promise<CursorHelpPoolDebugView> {
   ensureCursorHelpSlotLifecycle();
-  const state = await reconcileCursorHelpPoolState(slotCount);
+  const state = await reconcileCursorHelpPoolState(slotCount, {
+    allowAutoRebuildAfterRemoval: false,
+  });
   for (const slot of state.slots) {
     await ensureCursorHelpSlotUsable(slot);
   }
-  return await getCursorHelpPoolDebugState();
+  const debugState = await getCursorHelpPoolDebugState();
+  const next = resolveHeartbeatDelay(debugState);
+  scheduleCursorHelpPoolHeartbeat(next.delayMs);
+  return debugState;
+}
+
+export async function runCursorHelpPoolHeartbeat(): Promise<CursorHelpPoolDebugView> {
+  ensureCursorHelpSlotLifecycle();
+  const state = await loadCursorHelpPoolState();
+  for (const slot of state.slots) {
+    clearStaleExecution(slot.slotId, slot.tabId);
+    await ensureCursorHelpSlotUsable(slot).catch(() => null);
+  }
+  const debugState = await getCursorHelpPoolDebugState();
+  cursorHelpHeartbeatLastAt = nowMs();
+  const next = resolveHeartbeatDelay(debugState);
+  cursorHelpHeartbeatLastReason = `manual:${next.reason}`;
+  if (cursorHelpHeartbeatTimer) {
+    clearTimeout(cursorHelpHeartbeatTimer);
+    cursorHelpHeartbeatTimer = null;
+  }
+  scheduleCursorHelpPoolHeartbeat(next.delayMs);
+  if (debugState.summary && typeof debugState.summary === "object") {
+    debugState.summary.lastHeartbeatAt = cursorHelpHeartbeatLastAt;
+    debugState.summary.lastHeartbeatDelayMs = cursorHelpHeartbeatLastDelayMs;
+    debugState.summary.lastHeartbeatReason = cursorHelpHeartbeatLastReason;
+    debugState.summary.heartbeatInFlight = cursorHelpHeartbeatInFlight;
+  }
+  return debugState;
 }
 
 export async function rebuildCursorHelpPool(
@@ -1095,6 +1430,7 @@ export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebug
     state.windowId && (await chrome.windows.get(state.windowId).catch(() => null))
       ? await chrome.windows.get(state.windowId).catch(() => null)
       : null;
+  const windowRuntimeState = resolveCursorHelpWindowRuntimeState(state, window);
   const slots = sortSlotsForDisplay(state.slots).map((slot) => {
     const activeRequestId = String(
       ACTIVE_REQUEST_ID_BY_SLOT.get(slot.slotId) || "",
@@ -1118,6 +1454,8 @@ export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebug
       lastKnownUrl: slot.lastKnownUrl,
       lastReadyAt: slot.lastReadyAt || 0,
       lastUsedAt: slot.lastUsedAt || 0,
+      lastHealthCheckedAt: slot.lastHealthCheckedAt || 0,
+      lastHealthReason: slot.lastHealthReason || "",
       lastError: slot.lastError || "",
     };
   });
@@ -1134,6 +1472,17 @@ export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebug
       busyCount,
       errorCount,
       windowMode: state.windowMode || "none",
+      windowStatus: windowRuntimeState.status,
+      shouldRebuildWindow: windowRuntimeState.shouldRebuild,
+      allowBackgrounding: windowRuntimeState.allowBackgrounding,
+      requiresAttention: windowRuntimeState.requiresAttention,
+      recoveryCooldownActive: windowRuntimeState.recoveryCooldownActive,
+      recoveryCooldownUntil: windowRuntimeState.recoveryCooldownUntil || 0,
+      backgroundBlockedReason: windowRuntimeState.backgroundBlockedReason || "",
+      lastHeartbeatAt: cursorHelpHeartbeatLastAt,
+      lastHeartbeatDelayMs: cursorHelpHeartbeatLastDelayMs,
+      lastHeartbeatReason: cursorHelpHeartbeatLastReason,
+      heartbeatInFlight: cursorHelpHeartbeatInFlight,
       lastWindowEvent: state.lastWindowEvent || "",
       lastWindowEventAt: state.lastWindowEventAt || 0,
       lastWindowEventReason: state.lastWindowEventReason || "",
@@ -1146,6 +1495,13 @@ export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebug
           type: String(window.type || ""),
           tabCount: Array.isArray(window.tabs) ? window.tabs.length : undefined,
           mode: state.windowMode || "none",
+          runtimeStatus: windowRuntimeState.status,
+          shouldRebuild: windowRuntimeState.shouldRebuild,
+          allowBackgrounding: windowRuntimeState.allowBackgrounding,
+          requiresAttention: windowRuntimeState.requiresAttention,
+          recoveryCooldownActive: windowRuntimeState.recoveryCooldownActive,
+          recoveryCooldownUntil: windowRuntimeState.recoveryCooldownUntil || 0,
+          backgroundBlockedReason: windowRuntimeState.backgroundBlockedReason || "",
           lastEvent: state.lastWindowEvent || "",
           lastEventAt: state.lastWindowEventAt || 0,
           lastEventReason: state.lastWindowEventReason || "",

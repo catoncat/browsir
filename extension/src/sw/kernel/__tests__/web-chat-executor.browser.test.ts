@@ -6,6 +6,7 @@ import {
   ensureCursorHelpPoolReady,
   getCursorHelpPoolDebugState,
   handleWebChatRuntimeMessage,
+  runCursorHelpPoolHeartbeat,
 } from "../web-chat-executor.browser";
 import type { LlmResolvedRoute } from "../llm-provider";
 import {
@@ -856,7 +857,28 @@ describe("web-chat-executor.browser", () => {
     expect(debugState.summary.lastWindowEvent).toBe("adopt_existing_tabs");
     expect(debugState.summary.lastWindowEventReason).toContain("adopted=1");
     expect(debugState.window).toBeNull();
+    expect(chrome.windows.update).not.toHaveBeenCalled();
     expect(chromeMock.sendMessage).toHaveBeenCalled();
+  });
+
+  it("prefers popup windows for dedicated pool creation", async () => {
+    buildChromeMock();
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    await ensureCursorHelpPoolReady(3);
+
+    const windowsCreate = chrome.windows.create as unknown as ReturnType<typeof vi.fn>;
+    expect(windowsCreate.mock.calls[0]?.[0]).toMatchObject({
+      type: "popup",
+      focused: false,
+      url: "https://cursor.com/help",
+    });
+
+    const debugState = await getCursorHelpPoolDebugState();
+    expect(debugState.summary.windowMode).toBe("pool-window");
+    expect(debugState.summary.windowStatus).toBe("minimized");
+    expect(debugState.summary.shouldRebuildWindow).toBe(false);
+    expect(debugState.summary.lastWindowEventReason).toContain("type=popup");
   });
 
   it("records pool window removal reason in debug state", async () => {
@@ -869,8 +891,98 @@ describe("web-chat-executor.browser", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const debugState = await getCursorHelpPoolDebugState();
+    expect(debugState.summary.windowStatus).toBe("missing");
+    expect(debugState.summary.shouldRebuildWindow).toBe(false);
+    expect(debugState.summary.requiresAttention).toBe(true);
+    expect(debugState.summary.recoveryCooldownActive).toBe(true);
+    expect(Number(debugState.summary.recoveryCooldownUntil || 0)).toBeGreaterThan(0);
     expect(debugState.summary.lastWindowEvent).toBe("pool_window_removed");
     expect(debugState.summary.lastWindowEventReason).toContain("windowId=2");
+  });
+
+  it("does not immediately rebuild a removed pool window during cooldown", async () => {
+    const chromeMock = buildChromeMock();
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    await ensureCursorHelpPoolReady(3);
+
+    const windowsCreate = chrome.windows.create as unknown as ReturnType<typeof vi.fn>;
+    expect(windowsCreate).toHaveBeenCalledTimes(1);
+
+    chromeMock.emitWindowRemoved(2);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await ensureCursorHelpPoolReady(3);
+
+    expect(windowsCreate).toHaveBeenCalledTimes(1);
+    const debugState = await getCursorHelpPoolDebugState();
+    expect(debugState.summary.windowStatus).toBe("missing");
+    expect(debugState.summary.recoveryCooldownActive).toBe(true);
+    expect(debugState.summary.lastWindowEvent).toBe("skip_window_rebuild_cooldown");
+  });
+
+  it("does not auto-rebuild a removed pool window during passive ensure", async () => {
+    const chromeMock = buildChromeMock();
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    createCursorHelpWebProvider();
+    await ensureCursorHelpPoolReady(3);
+    chromeMock.emitWindowRemoved(2);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const windowsCreate = chrome.windows.create as unknown as ReturnType<typeof vi.fn>;
+    const createCallCountBeforeEnsure = windowsCreate.mock.calls.length;
+
+    await ensureCursorHelpPoolReady(3);
+    const debugState = await getCursorHelpPoolDebugState();
+
+    expect(windowsCreate.mock.calls.length).toBe(createCallCountBeforeEnsure);
+    expect(debugState.summary.windowStatus).toBe("missing");
+    expect(debugState.summary.shouldRebuildWindow).toBe(false);
+    expect(debugState.summary.recoveryCooldownActive).toBe(true);
+    expect(debugState.summary.lastWindowEvent).toBe("skip_window_rebuild_cooldown");
+    expect(String(debugState.summary.lastWindowEventReason || "")).toContain("until=");
+  });
+
+  it("heartbeat marks runtime-mismatch slots as error", async () => {
+    buildChromeMock();
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    await ensureCursorHelpPoolReady(3);
+
+    const sendMessage = chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>;
+    sendMessage.mockImplementation(async (_tabId: number, message: Record<string, unknown>) => {
+      const type = String(message.type || "").trim();
+      if (type === "webchat.inspect") {
+        return {
+          ok: true,
+          pageHookReady: true,
+          fetchHookReady: true,
+          senderReady: true,
+          canExecute: false,
+          url: "https://cursor.com/help",
+          selectedModel: "Sonnet 4.6",
+          availableModels: ["Sonnet 4.6"],
+          senderKind: "react_chat_input_on_submit",
+          pageRuntimeVersion: "stale-runtime",
+          contentRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
+          runtimeExpectedVersion: CURSOR_HELP_RUNTIME_VERSION,
+          rewriteStrategy: CURSOR_HELP_REWRITE_STRATEGY,
+          runtimeMismatch: true,
+          runtimeMismatchReason: "Cursor Help 页面运行时版本不一致。page=stale-runtime expected=current",
+        };
+      }
+      if (type === "webchat.execute" || type === "webchat.abort") {
+        return { ok: true };
+      }
+      throw new Error(`unexpected tab message: ${type}`);
+    });
+
+    const debugState = await runCursorHelpPoolHeartbeat();
+    expect(Number(debugState.summary.errorCount || 0)).toBeGreaterThan(0);
+    expect(String(debugState.slots[0]?.status || "")).toBe("error");
+    expect(String(debugState.slots[0]?.lastHealthReason || "")).toBe("runtime-mismatch");
+    expect(String(debugState.slots[0]?.lastError || "")).toContain("运行时版本不一致");
   });
 
   it("rejects stale runtime version before execute", async () => {
