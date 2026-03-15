@@ -2284,7 +2284,7 @@ export function createRuntimeLoopController(
             messages.push({
               role: "user",
               content:
-                "WARNING: You attempted to finish but your browser actions were not verified. Call browser_verify with a concrete expect assertion before giving your final answer.",
+                "WARNING: You attempted to finish but your browser actions were not verified. Call browser_verify with a concrete expect assertion (url/title/text/selector) before giving your final answer. If you used coordinate-based computer tool, switch to search_elements + click for more reliable targeting.",
             });
             continue;
           }
@@ -2309,6 +2309,7 @@ export function createRuntimeLoopController(
           ? lastEvidenceFingerprintBySignature.get(toolCallSignature) || ""
           : "";
         let stepUsedBrowserProofRequiredTool = false;
+        let stepUsedComputerTool = false;
         let stepObservedBrowserProof = false;
         const stepEvidenceParts: string[] = [];
         let skipRemainingToolCallsBySteer = false;
@@ -2341,6 +2342,9 @@ export function createRuntimeLoopController(
           if (isToolCallRequiringBrowserProof(tc.function.arguments || "", canonicalToolName)) {
             browserProofRequired = true;
             stepUsedBrowserProofRequiredTool = true;
+            if (canonicalToolName === "computer") {
+              stepUsedComputerTool = true;
+            }
           }
           toolStep += 1;
           orchestrator.events.emit("step_planned", sessionId, {
@@ -2612,8 +2616,9 @@ export function createRuntimeLoopController(
           }
           messages.push({
             role: "user",
-            content:
-              "WARNING: Your last browser action had no verification. Use browser_verify or include an expect parameter to confirm the action succeeded before proceeding.",
+            content: stepUsedComputerTool
+              ? "WARNING: Your coordinate-based browser action (computer) had no verification. Prefer search_elements to find targets by semantic query, then use click/fill_element_by_uid with the returned uid. Use computer only when search_elements fails twice with different queries. Call browser_verify with a concrete expect assertion to confirm progress."
+              : "WARNING: Your last browser action had no verification. Use browser_verify with a concrete expect (url/title/text/selector) to confirm the action succeeded before proceeding.",
           });
         }
 
