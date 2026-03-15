@@ -959,6 +959,100 @@ describe("web-chat-executor.browser", () => {
     expect(String(debugState.summary.lastWindowEventReason || "")).toContain("until=");
   });
 
+  it("awaits manual rebuild after cooldown expires during passive ensure", async () => {
+    buildChromeMock();
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    await chrome.storage.local.set({
+      [CURSOR_HELP_POOL_STORAGE_KEY]: {
+        version: 1,
+        windowId: null,
+        slots: [],
+        windowMode: "pool-window",
+        windowRecoveryCooldownUntil: Date.now() - 1,
+        lastWindowEvent: "pool_window_removed",
+        lastWindowEventAt: 1,
+        lastWindowEventReason: "windowId=2",
+        updatedAt: 1,
+      },
+    });
+
+    const windowsCreate = chrome.windows.create as unknown as ReturnType<typeof vi.fn>;
+    await ensureCursorHelpPoolReady(3);
+    const debugState = await getCursorHelpPoolDebugState();
+
+    expect(windowsCreate).not.toHaveBeenCalled();
+    expect(debugState.summary.windowStatus).toBe("missing");
+    expect(debugState.summary.shouldRebuildWindow).toBe(true);
+    expect(debugState.summary.recoveryCooldownActive).toBe(false);
+    expect(debugState.summary.lastWindowEvent).toBe("await_manual_rebuild");
+    expect(debugState.summary.lastWindowEventReason).toBe("window_removed");
+  });
+
+  it("auto-rebuilds the pool window after cooldown expires when active demand arrives", async () => {
+    buildChromeMock();
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    await chrome.storage.local.set({
+      [CURSOR_HELP_POOL_STORAGE_KEY]: {
+        version: 1,
+        windowId: null,
+        slots: [],
+        windowMode: "pool-window",
+        windowRecoveryCooldownUntil: Date.now() - 1,
+        lastWindowEvent: "pool_window_removed",
+        lastWindowEventAt: 1,
+        lastWindowEventReason: "windowId=2",
+        updatedAt: 1,
+      },
+    });
+
+    const provider = createCursorHelpWebProvider();
+    const response = await provider.send({
+      sessionId: "window-recovery-demand",
+      step: 1,
+      route: createRoute(),
+      signal: new AbortController().signal,
+      payload: {
+        stream: true,
+        messages: [{ role: "user", content: "hello" }],
+        tools: [],
+        tool_choice: "auto",
+      },
+    });
+
+    const windowsCreate = chrome.windows.create as unknown as ReturnType<typeof vi.fn>;
+    expect(windowsCreate).toHaveBeenCalledTimes(1);
+
+    const requestId = getLastExecuteRequestId();
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.debug",
+        requestId,
+        stage: "request_started",
+      },
+    });
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.turn_resolved",
+        requestId,
+        result: {
+          assistantText: "ok",
+          toolCalls: [],
+          finishReason: "stop",
+          meta: {},
+        },
+      },
+    });
+    await readResponseText(response);
+
+    const debugState = await getCursorHelpPoolDebugState();
+    expect(debugState.summary.windowMode).toBe("pool-window");
+    expect(debugState.summary.windowStatus).not.toBe("missing");
+  });
+
   it("adopts a newly opened external tab during rebuild cooldown instead of recreating the pool window", async () => {
     const chromeMock = buildChromeMock();
     const tabsQuery = chrome.tabs.query as unknown as ReturnType<typeof vi.fn>;
@@ -1052,6 +1146,102 @@ describe("web-chat-executor.browser", () => {
     expect(recoveredSlot).toBeTruthy();
     expect(Number(recoveredSlot?.tabId || 0)).not.toBe(missingTabId);
     expect(["idle", "warming", "recovering"]).toContain(String(recoveredSlot?.status || ""));
+  });
+
+  it("heartbeat soft-recovers page-not-ready slots", async () => {
+    buildChromeMock();
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    await ensureCursorHelpPoolReady(3);
+
+    const inspectAttempts = new Map<number, number>();
+    const sendMessage = chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>;
+    sendMessage.mockImplementation(async (tabId: number, message: Record<string, unknown>) => {
+      const type = String(message.type || "").trim();
+      if (type === "webchat.inspect") {
+        const attempt = Number(inspectAttempts.get(tabId) || 0) + 1;
+        inspectAttempts.set(tabId, attempt);
+        if (attempt === 1) {
+          return {
+            ok: true,
+            pageHookReady: false,
+            fetchHookReady: false,
+            senderReady: false,
+            canExecute: false,
+            url: "https://cursor.com/help",
+            runtimeMismatch: false,
+          };
+        }
+        return {
+          ok: true,
+          pageHookReady: true,
+          fetchHookReady: true,
+          senderReady: true,
+          canExecute: true,
+          url: "https://cursor.com/help",
+          selectedModel: "Sonnet 4.6",
+          availableModels: ["Sonnet 4.6"],
+          senderKind: "react_chat_input_on_submit",
+          pageRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
+          contentRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
+          runtimeExpectedVersion: CURSOR_HELP_RUNTIME_VERSION,
+          rewriteStrategy: CURSOR_HELP_REWRITE_STRATEGY,
+          runtimeMismatch: false,
+        };
+      }
+      if (type === "webchat.execute" || type === "webchat.abort") {
+        return { ok: true };
+      }
+      throw new Error(`unexpected tab message: ${type}`);
+    });
+
+    const debugState = await runCursorHelpPoolHeartbeat();
+    expect(Number(debugState.summary.errorCount || 0)).toBe(0);
+    expect(String(debugState.slots[0]?.lastHealthReason || "")).toBe("ready");
+  });
+
+  it("heartbeat soft-recovers inspect-failed slots", async () => {
+    buildChromeMock();
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    await ensureCursorHelpPoolReady(3);
+
+    const inspectAttempts = new Map<number, number>();
+    const sendMessage = chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>;
+    sendMessage.mockImplementation(async (tabId: number, message: Record<string, unknown>) => {
+      const type = String(message.type || "").trim();
+      if (type === "webchat.inspect") {
+        const attempt = Number(inspectAttempts.get(tabId) || 0) + 1;
+        inspectAttempts.set(tabId, attempt);
+        if (attempt === 1) {
+          throw new Error("temporary inspect failure");
+        }
+        return {
+          ok: true,
+          pageHookReady: true,
+          fetchHookReady: true,
+          senderReady: true,
+          canExecute: true,
+          url: "https://cursor.com/help",
+          selectedModel: "Sonnet 4.6",
+          availableModels: ["Sonnet 4.6"],
+          senderKind: "react_chat_input_on_submit",
+          pageRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
+          contentRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
+          runtimeExpectedVersion: CURSOR_HELP_RUNTIME_VERSION,
+          rewriteStrategy: CURSOR_HELP_REWRITE_STRATEGY,
+          runtimeMismatch: false,
+        };
+      }
+      if (type === "webchat.execute" || type === "webchat.abort") {
+        return { ok: true };
+      }
+      throw new Error(`unexpected tab message: ${type}`);
+    });
+
+    const debugState = await runCursorHelpPoolHeartbeat();
+    expect(Number(debugState.summary.errorCount || 0)).toBe(0);
+    expect(String(debugState.slots[0]?.lastHealthReason || "")).toBe("ready");
   });
 
   it("rejects stale runtime version before execute", async () => {

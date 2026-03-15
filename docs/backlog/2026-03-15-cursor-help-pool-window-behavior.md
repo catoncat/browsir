@@ -140,6 +140,29 @@ tags: [slice, cursor-help, pool, window, minimized]
 
 - 未提交
 
+## 工作总结（2026-03-15 Slice D）
+
+- 继续沿 `ISSUE-027` 收口“cooldown 结束后的恢复触发条件”，把 **passive ensure** 和 **active demand** 的行为边界明确成代码与测试，而不再停留在隐式分支里。
+- 当前实现新增了共享恢复决策 helper，用于区分 missing pool window 时的 3 类动作：
+  - `skip-cooldown`
+  - `await-manual`
+  - `auto-rebuild`
+- 行为上现在明确为：
+  - cooldown 仍在时：不 auto rebuild
+  - cooldown 已结束但只是 passive ensure：进入 `await_manual_rebuild`
+  - cooldown 已结束且有 active provider demand：允许自动重建 pool window
+- 同时保留上一轮新增的 opportunistic adopt 语义：若用户在 cooldown 期间手动打开了 external tab，仍优先接管 external tab，而不是 recreate popup。
+- 为此补了两条恢复边界回归测试：
+  - cooldown 结束后 passive ensure 只标记 manual rebuild，不自动重建
+  - cooldown 结束后 active demand 会自动重建并继续执行 provider 请求
+- 本轮验证：
+  - 聚焦测试 `src/sw/kernel/__tests__/web-chat-executor.browser.test.ts` 通过
+  - full build 仍被无关文件 `src/sw/kernel/runtime-router/plugin-sandbox.ts` 的现存语法错误阻塞，因此本轮继续只做 scoped 验证，不越界处理 unrelated build blocker
+
+## 相关 commits（2026-03-15 Slice D）
+
+- 未提交
+
 ## 工作总结（2026-03-15 第三轮实现）
 
 - 已把 `ISSUE-027` 的窗口状态矩阵与恢复条件显式化到 debug state：

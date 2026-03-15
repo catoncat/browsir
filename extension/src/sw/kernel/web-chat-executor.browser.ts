@@ -110,6 +110,7 @@ const MIN_CURSOR_HELP_POOL_SLOT_COUNT = 2;
 const MAX_CURSOR_HELP_POOL_SLOT_COUNT = 6;
 const CURSOR_HELP_HEARTBEAT_INTERVAL_MS = 30_000;
 const CURSOR_HELP_HEARTBEAT_BACKOFF_MS = 60_000;
+const CURSOR_HELP_HEARTBEAT_RECOVERY_RETRY_MS = 25;
 const encoder = new TextEncoder();
 const CONTENT_SCRIPT_FILE = "assets/cursor-help-content.js";
 const PAGE_HOOK_SCRIPT_FILE = "assets/cursor-help-page-hook.js";
@@ -408,6 +409,38 @@ function resolveCursorHelpWindowRuntimeState(
     recoveryCooldownActive: policy.recoveryCooldownActive,
     recoveryCooldownUntil: policy.recoveryCooldownUntil,
     backgroundBlockedReason: policy.backgroundBlockedReason,
+  };
+}
+
+function resolveMissingPoolWindowRecoveryAction(
+  state: CursorHelpPoolState,
+  options: {
+    allowAutoRebuildAfterRemoval?: boolean;
+  } = {},
+): {
+  action: "skip-cooldown" | "await-manual" | "auto-rebuild";
+  reason: string;
+} {
+  const policy = buildCursorHelpWindowPolicyState(state, null);
+  if (policy.recoveryCooldownActive) {
+    return {
+      action: "skip-cooldown",
+      reason: `until=${policy.recoveryCooldownUntil || 0}`,
+    };
+  }
+  if (
+    state.windowMode === "pool-window" &&
+    state.lastWindowEvent === "pool_window_removed" &&
+    options.allowAutoRebuildAfterRemoval !== true
+  ) {
+    return {
+      action: "await-manual",
+      reason: "window_removed",
+    };
+  }
+  return {
+    action: "auto-rebuild",
+    reason: "auto-rebuild-allowed",
   };
 }
 
@@ -1012,6 +1045,22 @@ async function attemptCursorHelpSlotRecovery(
   }).catch(() => null);
 }
 
+async function attemptCursorHelpSlotSoftRecovery(
+  slot: CursorHelpSlotRecord,
+): Promise<void> {
+  await patchCursorHelpSlotState(slot.slotId, {
+    ...buildSlotHealthSnapshot("recovering", "recovering", "retrying slot health"),
+  });
+  await injectCursorHelpScripts(slot.tabId).catch(() => {
+    // noop
+  });
+  await new Promise((resolve) => setTimeout(resolve, CURSOR_HELP_HEARTBEAT_RECOVERY_RETRY_MS));
+  await ensureCursorHelpSlotUsable({
+    ...slot,
+    status: "recovering",
+  }).catch(() => null);
+}
+
 async function reconcileCursorHelpPoolState(
   slotCount: number,
   options: {
@@ -1050,48 +1099,37 @@ async function reconcileCursorHelpPoolState(
     }
   }
 
-  const missingWindowPolicy = buildCursorHelpWindowPolicyState(current, null);
-
-  if (
-    !windowId &&
-    slots.length <= 0 &&
-    current.windowMode === "pool-window" &&
-    missingWindowPolicy.recoveryCooldownActive
-  ) {
-    const nextState = await saveCursorHelpPoolState(withWindowEvent({
-      ...current,
-      windowId: undefined,
-      slots: [],
-      windowMode: "pool-window",
-      updatedAt: nowMs(),
-    }, "skip_window_rebuild_cooldown", {
-      mode: "pool-window",
-      reason: `until=${missingWindowPolicy.recoveryCooldownUntil || 0}`,
-      recoveryCooldownUntil: missingWindowPolicy.recoveryCooldownUntil || 0,
-    }));
-    await clearLegacySessionSlots();
-    return nextState;
-  }
-
-  if (
-    !windowId &&
-    slots.length <= 0 &&
-    current.windowMode === "pool-window" &&
-    current.lastWindowEvent === "pool_window_removed" &&
-    options.allowAutoRebuildAfterRemoval === false
-  ) {
-    const nextState = await saveCursorHelpPoolState(withWindowEvent({
-      ...current,
-      windowId: undefined,
-      slots: [],
-      windowMode: "pool-window",
-      updatedAt: nowMs(),
-    }, "await_manual_rebuild", {
-      mode: "pool-window",
-      reason: "window_removed",
-    }));
-    await clearLegacySessionSlots();
-    return nextState;
+  if (!windowId && slots.length <= 0 && current.windowMode === "pool-window") {
+    const recovery = resolveMissingPoolWindowRecoveryAction(current, options);
+    if (recovery.action === "skip-cooldown") {
+      const nextState = await saveCursorHelpPoolState(withWindowEvent({
+        ...current,
+        windowId: undefined,
+        slots: [],
+        windowMode: "pool-window",
+        updatedAt: nowMs(),
+      }, "skip_window_rebuild_cooldown", {
+        mode: "pool-window",
+        reason: recovery.reason,
+        recoveryCooldownUntil: current.windowRecoveryCooldownUntil || 0,
+      }));
+      await clearLegacySessionSlots();
+      return nextState;
+    }
+    if (recovery.action === "await-manual") {
+      const nextState = await saveCursorHelpPoolState(withWindowEvent({
+        ...current,
+        windowId: undefined,
+        slots: [],
+        windowMode: "pool-window",
+        updatedAt: nowMs(),
+      }, "await_manual_rebuild", {
+        mode: "pool-window",
+        reason: recovery.reason,
+      }));
+      await clearLegacySessionSlots();
+      return nextState;
+    }
   }
 
   if (!windowId) {
@@ -1429,6 +1467,13 @@ export async function runCursorHelpPoolHeartbeat(): Promise<CursorHelpPoolDebugV
     );
     if (refreshed?.lastHealthReason === "tab-missing") {
       await attemptCursorHelpSlotRecovery(refreshed);
+      continue;
+    }
+    if (
+      refreshed?.lastHealthReason === "page-not-ready" ||
+      refreshed?.lastHealthReason === "inspect-failed"
+    ) {
+      await attemptCursorHelpSlotSoftRecovery(refreshed);
     }
   }
   const debugState = await getCursorHelpPoolDebugState();
