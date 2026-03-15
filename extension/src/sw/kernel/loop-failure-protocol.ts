@@ -294,6 +294,21 @@ export function attachFailureProtocol(
     retryHint,
   };
   if (modeEscalation) out.modeEscalation = modeEscalation;
+  const phase = options.phase;
+  const category = options.category;
+  if (phase || category) {
+    out.failureClass = {
+      ...(phase ? { phase } : {}),
+      ...(category ? { category } : {}),
+    };
+  }
+  const resumeStrategy = options.resumeStrategy;
+  if (resumeStrategy) {
+    out.resume = {
+      strategy: resumeStrategy,
+      action: resumeStrategy === "replan" ? "replan" : "resume_current_step",
+    };
+  }
   return out;
 }
 

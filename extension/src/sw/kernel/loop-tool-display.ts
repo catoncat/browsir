@@ -278,6 +278,7 @@ export function buildToolFailurePayload(
   const target = summarizeToolTarget(toolName, args, rawArgs);
   const errorCode = normalizeErrorCode(result.errorCode);
   return {
+    ...result,
     error: String(result.error || "工具执行失败"),
     errorCode: errorCode || undefined,
     retryHint: String(

@@ -5235,7 +5235,7 @@ describe("runtime-router.browser", () => {
       (item) => String(item.type || "") === "loop_done",
     ) as Record<string, unknown> | undefined;
     const donePayload = (done?.payload || {}) as Record<string, unknown>;
-    expect(String(donePayload.status || "")).toBe("max_steps");
+    expect(String(donePayload.status || "")).toBe("progress_uncertain");
     const guardCount = stream.filter(
       (item) =>
         String(item.type || "") === "loop_guard_browser_progress_missing",

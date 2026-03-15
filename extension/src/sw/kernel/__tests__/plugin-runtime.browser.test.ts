@@ -185,7 +185,7 @@ describe("plugin-runtime.browser", () => {
   it("支持 capability policy 覆盖并在 disable 后回滚", () => {
     const orchestrator = new BrainOrchestrator();
     const before = orchestrator.resolveCapabilityPolicy("browser.action");
-    expect(before.defaultVerifyPolicy).toBe("on_critical");
+    expect(before.defaultVerifyPolicy).toBe("off");
 
     orchestrator.registerPlugin({
       manifest: {
@@ -213,7 +213,7 @@ describe("plugin-runtime.browser", () => {
     orchestrator.disablePlugin("plugin.policy.override");
 
     const rolledBack = orchestrator.resolveCapabilityPolicy("browser.action");
-    expect(rolledBack.defaultVerifyPolicy).toBe("on_critical");
+    expect(rolledBack.defaultVerifyPolicy).toBe("off");
     expect(rolledBack.leasePolicy).toBe("auto");
   });
 

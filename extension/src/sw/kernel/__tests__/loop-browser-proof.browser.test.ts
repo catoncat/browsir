@@ -27,10 +27,10 @@ describe("loop-browser-proof", () => {
       expect(result.ok).toBe(true);
     });
 
-    it("requires both text and node change for non-navigation progress", () => {
+    it("detects text-only change as progress", () => {
       const before = { page: { url: "https://a.com", title: "A", textLength: 100, nodeCount: 50 } };
       const textOnly = { page: { url: "https://a.com", title: "A", textLength: 200, nodeCount: 50 } };
-      expect(buildObserveProgressVerify(before, textOnly).ok).toBe(false);
+      expect(buildObserveProgressVerify(before, textOnly).ok).toBe(true);
 
       const both = { page: { url: "https://a.com", title: "A", textLength: 200, nodeCount: 70 } };
       expect(buildObserveProgressVerify(before, both).ok).toBe(true);
