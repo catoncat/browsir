@@ -54,6 +54,21 @@ import {
   clearStaleExecution,
   reapStaleExecutionsForSlots,
 } from "./cursor-help-execution";
+import {
+  CURSOR_HELP_URL,
+  isCursorHelpUrl,
+  sendTabMessageWithRetry,
+  inspectCursorTab,
+  injectCursorHelpScripts,
+  inspectCursorTabEnsured,
+  waitForCursorHelpTabReady,
+  waitForCursorHelpInspectReady,
+  markCursorHelpTabStable,
+  isCursorHelpWindowAlive,
+  minimizeCursorHelpWindow,
+  readLiveCursorHelpSlot,
+  clearLegacySessionSlots,
+} from "./cursor-help-tab-ops";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -66,7 +81,6 @@ interface CursorHelpPoolDebugView {
 }
 
 const PROVIDER_ID = "cursor_help_web";
-const CURSOR_HELP_URL = "https://cursor.com/help";
 const CURSOR_TAB_PATTERNS = ["https://cursor.com/help*"] as const;
 const PREFERRED_SLOT_ID_BY_SESSION = new Map<string, string>();
 const PREFERRED_SLOT_ID_BY_CONVERSATION = new Map<string, string>();
@@ -80,9 +94,6 @@ const MAX_CURSOR_HELP_POOL_SLOT_COUNT = 6;
 const CURSOR_HELP_HEARTBEAT_INTERVAL_MS = 30_000;
 const CURSOR_HELP_HEARTBEAT_BACKOFF_MS = 60_000;
 const CURSOR_HELP_HEARTBEAT_RECOVERY_RETRY_MS = 500;
-const CONTENT_SCRIPT_FILE = "assets/cursor-help-content.js";
-const PAGE_HOOK_SCRIPT_FILE = "assets/cursor-help-page-hook.js";
-const CURSOR_HELP_SESSION_SLOT_STORAGE_KEY = "cursor_help_web.session_slots";
 const CURSOR_HELP_CONTAINER_WIDTH = 1280;
 const CURSOR_HELP_CONTAINER_HEIGHT = 900;
 const CURSOR_HELP_WINDOW_REBUILD_COOLDOWN_MS = 15_000;
@@ -238,10 +249,6 @@ function resolveSessionLaneConflict(
   };
 }
 
-function isCursorHelpUrl(raw: unknown): boolean {
-  return String(raw || "").startsWith(CURSOR_HELP_URL);
-}
-
 function clearSlotPreferences(slotId: string): void {
   const normalizedSlotId = String(slotId || "").trim();
   if (!normalizedSlotId) return;
@@ -296,132 +303,6 @@ function formatRewriteDebugSummary(raw: unknown): string {
     `origLen=${Number(debug.originalTargetLength || 0)}`,
     `nextLen=${Number(debug.rewrittenTargetLength || 0)}`
   ].join(" ");
-}
-
-async function waitForCursorHelpTabReady(tabId: number, timeoutMs = 20_000): Promise<void> {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    const tab = await chrome.tabs.get(tabId).catch(() => null);
-    if (tab?.id && tab.status === "complete" && String(tab.url || "").startsWith(CURSOR_HELP_URL)) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  throw new Error("等待 Cursor Help 页面加载超时");
-}
-
-async function waitForCursorHelpInspectReady(
-  tabId: number,
-  timeoutMs = 10_000,
-): Promise<CursorHelpInspectResult | null> {
-  const startedAt = Date.now();
-  let lastInspect: CursorHelpInspectResult | null = null;
-  while (Date.now() - startedAt < timeoutMs) {
-    lastInspect = await inspectCursorTabEnsured(tabId).catch(() => lastInspect);
-    if (lastInspect) {
-      return lastInspect;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  return lastInspect;
-}
-
-async function inspectCursorTab(tabId: number): Promise<CursorHelpInspectResult | null> {
-  const response = await sendTabMessageWithRetry(tabId, {
-    type: "webchat.inspect"
-  }).catch(() => null);
-  const row = response && typeof response === "object" ? (response as Record<string, unknown>) : null;
-  if (!row || row.ok !== true) return null;
-  const pageHookReady = row.pageHookReady === true || row.isReady === true;
-  const fetchHookReady = row.fetchHookReady === true;
-  const senderReady = row.senderReady === true;
-  const runtimeMismatch = row.runtimeMismatch === true;
-  const canBootExecute = pageHookReady && fetchHookReady && !runtimeMismatch;
-  return {
-    pageHookReady,
-    fetchHookReady,
-    senderReady,
-    canBootExecute,
-    canExecute:
-      row.canExecute === true ||
-      (!("canExecute" in row) && canBootExecute && senderReady),
-    url: String(row.url || ""),
-    selectedModel: String(row.selectedModel || "").trim() || undefined,
-    availableModels: Array.isArray(row.availableModels)
-      ? row.availableModels.map((item) => String(item || "").trim()).filter(Boolean)
-      : undefined,
-    senderKind: String(row.senderKind || "").trim() || undefined,
-    lastSenderError: String(row.lastSenderError || "").trim() || undefined,
-    pageRuntimeVersion: String(row.pageRuntimeVersion || "").trim() || undefined,
-    contentRuntimeVersion: String(row.contentRuntimeVersion || "").trim() || undefined,
-    runtimeExpectedVersion: String(row.runtimeExpectedVersion || "").trim() || undefined,
-    rewriteStrategy: String(row.rewriteStrategy || "").trim() || undefined,
-    runtimeMismatch,
-    runtimeMismatchReason: String(row.runtimeMismatchReason || "").trim() || undefined
-  };
-}
-
-async function injectCursorHelpScripts(tabId: number): Promise<void> {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: [PAGE_HOOK_SCRIPT_FILE],
-    world: "MAIN"
-  });
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: [CONTENT_SCRIPT_FILE]
-  });
-}
-
-async function inspectCursorTabEnsured(tabId: number): Promise<CursorHelpInspectResult | null> {
-  const firstTry = await inspectCursorTab(tabId);
-  if (firstTry?.pageHookReady) return firstTry;
-  await injectCursorHelpScripts(tabId).catch(() => {
-    // noop
-  });
-  return inspectCursorTab(tabId);
-}
-
-async function clearLegacySessionSlots(): Promise<void> {
-  await chrome.storage.local
-    .remove(CURSOR_HELP_SESSION_SLOT_STORAGE_KEY)
-    .catch(() => {
-      // noop
-    });
-}
-
-async function isCursorHelpWindowAlive(
-  windowId: number | undefined,
-): Promise<boolean> {
-  if (!Number.isInteger(windowId) || Number(windowId) <= 0) return false;
-  const found = await chrome.windows.get(Number(windowId)).catch(() => null);
-  return Boolean(found?.id);
-}
-
-async function minimizeCursorHelpWindow(
-  windowId: number | undefined,
-): Promise<boolean> {
-  if (!Number.isInteger(windowId) || Number(windowId) <= 0) return false;
-  const found = await chrome.windows.get(Number(windowId)).catch(() => null);
-  if (!found?.id) return false;
-  const windowType = String(found.type || "").trim();
-  if (windowType && windowType !== "popup") return false;
-  await chrome.windows
-    .update(Number(windowId), { state: "minimized" })
-    .catch(() => {
-      // noop
-    });
-  return true;
-}
-
-async function markCursorHelpTabStable(tabId: number): Promise<void> {
-  await chrome.tabs
-    .update(tabId, {
-      autoDiscardable: false,
-    })
-    .catch(() => {
-      // noop
-    });
 }
 
 function buildCursorHelpSlotRecord(
@@ -629,22 +510,6 @@ async function createCursorHelpPoolWindow(
     mode: "pool-window",
     reason: `slots=${slots.length} type=${createdWindowType} minimized=${minimized ? 1 : 0}`,
   }));
-}
-
-async function readLiveCursorHelpSlot(
-  slot: CursorHelpSlotRecord,
-): Promise<CursorHelpSlotRecord | null> {
-  const tab = await chrome.tabs.get(slot.tabId).catch(() => null);
-  if (!tab?.id || !isCursorHelpUrl(tab.url)) return null;
-  return {
-    ...slot,
-    tabId: tab.id,
-    windowId:
-      typeof tab.windowId === "number" && tab.windowId > 0
-        ? tab.windowId
-        : slot.windowId,
-    lastKnownUrl: String(tab.url || slot.lastKnownUrl || ""),
-  };
 }
 
 async function createAdditionalPoolSlot(
@@ -1489,30 +1354,6 @@ export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebug
     tabDecisionTrace: decisionTrace.entries,
     slots,
   };
-}
-
-const PERMANENT_TAB_MESSAGE_ERRORS = [
-  "Could not establish connection",
-  "Extension context invalidated",
-  "No tab with id",
-];
-
-async function sendTabMessageWithRetry(tabId: number, message: Record<string, unknown>, retries = 12): Promise<unknown> {
-  let lastError: unknown = null;
-  for (let attempt = 0; attempt < retries; attempt += 1) {
-    try {
-      return await chrome.tabs.sendMessage(tabId, message);
-    } catch (error) {
-      lastError = error;
-      const msg = error instanceof Error ? error.message : String(error);
-      if (PERMANENT_TAB_MESSAGE_ERRORS.some((p) => msg.includes(p))) {
-        break;
-      }
-      const delay = Math.min(250 * 2 ** attempt, 4000);
-      await new Promise((resolve) => setTimeout(resolve, delay));
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError || "目标网页执行器未就绪"));
 }
 
 export function createCursorHelpWebProvider() {
