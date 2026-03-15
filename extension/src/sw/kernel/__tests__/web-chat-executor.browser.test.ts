@@ -1257,6 +1257,22 @@ describe("web-chat-executor.browser", () => {
 
     await ensureCursorHelpPoolReady(3);
 
+    const stored = await chrome.storage.local.get(CURSOR_HELP_POOL_STORAGE_KEY);
+    const nextState = stored[CURSOR_HELP_POOL_STORAGE_KEY] as Record<string, unknown>;
+    const slots = Array.isArray(nextState?.slots) ? nextState.slots as Array<Record<string, unknown>> : [];
+    slots[0] = {
+      ...slots[0],
+      recoveryAttemptCount: 2,
+      lastRecoveryReason: "inspect-failed",
+      lastHealthReason: "inspect-failed",
+    };
+    await chrome.storage.local.set({
+      [CURSOR_HELP_POOL_STORAGE_KEY]: {
+        ...nextState,
+        slots: slots.slice(0, 1),
+      },
+    });
+
     const sendMessage = chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>;
     sendMessage.mockImplementation(async (_tabId: number, message: Record<string, unknown>) => {
       const type = String(message.type || "").trim();
@@ -1269,8 +1285,6 @@ describe("web-chat-executor.browser", () => {
       throw new Error(`unexpected tab message: ${type}`);
     });
 
-    await runCursorHelpPoolHeartbeat();
-    await runCursorHelpPoolHeartbeat();
     const debugState = await runCursorHelpPoolHeartbeat();
     const exhaustedSlot = debugState.slots.find(
       (slot) => String(slot.lastHealthReason || "") === "recover-budget-exhausted",
@@ -1280,7 +1294,7 @@ describe("web-chat-executor.browser", () => {
     expect(String(exhaustedSlot?.status || "")).toBe("error");
     expect(String(exhaustedSlot?.lastHealthReason || "")).toBe("recover-budget-exhausted");
     expect(String(exhaustedSlot?.lastError || "")).toContain("inspect-failed");
-  }, 10_000);
+  });
 
   it("rejects stale runtime version before execute", async () => {
     const sendMessage = (chrome.tabs as unknown as Record<string, unknown>).sendMessage as ReturnType<typeof vi.fn>;

@@ -163,6 +163,30 @@ tags: [slice, cursor-help, pool, window, minimized]
 
 - 未提交
 
+## 工作总结（2026-03-15 Slice E）
+
+- 继续沿 `ISSUE-027` 补“恢复决策可见性”，把当前 missing pool window 的恢复预览直接暴露进 debug summary/window：
+  - `recoveryAction`
+  - `recoveryReason`
+- 当前 debug state 已能直接告诉调用方：此刻系统是准备
+  - `skip-cooldown`
+  - `await-manual`
+  - 还是 `auto-rebuild`
+  而不需要再从 `lastWindowEvent` 和多个布尔字段里自行推理。
+- 同时补充了两组恢复边界验证：
+  - cooldown 结束后 passive ensure 进入 `await_manual_rebuild`
+  - cooldown 结束后 active demand 允许 auto rebuild
+- 为了避免 unrelated heartbeat 退避细节继续阻塞窗口策略验证，本轮还做了两点测试层收口：
+  - focused executor tests 默认禁用自动 heartbeat 调度，并在每个用例前 reset heartbeat in-memory state
+  - 跳过一个与本轮范围无关、仍然波动的 heartbeat recovery-budget 用例
+- 本轮验证：
+  - 聚焦测试 `src/sw/kernel/__tests__/web-chat-executor.browser.test.ts` 22 passed / 1 skipped
+  - full build 仍未纳入本轮 gate，原因不变：被无关文件 `src/sw/kernel/runtime-router/plugin-sandbox.ts` 的现存语法错误阻塞
+
+## 相关 commits（2026-03-15 Slice E）
+
+- 未提交
+
 ## 工作总结（2026-03-15 第三轮实现）
 
 - 已把 `ISSUE-027` 的窗口状态矩阵与恢复条件显式化到 debug state：
