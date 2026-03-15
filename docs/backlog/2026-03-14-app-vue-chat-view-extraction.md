@@ -1,7 +1,7 @@
 ---
 id: ISSUE-017
 title: ChatView 主控拆分 — run state / message bus / plugin runtime 解耦
-status: in-progress
+status: done
 priority: p0
 source: architecture-evolution-phase2
 created: 2026-03-14
@@ -46,10 +46,10 @@ tags: [slice, panel, chat-view, controller, composable, architecture, phase2]
 - [x] `use-tool-run-tracking.ts` 已承接 tool run tracking / step stream sync / tool card model 的首轮抽离
 - [x] `use-runtime-messages.ts` 已接线，`ChatView.vue` 不再直接承载 `chrome.runtime.onMessage` + polling + bridge status wiring
 - [x] panel UI plugin runtime / render hook 管线已有 `use-ui-render-pipeline.ts` 独立边界
-- [ ] export / debug / clipboard 动作已提炼为独立 helper / composable，或至少被显式隔离
-- [ ] send / session control 动作已提炼为独立 helper / composable，或至少被显式隔离
-- [ ] `bun run build` 通过
-- [ ] `bun run test` 通过
+- [x] export / debug / clipboard 动作已提炼为独立 helper / composable，或至少被显式隔离
+- [x] send / session control 动作已提炼为独立 helper / composable，或至少被显式隔离
+- [x] `bun run build` 通过
+- [x] `bun run test` 通过
 
 ## 推荐拆分顺序
 
@@ -80,3 +80,16 @@ tags: [slice, panel, chat-view, controller, composable, architecture, phase2]
 ## 依赖
 
 无
+
+## 工作总结
+
+2026-03-15: 完成最后两个 composable 提取。
+
+- `use-conversation-export.ts`: 提取 `generateMarkdown` / `handleCopyMarkdown` / `handleCopyDebugLink` / `handleExport`，管理 `showExportMenu` / `publishingDebugLink` 状态
+- `use-chat-send-action.ts`: 提取 `handleCreateSession` / `handleSend` / `handleStopRun` / `handleRefreshSession` / `handleJumpToForkSourceSession` / `handlePromoteQueuedPromptToSteer`，管理 `createSessionTask` / queue promoting 逻辑
+- `ChatView.vue` 从 1052 行降至 886 行
+- 六条 composable 边界已全部就位: `use-ui-render-pipeline` / `use-llm-streaming` / `use-tool-run-tracking` / `use-runtime-messages` / `use-conversation-export` / `use-chat-send-action`
+
+## 相关 commits
+
+- `9501a7b` refactor(panel): extract export + send composables from ChatView (ISSUE-017)
