@@ -2,7 +2,8 @@
 
 - **优先级**: P2
 - **来源**: Round 3 Review (2026-03-15)
-- **状态**: Open
+- **状态**: done
+- **认领**: copilot-agent
 
 ## 问题描述
 
@@ -10,20 +11,20 @@ LLM 效率优化提取（loop-llm-request.ts、loop-compaction-llm.ts、loop-bro
 
 ## 待办
 
-1. **删除 runtime-loop.browser.ts 中 8 个 dangling imports** [HIGH]
-   - computeRetryDelayMs, extractRetryDelayHintMs, isRetryableLlmStatus
-   - hostedChatTurnToMessage, parseLlmMessageFromBody
-   - readHostedChatTurnFromTransportStream, readLlmMessageFromSseStream
-   - mapToolErrorReasonToTerminalStatus
+1. ~~**删除 runtime-loop.browser.ts 中 8 个 dangling imports** [HIGH]~~
+   - ✅ computeRetryDelayMs, extractRetryDelayHintMs, isRetryableLlmStatus
+   - ✅ hostedChatTurnToMessage, parseLlmMessageFromBody
+   - ✅ readHostedChatTurnFromTransportStream, readLlmMessageFromSseStream
+   - ✅ mapToolErrorReasonToTerminalStatus
 
-2. **合并重复 createNonRetryableRuntimeError helper** [MEDIUM]
-   - 出现在 loop-llm-request.ts 和 loop-compaction-llm.ts
-   - 提取到 loop-shared-utils.ts
+2. ~~**合并重复 createNonRetryableRuntimeError helper** [MEDIUM]~~
+   - ✅ 提取到 loop-shared-utils.ts，两文件改用 import
 
-3. **对齐 compaction 重试延迟计算** [MEDIUM]
-   - llmMaxRetryDelayMs=0 时 catch block 与 HTTP error block 行为不一致
+3. ~~**对齐 compaction 重试延迟计算** [MEDIUM]~~
+   - ✅ catch block 现与 HTTP error block 一致：llmMaxRetryDelayMs=0 时使用 MAX_SAFE_INTEGER
 
-4. **合并重复 BuildLlmRawTracePayloadInput 接口** [LOW]
+4. ~~**合并重复 BuildLlmRawTracePayloadInput 接口** [LOW]~~
+   - ✅ loop-compaction-llm.ts 改为 import from loop-llm-request.ts
 
 ## 验收标准
 
