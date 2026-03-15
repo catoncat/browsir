@@ -1,7 +1,7 @@
 ---
 id: ISSUE-025
 title: Cursor Help pool slot 健康检查心跳
-status: in-progress
+status: done
 priority: p1
 source: ISSUE-023 decomposition
 created: 2026-03-15
@@ -140,5 +140,27 @@ tags: [slice, cursor-help, pool, heartbeat, health-check]
   - 周期性 heartbeat 与 auto-heal 之间更明确的调度协同
 
 ## 相关 commits（2026-03-15 第四轮实现）
+
+- 未提交
+
+## 工作总结（2026-03-15 第五轮实现）
+
+- 已把 `ISSUE-025` 的恢复链进一步收口到“会收手”的阶段：新增 per-reason retry budget，并在恢复预算耗尽后把 slot 明确降级到 `error`，而不是无限 `recovering`。
+- 当前 retry budget / degradation 已覆盖：
+  - `tab-missing`
+  - `page-not-ready`
+  - `inspect-failed`
+- 对应新增回归测试：`heartbeat downgrades to error after inspect-failed recovery budget is exhausted`。
+- 本轮验证结果：
+  - 聚焦测试 `src/sw/kernel/__tests__/web-chat-executor.browser.test.ts` 23/23 通过
+  - `bun run build` 成功
+- 至此，`ISSUE-025` 的验收口径已基本满足：
+  - 有明确 heartbeat 入口
+  - stale/error 不再只能等业务请求暴露
+  - 健康检查能驱动状态变更与恢复
+  - 失败 reason 已结构化
+  - 已有多组 heartbeat/恢复回归测试
+
+## 相关 commits（2026-03-15 第五轮实现）
 
 - 未提交

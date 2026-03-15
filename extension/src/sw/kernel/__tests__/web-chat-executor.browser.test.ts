@@ -1277,7 +1277,7 @@ describe("web-chat-executor.browser", () => {
     sendMessage.mockImplementation(async (_tabId: number, message: Record<string, unknown>) => {
       const type = String(message.type || "").trim();
       if (type === "webchat.inspect") {
-        throw new Error("persistent inspect failure");
+        return { ok: false, error: "persistent inspect failure" };
       }
       if (type === "webchat.execute" || type === "webchat.abort") {
         return { ok: true };
