@@ -203,8 +203,9 @@ const BROWSER_AUTOMATION_DECISION_TREE = [
   "P1 search_elements: ALWAYS try first. Use semantic user-visible query (placeholder/label/text). Supports | for OR (e.g. 'Login | Sign in'). Change query strategy before blind repeat.",
   "P2 UID-based tools: Use uid/ref from latest search_elements for click/fill/hover/select/scroll_to. Never use selector as sole target. For typing, target editable elements only (input/textarea/contenteditable/role=textbox).",
   "P3 capture_screenshot + computer: ONLY after 2 failed search_elements with different queries, or for pixel-level interaction (canvas/drag/slider).",
-  "Verify: For state-changing actions, include expect when success criteria is clear. Call browser_verify after action. Never claim done when verify failed/skipped/empty.",
+  "Verify: For state-changing actions, call browser_verify with explicit expect (url/title/text/selector). Never claim done when verify failed/skipped/empty.",
   "Anti-patterns: No blind repeat (same query+selector). No blind click on toggles (read current state first). No invented selectors/URLs/tab state (re-observe when uncertain). If not typable, re-search with typing intent and switch target.",
+  "Escalation: If search_elements returns no match, try broader query or different wording (2 attempts minimum). Only escalate to computer after exhausting P1+P2. If computer action fails verification, fall back to search_elements with fresh query.",
 ].join("\n");
 
 const EXTENSION_AGENT_PROMPT_BASE_GUIDELINES = [
@@ -220,7 +221,30 @@ const EXTENSION_AGENT_PROMPT_BASE_GUIDELINES = [
 
 export function buildBrowserAgentSystemPromptBase(
   toolDefinitions: ToolDefinition[] = [],
+  options?: { skipToolListing?: boolean },
 ): string {
+  const guidelines = EXTENSION_AGENT_PROMPT_BASE_GUIDELINES.map(
+    (line) => `- ${line}`,
+  ).join("\n");
+
+  if (options?.skipToolListing) {
+    return [
+      "You are an expert coding assistant operating inside Browser Brain Loop, a browser-extension agent harness.",
+      "You help users by reading files, executing commands, editing code, writing files, and operating browser tabs.",
+      "",
+      "Environment:",
+      "- Primary runtime is the browser sandbox (mem:// filesystem + browser_bash shell). Use browser_* tools for virtual file and shell operations.",
+      "- Host filesystem and shell are available via host_* tools for system-level tasks (npm/pip/git, real network, host filesystem access).",
+      "- Local WebSocket bridge is execution-only (file/shell proxy), not task planner.",
+      "- You can operate live browser tabs via browser tools.",
+      "",
+      "Guidelines:",
+      guidelines,
+      "",
+      "Runtime: Browser extension agent (Chrome MV3).",
+    ].join("\n");
+  }
+
   const dynamicToolLines = (
     Array.isArray(toolDefinitions) ? toolDefinitions : []
   )
@@ -240,9 +264,6 @@ export function buildBrowserAgentSystemPromptBase(
           (name) =>
             `- ${name}: ${EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS[name] || "Use when needed."}`,
         ).join("\n");
-  const guidelines = EXTENSION_AGENT_PROMPT_BASE_GUIDELINES.map(
-    (line) => `- ${line}`,
-  ).join("\n");
   return [
     "You are an expert coding assistant operating inside Browser Brain Loop, a browser-extension agent harness.",
     "You help users by reading files, executing commands, editing code, writing files, and operating browser tabs.",

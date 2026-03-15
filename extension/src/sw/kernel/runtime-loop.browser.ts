@@ -294,6 +294,19 @@ function shapeScreenshotForLlm(data: unknown, toolName: string): unknown {
   };
 }
 
+/**
+ * When a search_elements result has a compact text representation, strip the
+ * verbose `nodes` JSON array to save context tokens. The compact format
+ * preserves uid/ref, role, label, and flags — everything the LLM needs.
+ */
+function shapeSnapshotForLlm(data: unknown, toolName: string): unknown {
+  if (toolName !== "search_elements") return data;
+  const rec = toRecord(data);
+  if (typeof rec.compact !== "string" || !rec.compact) return data;
+  const { nodes: _stripped, ...rest } = rec;
+  return rest;
+}
+
 function extractContentText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return String(content || "");
@@ -2019,11 +2032,13 @@ export function createRuntimeLoopController(
       }
       const actionFailures = getActionFailures(sessionId);
       const llmToolDefinitions = listRuntimeLlmToolDefinitions("all");
+      const isHostedChatPath = resolveRouteRuntimeKind(activeRoute) === "hosted_chat";
       const systemPrompt = await systemPromptResolver.resolveSystemPrompt({
         config,
         sessionId,
         sessionMeta: meta,
         toolDefinitions: llmToolDefinitions,
+        skipToolListing: isHostedChatPath,
       });
       const messages = applyLatestUserPromptOverride(
         await buildLlmMessagesFromContext(
@@ -2505,7 +2520,10 @@ export function createRuntimeLoopController(
             browserProofSuccessCount += 1;
           }
           const rawToolData = responsePayload.data ?? result;
-          const shapedToolData = shapeScreenshotForLlm(rawToolData, canonicalToolName);
+          const shapedToolData = shapeSnapshotForLlm(
+            shapeScreenshotForLlm(rawToolData, canonicalToolName),
+            canonicalToolName,
+          );
           const llmToolContent = safeStringify(shapedToolData, 12_000);
           const uiToolPayload = buildToolSuccessPayload(tc, rawToolData, {
             modeUsed: result.modeUsed,

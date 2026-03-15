@@ -34,6 +34,7 @@ export interface SystemPromptResolverInput {
   sessionId: string;
   sessionMeta: SessionMeta | null;
   toolDefinitions?: ToolDefinition[];
+  skipToolListing?: boolean;
 }
 
 export function createSystemPromptResolver(deps: {
@@ -49,7 +50,9 @@ export function createSystemPromptResolver(deps: {
       : [];
     const overridePrompt = String(input.config.llmSystemPromptCustom || "");
     if (!overridePrompt.trim()) {
-      return buildBrowserAgentSystemPromptBase(toolDefinitions);
+      return buildBrowserAgentSystemPromptBase(toolDefinitions, {
+        skipToolListing: input.skipToolListing,
+      });
     }
 
     const parsedRefs = extractPromptContextRefs(overridePrompt, "system_prompt");
