@@ -213,6 +213,9 @@ const {
   onError: setErrorMessage,
 });
 const queuedPromotingIds = ref<Set<string>>(new Set());
+// Forward references for llm-streaming functions (resolved after useLlmStreaming)
+let _applyStreamEvent: (type: string, payload: Record<string, unknown>, sid: string) => import("./composables/use-llm-streaming").LlmStreamEventResult = () => ({ handled: false });
+let _resetLlmStreamingState: () => void = () => {};
 const {
   runPhase,
   activeToolRun,
@@ -228,7 +231,6 @@ const {
   toolPendingCardAction,
   toolPendingCardDetail,
   toolPendingCardStepsData,
-  bindLlmStreaming,
   activeRunHint,
   setLlmRunHint,
   clearRunHint,
@@ -246,6 +248,8 @@ const {
   activeSessionId,
   isRunActive,
   runSafely,
+  applyStreamEvent: (type, payload, sid) => _applyStreamEvent(type, payload, sid),
+  resetLlmStreamingState: () => _resetLlmStreamingState(),
 });
 
 const {
@@ -259,6 +263,7 @@ const {
   appendLlmStreamingDelta,
   commitPendingLlmStreamingText,
   resetLlmStreamingState,
+  applyStreamEvent,
   cleanup: cleanupLlmStreaming,
 } = useLlmStreaming({
   isRunActive,
@@ -268,16 +273,8 @@ const {
   startRunPending,
   shouldShowToolPendingCard,
 });
-bindLlmStreaming({
-  llmStreamingText,
-  llmStreamingSessionId,
-  llmStreamingActive,
-  llmStreamingPendingText,
-  flushLlmStreamingDeltaBuffer,
-  appendLlmStreamingDelta,
-  commitPendingLlmStreamingText,
-  resetLlmStreamingState,
-});
+_applyStreamEvent = applyStreamEvent;
+_resetLlmStreamingState = resetLlmStreamingState;
 const toolHistoryToggleLabel = computed(() =>
   showToolHistory.value ? "隐藏工具轨迹" : "显示工具轨迹"
 );

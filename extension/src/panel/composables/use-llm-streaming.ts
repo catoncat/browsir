@@ -1,5 +1,14 @@
 import { ref, computed, type Ref, type ComputedRef } from "vue";
 import type { DisplayMessage, RunViewPhase } from "../types";
+import { toRecord } from "../utils/tool-formatters";
+
+export interface LlmStreamEventResult {
+  handled: boolean;
+  runPhase?: RunViewPhase;
+  hint?: { label: string; detail: string };
+  clearStreaming?: boolean;
+  finalAssistant?: boolean;
+}
 
 export interface LlmStreamingDeps {
   isRunActive: ComputedRef<boolean>;
@@ -100,6 +109,150 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
     !deps.shouldShowToolPendingCard.value
   );
 
+  function applyStreamEvent(
+    type: string,
+    payload: Record<string, unknown>,
+    eventSessionId: string,
+  ): LlmStreamEventResult {
+    const fallbackSessionId = eventSessionId || String(deps.activeSessionId.value || "");
+
+    if (type === "hosted_chat.debug") {
+      flushLlmStreamingDeltaBuffer();
+      llmStreamingPendingText.value = "";
+      llmStreamingText.value = "";
+      llmStreamingSessionId.value = fallbackSessionId;
+      llmStreamingActive.value = true;
+      return {
+        handled: true,
+        runPhase: "llm",
+        finalAssistant: false,
+        hint: { label: "宿主生成中", detail: "正在接管网页会话" },
+      };
+    }
+
+    if (type === "hosted_chat.stream_text_delta") {
+      const chunk = String(payload.text || "");
+      if (chunk) {
+        if (!llmStreamingActive.value) {
+          llmStreamingSessionId.value = fallbackSessionId;
+          llmStreamingActive.value = true;
+        }
+        appendLlmStreamingDelta(chunk);
+        commitPendingLlmStreamingText();
+        const committed = llmStreamingText.value;
+        const markerIdx = committed.indexOf("[TM_TOOL_CALL_START:");
+        if (markerIdx >= 0) {
+          llmStreamingText.value = committed.slice(0, markerIdx).trimEnd();
+          llmStreamingPendingText.value = llmStreamingText.value;
+        }
+      }
+      return {
+        handled: true,
+        runPhase: "llm",
+        finalAssistant: false,
+        hint: { label: "宿主生成中", detail: "正在等待网页会话完成当前回合" },
+      };
+    }
+
+    if (type === "hosted_chat.tool_call_detected") {
+      resetLlmStreamingState();
+      return {
+        handled: true,
+        runPhase: "llm",
+        finalAssistant: false,
+        hint: { label: "检测到工具计划", detail: "即将进入工具执行" },
+      };
+    }
+
+    if (type === "hosted_chat.turn_resolved") {
+      const finishReason = String(payload.finishReason || "").trim();
+      if (finishReason === "tool_calls") {
+        resetLlmStreamingState();
+        return {
+          handled: true,
+          runPhase: "llm",
+          finalAssistant: false,
+          hint: { label: "准备执行工具", detail: "宿主回合已完成，正在交给工具执行" },
+        };
+      }
+      flushLlmStreamingDeltaBuffer();
+      commitPendingLlmStreamingText();
+      llmStreamingActive.value = false;
+      return {
+        handled: true,
+        finalAssistant: true,
+        hint: { label: "整理回复", detail: "正在整理网页会话结果" },
+      };
+    }
+
+    if (type === "hosted_chat.transport_error") {
+      resetLlmStreamingState();
+      return { handled: true, finalAssistant: false };
+    }
+
+    if (type === "llm.stream.start") {
+      flushLlmStreamingDeltaBuffer();
+      llmStreamingPendingText.value = "";
+      llmStreamingText.value = "";
+      llmStreamingSessionId.value = fallbackSessionId;
+      llmStreamingActive.value = true;
+      return {
+        handled: true,
+        runPhase: "llm",
+        finalAssistant: false,
+        hint: { label: "思考中", detail: "正在规划下一步" },
+      };
+    }
+
+    if (type === "llm.stream.delta") {
+      const chunk = String(payload.text || "");
+      if (!chunk) return { handled: true };
+      const activeId = String(deps.activeSessionId.value || "").trim();
+      const sourceId = llmStreamingSessionId.value || eventSessionId;
+      if (sourceId && activeId && sourceId !== activeId) return { handled: true };
+      llmStreamingSessionId.value = sourceId || activeId;
+      appendLlmStreamingDelta(chunk);
+      llmStreamingActive.value = true;
+      return { handled: true };
+    }
+
+    if (type === "llm.stream.end") {
+      flushLlmStreamingDeltaBuffer();
+      llmStreamingActive.value = false;
+      return { handled: true };
+    }
+
+    if (type === "llm.response.parsed") {
+      flushLlmStreamingDeltaBuffer();
+      const toolCalls = Number(payload.toolCalls || 0);
+      const responseSource = String(payload.source || "").trim();
+      const isHostedTransport = responseSource === "hosted_chat_transport";
+      if (Number.isFinite(toolCalls) && toolCalls > 0) {
+        resetLlmStreamingState();
+        return {
+          handled: true,
+          runPhase: "llm",
+          finalAssistant: false,
+        };
+      }
+      flushLlmStreamingDeltaBuffer();
+      commitPendingLlmStreamingText();
+      llmStreamingActive.value = false;
+      return {
+        handled: true,
+        finalAssistant: true,
+        hint: {
+          label: "整理回复",
+          detail: isHostedTransport
+            ? "正在生成网页宿主聊天的最终回答"
+            : "正在生成最终回答",
+        },
+      };
+    }
+
+    return { handled: false };
+  }
+
   function cleanup() {
     if (llmStreamFlushRaf != null) {
       cancelAnimationFrame(llmStreamFlushRaf);
@@ -119,6 +272,7 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
     appendLlmStreamingDelta,
     commitPendingLlmStreamingText,
     resetLlmStreamingState,
+    applyStreamEvent,
     cleanup,
   };
 }
