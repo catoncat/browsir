@@ -1,11 +1,11 @@
 ---
 id: ISSUE-030
 title: "web-chat-executor 正确性修复 — TOCTOU 竞态 / transport_error / 测试隔离"
-status: open
+status: in-progress
 priority: p0
 source: "review/2026-03-15-round1-cursor-help-pool-review.md"
 created: 2026-03-15
-assignee: unassigned
+assignee: copilot-agent
 kind: slice
 epic: EPIC-2026-03-15-CURSOR-HELP-POOL
 parallel_group: cursor-help

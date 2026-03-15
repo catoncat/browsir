@@ -1046,7 +1046,10 @@ async function executeNativeSend(payload: CursorHelpExecutionPayload): Promise<R
     void Promise.resolve(sender.submit(senderInputText, payload.requestedModel))
       .then(() => {
         const latest = pendingExecutions.get(payload.requestId);
-        if (!latest) return;
+        if (!latest) {
+          logToContent("execute.sender_resolved", "done", `native sender resolved but execution already cleaned up requestId=${payload.requestId}`);
+          return;
+        }
         logToContent("execute.sender_resolved", "done", `native sender promise resolved requestId=${payload.requestId}`);
       })
       .catch((error) => {
@@ -1054,7 +1057,12 @@ async function executeNativeSend(payload: CursorHelpExecutionPayload): Promise<R
         const message = error instanceof Error ? error.message : String(error);
         lastSenderError = message;
         logToContent("execute.sender_rejected", "failed", `native sender promise rejected: ${message}`);
-        if (!latest || latest.state === "request_started") {
+        if (!latest) {
+          logToContent("execute.sender_rejected", "done", `sender rejected but execution already cleaned up requestId=${payload.requestId}`);
+          return;
+        }
+        if (latest.state === "request_started") {
+          logToContent("execute.sender_rejected", "done", `sender rejected but request already started, ignoring requestId=${payload.requestId}`);
           return;
         }
         cleanupExecution(payload.requestId);

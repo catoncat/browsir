@@ -754,6 +754,10 @@ async function handleSave(): Promise<void> {
     for (const profile of config.value.llmProfiles) {
       if (isCursorHelpWebProvider(profile) && !runtimeState(profile).canExecute) {
         await ensureCursorHelpTab(profile, false);
+        if (!runtimeState(profile).canExecute) {
+          localError.value = `Cursor Help 连接探测失败（profile: ${String(profile.label || profile.id || "").trim() || "unnamed"}），请先确认页面可用后再保存。`;
+          return;
+        }
       }
     }
     await store.saveConfig();

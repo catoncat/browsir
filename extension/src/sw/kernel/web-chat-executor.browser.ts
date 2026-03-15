@@ -147,6 +147,15 @@ export function __resetCursorHelpWebProviderTestState(): void {
   cursorHelpHeartbeatLastAt = 0;
   cursorHelpHeartbeatLastDelayMs = 0;
   cursorHelpHeartbeatLastReason = "";
+  ACTIVE_BY_REQUEST_ID.clear();
+  ACTIVE_REQUEST_ID_BY_SLOT.clear();
+  ACTIVE_REQUEST_ID_BY_TAB.clear();
+  ACTIVE_REQUEST_ID_BY_SESSION_LANE.clear();
+  PREFERRED_SLOT_ID_BY_SESSION.clear();
+  PREFERRED_SLOT_ID_BY_CONVERSATION.clear();
+  LAST_CONVERSATION_KEY_BY_SESSION.clear();
+  cursorHelpSlotLifecycleBoundTabs = null;
+  cursorHelpSlotLifecycleBoundWindows = null;
 }
 
 function emitProviderDebugLog(step: string, status: "running" | "done" | "failed", detail: string): void {
@@ -212,6 +221,16 @@ function buildSessionLaneKey(
   return `${String(sessionId || "").trim()}::${lane}`;
 }
 
+/**
+ * Asymmetric lane conflict rules:
+ * - same-lane-busy: only one execution per (session, lane) pair at a time.
+ * - Any non-title lane must wait for an active title lane (title is fast & blocking avoids
+ *   concurrent model hits on the same session).
+ * - title must wait for any other active lane (title generation depends on the conversation
+ *   state produced by the primary/auxiliary run, so it must not overlap).
+ * - Two different non-title lanes (e.g. primary + auxiliary) are allowed in parallel:
+ *   they write to independent conversation branches and don't conflict.
+ */
 function resolveSessionLaneConflict(
   sessionId: string,
   lane: LlmProviderExecutionLane,
@@ -690,11 +709,15 @@ function closeExecution(entry: PendingExecution): void {
   ACTIVE_REQUEST_ID_BY_SESSION_LANE.delete(
     buildSessionLaneKey(entry.sessionId, entry.lane),
   );
-  void patchCursorHelpSlotState(entry.slotId, {
-    status: "idle",
-    lastUsedAt: nowMs(),
-    lastError: "",
-    lastReadyAt: Math.max(entry.lastEventAt, entry.createdAt),
+  void loadCursorHelpPoolState().then((poolState) => {
+    const currentSlot = poolState.slots.find((s) => s.slotId === entry.slotId);
+    if (currentSlot?.status === "recovering") return;
+    return patchCursorHelpSlotState(entry.slotId, {
+      status: "idle",
+      lastUsedAt: nowMs(),
+      lastError: "",
+      lastReadyAt: Math.max(entry.lastEventAt, entry.createdAt),
+    });
   });
   if (entry.controller) {
     entry.controller.close();
@@ -719,16 +742,16 @@ function failExecution(entry: PendingExecution, error: string): void {
       status: "stale",
       lastUsedAt: nowMs(),
       lastError: error,
-    }).catch(() => {
-      // noop
+    }).catch((patchErr) => {
+      console.warn(`[web-chat-executor] failExecution: patchSlotState(stale) failed for slot=${entry.slotId}`, patchErr);
     });
   } else {
     void patchCursorHelpSlotState(entry.slotId, {
       status: "error",
       lastUsedAt: nowMs(),
       lastError: error,
-    }).catch(() => {
-      // noop
+    }).catch((patchErr) => {
+      console.warn(`[web-chat-executor] failExecution: patchSlotState(error) failed for slot=${entry.slotId}`, patchErr);
     });
   }
   if (entry.controller) {
@@ -1468,7 +1491,7 @@ async function reconcileCursorHelpPoolState(
 
 async function markCursorHelpSlotBusy(
   slot: CursorHelpSlotRecord,
-  entry: PendingExecution,
+  _entry: PendingExecution,
 ): Promise<void> {
   await patchCursorHelpSlotState(slot.slotId, {
     status: "busy",
@@ -1477,12 +1500,6 @@ async function markCursorHelpSlotBusy(
     windowId: slot.windowId,
     lastKnownUrl: slot.lastKnownUrl,
   });
-  ACTIVE_REQUEST_ID_BY_SLOT.set(slot.slotId, entry.requestId);
-  ACTIVE_REQUEST_ID_BY_TAB.set(slot.tabId, entry.requestId);
-  ACTIVE_REQUEST_ID_BY_SESSION_LANE.set(
-    buildSessionLaneKey(entry.sessionId, entry.lane),
-    entry.requestId,
-  );
 }
 
 function classifySlotStatusFromInspect(
@@ -1624,6 +1641,7 @@ async function waitForCursorHelpSlot(
   const desiredSlotCount = readRequestedPoolSlotCount(input);
   let sawBusyCandidates = false;
   let lastUnavailableReason = "";
+  let pollInterval = SLOT_WAIT_POLL_MS;
 
   while (nowMs() < deadline) {
     const state = await reconcileCursorHelpPoolState(desiredSlotCount, {
@@ -1651,7 +1669,8 @@ async function waitForCursorHelpSlot(
         ? "当前所有槽位都有活动中的网页 provider 请求"
         : "暂无可用的 Cursor Help 槽位";
     }
-    await new Promise((resolve) => setTimeout(resolve, SLOT_WAIT_POLL_MS));
+    await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    pollInterval = Math.min(pollInterval * 1.5, 2000);
   }
 
   if (sawBusyCandidates) {
@@ -1722,23 +1741,33 @@ async function removeCursorHelpSlotsByWindowId(windowId: number): Promise<void> 
   await saveCursorHelpPoolState(nextState);
 }
 
+function handleTabRemoved(tabId: number): void {
+  void removeCursorHelpSlotByTabId(tabId);
+}
+
+function handleWindowRemoved(windowId: number): void {
+  void removeCursorHelpSlotsByWindowId(windowId);
+}
+
 function ensureCursorHelpSlotLifecycle(): void {
   const tabsApi = chrome.tabs;
   if (tabsApi?.onRemoved?.addListener && cursorHelpSlotLifecycleBoundTabs !== tabsApi) {
+    if (cursorHelpSlotLifecycleBoundTabs?.onRemoved?.removeListener) {
+      cursorHelpSlotLifecycleBoundTabs.onRemoved.removeListener(handleTabRemoved);
+    }
     cursorHelpSlotLifecycleBoundTabs = tabsApi;
-    tabsApi.onRemoved.addListener((tabId) => {
-      void removeCursorHelpSlotByTabId(tabId);
-    });
+    tabsApi.onRemoved.addListener(handleTabRemoved);
   }
   const windowsApi = chrome.windows;
   if (
     windowsApi?.onRemoved?.addListener &&
     cursorHelpSlotLifecycleBoundWindows !== windowsApi
   ) {
+    if (cursorHelpSlotLifecycleBoundWindows?.onRemoved?.removeListener) {
+      cursorHelpSlotLifecycleBoundWindows.onRemoved.removeListener(handleWindowRemoved);
+    }
     cursorHelpSlotLifecycleBoundWindows = windowsApi;
-    windowsApi.onRemoved.addListener((windowId) => {
-      void removeCursorHelpSlotsByWindowId(windowId);
-    });
+    windowsApi.onRemoved.addListener(handleWindowRemoved);
   }
 }
 
@@ -1922,6 +1951,12 @@ export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebug
   };
 }
 
+const PERMANENT_TAB_MESSAGE_ERRORS = [
+  "Could not establish connection",
+  "Extension context invalidated",
+  "No tab with id",
+];
+
 async function sendTabMessageWithRetry(tabId: number, message: Record<string, unknown>, retries = 12): Promise<unknown> {
   let lastError: unknown = null;
   for (let attempt = 0; attempt < retries; attempt += 1) {
@@ -1929,7 +1964,12 @@ async function sendTabMessageWithRetry(tabId: number, message: Record<string, un
       return await chrome.tabs.sendMessage(tabId, message);
     } catch (error) {
       lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      const msg = error instanceof Error ? error.message : String(error);
+      if (PERMANENT_TAB_MESSAGE_ERRORS.some((p) => msg.includes(p))) {
+        break;
+      }
+      const delay = Math.min(250 * 2 ** attempt, 4000);
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError || "目标网页执行器未就绪"));
@@ -1996,14 +2036,30 @@ export function createCursorHelpWebProvider() {
       }
 
       const requestId = `cursor-help-${crypto.randomUUID()}`;
-      const compiledPrompt = buildCursorHelpCompiledPrompt(
-        input.payload.messages,
-        input.payload.tools,
-        input.payload.tool_choice,
-      );
-      const latestUserPrompt = extractLastUserMessage(input.payload.messages);
-      const requestedModel =
-        String(input.route.llmModel || "").trim() || "auto";
+
+      // Atomic acquire: register slot/tab/lane immediately to prevent concurrent send() races
+      ACTIVE_REQUEST_ID_BY_SLOT.set(slot.slotId, requestId);
+      ACTIVE_REQUEST_ID_BY_TAB.set(slot.tabId, requestId);
+      ACTIVE_REQUEST_ID_BY_SESSION_LANE.set(sessionLaneKey, requestId);
+
+      let compiledPrompt: string;
+      let latestUserPrompt: string;
+      let requestedModel: string;
+      try {
+        compiledPrompt = buildCursorHelpCompiledPrompt(
+          input.payload.messages,
+          input.payload.tools,
+          input.payload.tool_choice,
+        );
+        latestUserPrompt = extractLastUserMessage(input.payload.messages);
+        requestedModel =
+          String(input.route.llmModel || "").trim() || "auto";
+      } catch (error) {
+        ACTIVE_REQUEST_ID_BY_SLOT.delete(slot.slotId);
+        ACTIVE_REQUEST_ID_BY_TAB.delete(slot.tabId);
+        ACTIVE_REQUEST_ID_BY_SESSION_LANE.delete(sessionLaneKey);
+        throw error instanceof Error ? error : new Error(String(error));
+      }
       const entry: PendingExecution = {
         requestId,
         sessionId,
@@ -2201,7 +2257,7 @@ export async function handleWebChatRuntimeMessage(message: unknown, senderTabId?
   if (event.type === "hosted_chat.transport_error") {
     enqueueHostedEvent(entry, event);
     emitProviderDebugLog("provider.error", "failed", event.error);
-    closeExecution(entry);
+    failExecution(entry, event.error);
     return true;
   }
 

@@ -25,15 +25,15 @@ Round 1 Code Review — 9 个 MEDIUM 发现。
 
 ## 修复清单
 
-- [ ] **M1**: 在 `resolveSessionLaneConflict` 中添加注释说明不对称规则的设计意图
-- [ ] **M2**: `failExecution` 中 `patchSlotState` 至少添加错误日志而非空 catch
-- [ ] **M3**: `sendTabMessageWithRetry` 对已知永久性失败短路（如 "Could not establish connection"），考虑指数退避
-- [ ] **M4**: SW 重启后 listener 累积问题 — 在添加前检查并清理旧 listener
-- [ ] **M5**: `waitForCursorHelpSlot` 考虑递增轮询间隔或仅在状态变化时 reconcile
-- [ ] **M6**: `closeExecution` 在 slot 处于 `recovering` 时不覆盖为 `idle`
-- [ ] **M7**: page-hook `!latest` 分支添加 `logToContent` 日志
-- [ ] **M8**: page-hook postMessage listener 考虑 per-session nonce（可延后评估）
-- [ ] **M9**: ProviderSettingsView `handleSave` 连接探测失败时 early return 不关闭对话框
+- [x] **M1**: 在 `resolveSessionLaneConflict` 中添加注释说明不对称规则的设计意图
+- [x] **M2**: `failExecution` 中 `patchSlotState` 至少添加错误日志而非空 catch
+- [x] **M3**: `sendTabMessageWithRetry` 对已知永久性失败短路（如 "Could not establish connection"），考虑指数退避
+- [x] **M4**: SW 重启后 listener 累积问题 — 在添加前检查并清理旧 listener
+- [x] **M5**: `waitForCursorHelpSlot` 考虑递增轮询间隔或仅在状态变化时 reconcile
+- [x] **M6**: `closeExecution` 在 slot 处于 `recovering` 时不覆盖为 `idle`
+- [x] **M7**: page-hook `!latest` 分支添加 `logToContent` 日志
+- [ ] **M8**: page-hook postMessage listener 考虑 per-session nonce（延后评估，accepted risk）
+- [x] **M9**: ProviderSettingsView `handleSave` 连接探测失败时 early return 不关闭对话框
 
 ## 验收
 
