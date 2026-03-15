@@ -1,10 +1,11 @@
 ---
 id: ISSUE-035
 title: "web-chat-executor 拆分 — pool/execution/heartbeat/window 职责分离"
-status: in-progress
+status: done
 priority: p2
 source: "ISSUE-023 code quality review"
 created: 2026-03-16
+closed: 2026-03-16
 assignee: copilot
 kind: refactor
 tags:
@@ -96,3 +97,22 @@ tags:
 ### P1 + P4 待评估
 - P1 执行生命周期紧耦合 P4 池状态管理（`closeExecution`/`failExecution` 调用 `patchCursorHelpSlotState`/`loadCursorHelpPoolState`）
 - 推荐 P4 先行或 P1+P4 合并提取
+
+### P4 池状态持久化提取 — done (e0fc93e)
+- 新建 `cursor-help-pool-state.ts` — 7 exported functions (~120 lines)
+- web-chat-executor: 2029 → 1903 行（含 P1 import 增量）
+
+### P1 执行生命周期提取 — done (8440188)
+- 新建 `cursor-help-execution.ts` — PendingExecution type + 4 Maps + 8 functions + 2 constants (~145 lines)
+- web-chat-executor: 1903 → 1780 行
+- 清理了 web-chat-executor 对 `serializeHostedChatTransportEvent`、`HostedChatTransportEvent` 的冗余 import
+
+### 总结
+- 原始: 2389 行 / 85 函数
+- 最终: 1780 行（减少 609 行，-25.5%）
+- 新增 4 个职责单一模块:
+  - `cursor-help-pool-policy.ts` — 窗口策略类型与纯函数
+  - `cursor-help-health.ts` — slot 健康分类与 inspect 诊断
+  - `cursor-help-pool-state.ts` — 池状态持久化与规范化
+  - `cursor-help-execution.ts` — 执行生命周期与 Map 状态
+- 47 文件 / 442 测试全通过，build 通过，无行为变更
