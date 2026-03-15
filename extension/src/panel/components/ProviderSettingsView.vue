@@ -440,10 +440,7 @@ async function waitForCursorHelpTabUsable(
   while (Date.now() < deadline) {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     if (!tab?.id) break;
-    if (
-      String(tab.url || "").startsWith(CURSOR_HELP_URL) &&
-      tab.status === "complete"
-    ) {
+    if (String(tab.url || "").startsWith(CURSOR_HELP_URL)) {
       lastState = await inspectCursorTab(tabId).catch(() => lastState);
       patchCursorHelpRuntimeState(profile, {
         ...(lastState || emptyCursorHelpRuntimeState()),

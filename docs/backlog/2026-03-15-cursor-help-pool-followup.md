@@ -212,3 +212,18 @@ f0ddbd3 完成了 Pool/Slot/Lane 核心架构：
 ## 相关 commits（2026-03-15 16:12）
 
 - 未提交
+
+## 工作总结（2026-03-15 18:35）
+
+- 用户再次反馈“已打开 Cursor 页面，但页面还没有完成加载。请稍后重试。”，并怀疑是近期 `cursor-help` / `ISSUE-027` 相关提交引入回归。
+- 本轮重新定位后确认：这句报错并不是 `web-chat-executor` / pool window policy 直接抛出的，而是设置页 `extension/src/panel/components/ProviderSettingsView.vue` 的连接探测文案，命中的条件是 `CursorHelpRuntimeState | null` 为 `null`。
+- 进一步核对 `waitForCursorHelpTabUsable()` 发现，旧逻辑只有在 `tab.url` 已匹配 `CURSOR_HELP_URL` 且 `tab.status === "complete"` 时才开始 `webchat.inspect`。这会把“页面已打开，但 Chrome 还没把 tab 状态标成 complete”的阶段误判成“页面尚未加载完成”。
+- 本次修复已将该门槛放宽为：只要 `tab.url` 已匹配 `CURSOR_HELP_URL`，就开始尝试 `inspectCursorTab()`，不再硬等 `tab.status === "complete"`。
+- 结论上，这次更像是设置页 probe 逻辑过严，而不是 `ISSUE-027` 几次窗口策略提交再次把 provider 主链路改坏。
+- 验证范围：
+  - `ProviderSettingsView.vue` 静态检查通过
+  - 未做 full build（仓库中仍存在 unrelated build blocker）
+
+## 相关 commits（2026-03-15 18:35）
+
+- 未提交
