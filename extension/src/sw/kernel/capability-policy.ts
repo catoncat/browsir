@@ -41,10 +41,6 @@ const BUILTIN_POLICY_TABLE: Record<string, CapabilityExecutionPolicy> = {
   "browser.action": {
     defaultVerifyPolicy: "off",
     leasePolicy: "auto"
-  },
-  "browser.verify": {
-    defaultVerifyPolicy: "always",
-    leasePolicy: "none"
   }
 };
 
