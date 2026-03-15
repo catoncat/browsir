@@ -992,6 +992,9 @@ describe("web-chat-executor.browser", () => {
     expect(debugState.summary.windowMode).toBe("external-tabs");
     expect(debugState.summary.lastWindowEvent).toBe("adopt_existing_tabs");
     expect(debugState.summary.lastWindowEventReason).toContain("adopted=1");
+    expect(debugState.summary.liveCursorHelpTabCount).toBe(1);
+    expect(debugState.summary.managedCursorHelpTabCount).toBe(1);
+    expect(debugState.summary.unmanagedCursorHelpTabCount).toBe(0);
     expect(debugState.window).toBeNull();
     expect(chrome.windows.update).not.toHaveBeenCalled();
     expect(chromeMock.sendMessage).toHaveBeenCalled();
@@ -1200,6 +1203,8 @@ describe("web-chat-executor.browser", () => {
     expect(debugState.summary.windowStatus).toBe("external-tabs");
     expect(debugState.summary.recoveryCooldownActive).toBe(false);
     expect(debugState.summary.lastWindowEvent).toBe("adopt_existing_tabs");
+    expect(debugState.summary.managedCursorHelpTabCount).toBe(1);
+    expect(debugState.summary.unmanagedCursorHelpTabCount).toBe(0);
   });
 
   it("heartbeat marks runtime-mismatch slots as error", async () => {

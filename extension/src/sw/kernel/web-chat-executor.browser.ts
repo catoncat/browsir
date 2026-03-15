@@ -1685,6 +1685,7 @@ export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebug
       : null;
   const windowRuntimeState = resolveCursorHelpWindowRuntimeState(state, window);
   const recoveryPreview = buildCursorHelpWindowRecoveryPreview(state);
+  const decisionTrace = await collectCursorHelpTabDecisionTrace(state);
   const slots = sortSlotsForDisplay(state.slots).map((slot) => {
     const activeRequestId = String(
       ACTIVE_REQUEST_ID_BY_SLOT.get(slot.slotId) || "",
@@ -1735,6 +1736,9 @@ export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebug
       backgroundBlockedReason: windowRuntimeState.backgroundBlockedReason || "",
       recoveryAction: recoveryPreview.action,
       recoveryReason: recoveryPreview.reason,
+      liveCursorHelpTabCount: decisionTrace.liveCursorHelpTabCount,
+      managedCursorHelpTabCount: decisionTrace.managedCursorHelpTabCount,
+      unmanagedCursorHelpTabCount: decisionTrace.unmanagedCursorHelpTabCount,
       lastHeartbeatAt: cursorHelpHeartbeatLastAt,
       lastHeartbeatDelayMs: cursorHelpHeartbeatLastDelayMs,
       lastHeartbeatReason: cursorHelpHeartbeatLastReason,

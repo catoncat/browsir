@@ -187,6 +187,27 @@ tags: [slice, cursor-help, pool, window, minimized]
 
 - 未提交
 
+## 工作总结（2026-03-15 Slice F）
+
+- 继续推进 `ISSUE-027` 的 decision trace，可见面再补一层：debug summary 现在额外暴露了当前 live Cursor Help tab 的分层计数：
+  - `liveCursorHelpTabCount`
+  - `managedCursorHelpTabCount`
+  - `unmanagedCursorHelpTabCount`
+- 这些计数的目标不是做业务逻辑，而是让调试时能更直接回答：
+  - 当前是否存在 live Cursor Help 页面
+  - 系统已经接管了多少
+  - 还剩多少未接管 external tab 候选
+- 这能和前一轮新增的 `recoveryAction / recoveryReason` 形成互补：
+  - `recoveryAction` 解释“系统现在打算怎么恢复”
+  - tab decision trace 解释“为什么没有 adopt / 为什么还需要 rebuild”
+- 对应补充了 focused executor 回归断言，确认 external-tab adopt 场景下 debug summary 会把 live/managed/unmanaged 计数反映正确。
+- 本轮验证：
+  - 聚焦测试 `src/sw/kernel/__tests__/web-chat-executor.browser.test.ts` 通过（22 passed / 1 skipped）
+
+## 相关 commits（2026-03-15 Slice F）
+
+- 未提交
+
 ## 工作总结（2026-03-15 第三轮实现）
 
 - 已把 `ISSUE-027` 的窗口状态矩阵与恢复条件显式化到 debug state：
