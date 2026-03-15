@@ -472,7 +472,6 @@ export function useToolRunTracking(deps: ToolRunTrackingDeps) {
     const mode = String(payload.mode || "");
     const ts = normalizeEventTs(envelope);
     const eventSessionId = String(envelope.sessionId || "").trim();
-    const responseSource = String(payload.source || "").trim();
 
     if (type === "loop_start") {
       activeRunToken.value += 1;
@@ -494,6 +493,7 @@ export function useToolRunTracking(deps: ToolRunTrackingDeps) {
       if (runPhase.value === "idle") {
         runPhase.value = "llm";
       }
+      const responseSource = String(payload.source || "").trim();
       if (responseSource === "hosted_chat_transport") {
         setLlmRunHint("宿主生成中", "正在通过网页会话规划下一步");
         return;

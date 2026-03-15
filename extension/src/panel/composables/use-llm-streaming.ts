@@ -1,12 +1,10 @@
 import { ref, computed, type Ref, type ComputedRef } from "vue";
 import type { DisplayMessage, RunViewPhase } from "../types";
-import { toRecord } from "../utils/tool-formatters";
 
 export interface LlmStreamEventResult {
   handled: boolean;
   runPhase?: RunViewPhase;
   hint?: { label: string; detail: string };
-  clearStreaming?: boolean;
   finalAssistant?: boolean;
 }
 
