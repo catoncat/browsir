@@ -119,6 +119,27 @@ tags: [slice, cursor-help, pool, window, minimized]
 
 - 未提交
 
+## 工作总结（2026-03-15 Slice B/C）
+
+- 继续推进 `ISSUE-027` 的窗口恢复策略，新增了“managed pool window 被关闭后的 rebuild cooldown”边界：
+  - `pool_window_removed` 后不再立刻自动重建专用窗口
+  - debug state 现在会显式暴露 `recoveryCooldownActive` / `recoveryCooldownUntil`
+  - passive ensure 会进入 `skip_window_rebuild_cooldown`，而不是立刻弹窗恢复
+- 在此基础上又补了一刀恢复优化：即使 cooldown 仍在，也允许 opportunistic adopt 用户后来手动打开的 `cursor.com/help` external tab；也就是说现在的优先级变成：
+  - 先复用/接管用户已有 external tab
+  - 再考虑是否需要恢复专用 pool window
+- 为此补充/更新了窗口策略回归测试，覆盖：
+  - `pool_window_removed` 进入 cooldown
+  - passive ensure 期间不自动 rebuild
+  - cooldown 期间若出现新的 external tab，则直接 adopt 而不 recreate pool window
+- 本轮验证：
+  - 聚焦测试 `src/sw/kernel/__tests__/web-chat-executor.browser.test.ts` 通过
+  - full build 当前被无关文件 `src/sw/kernel/runtime-router/plugin-sandbox.ts` 的现存语法错误阻塞；未在本轮修复以避免越界改 unrelated 范围
+
+## 相关 commits（2026-03-15 Slice B/C）
+
+- 未提交
+
 ## 工作总结（2026-03-15 第三轮实现）
 
 - 已把 `ISSUE-027` 的窗口状态矩阵与恢复条件显式化到 debug state：

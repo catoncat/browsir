@@ -178,6 +178,21 @@ function buildChromeMock() {
   };
   return {
     sendMessage,
+    addExternalTab(tabId = 41, windowId = 9, url = "https://cursor.com/help") {
+      tabsById.set(tabId, createTabRecord(tabId, windowId, url));
+      const existingWindow = windowsById.get(windowId) || {
+        id: windowId,
+        focused: false,
+        state: "normal",
+        type: "normal",
+        tabs: [] as number[]
+      };
+      windowsById.set(windowId, {
+        ...existingWindow,
+        tabs: Array.from(new Set([...(existingWindow.tabs as number[]), tabId]))
+      });
+      return cloneTab(tabId);
+    },
     emitTabRemoved(tabId: number, windowId = 2) {
       tabsById.delete(tabId);
       const currentWindow = windowsById.get(windowId);
@@ -944,6 +959,32 @@ describe("web-chat-executor.browser", () => {
     expect(String(debugState.summary.lastWindowEventReason || "")).toContain("until=");
   });
 
+  it("adopts a newly opened external tab during rebuild cooldown instead of recreating the pool window", async () => {
+    const chromeMock = buildChromeMock();
+    const tabsQuery = chrome.tabs.query as unknown as ReturnType<typeof vi.fn>;
+    tabsQuery.mockResolvedValue([]);
+
+    await ensureCursorHelpPoolReady(3);
+
+    const windowsCreate = chrome.windows.create as unknown as ReturnType<typeof vi.fn>;
+    expect(windowsCreate).toHaveBeenCalledTimes(1);
+
+    chromeMock.emitWindowRemoved(2);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const externalTab = chromeMock.addExternalTab(41, 9);
+    tabsQuery.mockResolvedValue([externalTab]);
+
+    await ensureCursorHelpPoolReady(3);
+
+    expect(windowsCreate).toHaveBeenCalledTimes(1);
+    const debugState = await getCursorHelpPoolDebugState();
+    expect(debugState.summary.windowMode).toBe("external-tabs");
+    expect(debugState.summary.windowStatus).toBe("external-tabs");
+    expect(debugState.summary.recoveryCooldownActive).toBe(false);
+    expect(debugState.summary.lastWindowEvent).toBe("adopt_existing_tabs");
+  });
+
   it("heartbeat marks runtime-mismatch slots as error", async () => {
     buildChromeMock();
     (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
@@ -983,6 +1024,34 @@ describe("web-chat-executor.browser", () => {
     expect(String(debugState.slots[0]?.status || "")).toBe("error");
     expect(String(debugState.slots[0]?.lastHealthReason || "")).toBe("runtime-mismatch");
     expect(String(debugState.slots[0]?.lastError || "")).toContain("运行时版本不一致");
+  });
+
+  it("heartbeat auto-recovers a missing slot tab when the pool window is still alive", async () => {
+    buildChromeMock();
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    await ensureCursorHelpPoolReady(3);
+    const stored = await chrome.storage.local.get(CURSOR_HELP_POOL_STORAGE_KEY);
+    const firstSlot = stored[CURSOR_HELP_POOL_STORAGE_KEY]?.slots?.[0] as Record<string, unknown> | undefined;
+    expect(firstSlot).toBeTruthy();
+
+    const missingTabId = Number(firstSlot?.tabId || 0);
+    const slotId = String(firstSlot?.slotId || "");
+    const tabsGet = chrome.tabs.get as unknown as ReturnType<typeof vi.fn>;
+    const originalGet = tabsGet.getMockImplementation();
+    tabsGet.mockImplementation(async (tabId: number) => {
+      if (tabId === missingTabId) return null;
+      return await originalGet?.(tabId);
+    });
+
+    const debugState = await runCursorHelpPoolHeartbeat();
+    const recoveredSlot = debugState.slots.find(
+      (slot) => String(slot.slotId || "") === slotId,
+    );
+
+    expect(recoveredSlot).toBeTruthy();
+    expect(Number(recoveredSlot?.tabId || 0)).not.toBe(missingTabId);
+    expect(["idle", "warming", "recovering"]).toContain(String(recoveredSlot?.status || ""));
   });
 
   it("rejects stale runtime version before execute", async () => {

@@ -39,7 +39,7 @@ interface CursorHelpSlotRecord {
   tabId: number;
   windowId?: number;
   lanePreference: "primary" | "auxiliary";
-  status: "cold" | "warming" | "idle" | "busy" | "stale" | "error";
+  status: "cold" | "warming" | "idle" | "busy" | "recovering" | "stale" | "error";
   lastKnownUrl: string;
   lastReadyAt: number;
   lastUsedAt: number;
@@ -214,6 +214,7 @@ function normalizeSlotRecord(value: unknown): CursorHelpSlotRecord | null {
     statusText === "warming" ||
     statusText === "idle" ||
     statusText === "busy" ||
+    statusText === "recovering" ||
     statusText === "stale" ||
     statusText === "error"
       ? (statusText as CursorHelpSlotRecord["status"])
@@ -325,10 +326,7 @@ function buildCursorHelpWindowPolicyState(
   state: CursorHelpPoolState,
   liveWindow: chrome.windows.Window | null,
 ): CursorHelpWindowPolicyState {
-  const hasExternalTabs =
-    state.windowMode === "external-tabs" &&
-    state.slots.some((slot) => !slot.windowId);
-  if (hasExternalTabs) {
+  if (state.windowMode === "external-tabs") {
     return {
       windowStatus: "external-tabs",
       shouldRebuildWindow: false,
@@ -966,6 +964,7 @@ async function readLiveCursorHelpSlot(
 async function createAdditionalPoolSlot(
   windowId: number,
   lanePreference: "primary" | "auxiliary",
+  existingSlotId?: string,
 ): Promise<CursorHelpSlotRecord | null> {
   const tab = await chrome.tabs
     .create({
@@ -976,7 +975,41 @@ async function createAdditionalPoolSlot(
     .catch(() => null);
   if (!tab?.id) return null;
   await markCursorHelpTabStable(tab.id);
-  return buildCursorHelpSlotRecord(tab, lanePreference);
+  return buildCursorHelpSlotRecord(tab, lanePreference, existingSlotId);
+}
+
+async function attemptCursorHelpSlotRecovery(
+  slot: CursorHelpSlotRecord,
+): Promise<void> {
+  if (!slot.windowId || !Number.isInteger(slot.windowId) || slot.windowId <= 0) return;
+  const windowAlive = await isCursorHelpWindowAlive(slot.windowId);
+  if (!windowAlive) return;
+  await patchCursorHelpSlotState(slot.slotId, {
+    ...buildSlotHealthSnapshot("recovering", "recovering", "auto-recovering slot"),
+  });
+  const replacement = await createAdditionalPoolSlot(
+    slot.windowId,
+    slot.lanePreference,
+    slot.slotId,
+  );
+  if (!replacement) {
+    await patchCursorHelpSlotState(slot.slotId, {
+      ...buildSlotHealthSnapshot("error", "recover-failed", "slot recovery failed"),
+    });
+    return;
+  }
+  await patchCursorHelpSlotState(slot.slotId, {
+    tabId: replacement.tabId,
+    windowId: replacement.windowId,
+    lanePreference: replacement.lanePreference,
+    lastKnownUrl: replacement.lastKnownUrl,
+    ...buildSlotHealthSnapshot("recovering", "recovering", "auto-recovering slot"),
+  });
+  await ensureCursorHelpSlotUsable({
+    ...slot,
+    ...replacement,
+    status: "recovering",
+  }).catch(() => null);
 }
 
 async function reconcileCursorHelpPoolState(
@@ -1008,6 +1041,13 @@ async function reconcileCursorHelpPoolState(
     }));
     await clearLegacySessionSlots();
     return nextState;
+  }
+
+  if (!windowId && slots.length <= 0 && current.windowMode === "pool-window") {
+    const adopted = await tryAdoptExistingCursorHelpSlots(desiredSlotCount);
+    if (adopted) {
+      return adopted;
+    }
   }
 
   const missingWindowPolicy = buildCursorHelpWindowPolicyState(current, null);
@@ -1382,7 +1422,14 @@ export async function runCursorHelpPoolHeartbeat(): Promise<CursorHelpPoolDebugV
   const state = await loadCursorHelpPoolState();
   for (const slot of state.slots) {
     clearStaleExecution(slot.slotId, slot.tabId);
-    await ensureCursorHelpSlotUsable(slot).catch(() => null);
+    const usable = await ensureCursorHelpSlotUsable(slot).catch(() => null);
+    if (usable) continue;
+    const refreshed = (await loadCursorHelpPoolState()).slots.find(
+      (item) => item.slotId === slot.slotId,
+    );
+    if (refreshed?.lastHealthReason === "tab-missing") {
+      await attemptCursorHelpSlotRecovery(refreshed);
+    }
   }
   const debugState = await getCursorHelpPoolDebugState();
   cursorHelpHeartbeatLastAt = nowMs();
