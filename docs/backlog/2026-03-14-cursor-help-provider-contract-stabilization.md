@@ -26,6 +26,8 @@ claimed_at: "2026-03-14T12:12:44.462Z"
 
 # ISSUE-014: Cursor Help provider contract 稳定化
 
+> **2026-03-15 补充说明**：本 issue 的 `done` 结论基于 **pool/slot/lane 重构前** 的实现审查，不应被继续当作当前 `cursor_help_web` 正式链路仍然可用的证明。后续架构变化与当前故障跟进请看 `ISSUE-023`。
+
 ## 目标
 
 继续收紧 `inspect` / readiness / runtime mismatch / transport contract，保持 sidepanel 主聊 + hook 接管正式链路。
