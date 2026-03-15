@@ -26,6 +26,7 @@ import {
 } from "./loop-shared-types";
 import {
   asRuntimeErrorWithMeta,
+  createNonRetryableRuntimeError,
   delay,
   isPlainJsonRecord,
   normalizeIntInRange,
@@ -54,22 +55,6 @@ export interface LlmRequestWithRetryInput extends LlmRequestInput {
   listToolDefinitions: (scope: "all" | "browser_only") => ToolDefinition[];
   summarizeLlmRequestPayload: (payload: JsonRecord) => JsonRecord;
   buildLlmRawTracePayload: (input: BuildLlmRawTracePayloadInput) => JsonRecord;
-}
-
-// ── Internal helpers ────────────────────────────────────────────────
-
-function createNonRetryableRuntimeError(
-  code: string,
-  message: string,
-  details?: unknown,
-): RuntimeErrorWithMeta {
-  const err = new Error(message) as RuntimeErrorWithMeta;
-  err.code = code;
-  err.retryable = false;
-  if (details !== undefined) {
-    err.details = details;
-  }
-  return err;
 }
 
 // ── Main export ─────────────────────────────────────────────────────

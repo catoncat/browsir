@@ -72,18 +72,11 @@ import {
 import {
   buildLlmFailureSignature,
   buildLlmRoutePayload,
-  computeRetryDelayMs,
-  extractRetryDelayHintMs,
-  isRetryableLlmStatus,
   readSessionLlmRoutePrefs,
   resolvePrimaryLlmRoute,
   withSessionLlmRouteMeta,
 } from "./loop-llm-route";
 import {
-  hostedChatTurnToMessage,
-  parseLlmMessageFromBody,
-  readHostedChatTurnFromTransportStream,
-  readLlmMessageFromSseStream,
   resolveRouteRuntimeKind,
 } from "./loop-llm-stream";
 import {
@@ -97,7 +90,6 @@ import {
   shouldAcquireLease,
   isToolCallRequiringBrowserProof,
   didToolProvideBrowserProof,
-  mapToolErrorReasonToTerminalStatus,
 } from "./loop-browser-proof";
 import {
   buildFocusEscalationToolCall,

@@ -27,6 +27,7 @@ import {
 import {
   asRuntimeErrorWithMeta,
   callInfra,
+  createNonRetryableRuntimeError,
   delay,
   extractLlmConfig,
   isPlainJsonRecord,
@@ -34,17 +35,7 @@ import {
   toRecord,
 } from "./loop-shared-utils";
 import type { JsonRecord } from "./types";
-
-interface BuildLlmRawTracePayloadInput {
-  step: number;
-  attempt: number;
-  status: number;
-  ok: boolean;
-  body: string;
-  retryDelayHintMs?: number | null;
-  source?: string;
-  contentType?: string;
-}
+import type { BuildLlmRawTracePayloadInput } from "./loop-llm-request";
 
 interface RequestCompactionSummaryFromLlmInput {
   orchestrator: BrainOrchestrator;
@@ -58,20 +49,6 @@ interface RequestCompactionSummaryFromLlmInput {
   buildLlmRawTracePayload: (
     input: BuildLlmRawTracePayloadInput,
   ) => JsonRecord;
-}
-
-function createNonRetryableRuntimeError(
-  code: string,
-  message: string,
-  details?: unknown,
-): RuntimeErrorWithMeta {
-  const err = new Error(message) as RuntimeErrorWithMeta;
-  err.code = code;
-  err.retryable = false;
-  if (details !== undefined) {
-    err.details = details;
-  }
-  return err;
 }
 
 export async function requestCompactionSummaryFromLlm(
@@ -334,7 +311,17 @@ export async function requestCompactionSummaryFromLlm(
       }
       const fallbackDelayMs = Math.max(
         0,
-        Math.min(llmMaxRetryDelayMs, computeRetryDelayMs(attempt)),
+        Math.min(
+          llmMaxRetryDelayMs > 0
+            ? llmMaxRetryDelayMs
+            : Number.MAX_SAFE_INTEGER,
+          computeRetryDelayMs(attempt),
+        
+          llmMaxRetryDelayMs > 0
+            ? llmMaxRetryDelayMs
+            : Number.MAX_SAFE_INTEGER,
+          computeRetryDelayMs(attempt),
+        ),
       );
       if (fallbackDelayMs > 0) {
         await delay(fallbackDelayMs);

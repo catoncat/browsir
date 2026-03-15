@@ -746,6 +746,20 @@ export function extractLlmConfig(raw: JsonRecord): BridgeConfig {
 
 // ── Misc ────────────────────────────────────────────────────────────
 
+export function createNonRetryableRuntimeError(
+  code: string,
+  message: string,
+  details?: unknown,
+): RuntimeErrorWithMeta {
+  const err = new Error(message) as RuntimeErrorWithMeta;
+  err.code = code;
+  err.retryable = false;
+  if (details !== undefined) {
+    err.details = details;
+  }
+  return err;
+}
+
 export function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
