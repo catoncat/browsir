@@ -341,11 +341,11 @@ Background 模式依赖 content script，需检测就绪性：
 
 ---
 
-## 7. 未涵盖（可后续迭代）
+## 7. 后续迭代（已实现）
 
-- 模式自动升级策略（background 连续失败 → 建议切 focus）
-- 混合模式（部分操作 CDP、部分 DOM）
-- 离屏 tab（chrome.offscreen）支持
+- ✅ 模式自动升级策略 — `background-failure-tracker.ts`：连续 3 次失败附加 upgradeHint
+- ✅ 混合模式（Mixed Mode）— 不支持的 action kind 自动降级到 CDP（`mode: "background-cdp-fallback"`）
+- ✅ 隐身 tab — `stealth-tab.ts`：在 minimized window 创建不可见 tab（替代 chrome.offscreen 方案，规避单文档限制）
 - Background Service Worker 中的 content script 管理
 
 ---

@@ -58,7 +58,9 @@ Kernel 引擎（50 个模块）聚合在 `BrainOrchestrator` 单例中，详见 
 - `automation-mode.ts` — focus/background 状态管理
 - `content/dom-snapshot-collector.ts` — Content Script DOM 快照（对标 AIPex `dom-snapshot.ts`）
 - `dom-locator.ts` — DOM 操作执行器（对标 AIPex `dom-action.ts`）
-- `runtime-infra.browser.ts` — snapshot/action 路由按 mode 分支
+- `background-failure-tracker.ts` — 连续失败追踪，3 次后附加 upgradeHint
+- `stealth-tab.ts` — minimized window 隐身 tab（background 模式创建的 tab 对用户不可见）
+- `runtime-infra.browser.ts` — snapshot/action 路由按 mode 分支 + mixed fallback（不支持的 action 降级 CDP）
 - `runtime-loop.browser.ts` — background 模式过滤 screenshot/computer 工具
 
 ## 常用命令
@@ -216,6 +218,8 @@ browser-brain-loop/
 │   │       ├── runtime-router.ts          # SW 消息路由
 │   │       ├── automation-mode.ts         # 自动化模式状态管理（focus/background）
 │   │       ├── dom-locator.ts             # DOM 操作执行器（background mode, chrome.scripting）
+│   │       ├── background-failure-tracker.ts # 后台模式连续失败追踪（auto-upgrade hint）
+│   │       ├── stealth-tab.ts             # 隐身 tab 管理（minimized window，background 模式用）
 │   │       ├── tool-contract-registry.ts  # 工具 Schema（45 内置）
 │   │       ├── tool-provider-registry.ts  # 工具执行层
 │   │       ├── plugin-runtime.ts          # 插件系统
