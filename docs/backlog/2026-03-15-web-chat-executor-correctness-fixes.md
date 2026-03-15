@@ -1,7 +1,7 @@
 ---
 id: ISSUE-030
 title: "web-chat-executor 正确性修复 — TOCTOU 竞态 / transport_error / 测试隔离"
-status: in-progress
+status: done
 priority: p0
 source: "review/2026-03-15-round1-cursor-help-pool-review.md"
 created: 2026-03-15
