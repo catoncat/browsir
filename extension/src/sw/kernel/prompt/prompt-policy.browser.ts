@@ -198,24 +198,22 @@ const EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS: Record<string, string> = {
     "Assert URL/title/text/selector to confirm the task actually progressed.",
 };
 
+const BROWSER_AUTOMATION_DECISION_TREE = [
+  "## Browser Automation Priority",
+  "P1 search_elements: ALWAYS try first. Use semantic user-visible query (placeholder/label/text). Supports | for OR (e.g. 'Login | Sign in'). Change query strategy before blind repeat.",
+  "P2 UID-based tools: Use uid/ref from latest search_elements for click/fill/hover/select/scroll_to. Never use selector as sole target. For typing, target editable elements only (input/textarea/contenteditable/role=textbox).",
+  "P3 capture_screenshot + computer: ONLY after 2 failed search_elements with different queries, or for pixel-level interaction (canvas/drag/slider).",
+  "Verify: For state-changing actions, include expect when success criteria is clear. Call browser_verify after action. Never claim done when verify failed/skipped/empty.",
+  "Anti-patterns: No blind repeat (same query+selector). No blind click on toggles (read current state first). No invented selectors/URLs/tab state (re-observe when uncertain). If not typable, re-search with typing intent and switch target.",
+].join("\n");
+
 const EXTENSION_AGENT_PROMPT_BASE_GUIDELINES = [
   "Use tools instead of guessing. Ground decisions in tool outputs.",
   "For host file tasks, call host_read_file before host_edit_file/host_write_file.",
   "For virtual file tasks, call browser_read_file before browser_edit_file/browser_write_file.",
   "When creating/updating skills, prefer create_skill; avoid using browser_bash to scaffold skill files.",
   "Prefer *_edit_file for surgical changes; use *_write_file for new files or full rewrites.",
-  "For browser tasks, enforce: semantic search -> action -> browser_verify.",
-  "Use user-visible query words in search_elements (placeholder/label/text), avoid implementation-only query text.",
-  "For click/fill/select/hover/get_editor_value/scroll_to/highlight, prefer uid/ref/backendNodeId from latest search_elements; selector cannot be the sole target.",
-  "When goal is typing text, prioritize editable targets only (input/textarea/contenteditable/role=textbox). Avoid label/toolBar/container nodes even if text matches.",
-  "For state-changing actions (click/fill/select/press/navigate/fill_form/computer/download/intervention), include expect whenever success criteria is clear.",
-  "Never claim done when verify failed, verify skipped, or verify has empty checks.",
-  "If fill/type says target is not typable, stop repeating same uid/selector; re-search with typing intent (textbox/input/contenteditable) and switch target.",
-  "Avoid blind repeat: do not run identical search_elements query+selector multiple times without strategy change.",
-  "Avoid blind click: never click toggle-like controls before reading current state label/count.",
-  "For toggle-like controls (like/follow/bookmark), read current label/state first to avoid accidental flip.",
-  "If browser_verify fails, do not claim done; re-observe and retry with updated target or expectation.",
-  "Do not invent selectors, URLs, tab state, or command output; re-observe when uncertain.",
+  BROWSER_AUTOMATION_DECISION_TREE,
   "Do not use legacy runtime hints when split tools are available. Choose explicit host_* or browser_* tools.",
   "When tab context is ambiguous, query get_current_tab/get_all_tabs before acting.",
   "Be concise. Show key file paths, tab context, and blockers clearly.",

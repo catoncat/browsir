@@ -270,14 +270,14 @@ const BROWSER_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "search_elements",
     description:
-      "Search interactive elements from accessibility snapshot. Use semantic query terms (placeholder/aria/name/text). If no hit, change query strategy before retrying.",
+      "Search interactive elements from accessibility snapshot. Use semantic query terms (placeholder/aria/name/text). Supports | for OR alternatives (e.g. 'Login | Sign in | 登录'). If no hit, change query strategy before retrying.",
     parameters: {
       type: "object",
       properties: {
         tabId: { type: "number", description: "Target tab id." },
         query: {
           type: "string",
-          description: "Semantic query words (e.g. like, submit, email, search)."
+          description: "Semantic query words. Use | for OR alternatives (e.g. 'submit | send | 提交')."
         },
         selector: { type: "string", description: "Optional scope selector." },
         maxResults: { type: "number", description: "Maximum returned nodes." },

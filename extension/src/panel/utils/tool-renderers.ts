@@ -266,7 +266,7 @@ function inferToolName(inputToolName: string, payload: JsonRecord): string {
   if (toText(payload.tool)) return toText(payload.tool).toLowerCase();
   if (Array.isArray(payload.tabs)) return "list_tabs";
   if (payload.opened === true || (payload.tab && typeof payload.tab === "object")) return "open_tab";
-  if (Array.isArray(payload.nodes) || toText(payload.snapshotId) || toText(payload.compact)) return "snapshot";
+  if (Array.isArray(payload.nodes) || toText(payload.results) || toText(payload.snapshotId) || toText(payload.compact)) return "snapshot";
   if (toText(payload.verifyReason) || typeof payload.verified === "boolean") return "browser_action";
   if (toText(payload.type) === "invoke" || (payload.response && typeof payload.response === "object")) return "invoke";
   return "";

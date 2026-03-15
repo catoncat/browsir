@@ -58,7 +58,7 @@ export function buildObserveProgressVerify(
   ];
 
   const ok =
-    urlChanged || titleChanged || (textLengthChanged && nodeCountChanged);
+    urlChanged || titleChanged || textLengthChanged || nodeCountChanged;
 
   return {
     ok,
@@ -73,7 +73,7 @@ export function shouldVerifyStep(
   action: string,
   verifyPolicy: unknown,
 ): boolean {
-  const policy = String(verifyPolicy || "on_critical");
+  const policy = String(verifyPolicy || "off");
   if (policy === "off") return false;
   if (policy === "always") return true;
   const critical = [

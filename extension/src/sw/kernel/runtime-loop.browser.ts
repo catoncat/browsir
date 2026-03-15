@@ -793,7 +793,7 @@ export function createRuntimeLoopController(
     const verifyPolicy =
       stepInput.verifyPolicy ||
       capabilityPolicy.defaultVerifyPolicy ||
-      "on_critical";
+      "off";
     const verifyEnabled = shouldVerifyStep(kind, verifyPolicy);
     let preObserve: unknown = null;
     if (verifyEnabled) {
@@ -1234,7 +1234,7 @@ export function createRuntimeLoopController(
     const effectiveVerifyPolicy: StepVerifyPolicy =
       input.verifyPolicy ||
       capabilityPolicy.defaultVerifyPolicy ||
-      "on_critical";
+      "off";
     const normalizedAction = String(input.action || "").trim();
     const payload = toRecord(input.args);
     const actionPayload =
