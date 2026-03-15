@@ -62,15 +62,14 @@ tags:
 - `brain.storage.reset` 两侧一致保留（session VFS 清除、global 保留、registry 保留）
 - `brain.skill.uninstall` 已加保护性 VFS 清理（失败不抛错，返回 `vfsCleanupError` 字段）
 
-### Slice C: @路径 / skills / prompt 共用 resolver（Phase 4）
+### Slice C: @路径 / skills / prompt 共用 resolver（Phase 4）✅ 审计通过
 
-验证 ISSUE-019（system-prompt-resolver）的产出是否已满足：
-- 聊天输入 `@/mem/...`
-- `llmSystemPromptCustom` 中的 `@路径`
-- skill reference
-- 三条链路 resolve / materialize 结果一致
+经审计（context-ref / context-ref-service / filesystem-inspect / prompt-resolver / skill-content-resolver / runtime-loop），Phase 4 三条链路已收敛：
 
-如仍有 gap，补齐共用 resolver。
+- 聊天 `@/mem/...` 和 system prompt `@/mem/...` 共用 `extractPromptContextRefs()` → `classifyContextRefToken()` → `locator: "mem://..."`
+- skill location 直接使用 `mem://...` → `executeStep()` → `invokeVirtualFrame()`
+- 所有 browser 路径最终经过 `virtual-path-resolver.ts` 的 `parseVirtualUri()` + `resolveVirtualPath()`
+- `@mem://...` 被正确拒绝为 `browser_canonical_invalid`，指引用户使用 `@/mem/...`
 
 ### Slice D: session delete / reset 语义闭环（Phase 5）
 

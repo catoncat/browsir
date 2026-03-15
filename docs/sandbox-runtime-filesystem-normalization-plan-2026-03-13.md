@@ -2,7 +2,7 @@
 
 日期：2026-03-13
 
-状态：部分落地（Phase 0/1/3 完成，Phase 2 ⏳ 结构抽离已完成）
+状态：大部分落地（Phase 0/1/2/3/4 完成，Phase 5/6 待验证）
 
 > **2026-03-15 工作树对齐更新**：
 >
@@ -321,24 +321,26 @@
 - ✅ `brain.storage.reset`：session VFS 清除，global（skills/plugins）+ registry 一致保留
 - ✅ `brain.skill.uninstall`：registry 删除 + VFS 文件清理，VFS 失败不影响一致性
 
-### Phase 4：接通 `@路径` / skills / system prompt 共用 resolver
+### Phase 4：接通 `@路径` / skills / system prompt 共用 resolver ✅ 已满足
 
 目标：文件上下文引用能力正式成为公共基础设施。
 
+**2026-03-15 审计结论**：三条链路已收敛到同一套解析管线。
+
 工作项：
 
-1. `ChatInput` 的 `@` 继续走统一 mention gateway
-2. `contextRefs` 贯穿 `panel -> runtime-router -> runtime-loop`
-3. `llmSystemPromptCustom` 支持 `@路径`
-4. skills references 复用同一 resolver
-5. `execute_skill_script` 与 skill resource resolver 共用定位层
+1. ✅ `ChatInput` 的 `@` 走统一 mention gateway（`extractPromptContextRefs(text, "composer_mention")`）
+2. ✅ `contextRefs` 贯穿 `panel -> runtime-router -> runtime-loop`（`context-ref-service.browser.ts` 统一 resolve + materialize）
+3. ✅ `llmSystemPromptCustom` 支持 `@路径`（`prompt-resolver.browser.ts` 调用 `extractPromptContextRefs(text, "system_prompt")`）
+4. ✅ skills references 复用同一 resolver（`skill-content-resolver.ts` → `executeStep()` → `invokeVirtualFrame()`）
+5. ✅ 所有 browser 路径最终经过 `virtual-path-resolver.ts` 的 `parseVirtualUri()` + `resolveVirtualPath()`
 
 验收：
 
-- 普通输入 `@/mem/...`
-- system prompt `@/mem/...`
-- skill reference
-- 三条链路 resolve / materialize 结果一致
+- ✅ 普通输入 `@/mem/...` → `classifyContextRefToken()` → `locator: "mem://..."` → `invokeVirtualFrame()`
+- ✅ system prompt `@/mem/...` → 同一 `classifyContextRefToken()` → 同一管线
+- ✅ skill `location: "mem://..."` → `executeStep()` → `invokeVirtualFrame()`
+- ✅ 三条链路 resolve / materialize 结果一致（共用 `context-ref-service` + `filesystem-inspect`）
 
 ### Phase 5：升级 session delete / storage reset 语义
 
