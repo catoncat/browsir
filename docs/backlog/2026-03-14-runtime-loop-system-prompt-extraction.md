@@ -76,4 +76,4 @@ ISSUE-018、ISSUE-020（同泳道串行）
 
 ## 相关 commits
 
-未提交
+- `eb175fe` refactor(kernel): extract system prompt resolver to prompt/ domain (ISSUE-019)
