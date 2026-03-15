@@ -1,4 +1,4 @@
-import { computed, ref, type ComputedRef, type Ref } from "vue";
+import { computed, ref, type ComputedRef, type Ref, type WritableComputedRef } from "vue";
 import type {
   RunViewPhase,
   RunViewState,
@@ -66,9 +66,20 @@ export function useToolRunTracking(deps: ToolRunTrackingDeps) {
   let initialToolSyncTimer: ReturnType<typeof setTimeout> | null = null;
   const pendingStepLogBuffer = new Map<number, string[]>();
   let llmStreamingBindings: ToolRunTrackingLlmStreamingBindings | null = null;
+  let llmStreamingBindDeadline = Date.now() + 2000;
 
   function bindLlmStreaming(bindings: ToolRunTrackingLlmStreamingBindings) {
     llmStreamingBindings = bindings;
+    llmStreamingBindDeadline = 0;
+  }
+
+  function requireLlmStreamingBindings(): ToolRunTrackingLlmStreamingBindings | null {
+    if (llmStreamingBindings) return llmStreamingBindings;
+    if (llmStreamingBindDeadline && Date.now() > llmStreamingBindDeadline) {
+      console.warn("[useToolRunTracking] llmStreamingBindings not bound — bindLlmStreaming() was never called");
+      llmStreamingBindDeadline = 0;
+    }
+    return null;
   }
 
   function patchRunViewState(patch: Partial<RunViewState>) {
@@ -514,12 +525,13 @@ export function useToolRunTracking(deps: ToolRunTrackingDeps) {
       if (runPhase.value === "idle") {
         runPhase.value = "llm";
       }
-      if (llmStreamingBindings) {
-        llmStreamingBindings.llmStreamingPendingText.value = "";
-        llmStreamingBindings.llmStreamingText.value = "";
-        llmStreamingBindings.llmStreamingSessionId.value =
+      const streaming = requireLlmStreamingBindings();
+      if (streaming) {
+        streaming.llmStreamingPendingText.value = "";
+        streaming.llmStreamingText.value = "";
+        streaming.llmStreamingSessionId.value =
           eventSessionId || String(deps.activeSessionId.value || "");
-        llmStreamingBindings.llmStreamingActive.value = true;
+        streaming.llmStreamingActive.value = true;
       }
       finalAssistantStreamingPhase.value = false;
       setLlmRunHint("宿主生成中", "正在接管网页会话");
@@ -533,19 +545,20 @@ export function useToolRunTracking(deps: ToolRunTrackingDeps) {
         runPhase.value = "llm";
       }
       const chunk = String(payload.text || "");
-      if (chunk && llmStreamingBindings) {
-        if (!llmStreamingBindings.llmStreamingActive.value) {
-          llmStreamingBindings.llmStreamingSessionId.value =
+      const streaming = requireLlmStreamingBindings();
+      if (chunk && streaming) {
+        if (!streaming.llmStreamingActive.value) {
+          streaming.llmStreamingSessionId.value =
             eventSessionId || String(deps.activeSessionId.value || "");
-          llmStreamingBindings.llmStreamingActive.value = true;
+          streaming.llmStreamingActive.value = true;
         }
-        llmStreamingBindings.appendLlmStreamingDelta(chunk);
-        llmStreamingBindings.commitPendingLlmStreamingText();
-        const committed = llmStreamingBindings.llmStreamingText.value;
+        streaming.appendLlmStreamingDelta(chunk);
+        streaming.commitPendingLlmStreamingText();
+        const committed = streaming.llmStreamingText.value;
         const markerIdx = committed.indexOf("[TM_TOOL_CALL_START:");
         if (markerIdx >= 0) {
-          llmStreamingBindings.llmStreamingText.value = committed.slice(0, markerIdx).trimEnd();
-          llmStreamingBindings.llmStreamingPendingText.value = llmStreamingBindings.llmStreamingText.value;
+          streaming.llmStreamingText.value = committed.slice(0, markerIdx).trimEnd();
+          streaming.llmStreamingPendingText.value = streaming.llmStreamingText.value;
         }
       }
       finalAssistantStreamingPhase.value = false;
@@ -975,7 +988,7 @@ export function useToolRunTracking(deps: ToolRunTrackingDeps) {
   }
 
   return {
-    runPhase,
+    runPhase: runPhase as WritableComputedRef<RunViewPhase>,
     activeToolRun,
     activeRunHint,
     toolPendingStepStates,

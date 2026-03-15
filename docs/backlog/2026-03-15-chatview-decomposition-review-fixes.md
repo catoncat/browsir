@@ -5,7 +5,7 @@ status: open
 priority: p1
 source: "review/2026-03-15-round2-chatview-decomposition-review.md"
 created: 2026-03-15
-assignee: unassigned
+assignee: copilot
 kind: slice
 parallel_group: panel-shell
 depends_on: []

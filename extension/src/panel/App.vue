@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { storeToRefs } from "pinia";
-import { onMounted, ref } from "vue";
+import { onMounted, ref, inject, type Ref } from "vue";
 import { useRuntimeStore } from "./stores/runtime";
 import { useChatStore } from "./stores/chat-store";
-import type { ViewMode } from "./types";
+import type { ViewMode, SessionListRenderSessionItem } from "./types";
 
 import ChatView from "./ChatView.vue";
 import SessionList from "./components/SessionList.vue";
@@ -16,12 +16,15 @@ import DebugView from "./components/DebugView.vue";
 const store = useRuntimeStore();
 const chatStore = useChatStore();
 const { loading } = storeToRefs(store);
-const { activeSessionId } = storeToRefs(chatStore);
 
 const activeView = ref<ViewMode>("chat");
 const listOpen = ref(false);
 
 const chatViewRef = ref<InstanceType<typeof ChatView> | null>(null);
+const sessionListRenderState = inject<Ref<{ sessions: SessionListRenderSessionItem[]; activeId: string }>>(
+  "sessionListRenderState",
+  ref({ sessions: [], activeId: "" }),
+);
 
 async function handleSelectSession(id: string) {
   try {
@@ -60,8 +63,8 @@ onMounted(() => {
     <SessionList
       v-if="listOpen"
       :is-open="listOpen"
-      :sessions="chatViewRef?.sessionListRenderState?.sessions ?? []"
-      :active-id="chatViewRef?.sessionListRenderState?.activeId ?? ''"
+      :sessions="sessionListRenderState.sessions"
+      :active-id="sessionListRenderState.activeId"
       :loading="loading"
       @close="listOpen = false"
       @new="chatViewRef?.handleCreateSession()"

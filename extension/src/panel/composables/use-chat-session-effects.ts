@@ -1,4 +1,5 @@
 import {
+  onUnmounted,
   ref,
   watch,
   type ComputedRef,
@@ -54,6 +55,8 @@ export interface ChatSessionEffectsDeps {
 
 export function useChatSessionEffects(deps: ChatSessionEffectsDeps) {
   const forkSourceResolvedTitle = ref("");
+  let disposed = false;
+  onUnmounted(() => { disposed = true; });
 
   watch(deps.queuedPromptViewItems, (items) => {
     if (!deps.queuedPromotingIds.value.size) return;
@@ -83,7 +86,10 @@ export function useChatSessionEffects(deps: ChatSessionEffectsDeps) {
       deps.setLlmRunHint("思考中", "正在分析你的请求");
       if (deps.activeSessionId.value) {
         void deps.runSafely(
-          () => deps.syncActiveToolRun(deps.activeSessionId.value),
+          async () => {
+            await deps.syncActiveToolRun(deps.activeSessionId.value);
+            if (disposed) return;
+          },
           "同步工具运行状态失败",
         );
       }
@@ -121,7 +127,10 @@ export function useChatSessionEffects(deps: ChatSessionEffectsDeps) {
     deps.resetEditingState();
     if (deps.activeSessionId.value && deps.isRunActive.value) {
       void deps.runSafely(
-        () => deps.syncActiveToolRun(deps.activeSessionId.value),
+        async () => {
+          await deps.syncActiveToolRun(deps.activeSessionId.value);
+          if (disposed) return;
+        },
         "同步工具运行状态失败",
       );
       deps.startInitialToolSync();
@@ -207,6 +216,7 @@ export function useChatSessionEffects(deps: ChatSessionEffectsDeps) {
           type: "brain.session.get",
           sessionId: id,
         })) as { ok?: boolean; data?: Record<string, unknown> };
+        if (deps.activeForkSourceSessionId.value !== id) return;
         if (response?.ok !== true) return;
         const meta = toRecord(response.data?.meta);
         const header = toRecord(meta.header);

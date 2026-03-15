@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onClickOutside } from "@vueuse/core";
 import { storeToRefs } from "pinia";
-import { computed, onUnmounted, ref, watch } from "vue";
+import { computed, onUnmounted, provide, ref, watch } from "vue";
 import { useRuntimeStore } from "./stores/runtime";
 import { useChatStore } from "./stores/chat-store";
 import { useConfigStore } from "./stores/config-store";
@@ -42,6 +42,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "update:active-view", view: ViewMode): void;
   (e: "update:list-open", open: boolean): void;
+  (e: "create-session"): void;
 }>();
 
 const store = useRuntimeStore();
@@ -456,10 +457,15 @@ const {
   emitUpdateListOpen: (open) => emit("update:list-open", open),
 });
 
+let stableMessagesRebuildPending = false;
 watch(
   [baseConversationMessages, uiRenderEpoch],
   () => {
-    void rebuildStableMessages();
+    if (stableMessagesRebuildPending) return;
+    stableMessagesRebuildPending = true;
+    void rebuildStableMessages().finally(() => {
+      stableMessagesRebuildPending = false;
+    });
   },
   { immediate: true }
 );
@@ -510,6 +516,8 @@ onUnmounted(() => {
   cleanupForkScene();
   cleanupMessageActions();
 });
+
+provide("sessionListRenderState", sessionListRenderState);
 
 defineExpose({ handleCreateSession, sessionListRenderState });
 </script>
