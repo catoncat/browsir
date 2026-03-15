@@ -1,11 +1,12 @@
 ---
 id: ISSUE-021
 title: "ChatView 二阶段深拆 — transcript / overlay / editor / export follow-up"
-status: open
+status: done
 priority: p2
 source: "ISSUE-017 follow-up after ChatView controller split"
 created: 2026-03-15
-assignee: unassigned
+closed: 2026-03-16
+assignee: copilot
 kind: refactor
 tags:
   - panel
@@ -59,8 +60,14 @@ tags:
 
 ### Phase 2：对首轮新 composable 做二次细拆（仅在确实膨胀时）
 
-1. **若 `use-tool-run-tracking.ts` 继续膨胀**
-   - 候选拆分：`useToolRunStream()` / `useToolPendingCardModel()` / run-hint state
+1. **~~若 `use-tool-run-tracking.ts` 继续膨胀~~** ✅ 已完成
+   - ~~候选拆分：`useToolRunStream()` / `useToolPendingCardModel()` / run-hint state~~
+   - 实际执行：
+     - 抽出 LLM 流事件处理到 `use-llm-streaming.ts`（`applyStreamEvent` 方法，约140行）
+     - 抽出5个纯函数到 `tool-run-stream-derive.ts`（158行）
+     - 去除 `bindLlmStreaming` 反向绑定机制，改为 forward ref + return-value 模式
+     - 从 1020 行压缩至 738 行（-27.6%）
+     - 剩余 738 行评估结论：log buffering、tool sync、card computeds 与响应式状态高度耦合，继续拆分收益不足
 
 2. **若 `use-llm-streaming.ts` 继续膨胀**
    - 候选拆分：draft buffer / visibility heuristic / final reply commit
