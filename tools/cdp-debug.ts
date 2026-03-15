@@ -109,6 +109,7 @@ class CdpClient {
     method: string,
     params: Record<string, unknown> = {},
     timeoutMs = 15_000,
+    sessionId?: string,
   ): Promise<any> {
     if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN)
       throw new Error(`${this.name}: websocket 未连接`);
@@ -119,8 +120,14 @@ class CdpClient {
         reject(new Error(`${this.name}: CDP 调用超时 ${method}`));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
-      this.ws!.send(JSON.stringify({ id, method, params }));
+      const msg: Record<string, unknown> = { id, method, params };
+      if (sessionId) msg.sessionId = sessionId;
+      this.ws!.send(JSON.stringify(msg));
     });
+  }
+
+  isConnected(): boolean {
+    return !this.closed && this.ws != null && this.ws.readyState === WebSocket.OPEN;
   }
 
   async evaluate(expression: string, opts?: { awaitPromise?: boolean; timeoutMs?: number }): Promise<any> {
@@ -172,6 +179,9 @@ function discoverChrome(): { port: number; wsPath: string } {
   const content = readFileSync(portFile, "utf-8").trim();
   const lines = content.split("\n");
   const port = parseInt(lines[0], 10);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`DevToolsActivePort 中端口号无效: ${lines[0]}`);
+  }
   const wsPath = lines[1] || "";
   return { port, wsPath };
 }
@@ -239,18 +249,7 @@ class BrowserSession {
   }
 
   async send(method: string, params: Record<string, unknown> = {}): Promise<any> {
-    // Send with sessionId for flattened session
-    const id = (this.client as any).nextId++;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        (this.client as any).pending.delete(id);
-        reject(new Error(`session: CDP 调用超时 ${method}`));
-      }, 20_000);
-      (this.client as any).pending.set(id, { resolve, reject, timer });
-      (this.client as any).ws.send(
-        JSON.stringify({ id, method, params, sessionId: this.sessionId }),
-      );
-    });
+    return this.client.send(method, params, 20_000, this.sessionId ?? undefined);
   }
 
   async evaluate(expr: string): Promise<any> {
@@ -292,6 +291,9 @@ class PersistentCdpPool {
   private browserClient: CdpClient | null = null;
   private browserWsUrl: string = "";
   private sessions = new Map<string, BrowserSession>();
+  private lastUsedAt = new Map<string, number>();
+  private pendingConnects = new Map<string, Promise<BrowserSession>>();
+  private static SESSION_TTL_MS = 5 * 60_000; // 5 minutes
 
   async ensureBrowser(): Promise<CdpClient> {
     if (this.browserClient) return this.browserClient;
@@ -309,17 +311,48 @@ class PersistentCdpPool {
   }
 
   async getSession(targetFilter: string): Promise<BrowserSession> {
+    this.evictStaleSessions();
+
     const targets = await this.getTargets();
     const target = findTarget(targets, targetFilter);
     if (!target) throw new Error(`未找到目标: ${targetFilter}`);
 
     const cached = this.sessions.get(target.targetId);
-    if (cached) return cached;
+    if (cached) {
+      this.lastUsedAt.set(target.targetId, Date.now());
+      return cached;
+    }
 
-    const session = new BrowserSession(this.browserWsUrl, target.targetId);
-    await session.connect();
-    this.sessions.set(target.targetId, session);
-    return session;
+    // Dedup concurrent connects for the same target
+    const pending = this.pendingConnects.get(target.targetId);
+    if (pending) return pending;
+
+    const connectPromise = (async () => {
+      const session = new BrowserSession(this.browserWsUrl, target.targetId);
+      await session.connect();
+      this.sessions.set(target.targetId, session);
+      this.lastUsedAt.set(target.targetId, Date.now());
+      return session;
+    })();
+
+    this.pendingConnects.set(target.targetId, connectPromise);
+    try {
+      return await connectPromise;
+    } finally {
+      this.pendingConnects.delete(target.targetId);
+    }
+  }
+
+  private evictStaleSessions(): void {
+    const now = Date.now();
+    for (const [id, ts] of this.lastUsedAt) {
+      if (now - ts > PersistentCdpPool.SESSION_TTL_MS) {
+        const session = this.sessions.get(id);
+        if (session) session.close().catch(() => {});
+        this.sessions.delete(id);
+        this.lastUsedAt.delete(id);
+      }
+    }
   }
 
   async cleanup(): Promise<void> {
@@ -327,6 +360,8 @@ class PersistentCdpPool {
       await session.close().catch(() => {});
     }
     this.sessions.clear();
+    this.lastUsedAt.clear();
+    this.pendingConnects.clear();
     await this.browserClient?.close();
     this.browserClient = null;
   }
@@ -334,8 +369,22 @@ class PersistentCdpPool {
 
 async function cmdServe() {
   const pool = new PersistentCdpPool();
+  const serveToken = process.env.CDP_SERVE_TOKEN || "";
   console.log("⏳ 正在连接 Chrome... 请在 Chrome 弹窗中点击「允许」（只需这一次）");
+  if (!serveToken) {
+    console.warn("⚠️  未设置 CDP_SERVE_TOKEN — /eval、/sw-eval、/chat 端点无鉴权保护");
+  }
   await pool.ensureBrowser(); // 建立连接 → 只触发一次 Chrome 授权弹窗
+
+  function requireAuth(req: Request): Response | null {
+    if (!serveToken) return null;
+    const auth = req.headers.get("authorization") || "";
+    const tokenParam = new URL(req.url).searchParams.get("token") || "";
+    if (auth === `Bearer ${serveToken}` || tokenParam === serveToken) return null;
+    return Response.json({ ok: false, error: "未授权" }, { status: 401 });
+  }
+
+  const PROTECTED_PATHS = new Set(["/eval", "/sw-eval", "/chat"]);
 
   const server = Bun.serve({
     port: SERVE_PORT,
@@ -345,6 +394,12 @@ async function cmdServe() {
       const pathname = url.pathname;
 
       try {
+        // 鉴权：保护敏感端点
+        if (PROTECTED_PATHS.has(pathname)) {
+          const denied = requireAuth(req);
+          if (denied) return denied;
+        }
+
         // GET /targets
         if (pathname === "/targets") {
           const targets = await pool.getTargets();

@@ -150,7 +150,11 @@ export function listNamespaceDescriptors(sessionId: string): VirtualNamespaceDes
 
 export function resolveVirtualPath(input: unknown, sessionId: string): ResolvedVirtualPath {
   const parsed = parseVirtualUri(input);
-  const rawSegments = String(parsed.path || "")
+  const rawPath = String(parsed.path || "");
+  if (/(?:^|\/)\.\.[\/]?/.test(rawPath)) {
+    normalizeRelativePath(rawPath);
+  }
+  const rawSegments = rawPath
     .split("/")
     .map((item) => String(item || "").trim())
     .filter(Boolean);

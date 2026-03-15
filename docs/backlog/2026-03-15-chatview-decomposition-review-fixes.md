@@ -1,7 +1,7 @@
 ---
 id: ISSUE-032
 title: "ChatView 拆分 review 修复 — 异步竞态 / 时序耦合 / unmount 守卫"
-status: open
+status: done
 priority: p1
 source: "review/2026-03-15-round2-chatview-decomposition-review.md"
 created: 2026-03-15
@@ -27,19 +27,19 @@ Round 2 Code Review — 2 CRITICAL + 3 HIGH 发现。
 
 ### CRITICAL
 
-- [ ] **C1**: `use-chat-session-effects.ts` fork title watcher 添加 staleness guard
-- [ ] **C2**: 消除 `bindLlmStreaming` 时序耦合（直接注入或添加 runtime assertion）
+- [x] **C1**: `use-chat-session-effects.ts` fork title watcher 添加 staleness guard
+- [x] **C2**: 消除 `bindLlmStreaming` 时序耦合（直接注入或添加 runtime assertion）
 
 ### HIGH
 
-- [ ] **H1**: `useToolRunTracking` 返回类型显式声明 `runPhase` 为 `WritableComputedRef`
-- [ ] **H2**: 异步 watcher 添加 unmount disposal 检查
-- [ ] **H3**: 替换 `defineExpose` 耦合为窄接口或 store
+- [x] **H1**: `useToolRunTracking` 返回类型显式声明 `runPhase` 为 `WritableComputedRef`
+- [x] **H2**: 异步 watcher 添加 unmount disposal 检查
+- [x] **H3**: 替换 `defineExpose` 耦合为窄接口或 store
 
 ### MEDIUM（可后续处理）
 
-- [ ] **M1**: 删除 App.vue 中未使用的 `activeSessionId`
-- [ ] **M4**: `rebuildStableMessages` watch 添加 debounce 或串行队列
+- [x] **M1**: 删除 App.vue 中未使用的 `activeSessionId`
+- [x] **M4**: `rebuildStableMessages` watch 添加 debounce 或串行队列
 
 ## 验收
 
