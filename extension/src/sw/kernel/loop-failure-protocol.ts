@@ -164,12 +164,6 @@ export function normalizeFailureReason(raw: unknown): FailureReason {
   return normalizeFailureReasonValue(raw);
 }
 
-function inferFailurePhase(reason: FailureReason): FailurePhase {
-  if (reason === "failed_verify") return "verify";
-  if (reason === "progress_uncertain") return "progress_guard";
-  return "execute";
-}
-
 function isBrowserToolName(toolName: string): boolean {
   return CANONICAL_BROWSER_TOOL_NAMES.includes(
     String(toolName || "")
@@ -241,55 +235,6 @@ function inferModeEscalationDirective(input: {
   };
 }
 
-function inferFailureCategory(input: {
-  errorCode: string;
-  errorReason: FailureReason;
-  modeEscalation: JsonRecord | null;
-}): FailureCategory {
-  const errorCode = normalizeErrorCode(input.errorCode);
-  if (input.errorReason === "progress_uncertain") return "no_progress";
-  if (input.errorReason === "failed_verify" || errorCode === "E_VERIFY_FAILED")
-    return "verify_failed";
-  if (errorCode === "E_BUSY") return "busy";
-  if (["E_TIMEOUT", "E_CLIENT_TIMEOUT", "E_CDP_TIMEOUT"].includes(errorCode))
-    return "timeout";
-  if (
-    [
-      "E_NO_TAB",
-      "E_REF_REQUIRED",
-      "E_CDP_RESOLVE_NODE",
-      "E_CDP_AXTREE_EMPTY",
-      "E_CDP_AXTREE_NO_NODES",
-    ].includes(errorCode)
-  ) {
-    return "missing_target";
-  }
-  if (input.modeEscalation) return "focus_required";
-  return "unknown";
-}
-
-function inferResumeStrategy(input: {
-  errorReason: FailureReason;
-  retryAction: ToolRetryAction;
-  modeEscalation: JsonRecord | null;
-  retryable: boolean;
-}): ResumeStrategy {
-  if (input.errorReason === "progress_uncertain")
-    return "retry_with_fresh_snapshot";
-  if (input.modeEscalation) return "retry_same_args";
-  if (input.retryAction === "auto_replay") return "retry_same_args";
-  if (input.retryAction === "llm_replan" && input.retryable)
-    return "retry_with_fresh_snapshot";
-  return "replan";
-}
-
-function mapNextBestAction(strategy: ResumeStrategy): string {
-  if (strategy === "retry_same_args") return "retry_same_args";
-  if (strategy === "retry_with_fresh_snapshot")
-    return "refresh_snapshot_then_retry";
-  return "replan_with_new_toolcall";
-}
-
 // ── Failure protocol attachment ─────────────────────────────────────
 
 export function attachFailureProtocol(
@@ -340,34 +285,6 @@ export function attachFailureProtocol(
   ) {
     retryHint = `${retryHint} Switch to focus mode and resume the current step without restarting the session.`;
   }
-  const failureCategory =
-    options.category ||
-    inferFailureCategory({
-      errorCode,
-      errorReason,
-      modeEscalation,
-    });
-  const retryAction =
-    errorReason === "progress_uncertain" ? "llm_replan" : retryDecision.action;
-  const resumeStrategy =
-    options.resumeStrategy ||
-    inferResumeStrategy({
-      errorReason,
-      retryAction,
-      modeEscalation,
-      retryable,
-    });
-  const failureClass: JsonRecord = {
-    phase: options.phase || inferFailurePhase(errorReason),
-    reason: errorReason,
-    category: failureCategory,
-    retryAction,
-  };
-  const resume: JsonRecord = {
-    action: "resume_current_step",
-    strategy: resumeStrategy,
-  };
-  if (modeEscalation) resume.mode = "focus";
 
   const out: JsonRecord = {
     ...payload,
@@ -375,14 +292,8 @@ export function attachFailureProtocol(
     errorReason,
     retryable,
     retryHint,
-    next_best_action: mapNextBestAction(resumeStrategy),
-    details: payload.details || payload.errorDetails || null,
-    failureClass,
-    resume,
   };
   if (modeEscalation) out.modeEscalation = modeEscalation;
-  if (options.stepRef && Object.keys(options.stepRef).length > 0)
-    out.stepRef = options.stepRef;
   return out;
 }
 

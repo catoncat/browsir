@@ -1,11 +1,12 @@
 ---
 id: ISSUE-022
 title: "浏览器自动化效率对齐 AIPex — 快照压缩 / 验证简化 / 编排策略"
-status: in-progress
+status: done
 priority: p1
 source: competitive-analysis
 created: 2026-03-15
 assignee: agent
+resolved: 2026-03-15
 kind: epic
 depends_on: []
 write_scope:

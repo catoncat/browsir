@@ -273,6 +273,27 @@ function estimateJsonBytes(value: unknown): number {
   }
 }
 
+const SCREENSHOT_TOOL_NAMES = new Set([
+  "capture_screenshot",
+  "capture_tab_screenshot",
+  "capture_screenshot_with_highlight",
+]);
+
+/**
+ * Strip base64 imageData from screenshot tool results to prevent context bloat.
+ * Replaces the heavy payload with a lightweight placeholder.
+ */
+function shapeScreenshotForLlm(data: unknown, toolName: string): unknown {
+  if (!SCREENSHOT_TOOL_NAMES.has(toolName)) return data;
+  const rec = toRecord(data);
+  if (typeof rec.imageData !== "string") return data;
+  const { imageData: _stripped, ...rest } = rec;
+  return {
+    ...rest,
+    imageData: "[screenshot captured]",
+  };
+}
+
 function extractContentText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return String(content || "");
@@ -2475,7 +2496,8 @@ export function createRuntimeLoopController(
             browserProofSuccessCount += 1;
           }
           const rawToolData = responsePayload.data ?? result;
-          const llmToolContent = safeStringify(rawToolData, 12_000);
+          const shapedToolData = shapeScreenshotForLlm(rawToolData, canonicalToolName);
+          const llmToolContent = safeStringify(shapedToolData, 12_000);
           const uiToolPayload = buildToolSuccessPayload(tc, rawToolData, {
             modeUsed: result.modeUsed,
             providerId: result.providerId,
