@@ -83,10 +83,10 @@ acceptance_ref: docs/<某设计文档>.md
   - 说明：Provider 连通性由 human 接手，其他 agent 默认不要并行改 `web-chat-executor.browser.ts` / `cursor-help-content.ts` / `cursor-help-page-hook.ts`，除非先明确重新分工。
 
 2. `ISSUE-024` [Cursor Help pool slot 自动扩缩容](./2026-03-15-cursor-help-pool-autoscaling.md)
-  - `status: in-progress`
+  - `status: done`
   - `priority: p2`
   - `parallel_group: cursor-help`
-  - 说明：依赖 `ISSUE-025`/`ISSUE-026` 已满足，autoscaling 6 项开工清单均未完成。
+  - 说明：autoscaling 已实现并通过 5 组回归测试覆盖扩缩容决策与冷却时间。
 
 ### 可立即开工
 

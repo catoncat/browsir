@@ -1,7 +1,7 @@
 ---
 id: ISSUE-024
 title: Cursor Help pool slot 自动扩缩容
-status: in-progress
+status: done
 priority: p2
 source: ISSUE-023 decomposition
 created: 2026-03-15
