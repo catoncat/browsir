@@ -6,6 +6,34 @@
 
 ## 关键发现
 
+### CDP 直连 WebSocket — 最优解（2026-03-15 验证）
+
+**核心发现：** 绕过 `chrome-devtools-mcp` 的 autoConnect 握手，直接通过 Chrome 的 `DevToolsActivePort` 文件获取 WebSocket URL，用原生 CDP 协议连接，可以完整访问所有扩展目标（SidePanel、Service Worker、Sandbox iframe）。
+
+```bash
+# 1. 读取端口和 WebSocket 路径
+cat "$HOME/Library/Application Support/Google/Chrome Beta/DevToolsActivePort"
+# 输出：
+# 9222
+# /devtools/browser/<guid>
+
+# 2. 连接 WebSocket（Node.js 原生 WebSocket 即可）
+ws://127.0.0.1:9222/devtools/browser/<guid>
+```
+
+**已验证能力：**
+| 操作 | 结果 |
+|------|------|
+| 列出所有 56 个目标（包括扩展页面、SW、iframe） | ✅ |
+| 截图 SidePanel（`Page.captureScreenshot`） | ✅ |
+| 读取 SidePanel DOM（`Runtime.evaluate`） | ✅ |
+| 在输入框中输入消息并点击发送 | ✅ |
+| 收到扩展 AI 的回复并读取 | ✅ |
+| 发现 Service Worker target | ✅ |
+| 发现 eval-sandbox.html iframe | ✅ |
+
+**关键技术：** 使用 `Target.attachToTarget` + `flatten: true` 定向连接 SidePanel target，然后通过带 `sessionId` 的 CDP 命令操作。
+
 ### Puppeteer 默认禁用扩展
 
 `chrome-devtools-mcp` 基于 Puppeteer 启动 Chrome，而 Puppeteer 默认传递 `--disable-extensions` 参数。这是之前"扩展无权限"的根因。
@@ -14,9 +42,19 @@
 - `--ignore-default-chrome-arg='--disable-extensions'`：让 MCP 启动的 Chrome 保留扩展
 - `--autoConnect`（推荐）：连接到用户已启动的 Chrome，天然保留所有扩展
 
-### Chrome 144+ autoConnect
+### Chrome 144+ autoConnect（官方博文确认）
 
-Chrome 146（当前已安装）支持 `chrome://inspect/#remote-debugging` 启用远程调试，MCP server 通过 `--autoConnect` 自动发现并连接。
+**来源：** [Chrome DevTools 官方博客](https://developer.chrome.com/blog/chrome-devtools-mcp-debug-your-browser-session) (Sebastian Benz & Alex Rudenko, 2025-12-11)
+
+Chrome Beta 147 / Stable 146（均 ≥ 144）支持 `chrome://inspect/#remote-debugging` 启用远程调试。MCP server 通过 `--autoConnect` 自动发现并连接。
+
+**核心工作流程：**
+1. 用户在 `chrome://inspect/#remote-debugging` 一次性启用远程调试
+2. MCP server 发起连接请求时，Chrome 弹出对话框要求用户授权
+3. 授权后调试中横幅显示「Chrome 正受到自动测试软件的控制」
+4. AI agent 可以访问 DevTools 面板数据（元素面板、网络面板等）
+
+**关键价值：** 支持在手动调试和 AI 辅助调试之间无缝切换——在 DevTools 中选中元素/网络请求后让 AI agent 接手调查。
 
 ## 三层架构
 
@@ -94,6 +132,34 @@ jq '.payload.data.runtime.summary' snapshot.json
 - Plugin/Skill 加载异常
 - Compaction 触发条件分析
 
+**已验证的数据模型（2026-03-15 实测）：**
+
+Session Diagnostics (`/api/diagnostics/<id>`)：
+```
+schema: bbl.diagnostic.v4
+payload:
+  config      — bridgeUrl, llmProvider, llmModel, hasLlmApiKey
+  summary     — running/stopped/paused, messageCount, stepCount, lastError, sandbox 状态
+  timeline    — array(24+) 步骤执行追踪（"步骤2 完成 browser_write_file"）
+  recentEvents— array(16+) 内核事件
+  eventTypeCounts — step_execute/llm.request/hosted_chat.* 等计数
+  sandbox     — summary + trace
+  agent       — runtimeState, loopRuns, decisionTrace, conversationTail
+  llm         — trace（请求/响应跟踪）
+  tools       — trace（工具调用跟踪）
+  debug       — stepStreamCount, stepStreamMeta, sandboxRuntimeMeta
+```
+
+Debug Snapshots (`/api/debug-snapshots/<id>`)：
+```
+schema: bbl.debug.export.v1
+payload.data:
+  runtime     — kernel state, session 列表, 运行中/暂停计数
+  diagnostics — summary, timeline, recentEvents（可为空）
+payload.target  — sessionId, filters
+payload.client  — 客户端信息
+```
+
 ### L3：全链路自动化
 
 **工具：** `chrome-devtools-mcp-for-extension`（社区 fork，v0.26.3）
@@ -126,12 +192,16 @@ jq '.payload.data.runtime.summary' snapshot.json
 
 ## 实施路线
 
-### Phase 1：快速验证（当前可做）
+### Phase 1：快速验证（已完成 ✅）
 
-1. ✅ 配置 `chrome-devtools-mcp` MCP server（已完成）
-2. ✅ 配置 `chrome-devtools-mcp-for-extension`（已完成）
-3. 在 Chrome 中启用远程调试：`chrome://inspect/#remote-debugging`
-4. 通过 Copilot 使用 `chrome-devtools` MCP 工具操作 SidePanel
+1. ✅ 配置 `chrome-devtools-mcp` MCP server
+2. ✅ 配置 `chrome-devtools-mcp-for-extension`
+3. ✅ MCP 协议握手验证（29 个工具可用）
+4. ✅ Chrome Beta 147 autoConnect 验证
+5. ✅ Bridge API diagnostics 连通验证（`token=my-bridge-token`）
+6. ✅ Session Diagnostics 数据模型确认（`bbl.diagnostic.v4`）
+7. ✅ Debug Snapshots 数据模型确认（`bbl.debug.export.v1`）
+8. ⚠️ 待做：在 Chrome 中启用远程调试 `chrome://inspect/#remote-debugging`
 
 ### Phase 2：L2 桥接增强
 

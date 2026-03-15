@@ -84,6 +84,14 @@ BRIDGE_TOKEN="<token>" bun run brain:e2e:live
 CHROME_BIN="/path/to/chrome" bun run brain:e2e
 BRAIN_E2E_HEADLESS=true bun run brain:e2e
 
+# CDP 直连调试（连接用户正在使用的 Chrome）
+bun tools/cdp-debug.ts targets              # 列出所有 Chrome 目标
+bun tools/cdp-debug.ts screenshot           # 截图 SidePanel
+bun tools/cdp-debug.ts dom                  # SidePanel DOM 概览
+bun tools/cdp-debug.ts eval 'document.title' # 在 SidePanel 执行 JS
+bun tools/cdp-debug.ts chat '你好'           # 在 SidePanel 发消息
+bun tools/cdp-debug.ts sw-eval 'self.registration.scope' # SW 中执行 JS
+
 # BDD 契约校验 + 门禁
 bun run bdd:validate && bun run bdd:gate
 bun run bdd:gate:live
@@ -97,6 +105,55 @@ BRAIN_E2E_LIVE_LLM_KEY="<key>"
 BRAIN_E2E_LIVE_LLM_MODEL="gpt-5.3-codex"
 # 可选：BRAIN_E2E_LIVE_ATTEMPTS=3 BRAIN_E2E_LIVE_MIN_PASS=2
 ```
+
+## AI Agent 调试扩展指南
+
+### 前置条件
+Chrome Beta（≥ 144）需先在 `chrome://inspect/#remote-debugging` 启用远程调试。启用后 Chrome 会在 `~/Library/Application Support/Google/Chrome Beta/DevToolsActivePort` 写入端口和 WebSocket 路径。
+
+### CDP 直连工具 (`tools/cdp-debug.ts`)
+
+本工具通过 CDP WebSocket 直连用户正在使用的 Chrome，可完整访问所有扩展目标：
+
+| 命令 | 用途 | 示例 |
+|------|------|------|
+| `targets` | 列出所有 Chrome target | `bun tools/cdp-debug.ts targets` |
+| `screenshot` | 截图 SidePanel（或指定 target） | `bun tools/cdp-debug.ts screenshot --target sw` |
+| `dom` | 获取 SidePanel DOM 概览 | `bun tools/cdp-debug.ts dom` |
+| `eval` | 在 SidePanel 执行 JS | `bun tools/cdp-debug.ts eval 'document.title'` |
+| `chat` | 发消息并等待回复 | `bun tools/cdp-debug.ts chat '你好'` |
+| `sw-eval` | 在 Service Worker 中执行 JS | `bun tools/cdp-debug.ts sw-eval 'self.registration.scope'` |
+
+**目标过滤器**（用于 `--target`）：`sidepanel`（默认）、`sw`、`sandbox`、或 URL/标题子串。
+
+### Bridge HTTP API 调试
+
+Bridge（端口 8787）暴露内核诊断数据：
+
+```bash
+# 列出诊断导出
+curl 'http://127.0.0.1:8787/api/diagnostics?token=<BRIDGE_TOKEN>'
+# 列出调试快照
+curl 'http://127.0.0.1:8787/api/debug-snapshots?token=<BRIDGE_TOKEN>'
+# 下载具体诊断
+curl 'http://127.0.0.1:8787/api/diagnostics/<id>?token=<BRIDGE_TOKEN>'
+```
+
+Session Diagnostics（`bbl.diagnostic.v4`）包含：`summary`（运行状态/步数/最后错误）、`timeline`（步骤执行轨迹）、`eventTypeCounts`、`sandbox`/`agent`/`llm`/`tools` trace。
+
+### AI Agent 调试工作流
+
+1. **UI 问题** → `cdp-debug screenshot` 截图 → 分析 → 修改代码 → 再截图验证
+2. **内核问题** → Bridge API 下载诊断 → 分析 `summary.lastError` 和 `timeline` → 定位根因
+3. **全链路** → `cdp-debug chat` 发消息 → 同时下载当次的 Bridge 诊断 → 前后对比
+
+### 技术原理
+
+CDP 直连绕过 `chrome-devtools-mcp` 的 autoConnect 握手，直接从 `DevToolsActivePort` 读取 WebSocket URL。通过 `Target.attachToTarget(flatten: true)` 获取 sessionId，再用 sessionId 范围内的 `Page.captureScreenshot`、`Runtime.evaluate` 等 CDP 命令操作指定 target。
+
+扩展 ID：`jhfgfgnkpceegbkojajfadeijojekgod`  
+SidePanel 输入框：`<textarea placeholder="/技能 @标签">`  
+发送按钮：`<button aria-label="发送消息">`
 
 ## 架构
 

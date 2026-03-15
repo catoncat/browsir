@@ -86,11 +86,11 @@ acceptance_ref: docs/<某设计文档>.md
   - `parallel_group: cursor-help`
   - 说明：当前 Cursor Help 方向仍在处理中；其中 Provider 连通性由 human 继续接手，其他 agent 默认不要再并行改 `web-chat-executor.browser.ts` / `cursor-help-content.ts` / `cursor-help-page-hook.ts`，除非先明确重新分工。
 
-3. `ISSUE-026` [Cursor Help pool lane 并发冲突细化](./2026-03-15-cursor-help-pool-lane-conflict-refinement.md)
-  - `status: in-progress`
+3. `ISSUE-024` [Cursor Help pool slot 自动扩缩容](./2026-03-15-cursor-help-pool-autoscaling.md)
+  - `status: open`
   - `priority: p2`
   - `parallel_group: cursor-help`
-  - 说明：`ISSUE-025` 已完成后，当前由 agent 接棒处理 lane conflict / busy vs reject 语义细化。
+  - 说明：`ISSUE-026` 收尾后，当前队列中的最后一张 cursor-help card 是 autoscaling。
 
 ### 可立即开工
 
@@ -116,24 +116,23 @@ acceptance_ref: docs/<某设计文档>.md
   - 说明：已完成 heartbeat / health reason / soft recovery / retry budget 收口。
 
 4. `ISSUE-026` [Cursor Help pool lane 并发冲突细化](./2026-03-15-cursor-help-pool-lane-conflict-refinement.md)
-  - `status: open`
+  - `status: done`
   - `priority: p2`
-  - 阻塞：依赖 `ISSUE-025`（已满足，等待认领）
-  - 说明：心跳/恢复闭环已稳定，当前可作为下一张 cursor-help slice 开工。
+  - 说明：已完成 lane conflict 集中判定与关键组合测试覆盖。
 
 5. `ISSUE-024` [Cursor Help pool slot 自动扩缩容](./2026-03-15-cursor-help-pool-autoscaling.md)
   - `status: open`
   - `priority: p2`
-  - 阻塞：依赖 `ISSUE-025` 与 `ISSUE-026`
-  - 说明：等待健康检查与 lane 规则收稳后再做自动扩缩容。
+  - 阻塞：依赖 `ISSUE-025` 与 `ISSUE-026`（均已满足，等待认领）
+  - 说明：当前已成为 Cursor Help 队列中的下一张可开工 card。
 
 ## 推荐领取顺序
 
 1. 先看是否有人正在持有 `panel-chat` 或 `kernel-loop` 单写者泳道。
 2. `panel-chat` 侧当前仍是 `ISSUE-017` 单写者，默认不要重复认领。
 3. `kernel-loop` 侧当前 `ISSUE-019` 已完成，暂无后续 open slice。
-4. `cursor-help` 侧当前由 `ISSUE-026` 持续推进，避免并行写入其 `write_scope`。
-5. `ISSUE-026` 完成后，后续建议顺序为：`ISSUE-024`。
+4. `cursor-help` 侧当前下一张建议 card 为 `ISSUE-024`；认领后应避免并行写入其 `write_scope`。
+5. `ISSUE-024` 完成后，当前这一组 Cursor Help pool follow-up 即可视为基本收束。
 6. `ISSUE-021` 必须排在 `ISSUE-017` 后，并且仅在一阶段拆分后仍有明显厚度时才启动。
 
 ## 维护规则
