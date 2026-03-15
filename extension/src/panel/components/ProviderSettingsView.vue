@@ -778,7 +778,7 @@ async function sendBrainMessage(message: Record<string, unknown>): Promise<Recor
 async function refreshCursorHelpPool(): Promise<void> {
   cursorHelpPoolLoading.value = true;
   try {
-    const result = await sendBrainMessage({ type: "brain.debug.cursor_help_pool" });
+    const result = await sendBrainMessage({ type: "brain.debug.cursor_help_pool", action: "heartbeat" });
     if (result?.ok && result.data) {
       cursorHelpPoolState.value = result.data as Record<string, unknown>;
     }
@@ -825,6 +825,7 @@ function slotStatusColor(status: unknown): string {
   const s = String(status || "").trim();
   if (s === "idle") return "text-emerald-500";
   if (s === "busy") return "text-amber-500";
+  if (s === "recovering") return "text-violet-400";
   if (s === "warming") return "text-sky-400";
   if (s === "error" || s === "stale") return "text-red-500";
   return "text-ui-text-muted";
@@ -834,11 +835,45 @@ function slotStatusLabel(status: unknown): string {
   const s = String(status || "").trim();
   if (s === "idle") return "就绪";
   if (s === "busy") return "执行中";
+  if (s === "recovering") return "恢复中";
   if (s === "warming") return "预热中";
   if (s === "error") return "异常";
   if (s === "stale") return "过期";
   if (s === "cold") return "冷启动";
   return s || "未知";
+}
+
+function poolWindowStatusLabel(status: unknown): string {
+  const s = String(status || "").trim();
+  if (s === "external-tabs") return "外部标签页";
+  if (s === "minimized") return "后台最小化";
+  if (s === "normal") return "前台可见";
+  if (s === "missing") return "窗口缺失";
+  if (s === "none") return "未建立";
+  return s || "未知";
+}
+
+function poolWindowStatusColor(status: unknown): string {
+  const s = String(status || "").trim();
+  if (s === "external-tabs" || s === "minimized") return "text-emerald-500";
+  if (s === "normal") return "text-amber-500";
+  if (s === "missing") return "text-red-500";
+  return "text-ui-text-muted";
+}
+
+function poolWindowEventLabel(event: unknown): string {
+  const s = String(event || "").trim();
+  if (s === "adopt_existing_tabs") return "接管现有标签页";
+  if (s === "reuse_external_tabs") return "复用现有标签页";
+  if (s === "create_pool_window") return "创建专用窗口";
+  if (s === "pool_window_removed") return "专用窗口已关闭";
+  if (s === "skip_window_backgrounding") return "跳过后台最小化";
+  if (s === "await_manual_rebuild") return "等待手动重建";
+  return s || "无";
+}
+
+function poolBooleanLabel(value: unknown): string {
+  return value ? "是" : "否";
 }
 
 onMounted(() => {
@@ -1046,6 +1081,41 @@ onMounted(() => {
                 重建
               </button>
             </div>
+          </div>
+          <div class="px-1 space-y-1.5 text-[11px] text-ui-text-muted">
+            <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span>
+                窗口状态
+                <span
+                  :class="poolWindowStatusColor(poolSummary().windowStatus)"
+                  class="ml-1 font-medium"
+                >
+                  {{ poolWindowStatusLabel(poolSummary().windowStatus) }}
+                </span>
+              </span>
+              <span>模式 {{ String(poolSummary().windowMode || 'none') }}</span>
+              <span>允许后台化 {{ poolBooleanLabel(poolSummary().allowBackgrounding) }}</span>
+              <span>需重建 {{ poolBooleanLabel(poolSummary().shouldRebuildWindow) }}</span>
+              <span>需关注 {{ poolBooleanLabel(poolSummary().requiresAttention) }}</span>
+            </div>
+            <p class="truncate" :title="String(poolSummary().lastWindowEventReason || '')">
+              最近事件：{{ poolWindowEventLabel(poolSummary().lastWindowEvent) }}
+              <template v-if="poolSummary().lastWindowEventReason">
+                · {{ String(poolSummary().lastWindowEventReason) }}
+              </template>
+            </p>
+            <p class="truncate">
+              心跳：{{ String(poolSummary().lastHeartbeatReason || '尚未运行') }}
+              <template v-if="poolSummary().lastHeartbeatDelayMs">
+                · 下次约 {{ Math.round(Number(poolSummary().lastHeartbeatDelayMs || 0) / 1000) }}s
+              </template>
+            </p>
+            <p
+              v-if="String(poolSummary().lastWindowEvent || '') === 'await_manual_rebuild'"
+              class="text-amber-500"
+            >
+              检测到专用窗口已被关闭；当前不会被动自动重建，如需恢复请手动点击“重建”。
+            </p>
           </div>
           <div
             v-for="slot in poolSlots()"

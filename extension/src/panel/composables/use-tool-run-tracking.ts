@@ -514,6 +514,14 @@ export function useToolRunTracking(deps: ToolRunTrackingDeps) {
       if (runPhase.value === "idle") {
         runPhase.value = "llm";
       }
+      if (llmStreamingBindings) {
+        llmStreamingBindings.llmStreamingPendingText.value = "";
+        llmStreamingBindings.llmStreamingText.value = "";
+        llmStreamingBindings.llmStreamingSessionId.value =
+          eventSessionId || String(deps.activeSessionId.value || "");
+        llmStreamingBindings.llmStreamingActive.value = true;
+      }
+      finalAssistantStreamingPhase.value = false;
       setLlmRunHint("宿主生成中", "正在接管网页会话");
       return;
     }
@@ -524,7 +532,22 @@ export function useToolRunTracking(deps: ToolRunTrackingDeps) {
       ) {
         runPhase.value = "llm";
       }
-      clearBoundLlmStreamingState();
+      const chunk = String(payload.text || "");
+      if (chunk && llmStreamingBindings) {
+        if (!llmStreamingBindings.llmStreamingActive.value) {
+          llmStreamingBindings.llmStreamingSessionId.value =
+            eventSessionId || String(deps.activeSessionId.value || "");
+          llmStreamingBindings.llmStreamingActive.value = true;
+        }
+        llmStreamingBindings.appendLlmStreamingDelta(chunk);
+        llmStreamingBindings.commitPendingLlmStreamingText();
+        const committed = llmStreamingBindings.llmStreamingText.value;
+        const markerIdx = committed.indexOf("[TM_TOOL_CALL_START:");
+        if (markerIdx >= 0) {
+          llmStreamingBindings.llmStreamingText.value = committed.slice(0, markerIdx).trimEnd();
+          llmStreamingBindings.llmStreamingPendingText.value = llmStreamingBindings.llmStreamingText.value;
+        }
+      }
       finalAssistantStreamingPhase.value = false;
       setLlmRunHint("宿主生成中", "正在等待网页会话完成当前回合");
       return;
@@ -539,15 +562,20 @@ export function useToolRunTracking(deps: ToolRunTrackingDeps) {
       return;
     }
     if (type === "hosted_chat.turn_resolved") {
-      clearBoundLlmStreamingState();
       const finishReason = String(payload.finishReason || "").trim();
       if (finishReason === "tool_calls") {
+        clearBoundLlmStreamingState();
         finalAssistantStreamingPhase.value = false;
         if (runPhase.value !== "tool_running") {
           runPhase.value = "llm";
         }
         setLlmRunHint("准备执行工具", "宿主回合已完成，正在交给工具执行");
         return;
+      }
+      llmStreamingBindings?.flushLlmStreamingDeltaBuffer();
+      llmStreamingBindings?.commitPendingLlmStreamingText();
+      if (llmStreamingBindings) {
+        llmStreamingBindings.llmStreamingActive.value = false;
       }
       finalAssistantStreamingPhase.value = true;
       setLlmRunHint("整理回复", "正在整理网页会话结果");
@@ -607,13 +635,10 @@ export function useToolRunTracking(deps: ToolRunTrackingDeps) {
           runPhase.value = "llm";
         }
       } else {
-        if (isHostedTransport) {
-          clearBoundLlmStreamingState();
-        } else {
-          llmStreamingBindings?.commitPendingLlmStreamingText();
-          if (llmStreamingBindings) {
-            llmStreamingBindings.llmStreamingActive.value = false;
-          }
+        llmStreamingBindings?.flushLlmStreamingDeltaBuffer();
+        llmStreamingBindings?.commitPendingLlmStreamingText();
+        if (llmStreamingBindings) {
+          llmStreamingBindings.llmStreamingActive.value = false;
         }
         finalAssistantStreamingPhase.value = true;
         setLlmRunHint(
@@ -952,6 +977,7 @@ export function useToolRunTracking(deps: ToolRunTrackingDeps) {
   return {
     runPhase,
     activeToolRun,
+    activeRunHint,
     toolPendingStepStates,
     activeRunToken,
     finalAssistantStreamingPhase,
