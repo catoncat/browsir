@@ -82,6 +82,20 @@ describe("orchestrator.browser", () => {
     expect(events).toContain("auto_compaction_end");
   });
 
+  it("非 retryable 错误应返回 canonical failed_execute reason", async () => {
+    const orchestrator = new BrainOrchestrator();
+    const created = await orchestrator.createSession({ title: "non-retryable-error" });
+
+    const decision = await orchestrator.handleAgentEnd({
+      sessionId: created.sessionId,
+      error: { message: "bad request", status: 400, code: "E_BAD_REQUEST" },
+      overflow: false,
+    });
+
+    expect(decision.action).toBe("done");
+    expect(decision.reason).toBe("failed_execute");
+  });
+
   it("重启后保留会话与 trace，但运行态不会自动恢复", async () => {
     const oldOrchestrator = new BrainOrchestrator();
     const created = await oldOrchestrator.createSession({ title: "restart-recovery" });

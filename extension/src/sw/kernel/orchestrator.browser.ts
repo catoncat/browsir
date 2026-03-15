@@ -49,6 +49,11 @@ import {
   normalizeCompactionSettings,
   type CompactionSettings,
 } from "../../shared/compaction";
+import {
+  type FailureReason,
+  type LoopTerminalStatus,
+  resolveAgentEndDoneReason,
+} from "./loop-shared-types";
 
 export type { ExecuteCapability, ExecuteMode, ExecuteStepInput, ExecuteStepResult } from "./types";
 export type { CapabilityExecutionPolicy, RegisterCapabilityPolicyOptions } from "./capability-policy";
@@ -72,6 +77,8 @@ export interface AgentEndInput {
   sessionId: string;
   error?: { message?: string; code?: string; status?: number } | null;
   overflow?: boolean;
+  status?: LoopTerminalStatus;
+  failureReason?: FailureReason | null;
 }
 
 export interface AgentEndDecision {
@@ -1052,7 +1059,11 @@ export class BrainOrchestrator {
 
     const decision: AgentEndDecision = {
       action: "done",
-      reason: nextInput.error ? "error" : "completed",
+      reason: resolveAgentEndDoneReason({
+        status: nextInput.status,
+        failureReason: nextInput.failureReason,
+        error: nextInput.error,
+      }),
       sessionId
     };
     const afterHook = await this.hooks.run("agent_end.after", { input: nextInput, decision });

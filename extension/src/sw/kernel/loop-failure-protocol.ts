@@ -15,6 +15,7 @@ import {
   CANONICAL_BROWSER_TOOL_NAMES,
   TOOL_AUTO_RETRY_BASE_DELAY_MS,
   TOOL_AUTO_RETRY_CAP_DELAY_MS,
+  normalizeFailureReasonValue,
 } from "./loop-shared-types";
 import {
   normalizeErrorCode,
@@ -160,12 +161,7 @@ export function buildToolRetryHint(toolName: string, errorCode: string): string 
 // ── Failure reason / phase / category inference ─────────────────────
 
 export function normalizeFailureReason(raw: unknown): FailureReason {
-  const reason = String(raw || "")
-    .trim()
-    .toLowerCase();
-  if (reason === "failed_verify") return "failed_verify";
-  if (reason === "progress_uncertain") return "progress_uncertain";
-  return "failed_execute";
+  return normalizeFailureReasonValue(raw);
 }
 
 function inferFailurePhase(reason: FailureReason): FailurePhase {

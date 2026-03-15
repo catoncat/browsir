@@ -296,6 +296,14 @@ jq '.payload.data.runtime.summary' snapshot.json
 - LLM 消费 snapshot 时优先 `compact + 元信息`，不要把整段大 JSON 直接塞回对话。
 - LLM 默认配置：`base=https://ai.chen.rs/v1`、`model=gpt-5.3-codex`（key 由运行时注入）。
 - strict verify 模式下，`browser_action` 默认需要动作后验证；"执行成功"不等于"目标推进成功"。
+- 终态 / 决策语义必须分层理解：
+  - `loop_done.status` 是终态域：`done | failed_execute | failed_verify | progress_uncertain | max_steps | stopped | timeout`
+  - `FailureReason` 是失败子域：`failed_execute | failed_verify | progress_uncertain`
+  - `brain.agent.end` / `handleAgentEnd()` 是决策域：`continue | retry | done`
+  - `action=done` 时 `reason` 应复用 canonical terminal status / failure reason，不再用模糊 `completed|error`
+- ownership：
+  - `threshold` compaction 由 `runtime-loop` 的 pre-send compaction check 触发
+  - `overflow` compaction 由 `brain.agent.end` 输入上报，再由 `orchestrator.handleAgentEnd()` 触发
 - 必须启用 `no_progress` 检测（重复签名 / ping-pong 往返）并提前终止当前轮。
 - auto-repair 仅在 `failed_execute/failed_verify/progress_uncertain` 或 `loop_no_progress` 信号触发；`max_steps/stopped/timeout` 不自动续跑下一轮。
 - `stopped` 回复优先状态文案，不回显 memory 中的大段 snapshot 内容。

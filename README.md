@@ -268,6 +268,14 @@ vNext 已切到 `sidepanel.html + service-worker.js` 主路径：
 
 - LLM 工具入参不再直接喂原始大 snapshot JSON；优先使用 `snapshot.compact + 关键元信息`，避免二次硬截断导致关键信息丢失。
 - 在 strict 策略下，`browser_action` 执行后默认必须通过验证（显式 `expect` 走 `cdp.verify`，否则走前后观测推进校验）。
+- 语义分层：
+  - `loop_done.status` 是终态域：`done | failed_execute | failed_verify | progress_uncertain | max_steps | stopped | timeout`
+  - `FailureReason` 是失败子域：`failed_execute | failed_verify | progress_uncertain`
+  - `brain.agent.end` / `handleAgentEnd()` 是决策域：`continue | retry | done`
+  - `handleAgentEnd(action=done)` 时，`reason` 应直接复用 canonical terminal status / failure reason；`continue` 仅用于 `compaction_overflow|compaction_threshold`
+- ownership 分层：
+  - `threshold` compaction 由 `runtime-loop` 在发 LLM 前触发 `preSendCompactionCheck()`
+  - `overflow` compaction 由外部 `brain.agent.end` 输入上报，再由 `orchestrator.handleAgentEnd()` 触发
 - 新增 `no_progress` 检测：当 action 签名连续重复或 ABAB 往返（ping-pong）时提前终止本轮。
 - auto-repair 仅在 `failed_execute | failed_verify | progress_uncertain` 或显式 `loop_no_progress` 信号时触发；`max_steps | stopped | timeout` 不自动开启下一轮。
 - 回复策略中，`stopped/timeout/max_steps/failed_*` 状态文案优先于 memory 回填。

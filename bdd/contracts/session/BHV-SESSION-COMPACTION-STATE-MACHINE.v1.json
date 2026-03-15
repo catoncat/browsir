@@ -4,6 +4,9 @@
   "context": {
     "surface": "service-worker.kernel.orchestrator",
     "stateMachine": ["retry", "compaction", "done"],
+    "agentEndDecisionDomain": ["continue", "retry", "done"],
+    "terminalStatusDomain": ["done", "failed_execute", "failed_verify", "progress_uncertain", "max_steps", "stopped", "timeout"],
+    "failureReasonDomain": ["failed_execute", "failed_verify", "progress_uncertain"],
     "compactionReasons": ["threshold", "overflow"],
     "events": ["auto_retry_start", "auto_retry_end", "auto_compaction_start", "session_compact", "auto_compaction_end"]
   },
@@ -18,6 +21,7 @@
   "observables": [
     "decision_retry_for_retryable_error_non_overflow",
     "decision_continue_with_reason_compaction_threshold_or_compaction_overflow",
+    "decision_done_reason_reuses_canonical_terminal_status_or_failure_reason",
     "event_stream_contains_auto_compaction_start_session_compact_auto_compaction_end",
     "session_compact_payload_contains_entry_id_and_token_delta",
     "context_messages_include_previous_summary_after_compaction"

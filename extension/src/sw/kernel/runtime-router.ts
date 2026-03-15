@@ -315,6 +315,8 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
                     ? statusNumber
                     : undefined,
                 };
+          const failureReasonRaw = String(payload.failureReason || "").trim();
+          const terminalStatusRaw = String(payload.status || "").trim();
 
           return await applyAfter(
             ok(
@@ -322,6 +324,19 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
                 sessionId,
                 error,
                 overflow: payload.overflow === true,
+                failureReason: failureReasonRaw
+                  ? (failureReasonRaw as "failed_execute" | "failed_verify" | "progress_uncertain")
+                  : null,
+                status: terminalStatusRaw
+                  ? (terminalStatusRaw as
+                      | "done"
+                      | "failed_execute"
+                      | "failed_verify"
+                      | "progress_uncertain"
+                      | "max_steps"
+                      | "stopped"
+                      | "timeout")
+                  : undefined,
               }),
             ),
           );

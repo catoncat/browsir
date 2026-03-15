@@ -264,6 +264,53 @@ describe("runtime-router.browser", () => {
     vi.restoreAllMocks();
   });
 
+  it("brain.agent.end 应透传 canonical failure reason", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    const created = await orchestrator.createSession({
+      title: "agent-end-failure-reason",
+    });
+
+    const out = await invokeRuntime({
+      type: "brain.agent.end",
+      payload: {
+        sessionId: created.sessionId,
+        error: {
+          message: "verify failed",
+          code: "E_VERIFY_FAILED",
+          status: 400,
+        },
+        failureReason: "failed_verify",
+      },
+    });
+
+    expect(out.ok).toBe(true);
+    const data = (out.data || {}) as Record<string, unknown>;
+    expect(String(data.action || "")).toBe("done");
+    expect(String(data.reason || "")).toBe("failed_verify");
+  });
+
+  it("brain.agent.end 应透传 canonical terminal status", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    const created = await orchestrator.createSession({
+      title: "agent-end-terminal-status",
+    });
+
+    const out = await invokeRuntime({
+      type: "brain.agent.end",
+      payload: {
+        sessionId: created.sessionId,
+        status: "max_steps",
+      },
+    });
+
+    expect(out.ok).toBe(true);
+    const data = (out.data || {}) as Record<string, unknown>;
+    expect(String(data.action || "")).toBe("done");
+    expect(String(data.reason || "")).toBe("max_steps");
+  });
+
   it("supports fork session and exposes forkedFrom metadata in list/view", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -8926,6 +8973,95 @@ describe("runtime-router.browser", () => {
     expect((patchedResult.data || {}) as Record<string, unknown>).toEqual({
       source: "inline-index-js",
     });
+  });
+
+  it("brain.plugin.install should support inline mem modules authored with export default", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    const { sessionId } = await orchestrator.createSession({
+      title: "plugin-install-inline-esm-default",
+    });
+    orchestrator.registerToolProvider(
+      "script",
+      {
+        id: "plugin.install.inline-esm.script",
+        invoke: async () => ({ source: "script" }),
+      },
+      { replace: true },
+    );
+
+    const pluginId = "plugin.route.extension.inline.esm-default";
+    const installed = await invokeRuntime({
+      type: "brain.plugin.install",
+      sessionId: "plugin-studio",
+      package: {
+        manifest: {
+          id: pluginId,
+          name: "plugin-route-extension-inline-esm-default",
+          version: "1.0.0",
+          permissions: {
+            hooks: ["tool.after_result"],
+          },
+        },
+        indexJs: `const SOURCE = "inline-esm-default";
+export default function registerPlugin(pi) {
+  pi.on("tool.after_result", (event) => {
+    const current = event && event.result && typeof event.result === "object" ? event.result : {};
+    return {
+      action: "patch",
+      patch: {
+        result: {
+          ...current,
+          source: SOURCE,
+        },
+      },
+    };
+  });
+}`,
+        uiJs: `const SUFFIX = "!";
+export default function registerUiPlugin(ui) {
+  ui.on("ui.notice.before_show", (event) => {
+    return {
+      action: "patch",
+      patch: {
+        message: String(event && event.message || "") + SUFFIX,
+      },
+    };
+  });
+}`,
+      },
+    });
+    expect(installed.ok).toBe(true);
+
+    const patched = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      mode: "script",
+      action: "click",
+      verifyPolicy: "off",
+    });
+    expect(patched.ok).toBe(true);
+    const patchedResult = (patched.data || {}) as Record<string, unknown>;
+    expect((patchedResult.data || {}) as Record<string, unknown>).toEqual({
+      source: "inline-esm-default",
+    });
+
+    const hookRun = await invokeRuntime({
+      type: "brain.plugin.ui_hook.run",
+      pluginId,
+      hook: "ui.notice.before_show",
+      payload: {
+        type: "success",
+        message: "esm-ok",
+      },
+    });
+    expect(hookRun.ok).toBe(true);
+    const hookData = (hookRun.data || {}) as Record<string, unknown>;
+    const hookResult = (hookData.hookResult || {}) as Record<string, unknown>;
+    expect(String(hookResult.action || "")).toBe("patch");
+    expect(
+      String((hookResult.patch as Record<string, unknown>)?.message || ""),
+    ).toBe("esm-ok!");
   });
 
   it("brain.plugin.install should rehydrate inline mem plugin across runtime reload", async () => {

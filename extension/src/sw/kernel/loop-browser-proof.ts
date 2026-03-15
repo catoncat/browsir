@@ -1,6 +1,9 @@
 import type { CapabilityExecutionPolicy } from "./capability-policy";
 import type { JsonRecord } from "./types";
-import { BROWSER_PROOF_REQUIRED_TOOL_NAMES } from "./loop-shared-types";
+import {
+  BROWSER_PROOF_REQUIRED_TOOL_NAMES,
+  normalizeFailureReasonValue,
+} from "./loop-shared-types";
 import { toRecord } from "./loop-shared-utils";
 import { parseToolCallArgs } from "./loop-tool-display";
 
@@ -156,10 +159,5 @@ export function didToolProvideBrowserProof(
 export function mapToolErrorReasonToTerminalStatus(
   rawReason: unknown,
 ): "failed_execute" | "failed_verify" | "progress_uncertain" {
-  const reason = String(rawReason || "")
-    .trim()
-    .toLowerCase();
-  if (reason === "failed_verify") return "failed_verify";
-  if (reason === "progress_uncertain") return "progress_uncertain";
-  return "failed_execute";
+  return normalizeFailureReasonValue(rawReason);
 }

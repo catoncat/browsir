@@ -68,6 +68,87 @@ export type FailureReason =
   | "failed_verify"
   | "progress_uncertain";
 
+export type LoopTerminalStatus =
+  | "done"
+  | FailureReason
+  | "max_steps"
+  | "stopped"
+  | "timeout";
+
+const FAILURE_REASON_SET = new Set<FailureReason>([
+  "failed_execute",
+  "failed_verify",
+  "progress_uncertain",
+]);
+
+const LOOP_TERMINAL_STATUS_SET = new Set<LoopTerminalStatus>([
+  "done",
+  "failed_execute",
+  "failed_verify",
+  "progress_uncertain",
+  "max_steps",
+  "stopped",
+  "timeout",
+]);
+
+export function normalizeFailureReasonValue(raw: unknown): FailureReason {
+  const reason = String(raw || "")
+    .trim()
+    .toLowerCase();
+  if (reason === "failed_verify") return "failed_verify";
+  if (reason === "progress_uncertain") return "progress_uncertain";
+  return "failed_execute";
+}
+
+export function isFailureReason(raw: unknown): raw is FailureReason {
+  const reason = String(raw || "")
+    .trim()
+    .toLowerCase();
+  return FAILURE_REASON_SET.has(reason as FailureReason);
+}
+
+export function normalizeLoopTerminalStatus(
+  raw: unknown,
+  fallback: LoopTerminalStatus = "done",
+): LoopTerminalStatus {
+  const status = String(raw || "")
+    .trim()
+    .toLowerCase();
+  if (LOOP_TERMINAL_STATUS_SET.has(status as LoopTerminalStatus)) {
+    return status as LoopTerminalStatus;
+  }
+  return fallback;
+}
+
+export function mapTerminalStatusToFailureReason(
+  raw: unknown,
+): FailureReason | null {
+  const status = normalizeLoopTerminalStatus(raw, "done");
+  return FAILURE_REASON_SET.has(status as FailureReason)
+    ? (status as FailureReason)
+    : null;
+}
+
+export function resolveAgentEndDoneReason(input: {
+  status?: unknown;
+  failureReason?: unknown;
+  error?: unknown;
+}): LoopTerminalStatus {
+  const explicitFailureReason =
+    input.failureReason == null || String(input.failureReason || "").trim() === ""
+      ? null
+      : normalizeFailureReasonValue(input.failureReason);
+  if (explicitFailureReason) return explicitFailureReason;
+
+  const statusFailureReason = mapTerminalStatusToFailureReason(input.status);
+  if (statusFailureReason) return statusFailureReason;
+
+  const status = normalizeLoopTerminalStatus(input.status, "done");
+  if (status !== "done") return status;
+
+  return input.error ? "failed_execute" : "done";
+}
+
 export type ToolRetryAction = "auto_replay" | "llm_replan" | "fail_fast";
 
 export type FailurePhase = "plan" | "execute" | "verify" | "progress_guard";
