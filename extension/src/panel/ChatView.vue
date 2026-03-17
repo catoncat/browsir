@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onClickOutside } from "@vueuse/core";
 import { storeToRefs } from "pinia";
-import { computed, onUnmounted, provide, ref, watch } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { useRuntimeStore } from "./stores/runtime";
 import { useChatStore } from "./stores/chat-store";
 import { useConfigStore } from "./stores/config-store";
@@ -533,8 +533,6 @@ onUnmounted(() => {
   cleanupForkScene();
   cleanupMessageActions();
 });
-
-provide("sessionListRenderState", sessionListRenderState);
 
 defineExpose({ handleCreateSession, sessionListRenderState });
 </script>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { storeToRefs } from "pinia";
-import { onMounted, ref, inject, type Ref } from "vue";
+import { computed, isRef, onMounted, ref } from "vue";
 import { useRuntimeStore } from "./stores/runtime";
 import { useChatStore } from "./stores/chat-store";
 import type { ViewMode, SessionListRenderSessionItem } from "./types";
@@ -21,10 +21,18 @@ const activeView = ref<ViewMode>("chat");
 const listOpen = ref(false);
 
 const chatViewRef = ref<InstanceType<typeof ChatView> | null>(null);
-const sessionListRenderState = inject<Ref<{ sessions: SessionListRenderSessionItem[]; activeId: string }>>(
-  "sessionListRenderState",
-  ref({ sessions: [], activeId: "" }),
-);
+const emptySessionListRenderState: {
+  sessions: SessionListRenderSessionItem[];
+  activeId: string;
+} = {
+  sessions: [],
+  activeId: "",
+};
+const sessionListRenderState = computed(() => {
+  const state = chatViewRef.value?.sessionListRenderState;
+  if (!state) return emptySessionListRenderState;
+  return isRef(state) ? state.value : state;
+});
 
 async function handleSelectSession(id: string) {
   try {
