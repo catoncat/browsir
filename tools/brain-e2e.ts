@@ -1161,6 +1161,7 @@ function resolveChromeBinary(): string {
     envBin,
     cft1208,
     cft1200,
+    "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary"
   ].filter(Boolean) as string[];
