@@ -16,6 +16,7 @@ import {
   providerRequiresApiConnection,
   type ProviderRuntimeKind,
 } from "../../shared/llm-provider-config";
+import { resolveCursorHelpDisplayModel } from "../../shared/cursor-help-protocol";
 import { sendMessage } from "./send-message";
 import { toIntInRange, toRecord } from "./store-helpers";
 
@@ -1067,9 +1068,17 @@ function normalizeHealth(
 function normalizeBuiltinFreeCatalog(
   raw: Record<string, unknown> | null | undefined,
 ): BuiltinFreeCatalog {
+  const seen = new Set<string>();
+  const availableModels: string[] = [];
+  for (const item of toStringList(raw?.availableModels)) {
+    const normalized = resolveCursorHelpDisplayModel(item);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    availableModels.push(normalized);
+  }
   return {
-    selectedModel: String(raw?.selectedModel || "").trim(),
-    availableModels: toStringList(raw?.availableModels),
+    selectedModel: resolveCursorHelpDisplayModel(String(raw?.selectedModel || "").trim()),
+    availableModels,
     statusMessage: String(raw?.statusMessage || "").trim(),
     statusDetail: String(raw?.statusDetail || "").trim(),
     checkedAt: String(raw?.checkedAt || "").trim(),

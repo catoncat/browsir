@@ -9,6 +9,7 @@ import {
   createSceneModelValue,
   deriveManagedProviderId,
   deriveProviderSettingsDraft,
+  deriveSceneModelDraft,
   resetToBuiltinCursor,
 } from "../provider-settings-state";
 
@@ -205,11 +206,44 @@ describe("provider-settings-state", () => {
     });
 
     expect(options.map((item) => item.label)).toEqual([
-      "内置免费 / gpt-5",
-      "内置免费 / claude-sonnet-4.6",
+      "内置免费 / GPT-5",
+      "内置免费 / Sonnet 4.6",
       "OpenRouter / gpt-4.1",
       "OpenRouter / gpt-4o-mini",
     ]);
+  });
+
+  it("dedupes builtin free alias variants and keeps the current builtin selection canonical", () => {
+    const config = normalizePanelConfig({
+      llmDefaultProfile: "cursor_help_web",
+      llmProfiles: [
+        {
+          id: "cursor_help_web",
+          providerId: "cursor_help_web",
+          modelId: "anthropic/claude-sonnet-4.6",
+          timeoutMs: 120000,
+          retryMaxAttempts: 2,
+          maxRetryDelayMs: 60000,
+          builtin: true,
+        },
+      ],
+    });
+
+    const builtinCatalog = {
+      selectedModel: "anthropic/claude-sonnet-4.6",
+      availableModels: ["Sonnet 4.6", "GPT-5.1 Codex Mini", "Gemini 3 Flash"],
+    };
+
+    const options = collectSceneModelOptions(config, builtinCatalog);
+    expect(options.map((item) => item.label)).toEqual([
+      "内置免费 / Sonnet 4.6",
+      "内置免费 / GPT-5.1 Codex Mini",
+      "内置免费 / Gemini 3 Flash",
+    ]);
+
+    expect(deriveSceneModelDraft(config, builtinCatalog).primaryValue).toBe(
+      createSceneModelValue("cursor_help_web", "Sonnet 4.6"),
+    );
   });
 
   it("maps scene model selections back to concrete route profiles", () => {
@@ -231,7 +265,7 @@ describe("provider-settings-state", () => {
     });
 
     applySceneModelDraft(config, {
-      primaryValue: createSceneModelValue("cursor_help_web", "gpt-5"),
+      primaryValue: createSceneModelValue("cursor_help_web", "GPT-5"),
       auxValue: createSceneModelValue("openrouter", "gpt-4o-mini"),
       fallbackValue: "",
     });
@@ -242,7 +276,7 @@ describe("provider-settings-state", () => {
     const aux = config.llmProfiles.find((item) => item.id === config.llmAuxProfile);
 
     expect(primary?.providerId).toBe("cursor_help_web");
-    expect(primary?.modelId).toBe("gpt-5");
+    expect(primary?.modelId).toBe("GPT-5");
     expect(aux?.providerId).toBe("openrouter");
     expect(aux?.modelId).toBe("gpt-4o-mini");
     expect(config.llmFallbackProfile).toBe("");

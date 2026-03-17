@@ -1,17 +1,18 @@
 <script setup lang="ts">
 import { storeToRefs } from "pinia";
 import { computed, onMounted, ref } from "vue";
-import { ArrowLeft, Eye, EyeOff, Loader2, Plus } from "lucide-vue-next";
+import { ArrowLeft, Eye, EyeOff, Loader2 } from "lucide-vue-next";
 import {
   normalizePanelConfig,
   useConfigStore,
   type PanelConfigNew,
 } from "../stores/config-store";
 import {
-  ADD_CUSTOM_PROVIDER_OPTION_VALUE,
   applySceneModelDraft,
   collectSceneModelOptions,
   deriveSceneModelDraft,
+  listCustomProviders,
+  readCustomProviderDraft,
   upsertCustomProvider,
 } from "../utils/provider-settings-state";
 
@@ -24,10 +25,11 @@ const draftConfig = ref<PanelConfigNew>(normalizePanelConfig({}));
 const localError = ref("");
 const builtinFreeError = ref("");
 const refreshingBuiltinFreeCatalog = ref(false);
-const addProviderOpen = ref(false);
+const providerEditorOpen = ref(false);
 const discoveringModels = ref(false);
 const showApiKey = ref(false);
 const sceneSelectionDirty = ref(false);
+const editingProviderId = ref("");
 
 const primaryValue = ref("");
 const auxValue = ref("");
@@ -36,7 +38,8 @@ const fallbackValue = ref("");
 const providerNameInput = ref("");
 const apiBaseInput = ref("");
 const apiKeyInput = ref("");
-const discoveredModels = ref<string[]>([]);
+const availableModels = ref<string[]>([]);
+const selectedModels = ref<string[]>([]);
 
 function trim(value: unknown): string {
   return String(value || "").trim();
@@ -111,7 +114,7 @@ function extractErrorMessage(
         : "";
     if (nested) return nested;
   } catch {
-    // Keep plain text fallback.
+    // keep plain text fallback
   }
   return text.length > 180 ? `${text.slice(0, 180)}...` : text;
 }
@@ -143,22 +146,39 @@ async function refreshBuiltinFreeCatalog(forceRefresh = false): Promise<void> {
   }
 }
 
-function resetAddProviderDraft(): void {
+function resetProviderEditorDraft(): void {
+  editingProviderId.value = "";
   providerNameInput.value = "";
   apiBaseInput.value = "";
   apiKeyInput.value = "";
-  discoveredModels.value = [];
+  availableModels.value = [];
+  selectedModels.value = [];
   showApiKey.value = false;
 }
 
 function openAddProviderSheet(): void {
+  resetProviderEditorDraft();
   localError.value = "";
-  addProviderOpen.value = true;
+  providerEditorOpen.value = true;
 }
 
-function closeAddProviderSheet(): void {
-  addProviderOpen.value = false;
-  resetAddProviderDraft();
+function openEditProviderSheet(providerId: string): void {
+  const draft = readCustomProviderDraft(draftConfig.value, providerId);
+  if (!draft) return;
+  editingProviderId.value = providerId;
+  providerNameInput.value = draft.providerName;
+  apiBaseInput.value = draft.apiBase;
+  apiKeyInput.value = draft.apiKey;
+  availableModels.value = dedupeModels(draft.supportedModels);
+  selectedModels.value = dedupeModels(draft.supportedModels);
+  localError.value = "";
+  providerEditorOpen.value = true;
+}
+
+function closeProviderSheet(): void {
+  providerEditorOpen.value = false;
+  localError.value = "";
+  resetProviderEditorDraft();
 }
 
 function handleSceneSelection(
@@ -168,14 +188,6 @@ function handleSceneSelection(
   const target = event.target as HTMLSelectElement | null;
   const nextValue = trim(target?.value);
   if (!target) return;
-
-  if (nextValue === ADD_CUSTOM_PROVIDER_OPTION_VALUE) {
-    if (scene === "primary") target.value = primaryValue.value;
-    if (scene === "aux") target.value = auxValue.value;
-    if (scene === "fallback") target.value = fallbackValue.value;
-    openAddProviderSheet();
-    return;
-  }
 
   localError.value = "";
   sceneSelectionDirty.value = true;
@@ -221,7 +233,20 @@ async function handleDiscoverModels(): Promise<void> {
       throw new Error("没有从该服务返回可用模型。");
     }
 
-    discoveredModels.value = dedupeModels(models);
+    const normalizedModels = dedupeModels(models);
+    if (editingProviderId.value) {
+      const currentSelected = dedupeModels(selectedModels.value);
+      availableModels.value = dedupeModels([
+        ...normalizedModels,
+        ...currentSelected,
+      ]);
+      selectedModels.value = currentSelected.filter((modelId) =>
+        availableModels.value.includes(modelId),
+      );
+    } else {
+      availableModels.value = normalizedModels;
+      selectedModels.value = [];
+    }
   } catch (err) {
     localError.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -229,7 +254,34 @@ async function handleDiscoverModels(): Promise<void> {
   }
 }
 
-function handleAddProvider(): void {
+function isModelSelected(modelId: string): boolean {
+  return selectedModels.value.includes(trim(modelId));
+}
+
+function toggleModelSelection(modelId: string, checked: boolean): void {
+  const normalized = trim(modelId);
+  if (!normalized) return;
+  const next = new Set(selectedModels.value.map((item) => trim(item)));
+  if (checked) next.add(normalized);
+  else next.delete(normalized);
+  selectedModels.value = Array.from(next);
+}
+
+function handleModelSelection(event: Event, modelId: string): void {
+  const target = event.target as HTMLInputElement | null;
+  if (!target) return;
+  toggleModelSelection(modelId, target.checked);
+}
+
+function handleSelectAllModels(): void {
+  selectedModels.value = dedupeModels(availableModels.value);
+}
+
+function handleClearSelectedModels(): void {
+  selectedModels.value = [];
+}
+
+function handleSaveProvider(): void {
   localError.value = "";
   const providerName = trim(providerNameInput.value);
   const apiBase = trim(apiBaseInput.value);
@@ -243,18 +295,26 @@ function handleAddProvider(): void {
     localError.value = "请先完整填写 API Base 和 API Key。";
     return;
   }
-  if (discoveredModels.value.length <= 0) {
+  if (availableModels.value.length <= 0) {
     localError.value = "请先连接并获取模型。";
     return;
   }
+  if (selectedModels.value.length <= 0) {
+    localError.value = "请至少选择一个模型。";
+    return;
+  }
 
-  upsertCustomProvider(draftConfig.value, {
-    providerName,
-    apiBase,
-    apiKey,
-    supportedModels: discoveredModels.value,
-  });
-  closeAddProviderSheet();
+  upsertCustomProvider(
+    draftConfig.value,
+    {
+      providerName,
+      apiBase,
+      apiKey,
+      supportedModels: selectedModels.value,
+    },
+    editingProviderId.value || undefined,
+  );
+  closeProviderSheet();
 }
 
 async function handleSave(): Promise<void> {
@@ -275,7 +335,7 @@ async function handleSave(): Promise<void> {
     await store.saveConfig();
     emit("close");
   } catch {
-    // store.error is rendered below.
+    // store.error is rendered below
   }
 }
 
@@ -298,9 +358,15 @@ const modelOptions = computed(() =>
   collectSceneModelOptions(draftConfig.value, builtinFreeCatalog.value),
 );
 const hasModelOptions = computed(() => modelOptions.value.length > 0);
-const discoveredModelSummary = computed(() => {
-  if (discoveredModels.value.length <= 0) return "";
-  return `已获取 ${discoveredModels.value.length} 个模型`;
+const customProviders = computed(() =>
+  listCustomProviders(draftConfig.value),
+);
+const providerEditorTitle = computed(() =>
+  editingProviderId.value ? "编辑自定义服务商" : "添加自定义服务商",
+);
+const providerEditorSummary = computed(() => {
+  if (availableModels.value.length <= 0) return "";
+  return `已发现 ${availableModels.value.length} 个模型，已选择 ${selectedModels.value.length} 个`;
 });
 
 onMounted(() => {
@@ -318,22 +384,22 @@ onMounted(() => {
     aria-modal="true"
     aria-label="模型设置"
     class="fixed inset-0 z-[60] bg-ui-bg flex flex-col animate-in fade-in duration-200 focus:outline-none"
-    @keydown.esc="addProviderOpen ? closeAddProviderSheet() : $emit('close')"
+    @keydown.esc="providerEditorOpen ? closeProviderSheet() : $emit('close')"
   >
     <header class="h-12 flex items-center px-2 border-b border-ui-border bg-ui-bg shrink-0">
       <button
         class="p-2.5 hover:bg-ui-surface rounded-sm transition-colors text-ui-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-        :aria-label="addProviderOpen ? '返回模型设置' : '返回'"
-        @click="addProviderOpen ? closeAddProviderSheet() : $emit('close')"
+        :aria-label="providerEditorOpen ? '返回模型设置' : '返回'"
+        @click="providerEditorOpen ? closeProviderSheet() : $emit('close')"
       >
         <ArrowLeft :size="18" aria-hidden="true" />
       </button>
       <h2 class="ml-2 font-bold text-[14px] text-ui-text tracking-tight">
-        {{ addProviderOpen ? "添加自定义服务商" : "模型设置" }}
+        {{ providerEditorOpen ? providerEditorTitle : "模型设置" }}
       </h2>
     </header>
 
-    <main v-if="!addProviderOpen" class="flex-1 overflow-y-auto p-4 space-y-4">
+    <main v-if="!providerEditorOpen" class="flex-1 overflow-y-auto p-4 space-y-4">
       <section
         v-if="builtinFreeStatus"
         class="rounded-sm border border-amber-500/30 bg-amber-500/8 p-3 flex items-start justify-between gap-3"
@@ -379,7 +445,6 @@ onMounted(() => {
             <option v-for="option in modelOptions" :key="option.value" :value="option.value">
               {{ option.label }}
             </option>
-            <option :value="ADD_CUSTOM_PROVIDER_OPTION_VALUE">+ 添加自定义服务商</option>
           </select>
         </label>
 
@@ -399,7 +464,6 @@ onMounted(() => {
             >
               {{ option.label }}
             </option>
-            <option :value="ADD_CUSTOM_PROVIDER_OPTION_VALUE">+ 添加自定义服务商</option>
           </select>
         </label>
 
@@ -419,18 +483,77 @@ onMounted(() => {
             >
               {{ option.label }}
             </option>
-            <option :value="ADD_CUSTOM_PROVIDER_OPTION_VALUE">+ 添加自定义服务商</option>
           </select>
         </label>
+      </section>
+
+      <section class="rounded-sm border border-ui-border bg-ui-surface/30 p-4 space-y-3">
+        <div class="flex items-center justify-between gap-3">
+          <div class="space-y-1">
+            <h3 class="text-[13px] font-semibold text-ui-text">已添加服务商</h3>
+            <p class="text-[12px] text-ui-text-muted">管理哪些模型会出现在场景选择里。</p>
+          </div>
+          <button
+            type="button"
+            class="rounded-sm border border-ui-border px-3 py-2 text-[12px] font-semibold text-ui-text hover:bg-ui-bg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+            @click="openAddProviderSheet"
+          >
+            添加自定义服务商
+          </button>
+        </div>
+
+        <div
+          v-if="customProviders.length <= 0"
+          class="rounded-sm border border-dashed border-ui-border px-3 py-4 text-[12px] text-ui-text-muted"
+        >
+          还没有自定义服务商。
+        </div>
+
+        <div v-else class="space-y-2">
+          <article
+            v-for="provider in customProviders"
+            :key="provider.id"
+            class="rounded-sm border border-ui-border bg-ui-bg/60 px-3 py-3"
+          >
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0 space-y-1">
+                <h4 class="text-[13px] font-semibold text-ui-text">{{ provider.name }}</h4>
+                <p v-if="provider.apiBase" class="truncate text-[11px] text-ui-text-muted">
+                  {{ provider.apiBase }}
+                </p>
+                <p class="text-[11px] text-ui-text-muted">{{ `${provider.selectedModelCount} 个模型` }}</p>
+              </div>
+              <button
+                type="button"
+                class="rounded-sm border border-ui-border px-3 py-1.5 text-[12px] font-semibold text-ui-text hover:bg-ui-surface transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+                :data-provider-manage="provider.id"
+                @click="openEditProviderSheet(provider.id)"
+              >
+                管理模型
+              </button>
+            </div>
+            <div class="mt-2 flex flex-wrap gap-2">
+              <span
+                v-for="modelId in provider.selectedModels"
+                :key="`${provider.id}-${modelId}`"
+                class="inline-flex items-center rounded-full border border-ui-border bg-ui-bg px-2.5 py-1 text-[11px] text-ui-text-muted"
+              >
+                {{ modelId }}
+              </span>
+            </div>
+          </article>
+        </div>
       </section>
     </main>
 
     <main v-else class="flex-1 overflow-y-auto p-4 space-y-4">
       <section class="rounded-sm border border-ui-border bg-ui-surface/30 p-4 space-y-4">
         <div class="space-y-1">
-          <h3 class="text-[15px] font-semibold tracking-tight text-ui-text">连接兼容服务</h3>
+          <h3 class="text-[15px] font-semibold tracking-tight text-ui-text">
+            {{ editingProviderId ? "更新兼容服务" : "连接兼容服务" }}
+          </h3>
           <p class="text-[12px] text-ui-text-muted leading-relaxed">
-            添加后只会把模型加入可选列表，不会自动改动当前场景。
+            获取模型后，勾选你要加入可选列表的模型。
           </p>
         </div>
 
@@ -488,49 +611,55 @@ onMounted(() => {
           </div>
         </div>
 
-        <div class="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            class="inline-flex items-center justify-center gap-2 rounded-sm bg-ui-text px-3 py-2 text-[13px] font-bold text-ui-bg hover:opacity-90 transition-opacity disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-            :disabled="discoveringModels"
-            @click="void handleDiscoverModels()"
-          >
-            <Loader2 v-if="discoveringModels" class="animate-spin" :size="14" />
-            {{ discoveringModels ? "获取中..." : "连接并获取模型" }}
-          </button>
-
-          <button
-            type="button"
-            class="inline-flex items-center justify-center rounded-sm border border-ui-border px-3 py-2 text-[13px] text-ui-text hover:bg-ui-bg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-            @click="closeAddProviderSheet"
-          >
-            返回
-          </button>
-        </div>
+        <button
+          type="button"
+          class="inline-flex items-center justify-center gap-2 rounded-sm bg-ui-text px-3 py-2 text-[13px] font-bold text-ui-bg hover:opacity-90 transition-opacity disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+          :disabled="discoveringModels"
+          @click="void handleDiscoverModels()"
+        >
+          <Loader2 v-if="discoveringModels" class="animate-spin" :size="14" />
+          {{ discoveringModels ? "获取中..." : "连接并获取模型" }}
+        </button>
 
         <div
-          v-if="discoveredModels.length > 0"
-          class="rounded-sm border border-ui-border bg-ui-bg/60 p-3 space-y-2"
+          v-if="availableModels.length > 0"
+          class="rounded-sm border border-ui-border bg-ui-bg/60 p-3 space-y-3"
         >
           <div class="flex items-center justify-between gap-3">
-            <span class="text-[12px] font-semibold text-ui-text">{{ discoveredModelSummary }}</span>
-            <button
-              type="button"
-              class="inline-flex items-center justify-center gap-1.5 rounded-sm border border-ui-border px-2.5 py-1.5 text-[12px] text-ui-text hover:bg-ui-bg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-              @click="handleAddProvider"
-            >
-              <Plus :size="14" aria-hidden="true" />
-              添加服务商
-            </button>
+            <span class="text-[12px] font-semibold text-ui-text">{{ providerEditorSummary }}</span>
+            <div class="flex items-center gap-2">
+              <button
+                type="button"
+                class="rounded-sm border border-ui-border px-2.5 py-1.5 text-[12px] text-ui-text hover:bg-ui-bg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+                @click="handleSelectAllModels"
+              >
+                全选
+              </button>
+              <button
+                type="button"
+                class="rounded-sm border border-ui-border px-2.5 py-1.5 text-[12px] text-ui-text hover:bg-ui-bg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+                @click="handleClearSelectedModels"
+              >
+                清空
+              </button>
+            </div>
           </div>
-          <div class="flex flex-wrap gap-2">
-            <span
-              v-for="model in discoveredModels"
+
+          <div class="space-y-2">
+            <label
+              v-for="model in availableModels"
               :key="model"
-              class="inline-flex items-center rounded-full border border-ui-border bg-ui-bg px-2.5 py-1 text-[11px] text-ui-text-muted"
+              class="flex items-center gap-3 rounded-sm border border-ui-border bg-ui-bg px-3 py-2 text-[12px] text-ui-text"
             >
-              {{ model }}
-            </span>
+              <input
+                :data-provider-model="model"
+                type="checkbox"
+                class="h-4 w-4 rounded border-ui-border bg-ui-bg text-ui-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+                :checked="isModelSelected(model)"
+                @change="handleModelSelection($event, model)"
+              />
+              <span class="truncate">{{ model }}</span>
+            </label>
           </div>
         </div>
       </section>
@@ -540,8 +669,26 @@ onMounted(() => {
       <p v-if="visibleError" class="text-[11px] text-red-500 mb-3 px-1">
         {{ visibleError }}
       </p>
+
+      <div v-if="providerEditorOpen" class="flex gap-2">
+        <button
+          type="button"
+          class="flex-1 rounded-sm border border-ui-border py-2.5 text-[13px] font-semibold text-ui-text hover:bg-ui-bg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+          @click="closeProviderSheet"
+        >
+          返回
+        </button>
+        <button
+          type="button"
+          class="flex-[1.4] rounded-sm bg-ui-text py-2.5 text-[13px] font-bold text-ui-bg hover:opacity-90 transition-opacity focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+          @click="handleSaveProvider"
+        >
+          保存服务商
+        </button>
+      </div>
+
       <button
-        v-if="!addProviderOpen"
+        v-else
         class="w-full bg-ui-text text-ui-bg py-2.5 rounded-sm font-bold flex items-center justify-center gap-2 hover:opacity-90 transition-opacity disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
         :disabled="savingConfig"
         @click="void handleSave()"

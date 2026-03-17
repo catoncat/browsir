@@ -12,7 +12,6 @@ import {
   type PanelConfigNew,
 } from "../../stores/config-store";
 import {
-  ADD_CUSTOM_PROVIDER_OPTION_VALUE,
   createSceneModelValue,
 } from "../../utils/provider-settings-state";
 
@@ -41,8 +40,8 @@ async function mountView(options?: {
   store.config = options?.config || normalizePanelConfig({});
   store.builtinFreeCatalog =
     options?.builtinFreeCatalog || {
-      selectedModel: "gpt-5",
-      availableModels: ["gpt-5"],
+      selectedModel: "GPT-5",
+      availableModels: ["GPT-5"],
     };
   store.error = "";
   store.savingConfig = false;
@@ -112,22 +111,24 @@ describe("ProviderSettingsView", () => {
     const view = await mountView();
     const primary = getSceneSelect(view.root, "primary");
 
-    expect(primary.value).toBe(createSceneModelValue("cursor_help_web", "gpt-5"));
+    expect(primary.value).toBe(createSceneModelValue("cursor_help_web", "GPT-5"));
     expect(getOptionLabels(primary)).toEqual([
       "请选择模型",
-      "内置免费 / gpt-5",
-      "+ 添加自定义服务商",
+      "内置免费 / GPT-5",
     ]);
     expect(view.root.textContent || "").not.toContain("通用 API");
   });
 
-  it("opens add-provider sheet from the select action without changing current scene value", async () => {
+  it("opens add-provider sheet from the provider list action without changing current scene value", async () => {
     const view = await mountView();
     const primary = getSceneSelect(view.root, "primary");
     const initialValue = primary.value;
 
-    primary.value = ADD_CUSTOM_PROVIDER_OPTION_VALUE;
-    primary.dispatchEvent(new Event("change", { bubbles: true }));
+    const addButton = Array.from(view.root.querySelectorAll("button")).find(
+      (button) => (button.textContent || "").includes("添加自定义服务商"),
+    ) as HTMLButtonElement | undefined;
+    expect(addButton).toBeDefined();
+    addButton?.click();
     await flushUi();
 
     expect(view.root.textContent || "").toContain("添加自定义服务商");
@@ -159,9 +160,11 @@ describe("ProviderSettingsView", () => {
     const view = await mountView();
     const initialValue = getSceneSelect(view.root, "primary").value;
 
-    const primary = getSceneSelect(view.root, "primary");
-    primary.value = ADD_CUSTOM_PROVIDER_OPTION_VALUE;
-    primary.dispatchEvent(new Event("change", { bubbles: true }));
+    const addButton = Array.from(view.root.querySelectorAll("button")).find(
+      (button) => (button.textContent || "").includes("添加自定义服务商"),
+    ) as HTMLButtonElement | undefined;
+    expect(addButton).toBeDefined();
+    addButton?.click();
     await flushUi();
 
     const providerName = view.root.querySelector(
@@ -200,11 +203,11 @@ describe("ProviderSettingsView", () => {
     getModelCheckbox(view.root, "gpt-4.1").click();
     await flushUi();
 
-    const addButton = Array.from(view.root.querySelectorAll("button")).find((button) =>
+    const saveButton = Array.from(view.root.querySelectorAll("button")).find((button) =>
       (button.textContent || "").includes("保存服务商"),
     ) as HTMLButtonElement | undefined;
-    expect(addButton).toBeDefined();
-    addButton?.click();
+    expect(saveButton).toBeDefined();
+    saveButton?.click();
     await flushUi();
 
     const labels = getOptionLabels(getSceneSelect(view.root, "primary"));

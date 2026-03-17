@@ -5,6 +5,7 @@ import {
   type PanelLlmProfileNew,
   type PanelLlmProvider,
 } from "../stores/config-store";
+import { resolveCursorHelpDisplayModel } from "../../shared/cursor-help-protocol";
 
 export interface ProviderSettingsDraft {
   primaryModelId: string;
@@ -478,9 +479,17 @@ export function collectSceneModelOptions(
   const seen = new Set<string>();
   const builtinModels: string[] = [];
   const builtinSeen = new Set<string>();
-  appendUnique(builtinModels, builtinSeen, builtinFreeCatalog.selectedModel);
+  appendUnique(
+    builtinModels,
+    builtinSeen,
+    resolveCursorHelpDisplayModel(builtinFreeCatalog.selectedModel),
+  );
   for (const model of builtinFreeCatalog.availableModels) {
-    appendUnique(builtinModels, builtinSeen, model);
+    appendUnique(
+      builtinModels,
+      builtinSeen,
+      resolveCursorHelpDisplayModel(model),
+    );
   }
   for (const modelId of builtinModels) {
     const value = createSceneModelValue(BUILTIN_CURSOR_HELP_PROFILE_ID, modelId);
@@ -522,12 +531,18 @@ function resolveBuiltinSceneModel(
   builtinFreeCatalog: BuiltinFreeModelCatalog,
 ): string {
   const available = Array.isArray(builtinFreeCatalog.availableModels)
-    ? builtinFreeCatalog.availableModels
+    ? builtinFreeCatalog.availableModels.map((item) =>
+        resolveCursorHelpDisplayModel(item),
+      )
     : [];
   if (available.length <= 0) return "";
-  const requested = trim(profile?.modelId);
+  const requested = resolveCursorHelpDisplayModel(trim(profile?.modelId));
   if (requested && requested !== "auto") return requested;
-  return trim(builtinFreeCatalog.selectedModel) || available[0] || "";
+  return (
+    resolveCursorHelpDisplayModel(trim(builtinFreeCatalog.selectedModel)) ||
+    available[0] ||
+    ""
+  );
 }
 
 function resolveSceneModelValue(
