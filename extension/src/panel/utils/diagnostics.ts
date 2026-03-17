@@ -1038,6 +1038,7 @@ export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}
   const sandboxSession = toRecord(sandboxRuntime.session);
   const events = normalizeStepEvents(stepStream);
 
+    const stepRangeInfo = computeStepRange(events);
   const timeline = normalizeStepTimeline(stepStream, options.timelineLimit ?? 24);
   const sandboxTimeline = buildSandboxTimeline(sandboxSession);
   const lastError = findLastError(stepStream);
@@ -1108,7 +1109,10 @@ export async function collectDiagnostics(options: CollectDiagnosticsOptions = {}
       stopped: runtime.stopped === true,
       paused: runtime.paused === true,
       messageCount: Number(conversationView.messageCount || messages.length || 0),
-      stepCount: events.length,
+        toolStepCount: stepRangeInfo.toolStepCount,
+        llmRequestCount: stepRangeInfo.llmRequestCount,
+        stepRange: stepRangeInfo.stepRange,
+        llmRequestRange: stepRangeInfo.llmRequestRange,
       stepStreamTruncated: stepStreamMeta.truncated === true,
       lastError,
       sandbox: {
