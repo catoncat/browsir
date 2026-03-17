@@ -105,7 +105,7 @@ sequenceDiagram
 关键文件：
 - `extension/src/sw/kernel/runtime-router.ts::handleBrainRun`
 - `extension/src/sw/kernel/runtime-loop.browser.ts::startFromPrompt`
-- `extension/src/sw/kernel/runtime-loop.browser.ts::requestLlmWithRetry`
+- `extension/src/sw/kernel/loop-llm-request.ts::requestLlmWithRetry`
 - `extension/src/sw/kernel/runtime-loop.browser.ts::executeToolCall`
 
 ## 4. 协议蓝图
@@ -184,7 +184,7 @@ Kernel 降级：
 - 缺少 LLM 配置：直接 `llm.skipped` + `loop_done(done)`  
   `extension/src/sw/kernel/runtime-loop.browser.ts::runAgentLoop(missing_llm_config)`
 - LLM 重试：指数退避 + 事件可观测  
-  `extension/src/sw/kernel/runtime-loop.browser.ts::requestLlmWithRetry`
+  `extension/src/sw/kernel/loop-llm-request.ts::requestLlmWithRetry`
 - 执行 fallback：`script -> cdp`  
   `extension/src/sw/kernel/runtime-loop.browser.ts::executeStep`
 

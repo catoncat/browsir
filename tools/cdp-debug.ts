@@ -208,9 +208,24 @@ async function getTargets(port: number): Promise<TargetInfo[]> {
 
 function findTarget(targets: TargetInfo[], filter: string): TargetInfo | undefined {
   // Filter patterns: "sidepanel", "sw", "sandbox", or URL/title substring
-  const f = filter.toLowerCase();
-  if (f === "sidepanel" || f === "panel") {
-    return targets.find((t) => t.url.includes(EXT_ID) && t.url.includes("sidepanel"));
+  const f = filter.toLowerCase().trim();
+  const extensionTargets = targets.filter((t) => t.url.includes(EXT_ID));
+  const findIn = (items: TargetInfo[]) =>
+    items.find(
+      (t) => t.url.toLowerCase().includes(f) || t.title.toLowerCase().includes(f),
+    );
+  const findExactOrSuffixIn = (items: TargetInfo[]) =>
+    items.find((t) => {
+      const url = t.url.toLowerCase();
+      return url === f || url.endsWith(f);
+    });
+
+  if (f === "sidepanel" || f === "panel" || f === "sidepanel.html") {
+    return (
+      extensionTargets.find((t) => t.url.toLowerCase().includes("sidepanel.html")) ||
+      extensionTargets.find((t) => t.url.toLowerCase().endsWith("/index.html")) ||
+      findIn(extensionTargets)
+    );
   }
   if (f === "sw" || f === "service-worker") {
     return targets.find(
@@ -218,12 +233,17 @@ function findTarget(targets: TargetInfo[], filter: string): TargetInfo | undefin
     );
   }
   if (f === "sandbox") {
-    return targets.find(
-      (t) => t.url.includes(EXT_ID) && t.url.includes("eval-sandbox"),
+    return (
+      extensionTargets.find((t) => t.url.toLowerCase().includes("eval-sandbox")) ||
+      findIn(extensionTargets)
     );
   }
-  return targets.find(
-    (t) => t.url.toLowerCase().includes(f) || t.title.toLowerCase().includes(f),
+
+  return (
+    findExactOrSuffixIn(extensionTargets) ||
+    findIn(extensionTargets) ||
+    findExactOrSuffixIn(targets) ||
+    findIn(targets)
   );
 }
 
