@@ -94,6 +94,7 @@ acceptance_ref: docs/<某设计文档>.md
 - `ISSUE-032` ChatView 拆分复查修复（done）
 - `ISSUE-033` LLM 模块提取残留清理（done）
 - `ISSUE-034` Sandbox 路径遍历防御 + CDP 安全加固（done）
+- `ISSUE-035` ProviderSettings 内置 Cursor profile canonicalization（done）
 
 ## 推荐领取顺序
 
