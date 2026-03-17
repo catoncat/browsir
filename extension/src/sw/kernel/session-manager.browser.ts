@@ -107,6 +107,21 @@ export class BrowserSessionManager {
     return readSessionMeta(sessionId);
   }
 
+  async updateMeta(
+    sessionId: string,
+    updater: (meta: SessionMeta) => SessionMeta,
+  ): Promise<SessionMeta> {
+    return this.withSessionWriteLock(sessionId, async () => {
+      const meta = await this.ensureSession(sessionId);
+      const next = updater(meta);
+      if (!next || next === meta) {
+        return meta;
+      }
+      await writeSessionMeta(sessionId, next);
+      return next;
+    });
+  }
+
   async getLeaf(sessionId: string): Promise<string | null> {
     const meta = await this.ensureSession(sessionId);
     return meta.leafId;

@@ -5,7 +5,6 @@ import {
   removeSessionIndexEntry,
   removeSessionMeta,
   removeTraceRecords,
-  writeSessionMeta,
 } from "../session-store.browser";
 import { nowIso } from "../types";
 import { clearSessionPreferences } from "../cursor-help-slot-preferences";
@@ -118,18 +117,20 @@ export async function handleSession(
       if (!manualTitle) {
         return fail("title 不能为空");
       }
-      const metadata = {
-        ...toRecord(meta.header.metadata),
-        titleSource: SESSION_TITLE_SOURCE_MANUAL,
-      };
-      await writeSessionMeta(sessionId, {
-        ...meta,
-        header: {
-          ...meta.header,
-          title: manualTitle,
-          metadata,
-        },
-        updatedAt: nowIso(),
+      await orchestrator.sessions.updateMeta(sessionId, (latestMeta) => {
+        const metadata = {
+          ...toRecord(latestMeta.header.metadata),
+          titleSource: SESSION_TITLE_SOURCE_MANUAL,
+        };
+        return {
+          ...latestMeta,
+          header: {
+            ...latestMeta.header,
+            title: manualTitle,
+            metadata,
+          },
+          updatedAt: nowIso(),
+        };
       });
       return ok({
         sessionId,
@@ -148,14 +149,14 @@ export async function handleSession(
         currentTitle || deriveSessionTitleFromEntries(entries);
       const normalizedFallback = normalizeSessionTitle(fallbackTitle, "新对话");
       if (normalizedFallback && normalizedFallback !== currentTitle) {
-        await writeSessionMeta(sessionId, {
-          ...meta,
+        await orchestrator.sessions.updateMeta(sessionId, (latestMeta) => ({
+          ...latestMeta,
           header: {
-            ...meta.header,
+            ...latestMeta.header,
             title: normalizedFallback,
           },
           updatedAt: nowIso(),
-        });
+        }));
       }
       return ok({
         sessionId,

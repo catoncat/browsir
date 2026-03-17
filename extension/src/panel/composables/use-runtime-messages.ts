@@ -140,7 +140,12 @@ export function useRuntimeMessages(deps: RuntimeMessagesDeps) {
     if (eventSessionId === deps.activeSessionId.value) {
       deps.applyRuntimeEventToolRun(payload.event);
       void deps.runSafely(
-        () => deps.loadConversation(eventSessionId, { setActive: false }),
+        async () => {
+          await deps.loadConversation(eventSessionId, { setActive: false });
+          if (brainEventType === "session_title_auto_updated") {
+            await deps.refreshSessions();
+          }
+        },
         "刷新会话失败",
       );
       return;

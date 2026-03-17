@@ -267,6 +267,15 @@ export async function handleBrainRun(
       reason: "edit_user_rerun",
     });
 
+    if (autoRun && mode === "retry") {
+      const settleDeadline = Date.now() + 300;
+      while (
+        orchestrator.getRunState(runSessionId).running &&
+        Date.now() < settleDeadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
     const out = await runtimeLoop.startFromPrompt({
       sessionId: runSessionId,
       prompt: editedPrompt,

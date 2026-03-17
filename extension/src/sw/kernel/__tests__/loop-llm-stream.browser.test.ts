@@ -117,4 +117,45 @@ describe("loop-llm-stream", () => {
     expect(result.result.finishReason).toBe("stop");
     expect(result.eventCount).toBe(3);
   });
+
+  it("parses hosted chat transport body into assistant message", () => {
+    const rawBody = [
+      JSON.stringify({
+        type: "hosted_chat.debug",
+        requestId: "req_1",
+        stage: "request_started",
+      }),
+      JSON.stringify({
+        type: "hosted_chat.stream_text_delta",
+        requestId: "req_1",
+        deltaText: "Cursor支持助手能力介绍",
+      }),
+      JSON.stringify({
+        type: "hosted_chat.turn_resolved",
+        requestId: "req_1",
+        result: {
+          assistantText: "Cursor支持助手能力介绍",
+          toolCalls: [],
+          finishReason: "stop",
+          meta: {
+            assistantTextLength: 17,
+          },
+        },
+      }),
+    ].join("\n");
+
+    expect(
+      parseLlmMessageFromBody(
+        rawBody,
+        "application/x-browser-brain-loop-hosted-chat+jsonl",
+      ),
+    ).toMatchObject({
+      content: "Cursor支持助手能力介绍",
+      tool_calls: [],
+      finish_reason: "stop",
+      meta: {
+        assistantTextLength: 17,
+      },
+    });
+  });
 });

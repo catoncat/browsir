@@ -270,6 +270,43 @@ export function hostedChatTurnToMessage(
   };
 }
 
+function parseHostedChatMessageFromTransportBody(rawBody: string): JsonRecord {
+  const lines = String(rawBody || "").split(/\r?\n/);
+  let resolved: HostedChatTurnResult | null = null;
+  let transportError: { message: string; meta: JsonRecord } | null = null;
+
+  for (const rawLine of lines) {
+    const line = String(rawLine || "").trim();
+    if (!line) continue;
+    const event = parseHostedChatTransportEvent(line);
+    if (!event) continue;
+    if (event.type === "hosted_chat.turn_resolved") {
+      resolved = event.result;
+      continue;
+    }
+    if (event.type === "hosted_chat.transport_error") {
+      transportError = {
+        message: event.error,
+        meta: toRecord(event.meta),
+      };
+    }
+  }
+
+  if (resolved) {
+    return hostedChatTurnToMessage(resolved);
+  }
+  if (transportError) {
+    return {
+      content: "",
+      tool_calls: [],
+      finish_reason: "transport_error",
+      meta: transportError.meta,
+      error: transportError.message,
+    };
+  }
+  return {};
+}
+
 export function buildHostedChatEventPayload(
   step: number,
   attempt: number,
@@ -329,6 +366,11 @@ export function parseLlmMessageFromBody(
 ): JsonRecord {
   const body = String(rawBody || "");
   const lowerType = String(contentType || "").toLowerCase();
+  if (
+    lowerType.includes("application/x-browser-brain-loop-hosted-chat+jsonl")
+  ) {
+    return parseHostedChatMessageFromTransportBody(body);
+  }
   if (
     lowerType.includes("text/event-stream") ||
     body.trim().startsWith("data:")

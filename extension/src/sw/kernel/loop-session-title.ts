@@ -2,7 +2,6 @@ import type { BrainOrchestrator } from "./orchestrator.browser";
 import type { LlmResolvedRoute } from "./llm-provider";
 import { LlmProviderRegistry } from "./llm-provider-registry";
 import type { RuntimeInfraHandler } from "./runtime-infra.browser";
-import { writeSessionMeta } from "./session-store.browser";
 import {
   DEFAULT_LLM_TIMEOUT_MS,
   MAX_LLM_TIMEOUT_MS,
@@ -21,6 +20,14 @@ import {
 import { type SessionMeta } from "./types";
 import { parseLlmMessageFromBody } from "./loop-llm-stream";
 import { resolveAuxiliaryLlmRoute } from "./loop-llm-route";
+
+const AUTO_TITLE_INITIAL_DONE_KEY = "autoTitleInitialDone";
+const AUTO_TITLE_LAST_INTERVAL_COUNT_KEY = "autoTitleLastIntervalCount";
+
+interface AutoTitleRefreshState {
+  initialDone: boolean;
+  lastIntervalCount: number;
+}
 
 export function normalizeSessionTitle(value: unknown, fallback = ""): string {
   const compact = String(value || "")
@@ -65,6 +72,81 @@ export function withSessionTitleMeta(
       ...meta.header,
       title,
       metadata,
+    },
+  };
+}
+
+function readAutoTitleRefreshState(meta: SessionMeta | null): AutoTitleRefreshState {
+  const metadata = toRecord(meta?.header?.metadata);
+  return {
+    initialDone: metadata[AUTO_TITLE_INITIAL_DONE_KEY] === true,
+    lastIntervalCount: normalizeIntInRange(
+      metadata[AUTO_TITLE_LAST_INTERVAL_COUNT_KEY],
+      0,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
+  };
+}
+
+function withAutoTitleRefreshState(
+  meta: SessionMeta,
+  state: AutoTitleRefreshState,
+): SessionMeta {
+  const current = readAutoTitleRefreshState(meta);
+  if (
+    current.initialDone === state.initialDone &&
+    current.lastIntervalCount === state.lastIntervalCount
+  ) {
+    return meta;
+  }
+  const metadata = {
+    ...toRecord(meta.header.metadata),
+    [AUTO_TITLE_INITIAL_DONE_KEY]: state.initialDone,
+    [AUTO_TITLE_LAST_INTERVAL_COUNT_KEY]: state.lastIntervalCount,
+  };
+  return {
+    ...meta,
+    header: {
+      ...meta.header,
+      metadata,
+    },
+  };
+}
+
+function planAutoTitleRefresh(input: {
+  meta: SessionMeta;
+  messageCount: number;
+  interval: number;
+  force: boolean;
+}): { shouldRefresh: boolean; nextState: AutoTitleRefreshState } {
+  const state = readAutoTitleRefreshState(input.meta);
+  const intervalMilestone =
+    input.interval > 0
+      ? Math.floor(input.messageCount / input.interval) * input.interval
+      : 0;
+
+  if (input.force) {
+    return {
+      shouldRefresh: input.messageCount > 0,
+      nextState: {
+        initialDone: state.initialDone || input.messageCount > 0,
+        lastIntervalCount: Math.max(state.lastIntervalCount, intervalMilestone),
+      },
+    };
+  }
+
+  const shouldDoInitial = !state.initialDone && input.messageCount > 0;
+  const shouldDoInterval =
+    input.interval > 0 &&
+    intervalMilestone > 0 &&
+    intervalMilestone > state.lastIntervalCount;
+
+  return {
+    shouldRefresh: shouldDoInitial || shouldDoInterval,
+    nextState: {
+      initialDone: state.initialDone || shouldDoInitial,
+      lastIntervalCount: Math.max(state.lastIntervalCount, intervalMilestone),
     },
   };
 }
@@ -194,15 +276,27 @@ export async function refreshSessionTitleAuto(
   if (!resolvedRoute.ok) return;
   const route = resolvedRoute.route;
   const interval = config.autoTitleInterval;
+  let shouldRefresh = false;
+  let nextRefreshState: AutoTitleRefreshState | null = null;
+  await orchestrator.sessions.updateMeta(sessionId, (latestMeta) => {
+    if (readSessionTitleSource(latestMeta) === SESSION_TITLE_SOURCE_MANUAL && !options.force) {
+      return latestMeta;
+    }
+    const plan = planAutoTitleRefresh({
+      meta: latestMeta,
+      messageCount,
+      interval,
+      force: options.force === true,
+    });
+    if (!plan.shouldRefresh) {
+      return latestMeta;
+    }
+    shouldRefresh = true;
+    nextRefreshState = plan.nextState;
+    return withAutoTitleRefreshState(latestMeta, plan.nextState);
+  });
 
-  const isDefaultTitle =
-    !currentTitle || currentTitle === "新会话" || currentTitle === "新对话";
-  const shouldRefresh =
-    options.force ||
-    isDefaultTitle ||
-    (interval > 0 && messageCount > 0 && messageCount % interval === 0);
-
-  if (!shouldRefresh) return;
+  if (!shouldRefresh || !nextRefreshState) return;
 
   const derived = await requestSessionTitleFromLlm({
     sessionId,
@@ -212,16 +306,24 @@ export async function refreshSessionTitleAuto(
   });
   if (!derived) return;
 
-  const nextMeta = withSessionTitleMeta(
-    meta,
-    derived,
-    SESSION_TITLE_SOURCE_AI,
-  );
-  await writeSessionMeta(sessionId, {
-    ...nextMeta,
-    updatedAt: new Date().toISOString(),
+  let titleUpdated = false;
+  await orchestrator.sessions.updateMeta(sessionId, (latestMeta) => {
+    const latestTitle = normalizeSessionTitle(latestMeta.header.title, "");
+    const latestSource = readSessionTitleSource(latestMeta);
+    const scheduledMeta = withAutoTitleRefreshState(latestMeta, nextRefreshState!);
+    if (latestTitle === derived && latestSource === SESSION_TITLE_SOURCE_AI) {
+      return scheduledMeta;
+    }
+    titleUpdated = true;
+    return withSessionTitleMeta(
+      scheduledMeta,
+      derived,
+      SESSION_TITLE_SOURCE_AI,
+    );
   });
-  orchestrator.events.emit("session_title_auto_updated", sessionId, {
-    title: derived,
-  });
+  if (titleUpdated || currentTitle !== derived) {
+    orchestrator.events.emit("session_title_auto_updated", sessionId, {
+      title: derived,
+    });
+  }
 }

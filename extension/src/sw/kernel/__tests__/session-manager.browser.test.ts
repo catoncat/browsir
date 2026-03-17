@@ -87,4 +87,36 @@ describe("session-manager.browser", () => {
     expect(stored?.header.workingContext?.hostCwd).toBeUndefined();
     expect(stored?.header.workingContext?.browserCwd).toBe("mem://");
   });
+
+  it("updateMeta 与 appendMessage 并发时应保留标题和 entryCount", async () => {
+    const manager = new BrowserSessionManager();
+    const created = await manager.createSession({ title: "新对话" });
+    const sessionId = created.header.id;
+
+    await manager.appendMessage({
+      sessionId,
+      role: "user",
+      text: "第一条消息",
+    });
+
+    await Promise.all([
+      manager.updateMeta(sessionId, (meta) => ({
+        ...meta,
+        header: {
+          ...meta.header,
+          title: "自动标题",
+        },
+      })),
+      manager.appendMessage({
+        sessionId,
+        role: "assistant",
+        text: "第二条消息",
+      }),
+    ]);
+
+    const meta = await manager.getMeta(sessionId);
+    expect(meta?.header.title).toBe("自动标题");
+    expect(meta?.entryCount).toBe(2);
+    expect(String(meta?.leafId || "")).not.toBe("");
+  });
 });
