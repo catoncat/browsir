@@ -68,26 +68,16 @@ acceptance_ref: docs/<某设计文档>.md
 
 项目内也可以通过 repo skill `auto-claim-issues` 自动认领符合条件的 backlog slice。
 
-## 当前未完成项（2026-03-15 更新）
+## 当前未完成项（最新更新）
 
-以下清单用于快速派工；后续 agent 进入仓库时，优先看本节，不必先遍历整个目录。
-
-已完成的 26 项 backlog 已归档至 `archive/` 子目录。
-
-### 进行中
-
-1. `ISSUE-023` [cursor_help_web Pool 架构后续](./2026-03-15-cursor-help-pool-followup.md)
-  - `status: in-progress`
-  - `priority: p1`
-  - `parallel_group: cursor-help`
-  - `assignee: human`
-  - 说明：Provider 连通性由 human 接手。子 slice ISSUE-024/025/026/027 全部已完成，仅剩 S1（multi-conversation conversationKey）部分已落地首阶段。
+当前无正在进行中的 backlog。所有历史 issue 皆已完成并归档至 `archive/` 子目录。
 
 ### 已归档
 
 以下 issue 已完成并移入 `archive/` 子目录：
 
 - `ISSUE-021` ChatView 二阶段深拆（done）
+- `ISSUE-023` cursor_help_web Pool 架构后续（done，human 连通性收尾）
 - `ISSUE-024` Pool slot 自动扩缩容（done）
 - `ISSUE-030` web-chat-executor 正确性修复（done）
 - `ISSUE-031` web-chat-executor MEDIUM 改进（done）
@@ -95,12 +85,14 @@ acceptance_ref: docs/<某设计文档>.md
 - `ISSUE-033` LLM 模块提取残留清理（done）
 - `ISSUE-034` Sandbox 路径遍历防御 + CDP 安全加固（done）
 - `ISSUE-035` ProviderSettings 内置 Cursor profile canonicalization（done）
+- `ISSUE-035` web-chat-executor 拆分 — pool/execution/heartbeat/window 职责分离（done，注：早期有重名 ID）
+- `ISSUE-036` CDP 快照缺少 Accessibility.enable（done）
+- `ISSUE-037` fill_form post-verify always fails when verifyPolicy=off（done）
 
 ## 推荐领取顺序
 
-1. `ISSUE-023` 由 human 负责，agent 不要并行改其 `write_scope`。
-2. 所有 agent 可认领的 issue 已全部完成并归档。
-3. 如有新需求，创建新的 backlog slice。
+1. 暂无待领取的 open issue。
+2. 如有新需求，请创建新的 backlog slice。
 
 ## 维护规则
 

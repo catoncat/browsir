@@ -57,3 +57,19 @@ tags: [slice, cursor-help, pool, autoscaling]
 - [ ] 明确扩缩容时如何保留/迁移 slot affinity
 - [ ] 把扩缩容事件与当前 slotCount 接到 debug state
 - [ ] 补充至少一组扩缩容决策与冷却时间的回归测试
+
+## 完成总结（2026-03-16）
+
+ISSUE-024 已全部完成，实现内容包括：
+- 自动扩容：`tryAutoExpandPool()` 在排队时创建新 slot（上限 `MAX_CURSOR_HELP_POOL_SLOT_COUNT`）
+- 自动收缩：`tryAutoShrinkPool()` 在 idle 超时后回收 slot（下限 `MIN_CURSOR_HELP_POOL_SLOT_COUNT`）
+- 冷却时间：收缩后 60s 内不重复收缩，避免抖动
+- 亲和性保护：有 session affinity 的 slot 不回收
+- Debug 可见：`lastAutoscaleEventAt` / `lastAutoscaleEvent` / `slotCount`
+- 回归测试：4+ 个扩缩容测试全部通过（含 shrink cooldown / affinity 保护）
+
+验收状态：✅ 全部满足
+
+## 相关 commits
+
+- `47d5a74` feat(cursor-help): ISSUE-027/025/026/024 - Pool 优化完整实现
