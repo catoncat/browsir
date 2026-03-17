@@ -117,6 +117,20 @@ describe("config-store Phase 1", () => {
   });
 
   describe("normalizePanelConfig", () => {
+    it("defaults to builtin free and does not inject generic openai-compatible provider", () => {
+      const result = normalizePanelConfig({});
+
+      expect(result.llmDefaultProfile).toBe("cursor_help_web");
+      expect(result.llmAuxProfile).toBe("");
+      expect(result.llmFallbackProfile).toBe("");
+      expect(result.llmProviders.map((item) => item.id)).toEqual([
+        "cursor_help_web",
+      ]);
+      expect(result.llmProfiles.map((item) => item.id)).toEqual([
+        "cursor_help_web",
+      ]);
+    });
+
     it("migrates legacy config into target-state panel config and injects builtin provider/profile", () => {
       const result = normalizePanelConfig({
         bridgeUrl: "ws://127.0.0.1:8787/ws",
@@ -154,7 +168,7 @@ describe("config-store Phase 1", () => {
       expect(result.maxSteps).toBe(88);
 
       expect(result.llmProviders.map((item) => item.id)).toEqual(
-        expect.arrayContaining(["openai", "openai_compatible", "cursor_help_web"]),
+        expect.arrayContaining(["openai", "cursor_help_web"]),
       );
       expect(result.llmProfiles.map((item) => item.id)).toEqual(
         expect.arrayContaining(["writer", "cursor_help_web"]),
@@ -240,11 +254,11 @@ describe("config-store Phase 1", () => {
         ],
       });
 
-      expect(result.llmDefaultProfile).toBe("fallback");
+      expect(result.llmDefaultProfile).toBe("cursor_help_web");
       expect(result.llmAuxProfile).toBe("");
-      expect(result.llmFallbackProfile).toBe("");
+      expect(result.llmFallbackProfile).toBe("fallback");
       expect(result.llmProviders.map((item) => item.id)).toEqual(
-        expect.arrayContaining(["shared-openai", "openai_compatible", "cursor_help_web"]),
+        expect.arrayContaining(["shared-openai", "cursor_help_web"]),
       );
       expect(result.llmProfiles.map((item) => item.id)).toEqual(
         expect.arrayContaining(["fallback", "cursor_help_web"]),

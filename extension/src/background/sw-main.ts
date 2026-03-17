@@ -4,7 +4,7 @@ const orchestrator = new BrainOrchestrator();
 registerRuntimeRouter(orchestrator);
 
 const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:8787/ws";
-const DEFAULT_BRIDGE_TOKEN = "dev-token-change-me";
+const DEFAULT_BRIDGE_TOKEN = "";
 const DEV_RELOAD_DEFAULT_INTERVAL_MS = 1500;
 const DEV_RELOAD_IDLE_INTERVAL_MS = 1500;
 const DEV_RELOAD_MIN_INTERVAL_MS = 500;
@@ -72,7 +72,9 @@ async function loadDevReloadConfig(): Promise<{
   );
   const bridgeBase = resolveBridgeHttpBase(data.bridgeUrl);
   const token = String(data.bridgeToken || DEFAULT_BRIDGE_TOKEN);
-  const versionUrl = `${bridgeBase}/dev/version?token=${encodeURIComponent(token)}`;
+  const versionUrl = token
+    ? `${bridgeBase}/dev/version?token=${encodeURIComponent(token)}`
+    : `${bridgeBase}/dev/version`;
   return { enabled, intervalMs, versionUrl };
 }
 

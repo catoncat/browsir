@@ -69,6 +69,7 @@ function resolveBridgeHttpBase(bridgeUrlRaw: unknown): string {
 }
 
 function appendBridgeTokenToUrl(urlRaw: string, token: string): string {
+  if (!String(token || "").trim()) return urlRaw;
   const url = new URL(urlRaw);
   url.searchParams.set("token", token);
   return url.toString();
@@ -174,9 +175,6 @@ export async function publishDebugLinkToBridge(
   if (!bridgeUrl) {
     throw new Error("bridgeUrl 未配置");
   }
-  if (!bridgeToken) {
-    throw new Error("bridgeToken 未配置");
-  }
 
   const target = options.target || { kind: "session" as const };
   const kind = target.kind === "plugin" ? "plugin" : "session";
@@ -206,24 +204,25 @@ export async function publishDebugLinkToBridge(
   };
 
   const baseUrl = resolveBridgeHttpBase(bridgeUrl);
-  const response = await fetch(
-    `${baseUrl}/api/debug-snapshots?token=${encodeURIComponent(bridgeToken)}`,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        sessionId: sessionId || (pluginId || kind),
-        title:
-          clipText(options.title || "", 96)
-          || (kind === "plugin"
-            ? `插件调试 ${pluginId}`
-            : `会话调试 ${sessionId || "active"}`),
-        payload,
-      }),
-    },
+  const publishUrl = appendBridgeTokenToUrl(
+    `${baseUrl}/api/debug-snapshots`,
+    bridgeToken,
   );
+  const response = await fetch(publishUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      sessionId: sessionId || (pluginId || kind),
+      title:
+        clipText(options.title || "", 96)
+        || (kind === "plugin"
+          ? `插件调试 ${pluginId}`
+          : `会话调试 ${sessionId || "active"}`),
+      payload,
+    }),
+  });
 
   const result = toRecord(await response.json().catch(() => ({})));
   if (!response.ok || result.ok === false) {

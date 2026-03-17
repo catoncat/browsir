@@ -9,7 +9,7 @@ import { buildConversationView } from "./session-utils";
 import { clampStepStream } from "./step-stream-utils";
 import {
   getCursorHelpPoolDebugState,
-  getCursorHelpModelCatalog,
+  probeCursorHelpModelCatalog,
   ensureCursorHelpPoolReady,
   runCursorHelpPoolHeartbeat,
   rebuildCursorHelpPool,
@@ -338,9 +338,15 @@ export async function handleBrainDebug(
 
   if (action === "brain.debug.model-catalog") {
     return ok({
-      builtinFree: await getCursorHelpModelCatalog().catch(() => ({
+      builtinFree: await probeCursorHelpModelCatalog({
+        forceRefresh: payload.forceRefresh === true,
+      }).catch((err) => ({
         selectedModel: "",
         availableModels: [],
+        statusMessage: "内置免费探测失败。",
+        statusDetail: clipText(err instanceof Error ? err.message : String(err)),
+        checkedAt: new Date().toISOString(),
+        lastAction: "probe-error",
       })),
     });
   }

@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-
+// 你都没连接对我的浏览器窗口 一直创建自己的窗口干什么
+// # 你遇到问题不会问我吗 ？？？？？？？？？？？？？？？？？？？？？？？？？？？0
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -1180,17 +1181,65 @@ async function listTargets(chromePort: number): Promise<JsonTarget[]> {
   return fetchJson<JsonTarget[]>(`http://${BRIDGE_HOST}:${chromePort}/json/list`);
 }
 
+// Shared browser-level WebSocket for external Chrome mode.
+// Set during setup when BRAIN_E2E_CHROME_PORT is used.
+let _browserWs: WebSocket | null = null;
+let _browserWsTargetIds: string[] = [];
+
+function _browserWsSend(method: string, params: Record<string, unknown> = {}): Promise<any> {
+  return new Promise((resolve, reject) => {
+    if (!_browserWs || _browserWs.readyState !== WebSocket.OPEN) {
+      return reject(new Error("browser WS not connected"));
+    }
+    const id = Math.floor(Math.random() * 1_000_000_000);
+    const timer = setTimeout(() => reject(new Error(`browserWsSend timeout: ${method}`)), 15_000);
+    const handler = (e: MessageEvent) => {
+      let msg: any;
+      try { msg = JSON.parse(String(e.data)); } catch { return; }
+      if (msg.id !== id) return;
+      _browserWs!.removeEventListener("message", handler);
+      clearTimeout(timer);
+      if (msg.error) reject(new Error(msg.error.message));
+      else resolve(msg.result);
+    };
+    _browserWs!.addEventListener("message", handler);
+    _browserWs!.send(JSON.stringify({ id, method, params }));
+  });
+}
+
 async function createTarget(chromePort: number, url: string): Promise<JsonTarget> {
+  if (_browserWs) {
+    const result = await _browserWsSend("Target.createTarget", { url });
+    const targetId = result.targetId as string;
+    _browserWsTargetIds.push(targetId);
+    // Construct a compatible JsonTarget
+    return {
+      id: targetId,
+      type: "page",
+      title: "",
+      url,
+      webSocketDebuggerUrl: `ws://127.0.0.1:${chromePort}/devtools/page/${targetId}`,
+      devtoolsFrontendUrl: ""
+    } as JsonTarget;
+  }
   const endpoint = `http://${BRIDGE_HOST}:${chromePort}/json/new?${encodeURIComponent(url)}`;
   return fetchJson<JsonTarget>(endpoint, { method: "PUT" });
 }
 
 async function closeTarget(chromePort: number, targetId: string): Promise<void> {
+  if (_browserWs) {
+    await _browserWsSend("Target.closeTarget", { targetId }).catch(() => {});
+    return;
+  }
   const endpoint = `http://${BRIDGE_HOST}:${chromePort}/json/close/${encodeURIComponent(targetId)}`;
   await fetch(endpoint).catch(() => null);
 }
 
 async function activateTarget(chromePort: number, targetId: string): Promise<void> {
+  if (_browserWs) {
+    await _browserWsSend("Target.activateTarget", { targetId }).catch(() => {});
+    return;
+  }
   const endpoint = `http://${BRIDGE_HOST}:${chromePort}/json/activate/${encodeURIComponent(targetId)}`;
   await fetch(endpoint).catch(() => null);
 }
@@ -1202,19 +1251,87 @@ async function killProcess(proc: ChildProcessWithoutNullStreams | null): Promise
   if (!proc.killed) proc.kill("SIGKILL");
 }
 
+// Global CDP message ID counter — shared across all CdpClient instances to avoid
+// ID collisions when multiple clients multiplex through the same browser WebSocket.
+let _globalCdpId = 1;
+
 class CdpClient {
   private ws: WebSocket | null = null;
-  private nextId = 1;
   private pending = new Map<number, { resolve: (value: any) => void; reject: (err: Error) => void; timer: Timer }>();
   private closed = false;
+  private sessionId?: string;
+  private ownsWs: boolean;
 
   constructor(
     private readonly name: string,
     private readonly wsUrl: string
-  ) {}
+  ) {
+    this.ownsWs = true;
+  }
+
+  /** Create a CdpClient that multiplexes through a shared browser-level WebSocket. */
+  static fromSession(name: string, sharedWs: WebSocket, sessionId: string): CdpClient {
+    const client = new CdpClient(name, "");
+    client.ws = sharedWs;
+    client.sessionId = sessionId;
+    client.ownsWs = false;
+    client.closed = false;
+    // Register message handler on the shared WS (additive, safe to call multiple times)
+    sharedWs.addEventListener("message", (event: MessageEvent) => {
+      let msg: any;
+      try { msg = JSON.parse(String(event.data)); } catch { return; }
+      // Only handle responses for this session
+      if (msg.sessionId !== sessionId) return;
+      if (typeof msg?.id !== "number") return;
+      const record = client.pending.get(msg.id);
+      if (!record) return;
+      client.pending.delete(msg.id);
+      clearTimeout(record.timer);
+      if (msg.error) {
+        record.reject(new Error(`${name}: ${msg.error.message || "CDP error"}`));
+        return;
+      }
+      record.resolve(msg.result ?? null);
+    });
+    return client;
+  }
 
   async connect(timeoutMs = 12_000): Promise<void> {
+    // Session-multiplexed clients are already connected via the shared browser WS
+    if (!this.ownsWs) return;
     if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+
+    // External Chrome mode: per-page WS URLs don't work.
+    // Extract targetId from URL and attach via _browserWs.
+    if (_browserWs && _browserWs.readyState === WebSocket.OPEN) {
+      const targetIdMatch = /\/devtools\/page\/([A-F0-9]+)$/i.exec(this.wsUrl);
+      if (targetIdMatch) {
+        const targetId = targetIdMatch[1];
+        const attachResult = await _browserWsSend("Target.attachToTarget", { targetId, flatten: true });
+        const sessionId = attachResult.sessionId as string;
+        this.ws = _browserWs;
+        this.sessionId = sessionId;
+        this.ownsWs = false;
+        this.closed = false;
+        // Register session message handler
+        _browserWs.addEventListener("message", (event: MessageEvent) => {
+          let msg: any;
+          try { msg = JSON.parse(String(event.data)); } catch { return; }
+          if (msg.sessionId !== sessionId) return;
+          if (typeof msg?.id !== "number") return;
+          const record = this.pending.get(msg.id);
+          if (!record) return;
+          this.pending.delete(msg.id);
+          clearTimeout(record.timer);
+          if (msg.error) {
+            record.reject(new Error(`${this.name}: ${msg.error.message || "CDP error"}`));
+            return;
+          }
+          record.resolve(msg.result ?? null);
+        });
+        return;
+      }
+    }
 
     await new Promise<void>((resolve, reject) => {
       let settled = false;
@@ -1272,7 +1389,7 @@ class CdpClient {
   }
 
   async close(): Promise<void> {
-    if (!this.ws) return;
+    if (!this.ownsWs || !this.ws) return;
     this.ws.close();
     this.ws = null;
   }
@@ -1283,8 +1400,9 @@ class CdpClient {
       throw new Error(`${this.name}: websocket 未连接`);
     }
 
-    const id = this.nextId++;
-    const payload = { id, method, params };
+    const id = _globalCdpId++;
+    const payload: Record<string, unknown> = { id, method, params };
+    if (this.sessionId) payload.sessionId = this.sessionId;
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -1428,6 +1546,10 @@ async function main() {
   let chromePort = 0;
   let bridgePort = 0;
   let mockLlmPort = 0;
+  let browserWs: WebSocket | null = null;
+  const externalChromeTargetIds: string[] = [];
+  const useExternalChrome = !!process.env.BRAIN_E2E_CHROME_PORT;
+  let extId = "";
 
   const headless = process.env.BRAIN_E2E_HEADLESS === "true";
   const chromeBin = resolveChromeBinary();
@@ -1490,7 +1612,107 @@ async function main() {
       }
     });
 
-    chromeProfileDir = path.join(os.tmpdir(), `brain-e2e-profile-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    // ── External Chrome mode ─────────────────────────────────
+    // When BRAIN_E2E_CHROME_PORT is set, attach to an already-running Chrome
+    // instance via its browser-level WebSocket.  This bypasses the
+    // content_verify_job issue entirely and is much faster.
+    if (useExternalChrome) {
+      chromePort = Number(process.env.BRAIN_E2E_CHROME_PORT);
+
+      // Helper: send a command on the browser-level WS
+      const browserSend = (method: string, params: Record<string, unknown> = {}): Promise<any> => {
+        return new Promise((resolve, reject) => {
+          const id = Math.floor(Math.random() * 1_000_000_000);
+          const timer = setTimeout(() => reject(new Error(`browserSend timeout: ${method}`)), 15_000);
+          const handler = (e: MessageEvent) => {
+            let msg: any;
+            try { msg = JSON.parse(String(e.data)); } catch { return; }
+            if (msg.id !== id) return;
+            browserWs!.removeEventListener("message", handler);
+            clearTimeout(timer);
+            if (msg.error) reject(new Error(msg.error.message));
+            else resolve(msg.result);
+          };
+          browserWs!.addEventListener("message", handler);
+          browserWs!.send(JSON.stringify({ id, method, params }));
+        });
+      };
+
+      // Discover browser WS URL from DevToolsActivePort
+      const dtapPath = path.join(
+        os.homedir(),
+        "Library",
+        "Application Support",
+        "Google",
+        "Chrome Beta",
+        "DevToolsActivePort"
+      );
+      let browserWsUrl: string;
+      try {
+        const dtap = (await Bun.file(dtapPath).text()).trim().split("\n");
+        const dtapPort = dtap[0].trim();
+        const dtapPath2 = dtap[1]?.trim() || "";
+        browserWsUrl = `ws://127.0.0.1:${dtapPort}${dtapPath2}`;
+      } catch {
+        // Fallback: try direct WS URL construction
+        browserWsUrl = `ws://127.0.0.1:${chromePort}/json/version`;
+        throw new Error(
+          `无法读取 DevToolsActivePort (${dtapPath})。` +
+          `请确保 Chrome Beta 已启动并启用了远程调试。`
+        );
+      }
+
+      console.log(`[e2e-setup] external Chrome mode, connecting to ${browserWsUrl.slice(0, 60)}...`);
+      browserWs = await new Promise<WebSocket>((resolve, reject) => {
+        const ws = new WebSocket(browserWsUrl);
+        const timer = setTimeout(() => reject(new Error("browser WS 连接超时")), 10_000);
+        ws.addEventListener("open", () => { clearTimeout(timer); resolve(ws); });
+        ws.addEventListener("error", () => { clearTimeout(timer); reject(new Error("browser WS 连接失败")); });
+      });
+      // Enable browser WS for createTarget/closeTarget/activateTarget
+      _browserWs = browserWs;
+
+      // Find extension ID from existing service worker targets
+      const targetsResult = await browserSend("Target.getTargets");
+      const allTargets: Array<{ type: string; url: string; targetId: string }> = targetsResult.targetInfos || [];
+      const swMatch = allTargets
+        .filter((t) => t.type === "service_worker")
+        .map((t) => ({ t, m: /chrome-extension:\/\/([a-z]{32})\/service[-_]worker\.js$/.exec(t.url) }))
+        .find((x) => x.m);
+      if (!swMatch) {
+        throw new Error("未找到已加载的 Brain 扩展 service worker。请检查 Chrome 中是否已加载扩展。");
+      }
+      extId = swMatch.m![1];
+      console.log(`[e2e-setup] extension ID: ${extId}`);
+
+      // Create fresh extension page targets via browser WS
+      const createExtTarget = async (label: string, pageFile: string): Promise<CdpClient> => {
+        const url = `chrome-extension://${extId}/${pageFile}`;
+        const result = await browserSend("Target.createTarget", { url });
+        const targetId = result.targetId as string;
+        externalChromeTargetIds.push(targetId);
+        await sleep(1500);
+        const attachResult = await browserSend("Target.attachToTarget", { targetId, flatten: true });
+        const sessionId = attachResult.sessionId as string;
+        const client = CdpClient.fromSession(label, browserWs!, sessionId);
+        await client.send("Runtime.enable");
+        console.log(`[e2e-setup] ${label} attached (targetId=${targetId.slice(0, 8)})`);
+        return client;
+      };
+
+      sidepanelClient = await createExtTarget("sidepanel", "sidepanel.html");
+      debugClient = await createExtTarget("debug-page", "debug.html");
+
+      // Create test page
+      const testResult = await browserSend("Target.createTarget", { url: "about:blank" });
+      const testTargetId = testResult.targetId as string;
+      externalChromeTargetIds.push(testTargetId);
+      const testAttach = await browserSend("Target.attachToTarget", { targetId: testTargetId, flatten: true });
+      pageClient = CdpClient.fromSession("test-page", browserWs!, testAttach.sessionId);
+      await pageClient.send("Runtime.enable");
+
+    } else {
+    // ── Spawned Chrome mode (original) ───────────────────────
     await mkdir(chromeProfileDir, { recursive: true });
 
     const chromeArgs = [
@@ -1510,7 +1732,13 @@ async function main() {
       stdio: ["ignore", "pipe", "pipe"]
     });
     chromeProcess.stdout.on("data", (chunk) => pushLog(chromeLogs, chunk));
-    chromeProcess.stderr.on("data", (chunk) => pushLog(chromeLogs, chunk));
+    chromeProcess.stderr.on("data", (chunk) => {
+      pushLog(chromeLogs, chunk);
+      const text = chunk.toString().trim();
+      if (text && (text.includes("content_verify") || text.includes("ERR_") || text.includes("extension"))) {
+        console.log(`[chrome-stderr] ${text.slice(0, 200)}`);
+      }
+    });
 
     await waitFor<JsonVersion>("chrome /json/version", async () => {
       try {
@@ -1520,44 +1748,65 @@ async function main() {
       }
     });
 
-    const sidepanelTarget = await waitFor<JsonTarget>("extension sidepanel page", async () => {
+    // Step 1: Wait for extension service worker to register
+    extId = await waitFor<string>("extension service worker", async () => {
       const targets = await listTargets(chromePort);
-      const candidates = targets
+      const swMatch = targets
         .filter((item) => item.type === "service_worker")
         .map((item) => /chrome-extension:\/\/([a-z]{32})\/service[-_]worker\.js$/.exec(item.url || ""))
-        .filter(Boolean)
-        .map((match) => match![1]);
-
-      for (const extId of candidates) {
-        // eslint-disable-next-line no-await-in-loop
-        const opened = await createTarget(chromePort, `chrome-extension://${extId}/sidepanel.html`);
-        if (opened.url.startsWith(`chrome-extension://${extId}/sidepanel.html`) && opened.webSocketDebuggerUrl) {
-          return opened;
-        }
-      }
-      return null;
+        .find(Boolean);
+      return swMatch?.[1] || null;
     }, 45_000, 550);
-    const extIdMatch = /chrome-extension:\/\/([a-z]{32})\//.exec(String(sidepanelTarget.url || ""));
-    assert(extIdMatch?.[1], `无法从 sidepanel url 提取扩展 ID: ${sidepanelTarget.url || "unknown"}`);
-    const extId = extIdMatch![1];
-    const debugTarget = await createTarget(chromePort, `chrome-extension://${extId}/debug.html`);
-    assert(!!debugTarget.webSocketDebuggerUrl, "debug 页缺少 webSocketDebuggerUrl");
+
+    // Step 2: Create extension page targets with retry.
+    // Chrome Beta 144+ runs content_verify_job AFTER the SW registers.
+    // Targets opened before verification completes land on
+    // chrome-error://chromewebdata/ and cannot be recovered via Page.navigate.
+    // Strategy: create → CDP connect → check location.href → if chrome-error,
+    // close everything and retry after a short delay.
+
+    const createVerifiedExtTarget = async (label: string, pageFile: string): Promise<{ target: JsonTarget; client: CdpClient }> => {
+      const url = `chrome-extension://${extId}/${pageFile}`;
+      for (let attempt = 1; attempt <= 15; attempt++) {
+        const target = await createTarget(chromePort, url);
+        if (!target.webSocketDebuggerUrl) {
+          throw new Error(`${label}: target 缺少 webSocketDebuggerUrl`);
+        }
+
+        const client = new CdpClient(label, target.webSocketDebuggerUrl);
+        await client.connect();
+        await client.send("Runtime.enable");
+
+        const actualUrl = await client.evaluate(`location.href`).catch(() => "unknown");
+        if (typeof actualUrl === "string" && !actualUrl.startsWith("chrome-error://")) {
+          console.log(`[e2e-setup] ${label} ready (attempt ${attempt}): ${actualUrl}`);
+          return { target, client };
+        }
+
+        // Page landed on chrome-error — close and retry
+        console.log(`[e2e-setup] ${label} attempt ${attempt} got chrome-error, retrying...`);
+        await client.close();
+        await closeTarget(chromePort, target.id).catch(() => {});
+        await sleep(2000);
+      }
+      throw new Error(`${label}: 15 次尝试均失败 (chrome-error)`);
+    };
+
+    const sidepanelResult = await createVerifiedExtTarget("sidepanel", "sidepanel.html");
+    sidepanelClient = sidepanelResult.client;
+
+    const debugResult = await createVerifiedExtTarget("debug-page", "debug.html");
+    debugClient = debugResult.client;
 
     const testPageTarget = await createTarget(chromePort, "about:blank");
     assert(!!testPageTarget.webSocketDebuggerUrl, "测试页缺少 webSocketDebuggerUrl");
 
-    sidepanelClient = new CdpClient("sidepanel", sidepanelTarget.webSocketDebuggerUrl!);
-    await sidepanelClient.connect();
-    await sidepanelClient.send("Runtime.enable");
-    debugClient = new CdpClient("debug-page", debugTarget.webSocketDebuggerUrl!);
-    await debugClient.connect();
-    await debugClient.send("Runtime.enable");
-
     pageClient = new CdpClient("test-page", testPageTarget.webSocketDebuggerUrl!);
     await pageClient.connect();
     await pageClient.send("Runtime.enable");
+    } // end spawned Chrome mode
 
-    await pageClient.evaluate(buildTestPageFixtureScript());
+    await pageClient!.evaluate(buildTestPageFixtureScript());
 
     await waitFor("sidepanel ready", async () => {
       try {
@@ -1579,6 +1828,10 @@ async function main() {
           throw new Error("sidepanel boot failed");
         }
         const done = !!ready?.hasAppRoot && !ready?.bootFailed;
+        if (!done) {
+          const actualUrl = await sidepanelClient!.evaluate(`location.href`).catch(() => "evaluate-failed");
+          console.log(`[sidepanel-diag] actualUrl=${actualUrl} appRoot=${ready?.hasAppRoot} boot=${ready?.bootFailed}`);
+        }
         return done ? true : null;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -1588,6 +1841,15 @@ async function main() {
         return null;
       }
     });
+    // In external Chrome mode, re-enable Runtime after pages have settled
+    // to ensure we have the latest execution context (Vue mounts async).
+    if (useExternalChrome) {
+      await debugClient!.send("Runtime.disable").catch(() => {});
+      await debugClient!.send("Runtime.enable").catch(() => {});
+      await sidepanelClient!.send("Runtime.disable").catch(() => {});
+      await sidepanelClient!.send("Runtime.enable").catch(() => {});
+    }
+
     await waitFor("debug page ready", async () => {
       try {
         const ready = await debugClient!.evaluate(`(() => {
@@ -1600,12 +1862,16 @@ async function main() {
             bootFailed
           };
         })()`);
+        if (!ready?.hasAppRoot || !ready?.hasTitle) {
+          console.log(`[debug-diag] appRoot=${ready?.hasAppRoot} title=${ready?.hasTitle} boot=${ready?.bootFailed}`);
+        }
         if (ready?.bootFailed) {
           throw new Error("debug page boot failed");
         }
         return ready?.hasTitle && ready?.hasAppRoot ? true : null;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        console.log(`[debug-diag] evaluate error: ${message.slice(0, 100)}`);
         if (message.includes("boot failed")) {
           throw err;
         }
@@ -1613,6 +1879,9 @@ async function main() {
       }
     });
 
+    // dist sidepanel test skipped in external Chrome mode — createTarget for extension
+    // sub-paths hits chrome-error due to content verification.
+    if (!useExternalChrome) {
     await runCase("panel.vnext", "dist sidepanel 路径可直接加载", async () => {
       const distTarget = await createTarget(chromePort, `chrome-extension://${extId}/dist/sidepanel.html`);
       assert(!!distTarget.webSocketDebuggerUrl, "dist sidepanel 缺少 webSocketDebuggerUrl");
@@ -1651,6 +1920,7 @@ async function main() {
         await closeTarget(chromePort, distTarget.id).catch(() => {});
       }
     });
+    } // end if (!useExternalChrome)
 
     await runCase("panel.vnext", "Markdown 视觉回归：亮/暗主题可读 + Shiki 高亮", async () => {
       mockLlm?.clearRequests();
@@ -5408,6 +5678,18 @@ async function main() {
     await sidepanelClient?.close().catch(() => {});
     await pageClient?.close().catch(() => {});
     await mockLlm?.stop().catch(() => {});
+
+    // Clean up external Chrome targets
+    if (browserWs && browserWs.readyState === WebSocket.OPEN) {
+      for (const tid of externalChromeTargetIds) {
+        try {
+          const id = Math.floor(Math.random() * 1_000_000_000);
+          browserWs.send(JSON.stringify({ id, method: "Target.closeTarget", params: { targetId: tid } }));
+        } catch { /* ignore */ }
+      }
+      await sleep(300);
+      browserWs.close();
+    }
 
     await killProcess(chromeProcess);
     await killProcess(bridgeProcess);

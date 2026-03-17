@@ -44,7 +44,7 @@ export function loadConfig(): BridgeConfig {
   return {
     host: process.env.BRIDGE_HOST ?? "127.0.0.1",
     port: parseIntEnv("BRIDGE_PORT", 8787),
-    token: process.env.BRIDGE_TOKEN ?? "dev-token-change-me",
+    token: process.env.BRIDGE_TOKEN ?? "",
     mode,
     enableBashExec: process.env.BRIDGE_ENABLE_BASH_EXEC !== "false",
     roots,

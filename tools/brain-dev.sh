@@ -2,19 +2,19 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BRIDGE_TOKEN="${BRIDGE_TOKEN:-dev-token-change-me}"
+BRIDGE_TOKEN="${BRIDGE_TOKEN:-}"
 BRIDGE_BASE="${BRIDGE_BASE:-http://127.0.0.1:8787}"
 declare -a PIDS=()
 
-if [[ "$BRIDGE_TOKEN" == "dev-token-change-me" ]]; then
-  echo "[brain:dev] 使用默认 BRIDGE_TOKEN=dev-token-change-me（仅建议本地开发）"
+if [[ -z "$BRIDGE_TOKEN" ]]; then
+  echo "[brain:dev] BRIDGE_TOKEN 为空，开发态不校验 token"
 else
   echo "[brain:dev] 使用自定义 BRIDGE_TOKEN"
 fi
 
 echo "[brain:dev] bridge:  $BRIDGE_BASE"
 echo "[brain:dev] watcher: extension/**/*"
-echo "[brain:dev] 提示: 扩展里 Bridge Token 需与当前 BRIDGE_TOKEN 一致"
+echo "[brain:dev] 提示: 若设置了 BRIDGE_TOKEN，扩展里需保持一致"
 
 cleanup() {
   local code=$?
@@ -30,7 +30,13 @@ trap cleanup EXIT INT TERM
 
 if curl -fsS "${BRIDGE_BASE}/health" >/dev/null 2>&1; then
   echo "[brain:dev] 检测到已有 bridge 在运行，复用现有进程"
-  if curl -fsS --get --data-urlencode "token=${BRIDGE_TOKEN}" "${BRIDGE_BASE}/dev/version" >/dev/null 2>&1; then
+  if [[ -z "$BRIDGE_TOKEN" ]]; then
+    if curl -fsS "${BRIDGE_BASE}/dev/version" >/dev/null 2>&1; then
+      echo "[brain:dev] 复用无 token bridge（可触发扩展自动 reload）"
+    else
+      echo "[brain:dev] 警告: 当前 bridge 可能仍要求 token，watcher 可能无法自动 reload"
+    fi
+  elif curl -fsS --get --data-urlencode "token=${BRIDGE_TOKEN}" "${BRIDGE_BASE}/dev/version" >/dev/null 2>&1; then
     echo "[brain:dev] token 校验通过（可触发扩展自动 reload）"
   else
     echo "[brain:dev] 警告: 当前 BRIDGE_TOKEN 与已运行 bridge 不一致，watcher 可能 401"

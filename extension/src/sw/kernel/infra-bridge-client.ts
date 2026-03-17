@@ -46,7 +46,7 @@ interface PendingInvoke {
 // ──────────────── constants ────────────────
 
 const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:8787/ws";
-const DEFAULT_BRIDGE_TOKEN = "dev-token-change-me";
+const DEFAULT_BRIDGE_TOKEN = "";
 const DEFAULT_BROWSER_RUNTIME_STRATEGY: BrowserRuntimeStrategy = "browser-first";
 const DEFAULT_BRIDGE_INVOKE_TIMEOUT_MS = 120_000;
 const MAX_BRIDGE_INVOKE_TIMEOUT_MS = 300_000;
@@ -57,6 +57,9 @@ const MAX_LLM_RETRY_MAX_ATTEMPTS = 6;
 const DEFAULT_LLM_MAX_RETRY_DELAY_MS = 60_000;
 const MAX_LLM_MAX_RETRY_DELAY_MS = 300_000;
 const MAX_CUSTOM_SYSTEM_PROMPT_CHARS = 12_000;
+const BUILTIN_CURSOR_HELP_PROFILE_ID = "cursor_help_web";
+const BUILTIN_CURSOR_HELP_PROVIDER_ID = "cursor_help_web";
+const BUILTIN_CURSOR_HELP_MODEL_ID = "auto";
 
 // ──────────────── pure helpers ────────────────
 
@@ -96,8 +99,8 @@ function normalizeCustomSystemPrompt(raw: unknown, fallback = ""): string {
 }
 
 function normalizeStoredLlmProfiles(raw: unknown): unknown {
-  if (!Array.isArray(raw)) return raw;
-  return raw.map((item) => {
+  const source = Array.isArray(raw) ? raw : [];
+  const normalized = source.map((item) => {
     const row = asRecord(item);
     const { role: _role, ...rest } = row;
     const connection = normalizeProviderConnectionConfig({
@@ -111,6 +114,23 @@ function normalizeStoredLlmProfiles(raw: unknown): unknown {
       llmApiKey: connection.llmApiKey,
     };
   });
+  if (
+    !normalized.some(
+      (item) => String(asRecord(item).id || "").trim() === BUILTIN_CURSOR_HELP_PROFILE_ID,
+    )
+  ) {
+    normalized.push({
+      id: BUILTIN_CURSOR_HELP_PROFILE_ID,
+      provider: BUILTIN_CURSOR_HELP_PROVIDER_ID,
+      llmApiBase: "",
+      llmApiKey: "",
+      llmModel: BUILTIN_CURSOR_HELP_MODEL_ID,
+      providerOptions: {
+        targetSite: "cursor_help",
+      },
+    });
+  }
+  return normalized;
 }
 
 function collectStoredProfileIds(raw: unknown): Set<string> {
@@ -132,6 +152,22 @@ function normalizeOptionalProfileId(
   if (!id || id === defaultProfile) return "";
   if (validIds.size > 0 && !validIds.has(id)) return "";
   return id;
+}
+
+function resolveStoredDefaultProfileId(
+  raw: unknown,
+  validIds: Set<string>,
+): string {
+  const requested = String(raw || "").trim();
+  if (requested && validIds.has(requested)) return requested;
+  if (validIds.has(BUILTIN_CURSOR_HELP_PROFILE_ID)) {
+    return BUILTIN_CURSOR_HELP_PROFILE_ID;
+  }
+  const first = validIds.values().next();
+  if (!first.done && String(first.value || "").trim()) {
+    return String(first.value || "").trim();
+  }
+  return requested || "default";
 }
 
 export function isRetryableBridgeCode(code: string): boolean {
@@ -330,9 +366,11 @@ export function createBridgeClient(): BridgeClient {
       "devReloadIntervalMs",
     ]);
     const llmProfiles = normalizeStoredLlmProfiles(data.llmProfiles);
-    const llmDefaultProfile =
-      String(data.llmDefaultProfile || "default").trim() || "default";
     const validProfileIds = collectStoredProfileIds(llmProfiles);
+    const llmDefaultProfile = resolveStoredDefaultProfileId(
+      data.llmDefaultProfile,
+      validProfileIds,
+    );
     bridgeConfigCache = {
       bridgeUrl: String(data.bridgeUrl || DEFAULT_BRIDGE_URL),
       bridgeToken: String(data.bridgeToken || DEFAULT_BRIDGE_TOKEN),
@@ -394,16 +432,18 @@ export function createBridgeClient(): BridgeClient {
   async function saveBridgeConfig(payload: unknown): Promise<BridgeConfig> {
     const source = asRecord(payload);
     const current = await getBridgeConfig();
-    const llmDefaultProfile =
-      String(
-        source.llmDefaultProfile || current.llmDefaultProfile || "default",
-      ).trim() || "default";
     const llmProfiles = normalizeStoredLlmProfiles(
       source.llmProfiles !== undefined
         ? source.llmProfiles
         : current.llmProfiles,
     );
     const validProfileIds = collectStoredProfileIds(llmProfiles);
+    const llmDefaultProfile = resolveStoredDefaultProfileId(
+      source.llmDefaultProfile !== undefined
+        ? source.llmDefaultProfile
+        : current.llmDefaultProfile,
+      validProfileIds,
+    );
     const next: BridgeConfig = {
       bridgeUrl: String(
         source.bridgeUrl || current.bridgeUrl || DEFAULT_BRIDGE_URL,
@@ -504,7 +544,11 @@ export function createBridgeClient(): BridgeClient {
     bridgeConnectPromise = (async () => {
       const config = await getBridgeConfig();
       const wsUrl = new URL(config.bridgeUrl);
-      wsUrl.searchParams.set("token", config.bridgeToken);
+      if (String(config.bridgeToken || "").trim()) {
+        wsUrl.searchParams.set("token", config.bridgeToken);
+      } else {
+        wsUrl.searchParams.delete("token");
+      }
       const wsHref = wsUrl.toString();
 
       return await new Promise<WebSocket>((resolve, reject) => {

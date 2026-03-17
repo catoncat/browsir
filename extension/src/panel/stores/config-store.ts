@@ -100,6 +100,10 @@ export interface RuntimeHealth {
 export interface BuiltinFreeCatalog {
   selectedModel: string;
   availableModels: string[];
+  statusMessage?: string;
+  statusDetail?: string;
+  checkedAt?: string;
+  lastAction?: string;
 }
 
 export interface PanelLlmProvider {
@@ -585,24 +589,6 @@ function ensureBuiltinProviders(providers: PanelLlmProvider[]): PanelLlmProvider
     map.set(provider.id, provider);
   }
 
-  const openAi = map.get(DEFAULT_OPENAI_PROVIDER_ID);
-  map.set(DEFAULT_OPENAI_PROVIDER_ID, {
-    ...createBuiltinOpenAiCompatibleProvider(),
-    ...openAi,
-    id: DEFAULT_OPENAI_PROVIDER_ID,
-    name: openAi?.name || getProviderNameFromId(DEFAULT_OPENAI_PROVIDER_ID),
-    type: "model_llm",
-    apiConfig: {
-      ...createBuiltinOpenAiCompatibleProvider().apiConfig,
-      ...toRecord(openAi?.apiConfig),
-    },
-    options: {
-      ...toRecord(createBuiltinOpenAiCompatibleProvider().options),
-      ...toRecord(openAi?.options),
-    },
-    builtin: true,
-  });
-
   const cursor = map.get(CURSOR_HELP_WEB_PROVIDER_ID);
   map.set(CURSOR_HELP_WEB_PROVIDER_ID, {
     ...createBuiltinCursorHelpProvider(),
@@ -724,10 +710,7 @@ function normalizeProvider(
             ...toRecord(row.options),
           }
         : toRecord(row.options),
-    builtin:
-      row.builtin === true ||
-      id === CURSOR_HELP_WEB_PROVIDER_ID ||
-      id === DEFAULT_OPENAI_PROVIDER_ID,
+    builtin: row.builtin === true || id === CURSOR_HELP_WEB_PROVIDER_ID,
   };
 }
 
@@ -908,13 +891,14 @@ export function normalizeNewConfig(
     const id = normalizeId(value, "");
     return profileIdAliases.get(id) || id;
   };
-  const defaultProfile = normalizeId(
-    remapProfileId(raw?.llmDefaultProfile),
-    repairedProfiles[0]?.id || BUILTIN_CURSOR_HELP_PROFILE_ID,
-  );
-  const llmDefaultProfile = validProfileIds.has(defaultProfile)
-    ? defaultProfile
+  const builtinDefaultProfile = validProfileIds.has(BUILTIN_CURSOR_HELP_PROFILE_ID)
+    ? BUILTIN_CURSOR_HELP_PROFILE_ID
     : repairedProfiles[0]?.id || BUILTIN_CURSOR_HELP_PROFILE_ID;
+  const requestedDefaultProfile = remapProfileId(raw?.llmDefaultProfile);
+  const llmDefaultProfile =
+    requestedDefaultProfile && validProfileIds.has(requestedDefaultProfile)
+      ? requestedDefaultProfile
+      : builtinDefaultProfile;
   const auxProfile = remapProfileId(raw?.llmAuxProfile);
   const fallbackProfile = remapProfileId(raw?.llmFallbackProfile);
 
@@ -1073,7 +1057,7 @@ function normalizeHealth(
     llmDefaultProfile: String(raw?.llmDefaultProfile || ""),
     llmAuxProfile: String(raw?.llmAuxProfile || ""),
     llmFallbackProfile: String(raw?.llmFallbackProfile || ""),
-    llmProvider: String(raw?.llmProvider || DEFAULT_PANEL_LLM_PROVIDER),
+    llmProvider: String(raw?.llmProvider || CURSOR_HELP_WEB_PROVIDER_ID),
     llmModel: String(raw?.llmModel || DEFAULT_PANEL_LLM_MODEL),
     hasLlmApiKey: Boolean(raw?.hasLlmApiKey),
     systemPromptPreview: String(raw?.systemPromptPreview || ""),
@@ -1086,6 +1070,10 @@ function normalizeBuiltinFreeCatalog(
   return {
     selectedModel: String(raw?.selectedModel || "").trim(),
     availableModels: toStringList(raw?.availableModels),
+    statusMessage: String(raw?.statusMessage || "").trim(),
+    statusDetail: String(raw?.statusDetail || "").trim(),
+    checkedAt: String(raw?.checkedAt || "").trim(),
+    lastAction: String(raw?.lastAction || "").trim(),
   };
 }
 
@@ -1112,9 +1100,12 @@ export const useConfigStore = defineStore("config", () => {
     health.value = normalizeHealth(raw);
   }
 
-  async function loadBuiltinFreeCatalog(): Promise<void> {
+  async function loadBuiltinFreeCatalog(options?: {
+    forceRefresh?: boolean;
+  }): Promise<void> {
     const raw = await sendMessage<Record<string, unknown>>(
       "brain.debug.model-catalog",
+      options?.forceRefresh ? { forceRefresh: true } : {},
     );
     builtinFreeCatalog.value = normalizeBuiltinFreeCatalog(
       raw?.builtinFree && typeof raw.builtinFree === "object"

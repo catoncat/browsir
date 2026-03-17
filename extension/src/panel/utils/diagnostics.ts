@@ -111,6 +111,7 @@ function resolveBridgeHttpBase(bridgeUrlRaw: unknown): string {
 }
 
 function appendBridgeTokenToUrl(urlRaw: string, token: string): string {
+  if (!String(token || "").trim()) return urlRaw;
   const url = new URL(urlRaw);
   url.searchParams.set("token", token);
   return url.toString();
@@ -859,6 +860,42 @@ function buildLoopRuns(events: NormalizedStepEvent[]): Array<Record<string, unkn
   return runs;
 }
 
+function computeStepRange(events: NormalizedStepEvent[]): {
+  toolStepCount: number;
+  llmRequestCount: number;
+  stepRange: [number, number] | null;
+  llmRequestRange: [number, number] | null;
+} {
+  const toolSteps = new Set<number>();
+  const llmRequestSteps: number[] = [];
+
+  for (const event of events) {
+    const step = toPositiveInt(event.payload.step);
+    if (event.type.startsWith("step_") && step > 0) {
+      toolSteps.add(step);
+    }
+    if (event.type === "llm.request" && step > 0) {
+      llmRequestSteps.push(step);
+    }
+  }
+
+  const sortedToolSteps = Array.from(toolSteps).sort((a, b) => a - b);
+  const sortedLlmSteps = llmRequestSteps.slice().sort((a, b) => a - b);
+
+  return {
+    toolStepCount: sortedToolSteps.length,
+    llmRequestCount: llmRequestSteps.length,
+    stepRange:
+      sortedToolSteps.length > 0
+        ? [sortedToolSteps[0], sortedToolSteps[sortedToolSteps.length - 1]]
+        : null,
+    llmRequestRange:
+      sortedLlmSteps.length > 0
+        ? [sortedLlmSteps[0], sortedLlmSteps[sortedLlmSteps.length - 1]]
+        : null,
+  };
+}
+
 function buildRawEventTail(events: NormalizedStepEvent[], limit = 72): Array<Record<string, unknown>> {
   const tail = events.slice(-Math.max(1, limit));
   return tail.map((event) => ({
@@ -1298,16 +1335,17 @@ export async function publishDiagnosticsToBridge(
   if (!bridgeUrl) {
     throw new Error("bridgeUrl 未配置");
   }
-  if (!bridgeToken) {
-    throw new Error("bridgeToken 未配置");
-  }
 
   const { payload } = await collectDiagnostics(options);
   const sessionId = String(payload.sessionId || options.sessionId || "").trim();
   const title = clipText(options.title || sessionId || "未命名会话", 120);
   const baseUrl = resolveBridgeHttpBase(bridgeUrl);
 
-  const response = await fetch(`${baseUrl}/api/diagnostics?token=${encodeURIComponent(bridgeToken)}`, {
+  const publishUrl = appendBridgeTokenToUrl(
+    `${baseUrl}/api/diagnostics`,
+    bridgeToken,
+  );
+  const response = await fetch(publishUrl, {
     method: "POST",
     headers: {
       "content-type": "application/json"

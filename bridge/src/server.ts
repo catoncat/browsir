@@ -195,7 +195,8 @@ export function startBridgeServer(options: StartBridgeServerOptions = {}): Bun.S
     async fetch(req, serverRef) {
       const url = new URL(req.url);
       const tokenFromReq = url.searchParams.get("token") ?? req.headers.get("x-bridge-token") ?? "";
-      const tokenOk = tokenFromReq === config.token;
+      const authDisabled = !String(config.token || "").trim();
+      const tokenOk = authDisabled || tokenFromReq === config.token;
 
       if (url.pathname === "/health") {
         return Response.json({
@@ -785,8 +786,8 @@ export function startBridgeServer(options: StartBridgeServerOptions = {}): Bun.S
     config.auditPath,
   );
 
-  if (config.token === "dev-token-change-me") {
-    console.warn("[bridge] BRIDGE_TOKEN is using default value. Set BRIDGE_TOKEN in production.");
+  if (!String(config.token || "").trim()) {
+    console.warn("[bridge] BRIDGE_TOKEN is empty. Local dev auth is disabled.");
   }
 
   return server;

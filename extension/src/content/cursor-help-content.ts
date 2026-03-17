@@ -703,6 +703,44 @@ function isLikelyModelText(text: string): boolean {
   return !/[{}[\]<>]/.test(normalized);
 }
 
+function getModelControlText(node: Element): string {
+  return normalizeModelText(
+    [
+      node.getAttribute("aria-label") || "",
+      node.getAttribute("title") || "",
+      node.textContent || "",
+    ].join(" "),
+  );
+}
+
+function collectModelInfoFromNodes(nodes: Element[]): { selectedModel: string; availableModels: string[] } {
+  const candidates = new Set<string>();
+  let selectedModel = "";
+
+  for (const node of nodes) {
+    const text = getModelControlText(node);
+    if (!isLikelyModelText(text)) continue;
+    candidates.add(text);
+    if (!selectedModel) {
+      const selected =
+        node.getAttribute("aria-selected") === "true" ||
+        node.getAttribute("aria-checked") === "true" ||
+        node.getAttribute("data-state") === "checked";
+      if (selected) selectedModel = text;
+    }
+  }
+
+  const availableModels = Array.from(candidates).slice(0, 8);
+  if (!selectedModel && availableModels.length > 0) {
+    selectedModel = availableModels[0];
+  }
+
+  return {
+    selectedModel,
+    availableModels,
+  };
+}
+
 function findVisibleChatInput(): HTMLElement | null {
   const candidates = Array.from(document.querySelectorAll(CHAT_INPUT_SELECTOR)).filter(
     (node): node is HTMLElement => node instanceof HTMLElement
@@ -844,32 +882,16 @@ async function waitForPageSenderReady(timeoutMs = PAGE_SENDER_READY_TIMEOUT_MS):
 }
 
 function collectModelInfo(): { selectedModel: string; availableModels: string[] } {
-  const candidates = new Set<string>();
-  let selectedModel = "";
-
   const nodes = Array.from(document.querySelectorAll(MODEL_CONTROL_SELECTOR));
-  for (const node of nodes) {
-    if (!isElementVisible(node)) continue;
-    const text = normalizeModelText(node.textContent || "");
-    if (!isLikelyModelText(text)) continue;
-    candidates.add(text);
-    if (!selectedModel) {
-      const selected =
-        node.getAttribute("aria-selected") === "true" ||
-        node.getAttribute("aria-checked") === "true" ||
-        node.getAttribute("data-state") === "checked";
-      if (selected) selectedModel = text;
-    }
+  const visibleInfo = collectModelInfoFromNodes(nodes.filter((node) => isElementVisible(node)));
+  if (visibleInfo.availableModels.length > 0) {
+    const fallbackInfo = visibleInfo.selectedModel ? null : collectModelInfoFromNodes(nodes);
+    return {
+      selectedModel: visibleInfo.selectedModel || fallbackInfo?.selectedModel || visibleInfo.availableModels[0] || "",
+      availableModels: visibleInfo.availableModels
+    };
   }
-
-  const availableModels = Array.from(candidates).slice(0, 8);
-  if (!selectedModel && availableModels.length > 0) {
-    selectedModel = availableModels[0];
-  }
-  return {
-    selectedModel,
-    availableModels
-  };
+  return collectModelInfoFromNodes(nodes);
 }
 
 function ensurePageHookInjected(): Promise<void> {

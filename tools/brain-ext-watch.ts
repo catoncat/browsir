@@ -6,8 +6,10 @@ import path from "node:path";
 
 const extensionDir = path.resolve(process.cwd(), "extension");
 const bridgeBase = (process.env.BRIDGE_BASE ?? "http://127.0.0.1:8787").replace(/\/$/, "");
-const bridgeToken = process.env.BRIDGE_TOKEN ?? "dev-token-change-me";
-const bumpUrl = `${bridgeBase}/dev/bump?token=${encodeURIComponent(bridgeToken)}`;
+const bridgeToken = process.env.BRIDGE_TOKEN ?? "";
+const bumpUrl = bridgeToken
+  ? `${bridgeBase}/dev/bump?token=${encodeURIComponent(bridgeToken)}`
+  : `${bridgeBase}/dev/bump`;
 
 const ignorePatterns = [/^\./, /(^|\/)\./, /\.swp$/, /\.tmp$/, /~$/];
 

@@ -43,6 +43,14 @@ export interface CustomProviderDraft {
   supportedModels: string[];
 }
 
+export interface CustomProviderSummary {
+  id: string;
+  name: string;
+  apiBase: string;
+  selectedModels: string[];
+  selectedModelCount: number;
+}
+
 function trim(value: unknown): string {
   return String(value || "").trim();
 }
@@ -384,6 +392,63 @@ function collectCustomProviderModels(
   return out;
 }
 
+function collectExplicitProviderModels(provider: PanelLlmProvider): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  appendUnique(out, seen, provider.apiConfig?.defaultModel);
+  for (const model of provider.apiConfig?.supportedModels || []) {
+    appendUnique(out, seen, model);
+  }
+  return out;
+}
+
+function resolveSelectedProviderModels(
+  config: PanelConfigNew,
+  provider: PanelLlmProvider,
+): string[] {
+  const explicit = collectExplicitProviderModels(provider);
+  if (explicit.length > 0) return explicit;
+  return collectProviderAssignedModels(config, provider.id);
+}
+
+export function listCustomProviders(
+  config: PanelConfigNew,
+): CustomProviderSummary[] {
+  return config.llmProviders
+    .filter(
+      (provider) =>
+        !provider.builtin &&
+        trim(provider.id) !== BUILTIN_CURSOR_HELP_PROFILE_ID &&
+        provider.type === "model_llm",
+    )
+    .map((provider) => {
+      const selectedModels = resolveSelectedProviderModels(config, provider);
+      return {
+        id: provider.id,
+        name: trim(provider.name) || trim(provider.id),
+        apiBase: trim(provider.apiConfig?.apiBase),
+        selectedModels,
+        selectedModelCount: selectedModels.length,
+      };
+    });
+}
+
+export function readCustomProviderDraft(
+  config: PanelConfigNew,
+  providerId: string,
+): CustomProviderDraft | null {
+  const provider = findProvider(config, providerId);
+  if (!provider) return null;
+  if (provider.builtin) return null;
+  if (trim(provider.id) === BUILTIN_CURSOR_HELP_PROFILE_ID) return null;
+  return {
+    providerName: trim(provider.name) || trim(provider.id),
+    apiBase: trim(provider.apiConfig?.apiBase),
+    apiKey: String(provider.apiConfig?.apiKey || ""),
+    supportedModels: resolveSelectedProviderModels(config, provider),
+  };
+}
+
 export function createSceneModelValue(providerId: string, modelId: string): string {
   const normalizedProviderId = trim(providerId);
   const normalizedModelId = trim(modelId);
@@ -558,6 +623,7 @@ export function applySceneModelDraft(
 export function upsertCustomProvider(
   config: PanelConfigNew,
   draft: CustomProviderDraft,
+  existingProviderId?: string,
 ): PanelLlmProvider {
   const providerName = trim(draft.providerName);
   const apiBase = trim(draft.apiBase);
@@ -567,6 +633,9 @@ export function upsertCustomProvider(
   );
 
   let provider =
+    config.llmProviders.find(
+      (item) => trim(item.id) === trim(existingProviderId),
+    ) ||
     config.llmProviders.find(
       (item) =>
         trim(item.id) !== BUILTIN_CURSOR_HELP_PROFILE_ID &&
@@ -594,10 +663,15 @@ export function upsertCustomProvider(
 
   provider.name = providerName;
   provider.type = "model_llm";
+  const previousDefaultModel = trim(provider.apiConfig?.defaultModel);
+  const defaultModel =
+    supportedModels.find((item) => item === previousDefaultModel) ||
+    supportedModels[0] ||
+    undefined;
   provider.apiConfig = {
     apiBase,
     apiKey,
-    defaultModel: supportedModels[0] || provider.apiConfig?.defaultModel,
+    defaultModel,
     supportedModels,
     supportsModelDiscovery: supportedModels.length > 0,
   };

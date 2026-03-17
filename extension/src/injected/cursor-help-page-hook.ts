@@ -1,4 +1,5 @@
 import {
+  inspectCursorHelpNativeModelCatalog,
   locateCursorHelpNativeSender,
   resolveNativeSenderInputText,
   type NativeSender
@@ -739,6 +740,7 @@ async function waitForNativeSender(timeoutMs = 2_500): Promise<NativeSender | nu
 
 function inspectSender(): CursorHelpSenderInspect {
   const sender = locateNativeSender();
+  const modelCatalog = inspectCursorHelpNativeModelCatalog(document);
   const senderReady = Boolean(sender);
   const senderKind = sender?.senderKind;
   const rewriteStrategy = resolveCursorHelpRewriteStrategy();
@@ -748,6 +750,8 @@ function inspectSender(): CursorHelpSenderInspect {
     fetchHookReady: document.documentElement?.getAttribute(FETCH_HOOK_READY_ATTR) === "1",
     senderReady,
     canExecute: Boolean(sender && document.documentElement?.getAttribute(FETCH_HOOK_READY_ATTR) === "1"),
+    selectedModel: modelCatalog.selectedModel || undefined,
+    availableModels: modelCatalog.availableModels,
     senderKind,
     lastSenderError: senderReady ? "" : lastSenderError,
     pageRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,

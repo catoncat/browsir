@@ -5,6 +5,12 @@ export interface NativeSender {
   submit: (text: string, requestedModel?: string) => Promise<void>;
 }
 
+export interface NativeModelCatalog {
+  selectedModel: string;
+  availableModels: string[];
+  probeCount: number;
+}
+
 interface SenderActionCandidate {
   displayName: string;
   propName: string;
@@ -30,6 +36,12 @@ const SUBMIT_PROP_SCORE: Array<{ pattern: RegExp; base: number }> = [
   { pattern: /^(submit|send)$/i, base: 84 },
   { pattern: /(submit|send|commit|dispatch)/i, base: 72 }
 ];
+const MODEL_NAME_PATTERN =
+  /\b(?:claude|sonnet|opus|haiku|gpt|gemini|cursor|o1|o3|o4)(?:[\s/_-]*(?:\d+(?:\.\d+)?|mini|nano|pro|flash|max|thinking|fast|preview|turbo|reasoning|auto|sonnet|opus|haiku))*\b/i;
+const MODEL_SELECTED_KEY_PATTERN = /(selected|current|active|default).*model|^(selected|current|active|default)$|^model(?:Id|Name)?$/i;
+const MODEL_COLLECTION_KEY_PATTERN = /(available)?models?|model(?:Options|List|Catalog|Choices)|options/i;
+const MODEL_OPTION_TEXT_KEYS = ["label", "name", "title", "model", "modelName", "id", "value", "slug"] as const;
+const MODEL_OPTION_SELECTED_KEYS = ["selected", "isSelected", "active", "isActive", "checked", "default", "isDefault"] as const;
 
 export function resolveNativeSenderInputText(latestUserPrompt: unknown, compiledPrompt: unknown): string {
   const latest = String(latestUserPrompt || "").trim();
@@ -41,6 +53,112 @@ export function resolveNativeSenderInputText(latestUserPrompt: unknown, compiled
 
 function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
+}
+
+function normalizeModelText(text: unknown): string {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function isLikelyModelText(text: unknown): boolean {
+  const normalized = normalizeModelText(text);
+  if (!normalized || normalized.length < 2 || normalized.length > 80) return false;
+  if (!MODEL_NAME_PATTERN.test(normalized)) return false;
+  return !/[{}[\]<>]/.test(normalized);
+}
+
+function isSelectedModelOption(value: unknown): boolean {
+  const row = toRecord(value);
+  return MODEL_OPTION_SELECTED_KEYS.some((key) => row[key] === true);
+}
+
+function readModelTextFromObject(value: unknown): string {
+  const row = toRecord(value);
+  for (const key of MODEL_OPTION_TEXT_KEYS) {
+    const candidate = row[key];
+    if (isLikelyModelText(candidate)) {
+      return normalizeModelText(candidate);
+    }
+  }
+  return "";
+}
+
+function collectModelCatalogFromValue(
+  value: unknown,
+  state: { selectedModel: string; availableModels: Set<string> },
+  options: {
+    keyHint?: string;
+    selectedHint?: boolean;
+    collectionHint?: boolean;
+    depth: number;
+    visited: WeakSet<object>;
+    budget: { remaining: number };
+  },
+): void {
+  if (options.budget.remaining <= 0 || value === null || value === undefined) return;
+  options.budget.remaining -= 1;
+
+  if (typeof value === "string") {
+    if (!isLikelyModelText(value)) return;
+    const normalized = normalizeModelText(value);
+    state.availableModels.add(normalized);
+    if (!state.selectedModel && options.selectedHint) {
+      state.selectedModel = normalized;
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 24)) {
+      collectModelCatalogFromValue(item, state, {
+        ...options,
+        collectionHint: true,
+        depth: options.depth + 1,
+      });
+    }
+    return;
+  }
+
+  if (typeof value !== "object") return;
+  if (options.depth >= 5) return;
+  if (typeof Element !== "undefined" && value instanceof Element) return;
+  if (typeof Document !== "undefined" && value instanceof Document) return;
+  if (typeof Window !== "undefined" && value instanceof Window) return;
+  if (options.visited.has(value as object)) return;
+  options.visited.add(value as object);
+
+  const objectModelText = readModelTextFromObject(value);
+  if (objectModelText && (options.collectionHint || options.selectedHint || isSelectedModelOption(value))) {
+    state.availableModels.add(objectModelText);
+    if (!state.selectedModel && (options.selectedHint || isSelectedModelOption(value))) {
+      state.selectedModel = objectModelText;
+    }
+  }
+
+  const row = toRecord(value);
+  const entries = Object.entries(row).slice(0, 24);
+  for (const [key, nested] of entries) {
+    const modelKey = /model/i.test(key);
+    const selectedHint = options.selectedHint || MODEL_SELECTED_KEY_PATTERN.test(key);
+    const collectionHint = options.collectionHint || MODEL_COLLECTION_KEY_PATTERN.test(key) || modelKey;
+    const shouldTraverseGenericObject =
+      !modelKey &&
+      !collectionHint &&
+      !selectedHint &&
+      typeof nested === "object" &&
+      nested !== null &&
+      options.depth < 2;
+    if (!shouldTraverseGenericObject && !modelKey && !collectionHint && !selectedHint && typeof nested !== "string" && !Array.isArray(nested)) {
+      continue;
+    }
+    collectModelCatalogFromValue(nested, state, {
+      keyHint: key,
+      selectedHint,
+      collectionHint,
+      depth: options.depth + 1,
+      visited: options.visited,
+      budget: options.budget,
+    });
+  }
 }
 
 function getReactFiber(node: Element): JsonRecord | null {
@@ -241,6 +359,67 @@ function findBestSenderAction(element: HTMLElement): SenderActionCandidate | nul
   }
 
   return best;
+}
+
+function inspectModelCatalogAroundElement(element: HTMLElement): NativeModelCatalog {
+  let fiber = getReactFiber(element);
+  let depth = 0;
+  const state = {
+    selectedModel: "",
+    availableModels: new Set<string>(),
+  };
+
+  while (fiber && depth < 40) {
+    collectModelCatalogFromValue(getFiberMemoizedProps(fiber), state, {
+      keyHint: "memoizedProps",
+      selectedHint: false,
+      collectionHint: false,
+      depth: 0,
+      visited: new WeakSet<object>(),
+      budget: { remaining: 200 },
+    });
+    collectModelCatalogFromValue(fiber.memoizedState, state, {
+      keyHint: "memoizedState",
+      selectedHint: false,
+      collectionHint: false,
+      depth: 0,
+      visited: new WeakSet<object>(),
+      budget: { remaining: 200 },
+    });
+    const parent = fiber.return;
+    fiber = parent && typeof parent === "object" ? (parent as JsonRecord) : null;
+    depth += 1;
+  }
+
+  const availableModels = Array.from(state.availableModels).slice(0, 8);
+  return {
+    selectedModel: state.selectedModel || availableModels[0] || "",
+    availableModels,
+    probeCount: depth,
+  };
+}
+
+export function inspectCursorHelpNativeModelCatalog(root: ParentNode = document): NativeModelCatalog {
+  const candidates = listEditableElements(root);
+  let best: NativeModelCatalog | null = null;
+
+  for (const element of candidates) {
+    const catalog = inspectModelCatalogAroundElement(element);
+    if (catalog.availableModels.length <= 0) continue;
+    if (
+      !best ||
+      catalog.availableModels.length > best.availableModels.length ||
+      (catalog.selectedModel && !best.selectedModel)
+    ) {
+      best = catalog;
+    }
+  }
+
+  return best || {
+    selectedModel: "",
+    availableModels: [],
+    probeCount: candidates.length,
+  };
 }
 
 export function locateCursorHelpNativeSender(

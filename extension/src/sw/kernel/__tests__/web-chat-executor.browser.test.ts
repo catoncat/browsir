@@ -7,6 +7,7 @@ import {
   ensureCursorHelpPoolReady,
   getCursorHelpPoolDebugState,
   handleWebChatRuntimeMessage,
+  probeCursorHelpModelCatalog,
   runCursorHelpPoolHeartbeat,
 } from "../web-chat-executor.browser";
 import type { LlmResolvedRoute } from "../llm-provider";
@@ -2073,5 +2074,43 @@ describe("web-chat-executor.browser", () => {
     const debugAfter = await getCursorHelpPoolDebugState();
     expect(Number(debugAfter.summary.autoscaleLastShrinkAt || 0)).toBeGreaterThan(0);
     expect(String(debugAfter.summary.autoscaleLastShrinkReason || "")).toContain("→2");
+  });
+
+  it("probeCursorHelpModelCatalog proactively boots the pool and returns available models", async () => {
+    buildChromeMock();
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    const catalog = await probeCursorHelpModelCatalog();
+
+    expect(catalog.selectedModel).toBe("Sonnet 4.6");
+    expect(catalog.availableModels).toEqual(["Sonnet 4.6"]);
+    expect(catalog.statusMessage).toBe("");
+  });
+
+  it("probeCursorHelpModelCatalog forceRefresh rebuilds a missing pool window", async () => {
+    buildChromeMock();
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    await chrome.storage.local.set({
+      [CURSOR_HELP_POOL_STORAGE_KEY]: {
+        version: 1,
+        windowId: null,
+        slots: [],
+        windowMode: "pool-window",
+        windowRecoveryCooldownUntil: Date.now() - 1,
+        lastWindowEvent: "pool_window_removed",
+        lastWindowEventAt: 1,
+        lastWindowEventReason: "windowId=2",
+        updatedAt: 1,
+      },
+    });
+
+    const windowsCreate = chrome.windows.create as unknown as ReturnType<typeof vi.fn>;
+    const catalog = await probeCursorHelpModelCatalog({ forceRefresh: true });
+
+    expect(windowsCreate).toHaveBeenCalled();
+    expect(catalog.selectedModel).toBe("Sonnet 4.6");
+    expect(catalog.availableModels).toEqual(["Sonnet 4.6"]);
+    expect(catalog.statusMessage).toBe("");
   });
 });

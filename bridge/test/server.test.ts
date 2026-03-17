@@ -122,6 +122,39 @@ async function waitForMessages(
 }
 
 describe("bridge server", () => {
+  test("allows unauthenticated dev websocket and version checks when token is empty", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "bridge-server-no-token-"));
+    const port = await getFreePort();
+    const config = {
+      ...createTestConfig(root, port, 4),
+      token: "",
+    };
+
+    const server = startBridgeServer({ config });
+    const baseUrl = `http://${config.host}:${server.port}`;
+
+    try {
+      const versionResp = await fetch(`${baseUrl}/dev/version`);
+      expect(versionResp.status).toBe(200);
+
+      const client = await connectWs(`ws://${config.host}:${server.port}/ws`);
+      await client.close();
+
+      const versionWithStaleTokenResp = await fetch(
+        `${baseUrl}/dev/version?token=stale-token`,
+      );
+      expect(versionWithStaleTokenResp.status).toBe(200);
+
+      const clientWithStaleToken = await connectWs(
+        `ws://${config.host}:${server.port}/ws?token=stale-token`,
+      );
+      await clientWithStaleToken.close();
+    } finally {
+      await server.stop(true);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("dedup race-free and dedup responses use current request metadata", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "bridge-server-dedup-"));
     const canonicalTool = "test.delay.echo";

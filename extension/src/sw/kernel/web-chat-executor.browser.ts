@@ -105,6 +105,15 @@ interface CursorHelpPoolDebugView {
   slots: JsonRecord[];
 }
 
+interface CursorHelpModelCatalogProbe {
+  selectedModel: string;
+  availableModels: string[];
+  statusMessage: string;
+  statusDetail: string;
+  checkedAt: string;
+  lastAction: string;
+}
+
 const PROVIDER_ID = "cursor_help_web";
 const SLOT_WAIT_POLL_MS = 200;
 const PRIMARY_SLOT_WAIT_MS = 15_000;
@@ -180,6 +189,12 @@ function toRecord(value: unknown): JsonRecord {
 
 function nowMs(): number {
   return Date.now();
+}
+
+function clipText(value: unknown, max = 220): string {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
 function randomSlotId(): string {
@@ -829,6 +844,149 @@ export async function getCursorHelpModelCatalog(): Promise<{
   return {
     selectedModel: inspect?.selectedModel || "",
     availableModels: inspect?.availableModels || [],
+  };
+}
+
+function summarizeCursorHelpModelCatalogProbe(
+  debugState: CursorHelpPoolDebugView | null,
+  catalog: {
+    selectedModel: string;
+    availableModels: string[];
+  },
+): Omit<CursorHelpModelCatalogProbe, "selectedModel" | "availableModels" | "checkedAt"> {
+  const summary = toRecord(debugState?.summary);
+  const slots = Array.isArray(debugState?.slots)
+    ? debugState!.slots.map((item) => toRecord(item))
+    : [];
+
+  if (catalog.selectedModel || catalog.availableModels.length > 0) {
+    return {
+      statusMessage: "",
+      statusDetail: "",
+      lastAction: String(summary.recoveryAction || "").trim(),
+    };
+  }
+
+  const firstErrorSlot =
+    slots.find((slot) =>
+      ["error", "stale"].includes(String(slot.status || "").trim()),
+    ) || null;
+  const errorDetail = clipText(
+    firstErrorSlot?.lastError || firstErrorSlot?.lastHealthReason || "",
+  );
+  const windowStatus = String(summary.windowStatus || "").trim();
+  const recoveryAction = String(summary.recoveryAction || "").trim();
+  const lastWindowEventReason = clipText(summary.lastWindowEventReason, 240);
+  const readyCount = Number(summary.readyCount || 0);
+  const busyCount = Number(summary.busyCount || 0);
+  const slotCount = Number(summary.slotCount || 0);
+  const errorCount = Number(summary.errorCount || 0);
+
+  if (windowStatus === "missing" && summary.recoveryCooldownActive === true) {
+    return {
+      statusMessage: "内置免费运行池窗口缺失，当前仍在冷却期。",
+      statusDetail:
+        lastWindowEventReason || "请稍后重试，或再次点击重试触发重建。",
+      lastAction: recoveryAction,
+    };
+  }
+
+  if (windowStatus === "missing" || summary.shouldRebuildWindow === true) {
+    return {
+      statusMessage: "内置免费运行池窗口缺失，需要重新拉起。",
+      statusDetail:
+        lastWindowEventReason || "点击重试后将尝试重新拉起运行池。",
+      lastAction: recoveryAction,
+    };
+  }
+
+  if (slotCount <= 0) {
+    return {
+      statusMessage: "内置免费运行池尚未初始化。",
+      statusDetail: "点击重试后会尝试创建并探测运行池。",
+      lastAction: recoveryAction,
+    };
+  }
+
+  if (errorCount > 0) {
+    return {
+      statusMessage: "内置免费运行池当前异常。",
+      statusDetail: errorDetail || lastWindowEventReason || "请点击重试重新探测。",
+      lastAction: recoveryAction,
+    };
+  }
+
+  if (readyCount <= 0 && busyCount > 0) {
+    return {
+      statusMessage: "内置免费正在初始化，请稍后重试。",
+      statusDetail: "",
+      lastAction: recoveryAction,
+    };
+  }
+
+  return {
+    statusMessage: "尚未从内置免费探测到可用模型。",
+    statusDetail: errorDetail || lastWindowEventReason,
+    lastAction: recoveryAction,
+  };
+}
+
+export async function probeCursorHelpModelCatalog(options?: {
+  forceRefresh?: boolean;
+}): Promise<CursorHelpModelCatalogProbe> {
+  const readCatalog = async (): Promise<{
+    selectedModel: string;
+    availableModels: string[];
+  }> => {
+    const catalog = await getCursorHelpModelCatalog().catch(() => ({
+      selectedModel: "",
+      availableModels: [],
+    }));
+    return {
+      selectedModel: String(catalog.selectedModel || "").trim(),
+      availableModels: Array.isArray(catalog.availableModels)
+        ? catalog.availableModels
+            .map((item) => String(item || "").trim())
+            .filter(Boolean)
+        : [],
+    };
+  };
+
+  let debugState: CursorHelpPoolDebugView | null = null;
+
+  await ensureCursorHelpPoolReady().catch(() => {});
+  debugState = await runCursorHelpPoolHeartbeat().catch(async () => {
+    return await getCursorHelpPoolDebugState().catch(() => null);
+  });
+
+  let catalog = await readCatalog();
+  const summary = toRecord(debugState?.summary);
+  const shouldForceRebuild =
+    options?.forceRefresh === true &&
+    !catalog.selectedModel &&
+    catalog.availableModels.length <= 0 &&
+    (
+      String(summary.windowStatus || "").trim() === "missing" ||
+      summary.shouldRebuildWindow === true ||
+      Number(summary.slotCount || 0) <= 0 ||
+      (Number(summary.readyCount || 0) <= 0 && Number(summary.errorCount || 0) > 0)
+    );
+
+  if (shouldForceRebuild) {
+    debugState = await rebuildCursorHelpPool().catch(async () => {
+      return await getCursorHelpPoolDebugState().catch(() => debugState);
+    });
+    debugState = await runCursorHelpPoolHeartbeat().catch(async () => {
+      return await getCursorHelpPoolDebugState().catch(() => debugState);
+    });
+    catalog = await readCatalog();
+  }
+
+  const status = summarizeCursorHelpModelCatalogProbe(debugState, catalog);
+  return {
+    ...catalog,
+    ...status,
+    checkedAt: new Date().toISOString(),
   };
 }
 

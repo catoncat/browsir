@@ -114,7 +114,9 @@ export const useChatStore = defineStore("chat", () => {
       (item) => item.id === activeSessionId.value,
     );
     if (!activeExists) {
-      activeSessionId.value = sessions.value[0]?.id || "";
+      activeSessionId.value = "";
+      messages.value = [];
+      runtime.value = null;
     }
   }
 

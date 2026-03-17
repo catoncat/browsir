@@ -298,6 +298,27 @@ describe("runtime infra handler", () => {
     expect(afterInvalidData.browserRuntimeStrategy).toBe("browser-first");
   });
 
+  it("injects builtin cursor_help_web profile when storage has no llmProfiles", async () => {
+    const infra = createRuntimeInfraHandler();
+
+    const result = await infra.handleMessage({ type: "config.get" });
+    expect(result?.ok).toBe(true);
+    if (!result || result.ok !== true) return;
+
+    const data = (result.data ?? {}) as Record<string, unknown>;
+    const profiles = Array.isArray(data.llmProfiles)
+      ? (data.llmProfiles as Array<Record<string, unknown>>)
+      : [];
+    const builtin = profiles.find(
+      (item) => String(item.id || "").trim() === "cursor_help_web",
+    );
+
+    expect(String(data.llmDefaultProfile || "")).toBe("cursor_help_web");
+    expect(builtin).toBeTruthy();
+    expect(String(builtin?.provider || "")).toBe("cursor_help_web");
+    expect(String(builtin?.llmModel || "")).toBe("auto");
+  });
+
   it("clears cursor_help_web base/key fields during config.save", async () => {
     const infra = createRuntimeInfraHandler();
 
@@ -331,6 +352,36 @@ describe("runtime infra handler", () => {
       : {};
     expect(String(profile.llmApiBase || "")).toBe("");
     expect(String(profile.llmApiKey || "")).toBe("");
+  });
+
+  it("self-heals legacy default profile ids to a valid stored profile", async () => {
+    const infra = createRuntimeInfraHandler();
+
+    const saved = await infra.handleMessage({
+      type: "config.save",
+      payload: {
+        llmDefaultProfile: "default",
+        llmProfiles: [
+          {
+            id: "cursor_help_web",
+            provider: "cursor_help_web",
+            llmApiBase: "",
+            llmApiKey: "",
+            llmModel: "auto",
+            providerOptions: {
+              targetSite: "cursor_help",
+            },
+          },
+        ],
+      },
+    });
+    expect(saved?.ok).toBe(true);
+
+    const after = await infra.handleMessage({ type: "config.get" });
+    expect(after?.ok).toBe(true);
+    if (!after || after.ok !== true) return;
+    const data = (after.data ?? {}) as Record<string, unknown>;
+    expect(String(data.llmDefaultProfile || "")).toBe("cursor_help_web");
   });
 
   it("supports lease acquire/heartbeat/release contract", async () => {
