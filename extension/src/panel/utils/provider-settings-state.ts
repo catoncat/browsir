@@ -14,6 +14,35 @@ export interface ProviderSettingsDraft {
 
 type ManagedRole = "primary" | "aux" | "fallback";
 
+export const ADD_CUSTOM_PROVIDER_OPTION_VALUE = "__add_custom_provider__";
+export const BUILTIN_FREE_PROVIDER_LABEL = "内置免费";
+
+export interface BuiltinFreeModelCatalog {
+  selectedModel: string;
+  availableModels: string[];
+}
+
+export interface SceneModelOption {
+  value: string;
+  providerId: string;
+  providerLabel: string;
+  modelId: string;
+  label: string;
+}
+
+export interface SceneModelDraft {
+  primaryValue: string;
+  auxValue: string;
+  fallbackValue: string;
+}
+
+export interface CustomProviderDraft {
+  providerName: string;
+  apiBase: string;
+  apiKey: string;
+  supportedModels: string[];
+}
+
 function trim(value: unknown): string {
   return String(value || "").trim();
 }
@@ -97,6 +126,30 @@ function createManagedProfile(
   };
   config.llmProfiles.push(profile);
   return profile;
+}
+
+function ensureSceneRoleProfile(
+  config: PanelConfigNew,
+  role: ManagedRole,
+  preferredProfileId: string,
+  providerId: string,
+  modelId: string,
+): PanelLlmProfileNew {
+  const preferred = findProfile(config, preferredProfileId);
+  if (preferred) {
+    preferred.providerId = providerId;
+    preferred.modelId = modelId;
+    return preferred;
+  }
+
+  const existingBySeed = findProfile(config, `route-${role}`);
+  if (existingBySeed) {
+    existingBySeed.providerId = providerId;
+    existingBySeed.modelId = modelId;
+    return existingBySeed;
+  }
+
+  return createManagedProfile(config, `route-${role}`, providerId, modelId);
 }
 
 function ensureManagedRoleProfile(
@@ -284,4 +337,270 @@ export function applyProviderSettingsDraft(
     );
     config.llmFallbackProfile = fallbackProfile.id;
   }
+}
+
+function collectProviderAssignedModels(
+  config: PanelConfigNew,
+  providerId: string,
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const profile of config.llmProfiles) {
+    if (trim(profile.providerId) !== trim(providerId)) continue;
+    appendUnique(out, seen, profile.modelId);
+  }
+  return out;
+}
+
+function createCustomProviderId(config: PanelConfigNew, providerName: string): string {
+  const normalized = trim(providerName)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const base = normalized || "provider";
+  const taken = new Set(config.llmProviders.map((item) => trim(item.id)));
+  let candidate = base;
+  let suffix = 2;
+  while (taken.has(candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+
+function collectCustomProviderModels(
+  config: PanelConfigNew,
+  provider: PanelLlmProvider,
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  appendUnique(out, seen, provider.apiConfig?.defaultModel);
+  for (const model of provider.apiConfig?.supportedModels || []) {
+    appendUnique(out, seen, model);
+  }
+  for (const model of collectProviderAssignedModels(config, provider.id)) {
+    appendUnique(out, seen, model);
+  }
+  return out;
+}
+
+export function createSceneModelValue(providerId: string, modelId: string): string {
+  const normalizedProviderId = trim(providerId);
+  const normalizedModelId = trim(modelId);
+  return normalizedProviderId && normalizedModelId
+    ? `${normalizedProviderId}::${normalizedModelId}`
+    : "";
+}
+
+export function parseSceneModelValue(
+  value: string,
+): { providerId: string; modelId: string } | null {
+  const normalized = trim(value);
+  if (!normalized || normalized === ADD_CUSTOM_PROVIDER_OPTION_VALUE) return null;
+  const separator = normalized.indexOf("::");
+  if (separator <= 0 || separator >= normalized.length - 2) return null;
+  return {
+    providerId: normalized.slice(0, separator),
+    modelId: normalized.slice(separator + 2),
+  };
+}
+
+export function collectSceneModelOptions(
+  config: PanelConfigNew,
+  builtinFreeCatalog: BuiltinFreeModelCatalog,
+): SceneModelOption[] {
+  const out: SceneModelOption[] = [];
+  const seen = new Set<string>();
+  const builtinModels: string[] = [];
+  const builtinSeen = new Set<string>();
+  appendUnique(builtinModels, builtinSeen, builtinFreeCatalog.selectedModel);
+  for (const model of builtinFreeCatalog.availableModels) {
+    appendUnique(builtinModels, builtinSeen, model);
+  }
+  for (const modelId of builtinModels) {
+    const value = createSceneModelValue(BUILTIN_CURSOR_HELP_PROFILE_ID, modelId);
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push({
+      value,
+      providerId: BUILTIN_CURSOR_HELP_PROFILE_ID,
+      providerLabel: BUILTIN_FREE_PROVIDER_LABEL,
+      modelId,
+      label: `${BUILTIN_FREE_PROVIDER_LABEL} / ${modelId}`,
+    });
+  }
+
+  for (const provider of config.llmProviders) {
+    if (trim(provider.id) === BUILTIN_CURSOR_HELP_PROFILE_ID) continue;
+    const models = collectCustomProviderModels(config, provider);
+    if (models.length <= 0) continue;
+    const providerLabel = trim(provider.name) || trim(provider.id);
+    for (const modelId of models) {
+      const value = createSceneModelValue(provider.id, modelId);
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      out.push({
+        value,
+        providerId: provider.id,
+        providerLabel,
+        modelId,
+        label: `${providerLabel} / ${modelId}`,
+      });
+    }
+  }
+
+  return out;
+}
+
+function resolveBuiltinSceneModel(
+  profile: PanelLlmProfileNew | null,
+  builtinFreeCatalog: BuiltinFreeModelCatalog,
+): string {
+  const available = Array.isArray(builtinFreeCatalog.availableModels)
+    ? builtinFreeCatalog.availableModels
+    : [];
+  if (available.length <= 0) return "";
+  const requested = trim(profile?.modelId);
+  if (requested && requested !== "auto") return requested;
+  return trim(builtinFreeCatalog.selectedModel) || available[0] || "";
+}
+
+function resolveSceneModelValue(
+  config: PanelConfigNew,
+  profileId: string,
+  builtinFreeCatalog: BuiltinFreeModelCatalog,
+): string {
+  const profile = findProfile(config, profileId);
+  if (!profile) return "";
+  if (trim(profile.providerId) === BUILTIN_CURSOR_HELP_PROFILE_ID) {
+    return createSceneModelValue(
+      BUILTIN_CURSOR_HELP_PROFILE_ID,
+      resolveBuiltinSceneModel(profile, builtinFreeCatalog),
+    );
+  }
+  return createSceneModelValue(profile.providerId, profile.modelId);
+}
+
+export function deriveSceneModelDraft(
+  config: PanelConfigNew,
+  builtinFreeCatalog: BuiltinFreeModelCatalog,
+): SceneModelDraft {
+  return {
+    primaryValue: resolveSceneModelValue(
+      config,
+      config.llmDefaultProfile,
+      builtinFreeCatalog,
+    ),
+    auxValue: resolveSceneModelValue(
+      config,
+      config.llmAuxProfile,
+      builtinFreeCatalog,
+    ),
+    fallbackValue: resolveSceneModelValue(
+      config,
+      config.llmFallbackProfile,
+      builtinFreeCatalog,
+    ),
+  };
+}
+
+export function applySceneModelDraft(
+  config: PanelConfigNew,
+  draft: SceneModelDraft,
+): void {
+  const primary = parseSceneModelValue(draft.primaryValue);
+  if (!primary) {
+    resetToBuiltinCursor(config);
+    return;
+  }
+
+  ensureProvider(config, primary.providerId);
+  const primaryProfile = ensureSceneRoleProfile(
+    config,
+    "primary",
+    config.llmDefaultProfile,
+    primary.providerId,
+    primary.modelId,
+  );
+  config.llmDefaultProfile = primaryProfile.id;
+
+  const aux = parseSceneModelValue(draft.auxValue);
+  if (!aux) {
+    config.llmAuxProfile = "";
+  } else {
+    ensureProvider(config, aux.providerId);
+    const auxProfile = ensureSceneRoleProfile(
+      config,
+      "aux",
+      config.llmAuxProfile,
+      aux.providerId,
+      aux.modelId,
+    );
+    config.llmAuxProfile = auxProfile.id;
+  }
+
+  const fallback = parseSceneModelValue(draft.fallbackValue);
+  if (!fallback) {
+    config.llmFallbackProfile = "";
+  } else {
+    ensureProvider(config, fallback.providerId);
+    const fallbackProfile = ensureSceneRoleProfile(
+      config,
+      "fallback",
+      config.llmFallbackProfile,
+      fallback.providerId,
+      fallback.modelId,
+    );
+    config.llmFallbackProfile = fallbackProfile.id;
+  }
+}
+
+export function upsertCustomProvider(
+  config: PanelConfigNew,
+  draft: CustomProviderDraft,
+): PanelLlmProvider {
+  const providerName = trim(draft.providerName);
+  const apiBase = trim(draft.apiBase);
+  const apiKey = trim(draft.apiKey);
+  const supportedModels = Array.from(
+    new Set(draft.supportedModels.map((item) => trim(item)).filter(Boolean)),
+  );
+
+  let provider =
+    config.llmProviders.find(
+      (item) =>
+        trim(item.id) !== BUILTIN_CURSOR_HELP_PROFILE_ID &&
+        trim(item.name) === providerName,
+    ) || null;
+
+  if (!provider) {
+    provider = {
+      id: createCustomProviderId(config, providerName),
+      name: providerName,
+      type: "model_llm",
+      apiConfig: {
+        apiBase,
+        apiKey,
+        defaultModel: supportedModels[0] || undefined,
+        supportedModels,
+        supportsModelDiscovery: supportedModels.length > 0,
+      },
+      options: {},
+      builtin: false,
+    };
+    config.llmProviders.push(provider);
+    return provider;
+  }
+
+  provider.name = providerName;
+  provider.type = "model_llm";
+  provider.apiConfig = {
+    apiBase,
+    apiKey,
+    defaultModel: supportedModels[0] || provider.apiConfig?.defaultModel,
+    supportedModels,
+    supportsModelDiscovery: supportedModels.length > 0,
+  };
+  provider.builtin = false;
+  return provider;
 }

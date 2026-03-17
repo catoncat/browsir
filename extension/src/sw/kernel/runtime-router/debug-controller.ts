@@ -9,6 +9,7 @@ import { buildConversationView } from "./session-utils";
 import { clampStepStream } from "./step-stream-utils";
 import {
   getCursorHelpPoolDebugState,
+  getCursorHelpModelCatalog,
   ensureCursorHelpPoolReady,
   runCursorHelpPoolHeartbeat,
   rebuildCursorHelpPool,
@@ -332,6 +333,15 @@ export async function handleBrainDebug(
       llmMaxRetryDelayMs: Number(cfg.llmMaxRetryDelayMs || 0),
       hasLlmApiKey,
       systemPromptPreview,
+    });
+  }
+
+  if (action === "brain.debug.model-catalog") {
+    return ok({
+      builtinFree: await getCursorHelpModelCatalog().catch(() => ({
+        selectedModel: "",
+        availableModels: [],
+      })),
     });
   }
 

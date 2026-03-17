@@ -97,6 +97,11 @@ export interface RuntimeHealth {
   systemPromptPreview: string;
 }
 
+export interface BuiltinFreeCatalog {
+  selectedModel: string;
+  availableModels: string[];
+}
+
 export interface PanelLlmProvider {
   id: string;
   name: string;
@@ -977,9 +982,22 @@ export function convertToLegacyBridgeConfig(
   const providersById = new Map(
     newConfig.llmProviders.map((item) => [item.id, item] as const),
   );
+  const referencedProfileIds = new Set(
+    [
+      newConfig.llmDefaultProfile,
+      newConfig.llmAuxProfile,
+      newConfig.llmFallbackProfile,
+    ]
+      .map((item) => String(item || "").trim())
+      .filter(Boolean),
+  );
 
   const legacyProfiles: PanelLlmProfile[] = newConfig.llmProfiles
-    .filter((item) => item.id !== BUILTIN_CURSOR_HELP_PROFILE_ID)
+    .filter(
+      (item) =>
+        item.id !== BUILTIN_CURSOR_HELP_PROFILE_ID ||
+        referencedProfileIds.has(item.id),
+    )
     .map((profile) => {
       const provider = providersById.get(profile.providerId);
       if (!provider) {
@@ -1062,6 +1080,15 @@ function normalizeHealth(
   };
 }
 
+function normalizeBuiltinFreeCatalog(
+  raw: Record<string, unknown> | null | undefined,
+): BuiltinFreeCatalog {
+  return {
+    selectedModel: String(raw?.selectedModel || "").trim(),
+    availableModels: toStringList(raw?.availableModels),
+  };
+}
+
 function createDefaultPanelConfig(): PanelConfigNew {
   return normalizePanelConfig({});
 }
@@ -1070,6 +1097,9 @@ export const useConfigStore = defineStore("config", () => {
   const savingConfig = ref(false);
   const error = ref("");
   const health = ref<RuntimeHealth>(normalizeHealth(undefined));
+  const builtinFreeCatalog = ref<BuiltinFreeCatalog>(
+    normalizeBuiltinFreeCatalog(undefined),
+  );
   const config = ref<PanelConfigNew>(createDefaultPanelConfig());
 
   async function loadConfig(): Promise<void> {
@@ -1080,6 +1110,17 @@ export const useConfigStore = defineStore("config", () => {
   async function refreshHealth(): Promise<void> {
     const raw = await sendMessage<Record<string, unknown>>("brain.debug.config");
     health.value = normalizeHealth(raw);
+  }
+
+  async function loadBuiltinFreeCatalog(): Promise<void> {
+    const raw = await sendMessage<Record<string, unknown>>(
+      "brain.debug.model-catalog",
+    );
+    builtinFreeCatalog.value = normalizeBuiltinFreeCatalog(
+      raw?.builtinFree && typeof raw.builtinFree === "object"
+        ? (raw.builtinFree as Record<string, unknown>)
+        : undefined,
+    );
   }
 
   async function saveConfig(): Promise<void> {
@@ -1103,10 +1144,12 @@ export const useConfigStore = defineStore("config", () => {
   return {
     config,
     health,
+    builtinFreeCatalog,
     savingConfig,
     error,
     loadConfig,
     refreshHealth,
+    loadBuiltinFreeCatalog,
     saveConfig,
   };
 });

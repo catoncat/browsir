@@ -818,6 +818,20 @@ export async function rebuildCursorHelpPool(
   return await ensureCursorHelpPoolReady(slotCount);
 }
 
+export async function getCursorHelpModelCatalog(): Promise<{
+  selectedModel: string;
+  availableModels: string[];
+}> {
+  const state = await loadCursorHelpPoolState();
+  const idleSlot = state.slots.find((s) => s.status === "idle") || state.slots[0];
+  if (!idleSlot) return { selectedModel: "", availableModels: [] };
+  const inspect = await inspectCursorTab(idleSlot.tabId).catch(() => null);
+  return {
+    selectedModel: inspect?.selectedModel || "",
+    availableModels: inspect?.availableModels || [],
+  };
+}
+
 export async function getCursorHelpPoolDebugState(): Promise<CursorHelpPoolDebugView> {
   const state = await loadCursorHelpPoolState();
   const window = state.windowId

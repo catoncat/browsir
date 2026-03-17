@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import { normalizePanelConfig } from "../../stores/config-store";
 import {
+  applySceneModelDraft,
   applyProviderSettingsDraft,
+  collectSceneModelOptions,
   collectProviderModelOptions,
+  createSceneModelValue,
   deriveManagedProviderId,
   deriveProviderSettingsDraft,
   resetToBuiltinCursor,
@@ -163,6 +166,85 @@ describe("provider-settings-state", () => {
 
     expect(config.llmDefaultProfile).toBe("cursor_help_web");
     expect(config.llmAuxProfile).toBe("");
+    expect(config.llmFallbackProfile).toBe("");
+  });
+
+  it("collects builtin free and custom provider models into one option list", () => {
+    const config = normalizePanelConfig({
+      llmProviders: [
+        {
+          id: "openrouter",
+          name: "OpenRouter",
+          type: "model_llm",
+          apiConfig: {
+            apiBase: "https://openrouter.ai/api/v1",
+            apiKey: "sk-test",
+            defaultModel: "gpt-4.1",
+            supportedModels: ["gpt-4.1", "gpt-4o-mini"],
+          },
+          builtin: false,
+        },
+      ],
+      llmProfiles: [
+        {
+          id: "openrouter-writer",
+          providerId: "openrouter",
+          modelId: "gpt-4.1",
+          timeoutMs: 30000,
+          retryMaxAttempts: 2,
+          maxRetryDelayMs: 60000,
+          builtin: false,
+        },
+      ],
+      llmDefaultProfile: "openrouter-writer",
+    });
+
+    const options = collectSceneModelOptions(config, {
+      selectedModel: "gpt-5",
+      availableModels: ["gpt-5", "claude-sonnet-4.6"],
+    });
+
+    expect(options.map((item) => item.label)).toEqual([
+      "内置免费 / gpt-5",
+      "内置免费 / claude-sonnet-4.6",
+      "OpenRouter / gpt-4.1",
+      "OpenRouter / gpt-4o-mini",
+    ]);
+  });
+
+  it("maps scene model selections back to concrete route profiles", () => {
+    const config = normalizePanelConfig({
+      llmProviders: [
+        {
+          id: "openrouter",
+          name: "OpenRouter",
+          type: "model_llm",
+          apiConfig: {
+            apiBase: "https://openrouter.ai/api/v1",
+            apiKey: "sk-test",
+            supportedModels: ["gpt-4o-mini"],
+          },
+          builtin: false,
+        },
+      ],
+      llmDefaultProfile: "cursor_help_web",
+    });
+
+    applySceneModelDraft(config, {
+      primaryValue: createSceneModelValue("cursor_help_web", "gpt-5"),
+      auxValue: createSceneModelValue("openrouter", "gpt-4o-mini"),
+      fallbackValue: "",
+    });
+
+    const primary = config.llmProfiles.find(
+      (item) => item.id === config.llmDefaultProfile,
+    );
+    const aux = config.llmProfiles.find((item) => item.id === config.llmAuxProfile);
+
+    expect(primary?.providerId).toBe("cursor_help_web");
+    expect(primary?.modelId).toBe("gpt-5");
+    expect(aux?.providerId).toBe("openrouter");
+    expect(aux?.modelId).toBe("gpt-4o-mini");
     expect(config.llmFallbackProfile).toBe("");
   });
 });

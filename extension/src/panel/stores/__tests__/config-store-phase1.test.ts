@@ -421,5 +421,47 @@ describe("config-store Phase 1", () => {
         "Provider 'missing-provider' not found",
       );
     });
+
+    it("keeps the builtin cursor profile when builtin route is selected", () => {
+      const newConfig = normalizePanelConfig({
+        llmProviders: [
+          {
+            id: "custom-provider",
+            name: "Custom",
+            type: "model_llm",
+            apiConfig: {
+              apiBase: "https://api.example.com/v1",
+              apiKey: "sk-test",
+              defaultModel: "gpt-4.1",
+              supportedModels: ["gpt-4.1", "gpt-4o-mini"],
+              supportsModelDiscovery: true,
+            },
+            builtin: false,
+          },
+        ],
+        llmProfiles: [
+          {
+            id: "custom-primary",
+            providerId: "custom-provider",
+            modelId: "gpt-4.1",
+            timeoutMs: 120000,
+            retryMaxAttempts: 2,
+            maxRetryDelayMs: 60000,
+            builtin: false,
+          },
+        ],
+        llmDefaultProfile: "cursor_help_web",
+      });
+
+      const result = convertToLegacyBridgeConfig(newConfig);
+      const cursorProfile = result.llmProfiles.find(
+        (item) => item.id === "cursor_help_web",
+      );
+
+      expect(result.llmDefaultProfile).toBe("cursor_help_web");
+      expect(cursorProfile).toBeDefined();
+      expect(cursorProfile?.provider).toBe("cursor_help_web");
+      expect(cursorProfile?.llmModel).toBe("auto");
+    });
   });
 });

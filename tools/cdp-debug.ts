@@ -24,6 +24,9 @@
  * 环境变量：
  *   CHROME_CHANNEL        Chrome 渠道 ("beta" | "stable"，默认 beta)
  *   CHROME_PORT           自定义调试端口（默认从 DevToolsActivePort 读取）
+ *   CHROME_USER_DATA_DIR  显式指定 Chrome user-data-dir（覆盖 channel 默认目录）
+ *   CHROME_DEVTOOLS_ACTIVE_PORT_FILE
+ *                         显式指定 DevToolsActivePort 文件路径（最高优先级）
  *   BBL_EXT_ID            扩展 ID（默认 jhfgfgnkpceegbkojajfadeijojekgod）
  *   CDP_SERVE_PORT        serve 模式端口（默认 9333）
  */
@@ -35,6 +38,20 @@ import os from "os";
 // --- Config ---
 const EXT_ID = process.env.BBL_EXT_ID || "jhfgfgnkpceegbkojajfadeijojekgod";
 const CHANNEL = process.env.CHROME_CHANNEL || "beta";
+const USER_DATA_DIR_OVERRIDE = process.env.CHROME_USER_DATA_DIR || "";
+const ACTIVE_PORT_FILE_OVERRIDE = process.env.CHROME_DEVTOOLS_ACTIVE_PORT_FILE || "";
+
+interface ChromeDiscovery {
+  port: number;
+  wsPath: string;
+  portFile: string;
+  userDataDir: string;
+  source:
+    | "custom-port"
+    | "custom-active-port-file"
+    | "custom-user-data-dir"
+    | "channel-default";
+}
 
 // --- CDP Client (simplified from brain-e2e.ts) ---
 class CdpClient {
@@ -151,13 +168,34 @@ interface TargetInfo {
   type: string;
   title: string;
   url: string;
+  attached?: boolean;
+  openerId?: string;
+  browserContextId?: string;
+  subtype?: string;
   webSocketDebuggerUrl?: string;
 }
 
-function discoverChrome(): { port: number; wsPath: string } {
-  const customPort = process.env.CHROME_PORT;
-  if (customPort) {
-    return { port: parseInt(customPort, 10), wsPath: "" };
+function resolveChromePortFile(): {
+  portFile: string;
+  userDataDir: string;
+  source: ChromeDiscovery["source"];
+} {
+  if (ACTIVE_PORT_FILE_OVERRIDE) {
+    const portFile = path.resolve(ACTIVE_PORT_FILE_OVERRIDE);
+    return {
+      portFile,
+      userDataDir: path.dirname(portFile),
+      source: "custom-active-port-file",
+    };
+  }
+
+  if (USER_DATA_DIR_OVERRIDE) {
+    const userDataDir = path.resolve(USER_DATA_DIR_OVERRIDE);
+    return {
+      portFile: path.join(userDataDir, "DevToolsActivePort"),
+      userDataDir,
+      source: "custom-user-data-dir",
+    };
   }
 
   const profileDirs: Record<string, string> = {
@@ -165,14 +203,32 @@ function discoverChrome(): { port: number; wsPath: string } {
     stable: path.join(os.homedir(), "Library", "Application Support", "Google", "Chrome"),
     canary: path.join(os.homedir(), "Library", "Application Support", "Google", "Chrome Canary"),
   };
-  const profileDir = profileDirs[CHANNEL];
-  if (!profileDir) throw new Error(`未知 Chrome channel: ${CHANNEL}`);
+  const userDataDir = profileDirs[CHANNEL];
+  if (!userDataDir) throw new Error(`未知 Chrome channel: ${CHANNEL}`);
+  return {
+    portFile: path.join(userDataDir, "DevToolsActivePort"),
+    userDataDir,
+    source: "channel-default",
+  };
+}
 
-  const portFile = path.join(profileDir, "DevToolsActivePort");
+function discoverChrome(): ChromeDiscovery {
+  const customPort = process.env.CHROME_PORT;
+  if (customPort) {
+    return {
+      port: parseInt(customPort, 10),
+      wsPath: "",
+      portFile: "",
+      userDataDir: USER_DATA_DIR_OVERRIDE ? path.resolve(USER_DATA_DIR_OVERRIDE) : "",
+      source: "custom-port",
+    };
+  }
+
+  const { portFile, userDataDir, source } = resolveChromePortFile();
   if (!existsSync(portFile)) {
     throw new Error(
       `未找到 DevToolsActivePort: ${portFile}\n` +
-      `请确保 Chrome ${CHANNEL} 已启用远程调试（chrome://inspect/#remote-debugging）`,
+      `请确认目标 Chrome user-data-dir 已启用远程调试（chrome://inspect/#remote-debugging）`,
     );
   }
 
@@ -183,7 +239,19 @@ function discoverChrome(): { port: number; wsPath: string } {
     throw new Error(`DevToolsActivePort 中端口号无效: ${lines[0]}`);
   }
   const wsPath = lines[1] || "";
-  return { port, wsPath };
+  return { port, wsPath, portFile, userDataDir, source };
+}
+
+function formatChromeDiscovery(discovery: ChromeDiscovery): string {
+  if (discovery.source === "custom-port") {
+    return `CHROME_PORT=${discovery.port}`;
+  }
+  const sourceLabelMap: Record<Exclude<ChromeDiscovery["source"], "custom-port">, string> = {
+    "custom-active-port-file": "CHROME_DEVTOOLS_ACTIVE_PORT_FILE",
+    "custom-user-data-dir": "CHROME_USER_DATA_DIR",
+    "channel-default": `CHROME_CHANNEL=${CHANNEL}`,
+  };
+  return `${sourceLabelMap[discovery.source]} -> ${discovery.portFile}`;
 }
 
 async function getBrowserWsUrl(): Promise<string> {
@@ -206,45 +274,119 @@ async function getTargets(port: number): Promise<TargetInfo[]> {
   return result.targetInfos || [];
 }
 
-function findTarget(targets: TargetInfo[], filter: string): TargetInfo | undefined {
-  // Filter patterns: "sidepanel", "sw", "sandbox", or URL/title substring
+function collectTargetCandidates(targets: TargetInfo[], filter: string): TargetInfo[] {
+  // Filter patterns: "sidepanel", "sw", "sandbox", or URL/title/context substring
   const f = filter.toLowerCase().trim();
   const extensionTargets = targets.filter((t) => t.url.includes(EXT_ID));
-  const findIn = (items: TargetInfo[]) =>
-    items.find(
-      (t) => t.url.toLowerCase().includes(f) || t.title.toLowerCase().includes(f),
-    );
+  const matches = (target: TargetInfo) =>
+    target.url.toLowerCase().includes(f) ||
+    target.title.toLowerCase().includes(f) ||
+    String(target.browserContextId || "").toLowerCase().includes(f) ||
+    String(target.targetId || "").toLowerCase().includes(f);
+  const findAllIn = (items: TargetInfo[]) =>
+    items.filter(matches);
   const findExactOrSuffixIn = (items: TargetInfo[]) =>
-    items.find((t) => {
+    items.filter((t) => {
       const url = t.url.toLowerCase();
-      return url === f || url.endsWith(f);
+      const contextId = String(t.browserContextId || "").toLowerCase();
+      const targetId = String(t.targetId || "").toLowerCase();
+      return (
+        url === f ||
+        url.endsWith(f) ||
+        contextId === f ||
+        targetId === f
+      );
     });
 
   if (f === "sidepanel" || f === "panel" || f === "sidepanel.html") {
-    return (
-      extensionTargets.find((t) => t.url.toLowerCase().includes("sidepanel.html")) ||
-      extensionTargets.find((t) => t.url.toLowerCase().endsWith("/index.html")) ||
-      findIn(extensionTargets)
+    const exact = extensionTargets.filter(
+      (t) => t.url.toLowerCase().includes("sidepanel.html"),
     );
+    if (exact.length > 0) return exact;
+    const indexMatches = extensionTargets.filter((t) =>
+      t.url.toLowerCase().endsWith("/index.html"),
+    );
+    if (indexMatches.length > 0) return indexMatches;
+    return findAllIn(extensionTargets);
   }
   if (f === "sw" || f === "service-worker") {
-    return targets.find(
+    return targets.filter(
       (t) => t.type === "service_worker" && t.url.includes(EXT_ID),
     );
   }
   if (f === "sandbox") {
-    return (
-      extensionTargets.find((t) => t.url.toLowerCase().includes("eval-sandbox")) ||
-      findIn(extensionTargets)
+    const exact = extensionTargets.filter((t) =>
+      t.url.toLowerCase().includes("eval-sandbox"),
     );
+    if (exact.length > 0) return exact;
+    return findAllIn(extensionTargets);
   }
 
-  return (
-    findExactOrSuffixIn(extensionTargets) ||
-    findIn(extensionTargets) ||
-    findExactOrSuffixIn(targets) ||
-    findIn(targets)
-  );
+  const exactExtensionMatches = findExactOrSuffixIn(extensionTargets);
+  if (exactExtensionMatches.length > 0) return exactExtensionMatches;
+  const fuzzyExtensionMatches = findAllIn(extensionTargets);
+  if (fuzzyExtensionMatches.length > 0) return fuzzyExtensionMatches;
+  const exactMatches = findExactOrSuffixIn(targets);
+  if (exactMatches.length > 0) return exactMatches;
+  return findAllIn(targets);
+}
+
+async function scoreInteractiveTarget(
+  browserWsUrl: string,
+  target: TargetInfo,
+): Promise<number> {
+  const session = new BrowserSession(browserWsUrl, target.targetId);
+  try {
+    await session.connect();
+    const probe = await session.evaluate(`JSON.stringify({
+      visibilityState: document.visibilityState,
+      hasFocus: document.hasFocus(),
+      href: location.href
+    })`);
+    const parsed =
+      probe && typeof probe === "string"
+        ? (JSON.parse(probe) as {
+            visibilityState?: string;
+            hasFocus?: boolean;
+            href?: string;
+          })
+        : {};
+    let score = 0;
+    if (String(parsed.href || "").includes("sidepanel.html")) score += 5;
+    if (parsed.visibilityState === "visible") score += 20;
+    if (parsed.hasFocus === true) score += 50;
+    return score;
+  } catch {
+    return -1;
+  } finally {
+    await session.close().catch(() => {});
+  }
+}
+
+async function resolveTarget(
+  targets: TargetInfo[],
+  filter: string,
+  browserWsUrl?: string,
+): Promise<TargetInfo | undefined> {
+  const candidates = collectTargetCandidates(targets, filter);
+  if (candidates.length <= 1) return candidates[0];
+
+  const normalized = filter.toLowerCase().trim();
+  if (
+    browserWsUrl &&
+    (normalized === "sidepanel" || normalized === "panel" || normalized === "sidepanel.html")
+  ) {
+    const scored = await Promise.all(
+      candidates.slice(0, 6).map(async (target) => ({
+        target,
+        score: await scoreInteractiveTarget(browserWsUrl, target),
+      })),
+    );
+    scored.sort((a, b) => b.score - a.score);
+    if (scored[0] && scored[0].score >= 0) return scored[0].target;
+  }
+
+  return candidates[0];
 }
 
 // --- Flatten session helper (for browser-level target access) ---
@@ -334,7 +476,7 @@ class PersistentCdpPool {
     this.evictStaleSessions();
 
     const targets = await this.getTargets();
-    const target = findTarget(targets, targetFilter);
+    const target = await resolveTarget(targets, targetFilter, this.browserWsUrl);
     if (!target) throw new Error(`未找到目标: ${targetFilter}`);
 
     const cached = this.sessions.get(target.targetId);
@@ -390,6 +532,8 @@ class PersistentCdpPool {
 async function cmdServe() {
   const pool = new PersistentCdpPool();
   const serveToken = process.env.CDP_SERVE_TOKEN || "";
+  const discovery = discoverChrome();
+  console.log(`📍 Chrome 发现源: ${formatChromeDiscovery(discovery)}`);
   console.log("⏳ 正在连接 Chrome... 请在 Chrome 弹窗中点击「允许」（只需这一次）");
   if (!serveToken) {
     console.warn("⚠️  未设置 CDP_SERVE_TOKEN — /eval、/sw-eval、/chat 端点无鉴权保护");
@@ -543,7 +687,9 @@ async function cmdServe() {
 const [, , command, ...args] = process.argv;
 
 async function cmdTargets() {
-  const { port } = discoverChrome();
+  const discovery = discoverChrome();
+  const { port } = discovery;
+  console.log(`📍 Chrome 发现源: ${formatChromeDiscovery(discovery)}`);
   const targets = await getTargets(port);
   const grouped: Record<string, TargetInfo[]> = {};
   for (const t of targets) {
@@ -553,7 +699,12 @@ async function cmdTargets() {
     console.log(`\n=== ${type} (${items.length}) ===`);
     for (const t of items) {
       const extMarker = t.url.includes(EXT_ID) ? " ★" : "";
-      console.log(`  ${t.title?.slice(0, 60) || "(untitled)"} | ${t.url?.slice(0, 80)}${extMarker}`);
+      const contextMarker = t.browserContextId
+        ? ` [ctx=${t.browserContextId.slice(0, 8)}]`
+        : "";
+      console.log(
+        `  ${t.title?.slice(0, 60) || "(untitled)"}${contextMarker} | ${t.url?.slice(0, 80)}${extMarker}`,
+      );
     }
   }
   console.log(`\n总计: ${targets.length} 个目标`);
@@ -568,7 +719,7 @@ async function cmdScreenshot() {
   const browserWs = await getBrowserWsUrl();
   const { port } = discoverChrome();
   const targets = await getTargets(port);
-  const target = findTarget(targets, targetFilter);
+  const target = await resolveTarget(targets, targetFilter, browserWs);
   if (!target) {
     console.error(`❌ 未找到目标: ${targetFilter}`);
     console.error(`可用的扩展目标：`);
@@ -594,7 +745,7 @@ async function cmdEval() {
   const browserWs = await getBrowserWsUrl();
   const { port } = discoverChrome();
   const targets = await getTargets(port);
-  const target = findTarget(targets, "sidepanel");
+  const target = await resolveTarget(targets, "sidepanel", browserWs);
   if (!target) {
     console.error("❌ SidePanel 未找到");
     process.exit(1);
@@ -611,7 +762,7 @@ async function cmdDom() {
   const browserWs = await getBrowserWsUrl();
   const { port } = discoverChrome();
   const targets = await getTargets(port);
-  const target = findTarget(targets, "sidepanel");
+  const target = await resolveTarget(targets, "sidepanel", browserWs);
   if (!target) {
     console.error("❌ SidePanel 未找到");
     process.exit(1);
@@ -642,7 +793,7 @@ async function cmdChat() {
   const browserWs = await getBrowserWsUrl();
   const { port } = discoverChrome();
   const targets = await getTargets(port);
-  const target = findTarget(targets, "sidepanel");
+  const target = await resolveTarget(targets, "sidepanel", browserWs);
   if (!target) {
     console.error("❌ SidePanel 未找到");
     process.exit(1);
@@ -717,7 +868,7 @@ async function cmdSwEval() {
   const browserWs = await getBrowserWsUrl();
   const { port } = discoverChrome();
   const targets = await getTargets(port);
-  const target = findTarget(targets, "sw");
+  const target = await resolveTarget(targets, "sw", browserWs);
   if (!target) {
     console.error("❌ Service Worker 未找到");
     process.exit(1);
@@ -773,6 +924,9 @@ CDP 直连调试工具
 
 环境变量:
   CHROME_CHANNEL=beta    Chrome 渠道（默认 beta）
+  CHROME_USER_DATA_DIR=... 显式指定 Chrome user-data-dir
+  CHROME_DEVTOOLS_ACTIVE_PORT_FILE=...
+                         显式指定 DevToolsActivePort 文件
   CHAT_WAIT_MS=10000     chat 命令等待回复毫秒数
   BBL_EXT_ID=...         扩展 ID
 `);
