@@ -107,6 +107,27 @@ interface PendingExecution extends CursorHelpExecutionPayload {
 
 const pendingExecutions = new Map<string, PendingExecution>();
 let lastSenderError = "";
+const EDITABLE_SELECTOR = [
+  "textarea",
+  "input[type='text']",
+  "input:not([type])",
+  "[contenteditable='true']",
+  "[role='textbox']"
+].join(",");
+const MODEL_MENU_TRIGGER_SELECTOR = [
+  "button",
+  "[role='button']",
+  "[role='combobox']",
+  "[aria-haspopup='listbox']",
+  "[aria-haspopup='menu']"
+].join(",");
+const MODEL_MENU_OPTION_SELECTOR = [
+  "[role='option']",
+  "[role='menuitemradio']",
+  "option",
+  "button",
+  "[role='button']"
+].join(",");
 const CURSOR_HELP_REQUEST_PATHS = [
   "/api/chat",
   "/chat/completions",
@@ -116,18 +137,20 @@ const CURSOR_HELP_PROMPT_START_PREFIX = "<!-- BBL_PROMPT_START:";
 const CURSOR_HELP_PROMPT_END_PREFIX = "<!-- BBL_PROMPT_END:";
 const CURSOR_HELP_SYSTEM_PROMPT_START_PREFIX = "<!-- BBL_SYSTEM_PROMPT_START:";
 const CURSOR_HELP_SYSTEM_PROMPT_END_PREFIX = "<!-- BBL_SYSTEM_PROMPT_END:";
-const MODEL_ALIASES: Array<{ match: RegExp; apiModel: string }> = [
-  { match: /anthropic\/claude-sonnet-4\.6|claude-sonnet-4\.6|sonnet 4\.6/i, apiModel: "anthropic/claude-sonnet-4.6" },
-  { match: /anthropic\/claude-sonnet-4|claude-sonnet-4|sonnet 4/i, apiModel: "anthropic/claude-sonnet-4" },
-  { match: /anthropic\/claude-opus-4\.1|claude-opus-4\.1|opus 4\.1/i, apiModel: "anthropic/claude-opus-4.1" },
-  { match: /anthropic\/claude-opus-4|claude-opus-4|opus 4/i, apiModel: "anthropic/claude-opus-4" },
-  { match: /google\/gemini-2\.5-pro|gemini-2\.5-pro|gemini 2\.5 pro/i, apiModel: "google/gemini-2.5-pro" },
-  { match: /google\/gemini-2\.5-flash|gemini-2\.5-flash|gemini 2\.5 flash/i, apiModel: "google/gemini-2.5-flash" },
-  { match: /openai\/gpt-5|gpt-5/i, apiModel: "openai/gpt-5" },
-  { match: /openai\/gpt-4\.1|gpt-4\.1/i, apiModel: "openai/gpt-4.1" },
-  { match: /openai\/o3|o3/i, apiModel: "openai/o3" },
-  { match: /openai\/o1|o1/i, apiModel: "openai/o1" }
+const MODEL_ALIASES: Array<{ match: RegExp; apiModel: string; displayModel: string }> = [
+  { match: /^(?:anthropic\/claude-sonnet-4\.6|claude-sonnet-4\.6|sonnet 4\.6)$/i, apiModel: "anthropic/claude-sonnet-4.6", displayModel: "Sonnet 4.6" },
+  { match: /^(?:anthropic\/claude-sonnet-4|claude-sonnet-4|sonnet 4)$/i, apiModel: "anthropic/claude-sonnet-4", displayModel: "Sonnet 4" },
+  { match: /^(?:anthropic\/claude-opus-4\.1|claude-opus-4\.1|opus 4\.1)$/i, apiModel: "anthropic/claude-opus-4.1", displayModel: "Opus 4.1" },
+  { match: /^(?:anthropic\/claude-opus-4|claude-opus-4|opus 4)$/i, apiModel: "anthropic/claude-opus-4", displayModel: "Opus 4" },
+  { match: /^(?:google\/gemini-2\.5-pro|gemini-2\.5-pro|gemini 2\.5 pro)$/i, apiModel: "google/gemini-2.5-pro", displayModel: "Gemini 2.5 Pro" },
+  { match: /^(?:google\/gemini-2\.5-flash|gemini-2\.5-flash|gemini 2\.5 flash)$/i, apiModel: "google/gemini-2.5-flash", displayModel: "Gemini 2.5 Flash" },
+  { match: /^(?:openai\/gpt-5|gpt-5)$/i, apiModel: "openai/gpt-5", displayModel: "GPT-5" },
+  { match: /^(?:openai\/gpt-4\.1|gpt-4\.1)$/i, apiModel: "openai/gpt-4.1", displayModel: "GPT-4.1" },
+  { match: /^(?:openai\/o3|o3)$/i, apiModel: "openai/o3", displayModel: "o3" },
+  { match: /^(?:openai\/o1|o1)$/i, apiModel: "openai/o1", displayModel: "o1" }
 ];
+const MODEL_NAME_PATTERN =
+  /^(?:[a-z0-9._-]+\/)?(?:claude|sonnet|opus|haiku|gpt|gemini|cursor|o1|o3|o4)(?:[\s/_-]*(?:\d+(?:\.\d+)?[a-z]?|mini|nano|pro|flash|max|thinking|fast|auto|preview|opus|sonnet|haiku|turbo|reasoning|codex|coder|plus|latest))*$/i;
 
 function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
@@ -139,6 +162,45 @@ function cloneJsonRecord(value: unknown): JsonRecord {
 
 function normalizeModelText(text: string): string {
   return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function resolveCursorHelpDisplayModel(model: string): string {
+  const normalized = normalizeModelText(model);
+  if (!normalized) return "";
+  for (const alias of MODEL_ALIASES) {
+    if (alias.match.test(normalized)) return alias.displayModel;
+  }
+  return normalized;
+}
+
+function isLikelyModelText(text: string): boolean {
+  const normalized = normalizeModelText(text);
+  if (!normalized || normalized.length < 2 || normalized.length > 80) return false;
+  if (!MODEL_NAME_PATTERN.test(normalized)) return false;
+  return !/[{}[\]<>]/.test(normalized);
+}
+
+function isVisibleElement(element: Element): element is HTMLElement {
+  if (!(element instanceof HTMLElement)) return false;
+  const style = window.getComputedStyle(element);
+  if (style.display === "none" || style.visibility === "hidden") return false;
+  const rect = element.getBoundingClientRect();
+  return (rect.width > 0 && rect.height > 0) || element.getClientRects().length > 0;
+}
+
+function getElementSignal(element: Element): string {
+  const signals = [
+    element.getAttribute("aria-label") || "",
+    element.getAttribute("title") || "",
+    element.textContent || "",
+  ]
+    .map((value) => resolveCursorHelpDisplayModel(normalizeModelText(value)))
+    .filter(Boolean);
+  for (const value of signals) {
+    if (isLikelyModelText(value)) return value;
+  }
+  const combined = resolveCursorHelpDisplayModel(normalizeModelText(signals.join(" ")));
+  return isLikelyModelText(combined) ? combined : "";
 }
 
 function normalizeCursorHelpRewriteStrategy(
@@ -738,9 +800,119 @@ async function waitForNativeSender(timeoutMs = 2_500): Promise<NativeSender | nu
   return locateNativeSender();
 }
 
-function inspectSender(): CursorHelpSenderInspect {
+function listVisibleEditableElements(): HTMLElement[] {
+  return Array.from(document.querySelectorAll(EDITABLE_SELECTOR)).filter(isVisibleElement);
+}
+
+function findModelMenuTrigger(selectedModelHint: string): HTMLElement | null {
+  const desired = resolveCursorHelpDisplayModel(selectedModelHint);
+  const editables = listVisibleEditableElements();
+  let best: HTMLElement | null = null;
+  let bestScore = -1;
+
+  for (const node of Array.from(document.querySelectorAll(MODEL_MENU_TRIGGER_SELECTOR))) {
+    if (!isVisibleElement(node)) continue;
+    const signal = getElementSignal(node);
+    if (!signal) continue;
+
+    let score = 0;
+    if (desired && signal === desired) score += 300;
+    if (node.getAttribute("aria-haspopup") === "listbox" || node.getAttribute("aria-haspopup") === "menu") {
+      score += 120;
+    }
+    if (node.getAttribute("role") === "combobox" || node.hasAttribute("aria-expanded")) {
+      score += 80;
+    }
+
+    const nodeRect = node.getBoundingClientRect();
+    for (const editable of editables) {
+      const editableRect = editable.getBoundingClientRect();
+      const distance = Math.abs(editableRect.top - nodeRect.top);
+      score += Math.max(0, 200 - Math.round(distance));
+    }
+
+    if (score > bestScore) {
+      best = node;
+      bestScore = score;
+    }
+  }
+
+  return best;
+}
+
+function collectModelOptionsFromVisibleMenu(selectedModelHint: string): {
+  selectedModel: string;
+  availableModels: string[];
+} {
+  const availableModels: string[] = [];
+  const seen = new Set<string>();
+  let selectedModel = "";
+
+  for (const node of Array.from(document.querySelectorAll(MODEL_MENU_OPTION_SELECTOR))) {
+    if (!isVisibleElement(node)) continue;
+    const signal = getElementSignal(node);
+    if (!signal || seen.has(signal)) continue;
+    seen.add(signal);
+    availableModels.push(signal);
+
+    const selected =
+      node.getAttribute("aria-selected") === "true" ||
+      node.getAttribute("aria-checked") === "true" ||
+      node.getAttribute("data-state") === "checked";
+    if (!selectedModel && selected) {
+      selectedModel = signal;
+    }
+  }
+
+  if (!selectedModel) {
+    const desired = resolveCursorHelpDisplayModel(selectedModelHint);
+    if (desired && availableModels.includes(desired)) {
+      selectedModel = desired;
+    }
+  }
+
+  return {
+    selectedModel: selectedModel || availableModels[0] || "",
+    availableModels,
+  };
+}
+
+async function inspectExpandedModelMenu(selectedModelHint: string): Promise<{
+  selectedModel: string;
+  availableModels: string[];
+} | null> {
+  const trigger = findModelMenuTrigger(selectedModelHint);
+  if (!trigger) return null;
+
+  const wasExpanded = trigger.getAttribute("aria-expanded") === "true";
+  if (!wasExpanded) {
+    trigger.click();
+  }
+
+  let catalog = collectModelOptionsFromVisibleMenu(selectedModelHint);
+  if (catalog.availableModels.length <= 1) {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      catalog = collectModelOptionsFromVisibleMenu(selectedModelHint);
+      if (catalog.availableModels.length > 1) break;
+    }
+  }
+
+  if (!wasExpanded) {
+    trigger.click();
+  }
+
+  return catalog.availableModels.length > 1 ? catalog : null;
+}
+
+async function inspectSender(): Promise<CursorHelpSenderInspect> {
   const sender = locateNativeSender();
-  const modelCatalog = inspectCursorHelpNativeModelCatalog(document);
+  const baseModelCatalog = inspectCursorHelpNativeModelCatalog(document);
+  const expandedModelCatalog =
+    baseModelCatalog.availableModels.length > 1
+      ? null
+      : await inspectExpandedModelMenu(baseModelCatalog.selectedModel);
+  const modelCatalog = expandedModelCatalog || baseModelCatalog;
   const senderReady = Boolean(sender);
   const senderKind = sender?.senderKind;
   const rewriteStrategy = resolveCursorHelpRewriteStrategy();
@@ -1162,27 +1334,29 @@ function installPageMessageBridge(): void {
     if (data.type === "WEBCHAT_INSPECT") {
       const payload = toRecord(data.payload);
       const rpcId = String(payload.rpcId || "").trim();
-      try {
-        replyRpc(rpcId, {
-          ok: true,
-          ...inspectSender()
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        lastSenderError = message;
-        logToContent("inspect", "failed", message);
-        replyRpc(rpcId, {
-          ok: false,
-          error: message,
-          pageHookReady: true,
-          fetchHookReady: document.documentElement?.getAttribute(FETCH_HOOK_READY_ATTR) === "1",
-          senderReady: false,
-          canExecute: false,
-          lastSenderError: message,
-          pageRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
-          rewriteStrategy: resolveCursorHelpRewriteStrategy()
-        });
-      }
+      void (async () => {
+        try {
+          replyRpc(rpcId, {
+            ok: true,
+            ...(await inspectSender())
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          lastSenderError = message;
+          logToContent("inspect", "failed", message);
+          replyRpc(rpcId, {
+            ok: false,
+            error: message,
+            pageHookReady: true,
+            fetchHookReady: document.documentElement?.getAttribute(FETCH_HOOK_READY_ATTR) === "1",
+            senderReady: false,
+            canExecute: false,
+            lastSenderError: message,
+            pageRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
+            rewriteStrategy: resolveCursorHelpRewriteStrategy()
+          });
+        }
+      })();
       return;
     }
 

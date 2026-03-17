@@ -354,7 +354,7 @@ const MODEL_CONTROL_SELECTOR = [
 ].join(", ");
 
 const MODEL_NAME_PATTERN =
-  /\b(?:claude|gpt|gemini|cursor|o1|o3|o4)(?:[\s-]*(?:\d+(?:\.\d+)?|mini|nano|pro|flash|max|thinking|fast|auto|preview|opus|sonnet|haiku|turbo|reasoning))*\b/i;
+  /^(?:[a-z0-9._-]+\/)?(?:claude|sonnet|opus|haiku|gpt|gemini|cursor|o1|o3|o4)(?:[\s/_-]*(?:\d+(?:\.\d+)?[a-z]?|mini|nano|pro|flash|max|thinking|fast|auto|preview|opus|sonnet|haiku|turbo|reasoning|codex|coder|plus|latest))*$/i;
 
 const PAGE_RPC_TIMEOUT_MS = 8_000;
 const PAGE_SENDER_READY_TIMEOUT_MS = 4_000;
@@ -704,13 +704,18 @@ function isLikelyModelText(text: string): boolean {
 }
 
 function getModelControlText(node: Element): string {
-  return normalizeModelText(
-    [
-      node.getAttribute("aria-label") || "",
-      node.getAttribute("title") || "",
-      node.textContent || "",
-    ].join(" "),
-  );
+  const signals = [
+    node.getAttribute("aria-label") || "",
+    node.getAttribute("title") || "",
+    node.textContent || "",
+  ]
+    .map((value) => normalizeModelText(value))
+    .filter(Boolean);
+  for (const value of signals) {
+    if (isLikelyModelText(value)) return value;
+  }
+  const combined = normalizeModelText(signals.join(" "));
+  return isLikelyModelText(combined) ? combined : "";
 }
 
 function collectModelInfoFromNodes(nodes: Element[]): { selectedModel: string; availableModels: string[] } {
@@ -719,7 +724,7 @@ function collectModelInfoFromNodes(nodes: Element[]): { selectedModel: string; a
 
   for (const node of nodes) {
     const text = getModelControlText(node);
-    if (!isLikelyModelText(text)) continue;
+    if (!text) continue;
     candidates.add(text);
     if (!selectedModel) {
       const selected =

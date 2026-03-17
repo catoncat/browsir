@@ -5,6 +5,7 @@ import {
   injectCompiledPromptIdempotent,
   isCursorHelpTargetRequestUrl,
   parseCursorHelpSseLine,
+  resolveCursorHelpDisplayModel,
   resolveCursorHelpApiModel,
   rewriteCursorHelpNativeRequestBody
 } from "../../../shared/cursor-help-protocol";
@@ -18,6 +19,12 @@ describe("cursor-help-protocol", () => {
     expect(resolveCursorHelpApiModel("Sonnet 4.6")).toBe("anthropic/claude-sonnet-4.6");
     expect(resolveCursorHelpApiModel("auto", "Gemini 2.5 Pro")).toBe("google/gemini-2.5-pro");
     expect(resolveCursorHelpApiModel("openai/gpt-5")).toBe("openai/gpt-5");
+  });
+
+  it("maps Cursor Help api ids back to stable UI labels", () => {
+    expect(resolveCursorHelpDisplayModel("anthropic/claude-sonnet-4.6")).toBe("Sonnet 4.6");
+    expect(resolveCursorHelpDisplayModel("Sonnet 4.6")).toBe("Sonnet 4.6");
+    expect(resolveCursorHelpDisplayModel("google/gemini-2.5-flash")).toBe("Gemini 2.5 Flash");
   });
 
   it("rewrites native request body while preserving envelope", () => {

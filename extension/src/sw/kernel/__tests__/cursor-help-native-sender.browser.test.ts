@@ -110,4 +110,36 @@ describe("cursor-help-native-sender", () => {
       "Gemini 2.5 Pro"
     ]);
   });
+
+  it("reads screenshot-style model labels without requiring a provider prefix", () => {
+    document.body.innerHTML = `<textarea aria-label="Chat message"></textarea>`;
+    const textarea = document.querySelector("textarea");
+    if (!(textarea instanceof HTMLTextAreaElement)) {
+      throw new Error("textarea not found");
+    }
+    Object.defineProperty(textarea, "__reactFiber$screenshot", {
+      configurable: true,
+      value: {
+        type: { displayName: "ChatInput" },
+        memoizedProps: {
+          selectedModel: { label: "Sonnet 4.6" },
+          availableModels: [
+            { label: "Sonnet 4.6", selected: true },
+            { label: "GPT-5.1 Codex Mini" },
+            { label: "Gemini 3 Flash" }
+          ]
+        },
+        return: null
+      }
+    });
+
+    const catalog = inspectCursorHelpNativeModelCatalog(document);
+
+    expect(catalog.selectedModel).toBe("Sonnet 4.6");
+    expect(catalog.availableModels).toEqual([
+      "Sonnet 4.6",
+      "GPT-5.1 Codex Mini",
+      "Gemini 3 Flash"
+    ]);
+  });
 });

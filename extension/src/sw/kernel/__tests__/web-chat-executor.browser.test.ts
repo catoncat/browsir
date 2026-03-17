@@ -18,6 +18,7 @@ import {
 import { CURSOR_HELP_REWRITE_STRATEGY, CURSOR_HELP_RUNTIME_VERSION } from "../../../shared/cursor-help-runtime-meta";
 
 const CURSOR_HELP_POOL_STORAGE_KEY = "cursor_help_web.pool.v1";
+const CURSOR_HELP_AVAILABLE_MODELS = ["Sonnet 4.6", "GPT-5.1 Codex Mini", "Gemini 2.5 Flash"];
 
 function createRoute(): LlmResolvedRoute {
   return {
@@ -82,7 +83,7 @@ function buildChromeMock() {
         canExecute: true,
         url: "https://cursor.com/help",
         selectedModel: "Sonnet 4.6",
-        availableModels: ["Sonnet 4.6"],
+        availableModels: CURSOR_HELP_AVAILABLE_MODELS,
         senderKind: "react_chat_input_on_submit",
         pageRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
         contentRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
@@ -1006,7 +1007,7 @@ describe("web-chat-executor.browser", () => {
     await readResponseText(title);
   });
 
-  it("reuses the last session conversationKey on the next execute request", async () => {
+  it("does not implicitly reuse the last native conversationKey on the next execute request", async () => {
     const provider = createCursorHelpWebProvider();
     const first = await provider.send({
       sessionId: "session-conversation-affinity",
@@ -1066,7 +1067,7 @@ describe("web-chat-executor.browser", () => {
 
     const secondRequestId = getLastExecuteRequestId();
     const secondExecuteCall = getExecuteCalls().at(-1) || {};
-    expect(secondExecuteCall.conversationKey).toBe("cursor-help:conv-1");
+    expect(secondExecuteCall.conversationKey).toBeUndefined();
 
     await handleWebChatRuntimeMessage({
       type: "webchat.transport",
@@ -1093,6 +1094,54 @@ describe("web-chat-executor.browser", () => {
       }
     });
     await readResponseText(second);
+  });
+
+  it("preserves an explicit conversationKey when the caller asks to reuse it", async () => {
+    const provider = createCursorHelpWebProvider();
+    const response = await provider.send({
+      sessionId: "session-explicit-conversation-key",
+      step: 1,
+      route: createRoute(),
+      signal: new AbortController().signal,
+      payload: {
+        stream: true,
+        conversationKey: "cursor-help:conv-explicit",
+        messages: [{ role: "user", content: "Continue with explicit native conversation" }],
+        tools: [],
+        tool_choice: "auto",
+      },
+    });
+
+    const requestId = getLastExecuteRequestId();
+    const executeCall = getExecuteCalls().at(-1) || {};
+    expect(executeCall.conversationKey).toBe("cursor-help:conv-explicit");
+
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.debug",
+        requestId,
+        stage: "request_started",
+        meta: {
+          conversationKey: "cursor-help:conv-explicit",
+          sessionKey: "cursor-help:conv-explicit",
+        },
+      },
+    });
+    await handleWebChatRuntimeMessage({
+      type: "webchat.transport",
+      envelope: {
+        type: "hosted_chat.turn_resolved",
+        requestId,
+        result: {
+          assistantText: "done-explicit",
+          toolCalls: [],
+          finishReason: "stop",
+          meta: {},
+        },
+      },
+    });
+    await readResponseText(response);
   });
 
   it("records external-tab adoption in pool debug state", async () => {
@@ -1379,7 +1428,7 @@ describe("web-chat-executor.browser", () => {
           canExecute: false,
           url: "https://cursor.com/help",
           selectedModel: "Sonnet 4.6",
-          availableModels: ["Sonnet 4.6"],
+          availableModels: CURSOR_HELP_AVAILABLE_MODELS,
           senderKind: "react_chat_input_on_submit",
           pageRuntimeVersion: "stale-runtime",
           contentRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
@@ -1462,7 +1511,7 @@ describe("web-chat-executor.browser", () => {
           canExecute: true,
           url: "https://cursor.com/help",
           selectedModel: "Sonnet 4.6",
-          availableModels: ["Sonnet 4.6"],
+          availableModels: CURSOR_HELP_AVAILABLE_MODELS,
           senderKind: "react_chat_input_on_submit",
           pageRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
           contentRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
@@ -1506,7 +1555,7 @@ describe("web-chat-executor.browser", () => {
           canExecute: true,
           url: "https://cursor.com/help",
           selectedModel: "Sonnet 4.6",
-          availableModels: ["Sonnet 4.6"],
+          availableModels: CURSOR_HELP_AVAILABLE_MODELS,
           senderKind: "react_chat_input_on_submit",
           pageRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
           contentRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
@@ -1584,7 +1633,7 @@ describe("web-chat-executor.browser", () => {
           canExecute: false,
           url: "https://cursor.com/help",
           selectedModel: "Sonnet 4.6",
-          availableModels: ["Sonnet 4.6"],
+          availableModels: CURSOR_HELP_AVAILABLE_MODELS,
           senderKind: "react_chat_input_on_submit",
           pageRuntimeVersion: "stale-runtime",
           contentRuntimeVersion: CURSOR_HELP_RUNTIME_VERSION,
@@ -2083,7 +2132,7 @@ describe("web-chat-executor.browser", () => {
     const catalog = await probeCursorHelpModelCatalog();
 
     expect(catalog.selectedModel).toBe("Sonnet 4.6");
-    expect(catalog.availableModels).toEqual(["Sonnet 4.6"]);
+    expect(catalog.availableModels).toEqual(CURSOR_HELP_AVAILABLE_MODELS);
     expect(catalog.statusMessage).toBe("");
   });
 
@@ -2110,7 +2159,7 @@ describe("web-chat-executor.browser", () => {
 
     expect(windowsCreate).toHaveBeenCalled();
     expect(catalog.selectedModel).toBe("Sonnet 4.6");
-    expect(catalog.availableModels).toEqual(["Sonnet 4.6"]);
+    expect(catalog.availableModels).toEqual(CURSOR_HELP_AVAILABLE_MODELS);
     expect(catalog.statusMessage).toBe("");
   });
 });

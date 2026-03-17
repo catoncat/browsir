@@ -4,6 +4,7 @@ import {
   parseHostedChatTransportEvent,
 } from "../../shared/cursor-help-web-shared";
 import { CURSOR_HELP_RUNTIME_VERSION } from "../../shared/cursor-help-runtime-meta";
+import { resolveCursorHelpDisplayModel } from "../../shared/cursor-help-protocol";
 import type {
   LlmProviderExecutionLane,
   LlmProviderSendInput,
@@ -586,7 +587,10 @@ function resolveConversationKeyForSession(
 ): string {
   const explicitConversationKey = String(payload.conversationKey || "").trim();
   if (explicitConversationKey) return explicitConversationKey;
-  return String(LAST_CONVERSATION_KEY_BY_SESSION.get(sessionId) || "").trim();
+  // Keep Browser Brain Loop transcript as the source of truth.
+  // Implicitly reviving the last native Cursor conversation reintroduces
+  // webpage-side hidden persona/state that can override our injected prompt.
+  return "";
 }
 
 async function waitForCursorHelpSlot(
@@ -942,13 +946,21 @@ export async function probeCursorHelpModelCatalog(options?: {
       selectedModel: "",
       availableModels: [],
     }));
+    const seen = new Set<string>();
+    const availableModels = Array.isArray(catalog.availableModels)
+      ? catalog.availableModels
+          .map((item) => resolveCursorHelpDisplayModel(String(item || "").trim()))
+          .filter((item) => {
+            if (!item || seen.has(item)) return false;
+            seen.add(item);
+            return true;
+          })
+      : [];
     return {
-      selectedModel: String(catalog.selectedModel || "").trim(),
-      availableModels: Array.isArray(catalog.availableModels)
-        ? catalog.availableModels
-            .map((item) => String(item || "").trim())
-            .filter(Boolean)
-        : [],
+      selectedModel: resolveCursorHelpDisplayModel(
+        String(catalog.selectedModel || "").trim(),
+      ),
+      availableModels,
     };
   };
 

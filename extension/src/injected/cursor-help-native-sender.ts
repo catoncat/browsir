@@ -37,7 +37,7 @@ const SUBMIT_PROP_SCORE: Array<{ pattern: RegExp; base: number }> = [
   { pattern: /(submit|send|commit|dispatch)/i, base: 72 }
 ];
 const MODEL_NAME_PATTERN =
-  /\b(?:claude|sonnet|opus|haiku|gpt|gemini|cursor|o1|o3|o4)(?:[\s/_-]*(?:\d+(?:\.\d+)?|mini|nano|pro|flash|max|thinking|fast|preview|turbo|reasoning|auto|sonnet|opus|haiku))*\b/i;
+  /^(?:[a-z0-9._-]+\/)?(?:claude|sonnet|opus|haiku|gpt|gemini|cursor|o1|o3|o4)(?:[\s/_-]*(?:\d+(?:\.\d+)?[a-z]?|mini|nano|pro|flash|max|thinking|fast|auto|preview|opus|sonnet|haiku|turbo|reasoning|codex|coder|plus|latest))*$/i;
 const MODEL_SELECTED_KEY_PATTERN = /(selected|current|active|default).*model|^(selected|current|active|default)$|^model(?:Id|Name)?$/i;
 const MODEL_COLLECTION_KEY_PATTERN = /(available)?models?|model(?:Options|List|Catalog|Choices)|options/i;
 const MODEL_OPTION_TEXT_KEYS = ["label", "name", "title", "model", "modelName", "id", "value", "slug"] as const;

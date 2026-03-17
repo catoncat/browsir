@@ -116,4 +116,50 @@ describe("cursor-help-content webchat.inspect", () => {
     expect(response.selectedModel).toBe("GPT-4o mini");
     expect(response.availableModels).toEqual(["GPT-4o mini", "Claude Sonnet 4"]);
   });
+
+  it("does not treat prompt-style button text as model names", async () => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "hidden"
+    });
+    document.body.innerHTML = `
+      <button aria-selected="true">GPT-4o mini</button>
+      <button>Try Claude Sonnet 4 to review this PR</button>
+      <button>Gemini 2.5 Pro</button>
+    `;
+
+    const buttons = Array.from(document.querySelectorAll("button"));
+    buttons.forEach(markAsNonRendered);
+
+    const response = await inspectWebchat();
+
+    expect(response.ok).toBe(true);
+    expect(response.selectedModel).toBe("GPT-4o mini");
+    expect(response.availableModels).toEqual(["GPT-4o mini", "Gemini 2.5 Pro"]);
+  });
+
+  it("captures the three visible cursor helper models from the model menu", async () => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "hidden"
+    });
+    document.body.innerHTML = `
+      <button aria-selected="true">Sonnet 4.6</button>
+      <button>GPT-5.1 Codex Mini</button>
+      <button>Gemini 3 Flash</button>
+    `;
+
+    const buttons = Array.from(document.querySelectorAll("button"));
+    buttons.forEach(markAsNonRendered);
+
+    const response = await inspectWebchat();
+
+    expect(response.ok).toBe(true);
+    expect(response.selectedModel).toBe("Sonnet 4.6");
+    expect(response.availableModels).toEqual([
+      "Sonnet 4.6",
+      "GPT-5.1 Codex Mini",
+      "Gemini 3 Flash"
+    ]);
+  });
 });

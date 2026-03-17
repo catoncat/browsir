@@ -103,17 +103,17 @@ export const CURSOR_HELP_SYSTEM_PROMPT_START_PREFIX = "<!-- BBL_SYSTEM_PROMPT_ST
 export const CURSOR_HELP_SYSTEM_PROMPT_END_PREFIX = "<!-- BBL_SYSTEM_PROMPT_END:";
 const CURSOR_HELP_PROMPT_ENVELOPE_RE = /<!-- BBL_PROMPT_START:[^>]+ -->[\s\S]*?<!-- BBL_PROMPT_END:[^>]+ -->\s*/g;
 
-const MODEL_ALIASES: Array<{ match: RegExp; apiModel: string }> = [
-  { match: /anthropic\/claude-sonnet-4\.6|claude-sonnet-4\.6|sonnet 4\.6/i, apiModel: "anthropic/claude-sonnet-4.6" },
-  { match: /anthropic\/claude-sonnet-4|claude-sonnet-4|sonnet 4/i, apiModel: "anthropic/claude-sonnet-4" },
-  { match: /anthropic\/claude-opus-4\.1|claude-opus-4\.1|opus 4\.1/i, apiModel: "anthropic/claude-opus-4.1" },
-  { match: /anthropic\/claude-opus-4|claude-opus-4|opus 4/i, apiModel: "anthropic/claude-opus-4" },
-  { match: /google\/gemini-2\.5-pro|gemini-2\.5-pro|gemini 2\.5 pro/i, apiModel: "google/gemini-2.5-pro" },
-  { match: /google\/gemini-2\.5-flash|gemini-2\.5-flash|gemini 2\.5 flash/i, apiModel: "google/gemini-2.5-flash" },
-  { match: /openai\/gpt-5|gpt-5/i, apiModel: "openai/gpt-5" },
-  { match: /openai\/gpt-4\.1|gpt-4\.1/i, apiModel: "openai/gpt-4.1" },
-  { match: /openai\/o3|o3/i, apiModel: "openai/o3" },
-  { match: /openai\/o1|o1/i, apiModel: "openai/o1" }
+const MODEL_ALIASES: Array<{ match: RegExp; apiModel: string; displayModel: string }> = [
+  { match: /^(?:anthropic\/claude-sonnet-4\.6|claude-sonnet-4\.6|sonnet 4\.6)$/i, apiModel: "anthropic/claude-sonnet-4.6", displayModel: "Sonnet 4.6" },
+  { match: /^(?:anthropic\/claude-sonnet-4|claude-sonnet-4|sonnet 4)$/i, apiModel: "anthropic/claude-sonnet-4", displayModel: "Sonnet 4" },
+  { match: /^(?:anthropic\/claude-opus-4\.1|claude-opus-4\.1|opus 4\.1)$/i, apiModel: "anthropic/claude-opus-4.1", displayModel: "Opus 4.1" },
+  { match: /^(?:anthropic\/claude-opus-4|claude-opus-4|opus 4)$/i, apiModel: "anthropic/claude-opus-4", displayModel: "Opus 4" },
+  { match: /^(?:google\/gemini-2\.5-pro|gemini-2\.5-pro|gemini 2\.5 pro)$/i, apiModel: "google/gemini-2.5-pro", displayModel: "Gemini 2.5 Pro" },
+  { match: /^(?:google\/gemini-2\.5-flash|gemini-2\.5-flash|gemini 2\.5 flash)$/i, apiModel: "google/gemini-2.5-flash", displayModel: "Gemini 2.5 Flash" },
+  { match: /^(?:openai\/gpt-5|gpt-5)$/i, apiModel: "openai/gpt-5", displayModel: "GPT-5" },
+  { match: /^(?:openai\/gpt-4\.1|gpt-4\.1)$/i, apiModel: "openai/gpt-4.1", displayModel: "GPT-4.1" },
+  { match: /^(?:openai\/o3|o3)$/i, apiModel: "openai/o3", displayModel: "o3" },
+  { match: /^(?:openai\/o1|o1)$/i, apiModel: "openai/o1", displayModel: "o1" }
 ];
 
 function toRecord(value: unknown): JsonRecord {
@@ -228,6 +228,15 @@ export function resolveCursorHelpApiModel(requestedModel: string, detectedModel 
     }
   }
   return "anthropic/claude-sonnet-4.6";
+}
+
+export function resolveCursorHelpDisplayModel(model: string): string {
+  const normalized = normalizeModelText(model);
+  if (!normalized) return "";
+  for (const alias of MODEL_ALIASES) {
+    if (alias.match.test(normalized)) return alias.displayModel;
+  }
+  return normalized;
 }
 
 export function isCursorHelpTargetRequestUrl(url: string): boolean {
