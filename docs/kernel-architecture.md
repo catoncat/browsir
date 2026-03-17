@@ -316,8 +316,11 @@ type BrowserRuntimeStrategy = "browser-first" | "host-first";
 | **Eval Bridge** | `eval-bridge.ts` | SidePanel/Offscreen JS eval 桥接 |
 | **Web Chat Executor** | `web-chat-executor.browser.ts` | 嵌入式 web chat transport 执行器（cursor-help 等） |
 | **Persistable AST Analyzer** | `persistable-ast-analyzer.ts` | AST 分析：检测插件脚本可持久化性 |
-| **Plugin Materializer** | `plugin-materializer.ts` | 插件物化：从持久化数据还原插件实例 |
-| **Plugin Module Serializer** | `plugin-module-serializer.ts` | 插件模块序列化/反序列化 |
+| **Prompt Enricher** | `prompt/` | LLM prompt 构建：`prompt-enricher.ts`、`schema-to-prompt.ts` 等 |
+| **Cursor Help Pool** | `cursor-help-*.ts` | `cursor_help` 专属连接池系列模块（如 `execution` / `pool-window` / `pool-state` 等） |
+| **Background Auto** | `automation-mode.ts` | 自动化模式状态管理（`focus` / `background`）|
+| **Stealth Tab** | `stealth-tab.ts` | 后台模式下的隐身/最小化窗口标签页管理 |
+| **Failure Tracker** | `background-failure-tracker.ts` | 后台模式连续失败追踪与降级提示 |
 
 ---
 
