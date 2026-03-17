@@ -178,6 +178,11 @@ function extractVisibleText(element: Element): string {
     if (node.nodeType === Node.ELEMENT_NODE) {
       if (SKIP_TAGS.has((node as Element).tagName.toLowerCase())) return;
       for (const child of Array.from(node.childNodes)) walk(child);
+      // Traverse Shadow DOM for text extraction
+      const shadow = (node as HTMLElement).shadowRoot;
+      if (shadow) {
+        for (const child of Array.from(shadow.childNodes)) walk(child);
+      }
     }
   }
   walk(element);
@@ -515,6 +520,22 @@ function traverseElement(
       const r = traverseElement(child, opts, flat, doc);
       childNodes.push(...r.nodes);
       if (r.hasVisibilityVisible) childVis = true;
+    }
+  }
+
+  // Traverse Shadow DOM if present (open mode)
+  const shadow = (el as HTMLElement).shadowRoot;
+  if (shadow) {
+    for (const child of Array.from(shadow.children)) {
+      if (child.tagName.toLowerCase() === "iframe") {
+        const r = traverseIframe(child as HTMLIFrameElement, opts, flat, doc);
+        childNodes.push(...r.nodes);
+        if (r.hasVisibilityVisible) childVis = true;
+      } else {
+        const r = traverseElement(child, opts, flat, doc);
+        childNodes.push(...r.nodes);
+        if (r.hasVisibilityVisible) childVis = true;
+      }
     }
   }
 

@@ -121,26 +121,35 @@ function runDomAction(payload: DomActionPayload): DomActionResponse<any> {
     return value.replace(/"/g, '\\"');
   };
 
-  // --- Query by UID (main document + same-origin iframes) ---
+  // --- Query by UID (main document + shadow roots + same-origin iframes) ---
   const queryByUid = (uid: string): Element | null => {
     const sel = `[data-brain-uid="${cssEscape(uid)}"]`;
-    const found = document.querySelector(sel);
-    if (found) return found;
 
-    const searchFrames = (doc: Document): Element | null => {
-      for (const iframe of doc.querySelectorAll("iframe")) {
-        try {
-          const fd = iframe.contentDocument;
-          if (!fd) continue;
-          const hit = fd.querySelector(sel);
-          if (hit) return hit;
-          const nested = searchFrames(fd);
-          if (nested) return nested;
-        } catch { /* cross-origin */ }
+    const deepQuery = (root: Document | ShadowRoot): Element | null => {
+      const hit = root.querySelector(sel);
+      if (hit) return hit;
+
+      for (const el of root.querySelectorAll("*")) {
+        // Search inside open Shadow Roots
+        if (el.shadowRoot) {
+          const shadowHit = deepQuery(el.shadowRoot);
+          if (shadowHit) return shadowHit;
+        }
+        // Search inside same-origin iframes
+        if (el.tagName.toLowerCase() === "iframe") {
+          try {
+            const fd = (el as HTMLIFrameElement).contentDocument;
+            if (fd) {
+              const nested = deepQuery(fd);
+              if (nested) return nested;
+            }
+          } catch { /* cross-origin */ }
+        }
       }
       return null;
     };
-    return searchFrames(document);
+
+    return deepQuery(document);
   };
 
   // --- Highlight effect (1.2 s fade-out) ---

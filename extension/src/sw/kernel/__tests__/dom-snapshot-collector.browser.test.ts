@@ -167,5 +167,45 @@ describe("dom-snapshot-collector", () => {
       expect(snap.root.role).toBe("RootWebArea");
       expect(snap.totalNodes).toBeGreaterThanOrEqual(1); // at least the root
     });
+
+    it("traverses open Shadow DOM and captures elements inside", () => {
+      const doc = makeDoc('<div id="host"></div>');
+      const host = doc.getElementById("host")!;
+      const shadow = host.attachShadow({ mode: "open" });
+      shadow.innerHTML = '<button data-brain-uid="shadow_btn_1">Shadow Click</button>';
+      const snap = collectDomSnapshot(doc);
+      const btn = allNodes(snap).find((n) => n.id === "shadow_btn_1");
+      expect(btn).toBeDefined();
+      expect(btn?.role).toBe("button");
+      expect(btn?.name).toBe("Shadow Click");
+    });
+
+    it("traverses nested Shadow DOMs recursively", () => {
+      const doc = makeDoc('<div id="outer-host"></div>');
+      const outerHost = doc.getElementById("outer-host")!;
+      const outerShadow = outerHost.attachShadow({ mode: "open" });
+      outerShadow.innerHTML = '<div id="inner-host"></div>';
+      const innerHost = outerShadow.getElementById("inner-host")!;
+      const innerShadow = innerHost.attachShadow({ mode: "open" });
+      innerShadow.innerHTML =
+        '<input type="text" data-brain-uid="nested_input" placeholder="deep">';
+      const snap = collectDomSnapshot(doc);
+      const input = allNodes(snap).find((n) => n.id === "nested_input");
+      expect(input).toBeDefined();
+      expect(input?.role).toBe("textbox");
+      expect(input?.placeholder).toBe("deep");
+    });
+
+    it("extracts text from inside Shadow DOM for accessible names", () => {
+      const doc = makeDoc('<div id="host2"></div>');
+      const host = doc.getElementById("host2")!;
+      const shadow = host.attachShadow({ mode: "open" });
+      shadow.innerHTML = '<a href="https://example.com" data-brain-uid="shadow_link">Shadow Link</a>';
+      const snap = collectDomSnapshot(doc);
+      const link = allNodes(snap).find((n) => n.id === "shadow_link");
+      expect(link).toBeDefined();
+      expect(link?.role).toBe("link");
+      expect(link?.name).toBe("Shadow Link");
+    });
   });
 });
