@@ -28,6 +28,31 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+wait_for_first_exit() {
+  local status pid running
+
+  if wait -n "${PIDS[@]}" 2>/dev/null; then
+    return 0
+  fi
+
+  status=$?
+  if [[ "$status" -ne 2 ]]; then
+    return "$status"
+  fi
+
+  # macOS 自带旧 shell 不支持 wait -n，退化为轮询后台作业状态。
+  while true; do
+    running="$(jobs -pr)"
+    for pid in "${PIDS[@]}"; do
+      if ! grep -qx "$pid" <<<"$running"; then
+        wait "$pid"
+        return $?
+      fi
+    done
+    sleep 0.2
+  done
+}
+
 if curl -fsS "${BRIDGE_BASE}/health" >/dev/null 2>&1; then
   echo "[brain:dev] 检测到已有 bridge 在运行，复用现有进程"
   if [[ -z "$BRIDGE_TOKEN" ]]; then
@@ -56,4 +81,4 @@ fi
 ) &
 PIDS+=("$!")
 
-wait -n "${PIDS[@]}"
+wait_for_first_exit
