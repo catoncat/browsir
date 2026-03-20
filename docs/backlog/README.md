@@ -68,7 +68,7 @@ acceptance_ref: docs/<某设计文档>.md
 
 项目内也可以通过 repo skill `auto-claim-issues` 自动认领符合条件的 backlog slice。
 
-## 当前未完成项（2026-03-15 更新）
+## 当前未完成项（2026-03-17 更新）
 
 以下清单用于快速派工；后续 agent 进入仓库时，优先看本节，不必先遍历整个目录。
 
@@ -82,6 +82,12 @@ acceptance_ref: docs/<某设计文档>.md
   - `parallel_group: cursor-help`
   - `assignee: human`
   - 说明：Provider 连通性由 human 接手。子 slice ISSUE-024/025/026/027 全部已完成，仅剩 S1（multi-conversation conversationKey）部分已落地首阶段。
+
+2. `ISSUE-039` [调试会话后历史记录消失，live runtime 无法再找到 session](./2026-03-17-session-history-disappears-after-debug-session.md)
+  - `status: open`
+  - `priority: p1`
+  - `assignee: unassigned`
+  - 说明：用户已提供 snapshot，但同一 session 在 live `brain.debug.dump` 中不存在，需排查 session 持久化/恢复链路。
 
 ### 已归档
 
@@ -97,8 +103,8 @@ acceptance_ref: docs/<某设计文档>.md
 
 ## 推荐领取顺序
 
-1. `ISSUE-023` 由 human 负责，agent 不要并行改其 `write_scope`。
-2. 所有 agent 可认领的 issue 已全部完成并归档。
+1. `ISSUE-039` 可优先排查，范围相对独立，且直接影响调试与历史可用性。
+2. `ISSUE-023` 由 human 负责，agent 不要并行改其 `write_scope`。
 3. 如有新需求，创建新的 backlog slice。
 
 ## 维护规则

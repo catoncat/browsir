@@ -196,7 +196,7 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
       try {
         // 基础设施消息不走 applyAfter → runtime.route.after hook 链路：
         // - bbloop.*: plugin trace / UI mascot / global notice，仅面板侧消费
-        // - sandbox-*: eval-bridge sandbox 执行，通过 sendMessage 中继到 SidePanel relay
+        // - sandbox-*: eval-bridge sandbox 执行，通过 sendMessage 中继到 sandbox relay
         // 否则沙箱插件的 emitPluginHookTrace / sandboxBash 会自回环触发死循环。
         if (type.startsWith("bbloop.") || type.startsWith("sandbox-")) {
           return ok({ passthrough: true });

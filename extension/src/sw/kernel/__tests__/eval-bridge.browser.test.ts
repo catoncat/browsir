@@ -20,13 +20,15 @@ describe("eval-bridge", () => {
   });
 
   describe("sandboxBash", () => {
-    it("routes through SidePanel when available", async () => {
+    it("prefers offscreen relay even when SidePanel is available", async () => {
       const chromeRuntime = (globalThis as any).chrome.runtime;
-      // SidePanel is available
-      chromeRuntime.getContexts.mockResolvedValue([
-        { contextType: "SIDE_PANEL" },
-      ]);
-      // Sandbox returns success
+      chromeRuntime.getContexts.mockImplementation(
+        async ({ contextTypes }: { contextTypes?: string[] }) => {
+          if (contextTypes?.includes("OFFSCREEN_DOCUMENT")) return [];
+          if (contextTypes?.includes("SIDE_PANEL")) return [{ contextType: "SIDE_PANEL" }];
+          return [];
+        }
+      );
       chromeRuntime.sendMessage.mockResolvedValue({
         ok: true,
         stdout: "hello",
@@ -43,18 +45,20 @@ describe("eval-bridge", () => {
       expect(result.ok).toBe(true);
       expect(result.stdout).toBe("hello");
       expect(result.exitCode).toBe(0);
-      // Should not create offscreen document
       expect(
         (globalThis as any).chrome.offscreen.createDocument
-      ).not.toHaveBeenCalled();
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: "sandbox-host.html",
+        })
+      );
     });
 
-    it("falls back to offscreen document when SidePanel unavailable", async () => {
+    it("creates offscreen document when no relay exists", async () => {
       const chromeRuntime = (globalThis as any).chrome.runtime;
-      // No SidePanel
       chromeRuntime.getContexts
-        .mockResolvedValueOnce([]) // hasSidePanelRelay check
-        .mockResolvedValueOnce([]); // ensureOffscreenRelay check
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]);
       chromeRuntime.sendMessage.mockResolvedValue({
         ok: true,
         stdout: "from offscreen",
@@ -88,9 +92,7 @@ describe("eval-bridge", () => {
 
     it("returns error result when sendMessage fails", async () => {
       const chromeRuntime = (globalThis as any).chrome.runtime;
-      chromeRuntime.getContexts.mockResolvedValue([
-        { contextType: "SIDE_PANEL" },
-      ]);
+      chromeRuntime.getContexts.mockResolvedValue([{ contextType: "OFFSCREEN_DOCUMENT" }]);
       chromeRuntime.sendMessage.mockRejectedValue(new Error("disconnected"));
 
       const result = await sandboxBash({
@@ -106,7 +108,7 @@ describe("eval-bridge", () => {
 
     it("returns error result when no response from sandbox", async () => {
       const chromeRuntime = (globalThis as any).chrome.runtime;
-      chromeRuntime.getContexts.mockResolvedValue([{ contextType: "SIDE_PANEL" }]);
+      chromeRuntime.getContexts.mockResolvedValue([{ contextType: "OFFSCREEN_DOCUMENT" }]);
       chromeRuntime.sendMessage.mockResolvedValue(null);
 
       const result = await sandboxBash({
@@ -120,7 +122,7 @@ describe("eval-bridge", () => {
 
     it("passes files, cwd, and timeoutMs in message", async () => {
       const chromeRuntime = (globalThis as any).chrome.runtime;
-      chromeRuntime.getContexts.mockResolvedValue([{ contextType: "SIDE_PANEL" }]);
+      chromeRuntime.getContexts.mockResolvedValue([{ contextType: "OFFSCREEN_DOCUMENT" }]);
       chromeRuntime.sendMessage.mockResolvedValue({
         ok: true,
         stdout: "",
@@ -147,10 +149,7 @@ describe("eval-bridge", () => {
 
     it("skips offscreen creation if already exists", async () => {
       const chromeRuntime = (globalThis as any).chrome.runtime;
-      // No SidePanel
-      chromeRuntime.getContexts
-        .mockResolvedValueOnce([]) // hasSidePanelRelay
-        .mockResolvedValueOnce([{ contextType: "OFFSCREEN_DOCUMENT" }]); // ensureOffscreenRelay
+      chromeRuntime.getContexts.mockResolvedValue([{ contextType: "OFFSCREEN_DOCUMENT" }]);
       chromeRuntime.sendMessage.mockResolvedValue({
         ok: true,
         stdout: "",

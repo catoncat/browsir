@@ -101,26 +101,22 @@ interface BashResult {
 6. 返回 stdout/stderr/exitCode + diff
 7. SW 将 diff 应用回自己的 Sandbox（fs.writeFile/rm）
 
-#### D3: 双宿主策略（SidePanel + Offscreen Document）
+#### D3: 单宿主策略（Offscreen Document）
 
-- **主要宿主**：SidePanel 内嵌 sandbox iframe（Agent 运行时 SidePanel 必然打开）
-- **备用宿主**：当 SidePanel 不可用时，SW 通过 `chrome.offscreen.createDocument()` 创建 Offscreen Document 作为 sandbox iframe 的宿主
+- **唯一宿主**：SW 通过 `chrome.offscreen.createDocument()` 创建 Offscreen Document 作为 sandbox iframe 的宿主
 
 Offscreen Document 本身的 CSP 也禁止 eval，但它可以**包含一个 sandbox iframe**，sandbox iframe 有独立 CSP。通信链：SW → Offscreen Document → sandbox iframe。
 
 ```typescript
 // SW 侧 EvalBridge 伪代码
 async function ensureRelay(): Promise<RelayPort> {
-  // 1. 尝试 SidePanel
-  const panels = await chrome.runtime.getContexts({ contextTypes: ["SIDE_PANEL"] });
-  if (panels.length > 0) return connectToSidePanel();
-
-  // 2. fallback: Offscreen Document
-  const existing = await chrome.offscreen.hasDocument();
-  if (!existing) {
+  const contexts = await chrome.runtime.getContexts({
+    contextTypes: ["OFFSCREEN_DOCUMENT"]
+  });
+  if (contexts.length === 0) {
     await chrome.offscreen.createDocument({
       url: "sandbox-host.html",
-      reasons: ["WORKERS"],  // 或 "TESTING"
+      reasons: ["WORKERS"],
       justification: "Host sandbox iframe for plugin code evaluation"
     });
   }
@@ -180,7 +176,7 @@ SW 重启时发送 `{ type: "sandbox-reset" }` 通知中继宿主销毁旧 ifram
 | Hook 系统 | ❌ 无影响 | 函数调用链，不涉及 eval |
 | CDP 浏览器操作 | ❌ 无影响 | chrome.debugger API |
 | Service Worker 生命周期 | ❌ 无影响 | sandbox iframe 不影响 SW |
-| SidePanel UI | ⚠️ 微小 | 新增一个不可见 iframe |
+| SidePanel UI | ❌ 无影响 | sandbox iframe 不再直接挂在用户可见页面 |
 
 ### 其他受益场景
 
@@ -205,7 +201,7 @@ SW 重启时发送 `{ type: "sandbox-reset" }` 通知中继宿主销毁旧 ifram
 | 文件 | 说明 |
 |------|------|
 | 新增 `extension/src/sw/kernel/eval-bridge.ts` | SW 侧：ensureRelay() + sendBashCommand() + 请求队列 + 超时 + 健康检查 |
-| 新增 `extension/src/panel/utils/sandbox-relay.ts` | SidePanel 侧：创建/管理 sandbox iframe + 消息转发 |
+| 新增 `extension/src/sandbox-host/main.ts` | Offscreen 宿主：创建/管理 sandbox iframe + 消息转发 |
 
 ### Phase 3：集成
 
@@ -215,8 +211,8 @@ SW 重启时发送 `{ type: "sandbox-reset" }` 通知中继宿主销毁旧 ifram
 | `extension/vite.config.ts` | 添加 eval-sandbox + sandbox-host 入口 |
 | `extension/src/sw/kernel/browser-unix-runtime/lifo-adapter.ts` | `bashFrame()` 改用 eval-bridge |
 | `extension/src/sw/kernel/runtime-router/plugin-sandbox.ts` | `invokePluginSandboxRunner()` 改用 eval-bridge |
-| `extension/src/panel/main.ts` | 初始化 sandbox-relay |
-| `extension/src/panel/plugin-studio-main.ts` | 初始化 sandbox-relay |
+| `extension/src/panel/main.ts` | 不再直接挂 sandbox iframe |
+| `extension/src/panel/plugin-studio-main.ts` | 不再直接挂 sandbox iframe |
 
 ### 安全考量
 

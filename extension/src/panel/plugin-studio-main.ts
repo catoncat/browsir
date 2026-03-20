@@ -1,11 +1,8 @@
 import { createPinia } from "pinia";
 import { createApp, defineComponent, h } from "vue";
 import PluginStudioView from "./components/PluginStudioView.vue";
-import { initSandboxRelay } from "./utils/sandbox-relay";
 import "@incremark/theme/styles.css";
 import "./styles.css";
-
-initSandboxRelay();
 
 function readTabId(tab: chrome.tabs.Tab | null): number {
   if (!tab) return 0;

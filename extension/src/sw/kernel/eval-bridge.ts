@@ -2,7 +2,8 @@
  * eval-bridge.ts
  *
  * Service Worker side bridge for executing bash commands in the sandbox page.
- * Routes messages through the SidePanel (primary) or Offscreen Document (fallback).
+ * Uses a single offscreen relay so user-facing extension pages don't directly
+ * embed the sandbox iframe.
  */
 
 // --- Types ---
@@ -38,19 +39,6 @@ function nextId(): string {
   return `sb-${Date.now()}-${++requestCounter}`;
 }
 
-async function hasSidePanelRelay(): Promise<boolean> {
-  try {
-    // chrome.runtime.getContexts is available in MV3 Chrome 116+
-    if (typeof chrome?.runtime?.getContexts !== "function") return false;
-    const contexts = await chrome.runtime.getContexts({
-      contextTypes: ["SIDE_PANEL" as any],
-    });
-    return contexts.length > 0;
-  } catch {
-    return false;
-  }
-}
-
 async function ensureOffscreenRelay(): Promise<void> {
   try {
     // Check if offscreen document already exists
@@ -75,16 +63,13 @@ async function ensureOffscreenRelay(): Promise<void> {
 
 /**
  * Execute a bash command in the sandbox page.
- * Routes through SidePanel if available, otherwise creates an offscreen document.
+ * Routes through the offscreen relay to keep the sandbox iframe out of
+ * sidepanel and plugin-studio documents.
  */
 export async function sandboxBash(input: SandboxBashInput): Promise<SandboxBashResult> {
   const id = nextId();
 
-  // Ensure at least one relay is available
-  const hasSidePanel = await hasSidePanelRelay();
-  if (!hasSidePanel) {
-    await ensureOffscreenRelay();
-  }
+  await ensureOffscreenRelay();
 
   const message = {
     type: "sandbox-bash" as const,
