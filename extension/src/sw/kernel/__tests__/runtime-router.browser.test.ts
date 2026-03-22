@@ -3,7 +3,7 @@ import "./test-setup";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetLifoAdapterForTest } from "../browser-unix-runtime/lifo-adapter";
 import { compact, prepareCompaction } from "../compaction.browser";
-import { getDB, kvGet, kvKeys } from "../idb-storage";
+import { clearIdbStores, getDB, kvGet, kvKeys } from "../idb-storage";
 import { BrainOrchestrator } from "../orchestrator.browser";
 import { registerRuntimeRouter } from "../runtime-router";
 import { invokeVirtualFrame } from "../virtual-fs.browser";
@@ -144,13 +144,7 @@ function resetRuntimeOnMessageMock(): void {
 }
 
 async function resetRuntimeRouterTestState(): Promise<void> {
-  const db = await getDB();
-  const tx = db.transaction(["sessions", "entries", "traces", "kv"], "readwrite");
-  await tx.objectStore("sessions").clear();
-  await tx.objectStore("entries").clear();
-  await tx.objectStore("traces").clear();
-  await tx.objectStore("kv").clear();
-  await tx.done;
+  await clearIdbStores();
   await resetLifoAdapterForTest();
   await chrome.storage.local.clear();
 }

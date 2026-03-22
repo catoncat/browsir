@@ -3,7 +3,7 @@ import "./test-setup";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { initSessionIndex, resetSessionStore } from "../storage-reset.browser";
 import { SESSION_INDEX_KEY, readSessionIndex } from "../session-store.browser";
-import { kvSet, getDB } from "../idb-storage";
+import { clearIdbStores, kvSet, getDB } from "../idb-storage";
 import { SESSION_VIRTUAL_NAMESPACE_KEY_PREFIX } from "../browser-unix-runtime/lifo-adapter";
 
 type Store = Record<string, unknown>;
@@ -17,13 +17,7 @@ async function getStore(): Promise<Store> {
 }
 
 beforeEach(async () => {
-  const db = await getDB();
-  await Promise.all([
-    db.clear("sessions"),
-    db.clear("entries"),
-    db.clear("traces"),
-    db.clear("kv")
-  ]);
+  await clearIdbStores();
   await chrome.storage.local.clear();
 });
 
@@ -63,6 +57,69 @@ describe("storage-reset.browser", () => {
       timestamp: "2024-01-01T00:00:00.000Z",
       ok: true
     });
+    await db.put("channelBindings", {
+      bindingKey: "wechat:conv-1",
+      channelConversationKey: "wechat:conv-1",
+      channelKind: "wechat",
+      remoteConversationId: "conv-1",
+      remoteUserId: "user-1",
+      sessionId: "s1",
+      trustTier: "external_remote",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-01T00:00:00.000Z"
+    });
+    await db.put("channelTurns", {
+      channelTurnId: "turn-1",
+      bindingKey: "wechat:conv-1",
+      remoteMessageKey: "wechat:conv-1:msg-1",
+      channelKind: "wechat",
+      remoteConversationId: "conv-1",
+      remoteUserId: "user-1",
+      remoteMessageId: "msg-1",
+      sessionId: "s1",
+      queuedMode: "start",
+      lifecycleStatus: "received",
+      dispatchStatus: "pending",
+      deliveryStatus: "not_requested",
+      interventionStatus: "none",
+      repairStatus: "none",
+      anomalyFlags: [],
+      runAttemptCount: 0,
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-01T00:00:00.000Z"
+    });
+    await db.put("channelEvents", {
+      eventId: "event-1",
+      channelTurnId: "turn-1",
+      sessionId: "s1",
+      type: "channel.turn.accepted",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      payload: { accepted: true }
+    });
+    await db.put("channelOutbox", {
+      deliveryId: "delivery-1",
+      channelTurnId: "turn-1",
+      sessionId: "s1",
+      channelKind: "wechat",
+      projectionKind: "final_text",
+      deliveryStatus: "queued",
+      attemptCount: 0,
+      projection: {
+        channelTurnId: "turn-1",
+        sessionId: "s1",
+        projectionKind: "final_text",
+        visibleText: "done",
+        truncated: false,
+        trustTier: "external_remote"
+      },
+      replyProjection: {
+        channelTurnId: "turn-1",
+        deliveryId: "delivery-1",
+        parts: [{ kind: "text", text: "done" }]
+      },
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-01T00:00:00.000Z"
+    });
     await kvSet(SESSION_INDEX_KEY, {
       version: 1,
       sessions: [{ id: "s1", createdAt: "2024-01-01T00:00:00.000Z", updatedAt: "2024-01-01T00:00:00.000Z" }],
@@ -83,11 +140,15 @@ describe("storage-reset.browser", () => {
       includeTrace: false
     });
 
-    expect(result.removedCount).toBe(4);
+    expect(result.removedCount).toBe(8);
     expect(result.removedKeys).toContain("session:index");
     expect(result.removedKeys).toContain("session:s1:meta");
     expect(result.removedKeys).toContain("entry:m1");
     expect(result.removedKeys).toContain(`${SESSION_VIRTUAL_NAMESPACE_KEY_PREFIX}s1`);
+    expect(result.removedKeys).toContain("channel-binding:wechat:conv-1");
+    expect(result.removedKeys).toContain("channel-turn:turn-1");
+    expect(result.removedKeys).toContain("channel-event:event-1");
+    expect(result.removedKeys).toContain("channel-outbox:delivery-1");
     expect(result.removedKeys).not.toContain("trace-record:trace-record-1");
     expect(result.removedKeys).not.toContain("archive:legacy:index");
     expect(result.removedKeys).not.toContain("archive:legacy:old");
@@ -99,6 +160,10 @@ describe("storage-reset.browser", () => {
     expect(all["archive:legacy:index"]).toEqual(["archive:legacy:old"]);
     expect(all["archive:legacy:old"]).toEqual({ payload: true });
     expect(await db.get("kv", `${SESSION_VIRTUAL_NAMESPACE_KEY_PREFIX}s1`)).toBeUndefined();
+    expect(await db.get("channelBindings", "wechat:conv-1")).toBeUndefined();
+    expect(await db.get("channelTurns", "turn-1")).toBeUndefined();
+    expect(await db.get("channelEvents", "event-1")).toBeUndefined();
+    expect(await db.get("channelOutbox", "delivery-1")).toBeUndefined();
     expect(await db.getAll("traces")).toHaveLength(1);
 
     expect(result.index.version).toBe(1);

@@ -8,6 +8,7 @@ import { getDB } from "./idb-storage";
 
 export interface ResetSessionStoreOptions {
   includeTrace?: boolean;
+  includeChannel?: boolean;
 }
 
 export interface ResetSessionStoreResult {
@@ -18,12 +19,19 @@ export interface ResetSessionStoreResult {
 
 export async function resetSessionStore(options: ResetSessionStoreOptions = {}): Promise<ResetSessionStoreResult> {
   const includeTrace = options.includeTrace ?? true;
+  const includeChannel = options.includeChannel ?? true;
   const db = await getDB();
   const removedKeys: string[] = [];
   let removedCount = 0;
-  const storeNames = includeTrace
-    ? (["sessions", "entries", "traces", "kv"] as const)
-    : (["sessions", "entries", "kv"] as const);
+  const storeNames = [
+    "sessions",
+    "entries",
+    ...(includeTrace ? (["traces"] as const) : []),
+    "kv",
+    ...(includeChannel
+      ? (["channelBindings", "channelTurns", "channelEvents", "channelOutbox"] as const)
+      : []),
+  ] as const;
   const tx = db.transaction(storeNames, "readwrite");
 
   const sessionKeys = (await tx.objectStore("sessions").getAllKeys()).map((key) => String(key));
@@ -55,6 +63,36 @@ export async function resetSessionStore(options: ResetSessionStoreOptions = {}):
     await tx.objectStore("kv").delete(key);
     removedKeys.push(key);
     removedCount += 1;
+  }
+
+  if (includeChannel) {
+    const bindingKeys = (await tx.objectStore("channelBindings").getAllKeys()).map((key) => String(key));
+    for (const key of bindingKeys) {
+      await tx.objectStore("channelBindings").delete(key);
+      removedKeys.push(`channel-binding:${key}`);
+      removedCount += 1;
+    }
+
+    const turnKeys = (await tx.objectStore("channelTurns").getAllKeys()).map((key) => String(key));
+    for (const key of turnKeys) {
+      await tx.objectStore("channelTurns").delete(key);
+      removedKeys.push(`channel-turn:${key}`);
+      removedCount += 1;
+    }
+
+    const eventKeys = (await tx.objectStore("channelEvents").getAllKeys()).map((key) => String(key));
+    for (const key of eventKeys) {
+      await tx.objectStore("channelEvents").delete(key);
+      removedKeys.push(`channel-event:${key}`);
+      removedCount += 1;
+    }
+
+    const outboxKeys = (await tx.objectStore("channelOutbox").getAllKeys()).map((key) => String(key));
+    for (const key of outboxKeys) {
+      await tx.objectStore("channelOutbox").delete(key);
+      removedKeys.push(`channel-outbox:${key}`);
+      removedCount += 1;
+    }
   }
 
   await tx.done;

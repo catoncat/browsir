@@ -4,17 +4,11 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { BUILTIN_SKILL_SEED_SESSION_ID } from "../builtin-skill-policy";
 import { resetLifoAdapterForTest, invokeLifoFrame } from "../browser-unix-runtime/lifo-adapter";
 import { ensureBuiltinSkills } from "../builtin-skills";
-import { getDB } from "../idb-storage";
+import { clearIdbStores } from "../idb-storage";
 import { BrainOrchestrator } from "../orchestrator.browser";
 
 async function resetBuiltinSkillTestState(): Promise<void> {
-  const db = await getDB();
-  const tx = db.transaction(["sessions", "entries", "traces", "kv"], "readwrite");
-  await tx.objectStore("sessions").clear();
-  await tx.objectStore("entries").clear();
-  await tx.objectStore("traces").clear();
-  await tx.objectStore("kv").clear();
-  await tx.done;
+  await clearIdbStores();
   await resetLifoAdapterForTest();
 }
 

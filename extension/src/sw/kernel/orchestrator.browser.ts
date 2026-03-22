@@ -55,6 +55,7 @@ import {
   type LoopTerminalStatus,
   resolveAgentEndDoneReason,
 } from "./loop-shared-types";
+import { ChannelSubsystem } from "./channel-subsystem";
 
 export type { ExecuteCapability, ExecuteMode, ExecuteStepInput, ExecuteStepResult } from "./types";
 export type { CapabilityExecutionPolicy, RegisterCapabilityPolicyOptions } from "./capability-policy";
@@ -152,6 +153,7 @@ class HookBlockError extends Error {
 export class BrainOrchestrator {
   readonly sessions = new BrowserSessionManager();
   readonly events = new BrainEventBus();
+  readonly channels = new ChannelSubsystem();
   private readonly options: {
     retryMaxAttempts: number;
     retryBaseDelayMs: number;
