@@ -139,6 +139,12 @@ const activeSessionTitle = computed(() => {
   return session?.title || "新对话";
 });
 
+const activeSessionSourceLabel = computed(() =>
+  String((activeSession.value as { sourceLabel?: string } | null)?.sourceLabel || "")
+    .trim()
+    .toLowerCase(),
+);
+
 const activeForkSourceSessionId = computed(() =>
   String(activeSession.value?.forkedFrom?.sessionId || "").trim()
 );
@@ -585,9 +591,18 @@ defineExpose({ handleCreateSession, sessionListRenderState });
           </div>
         </div>
         <div class="flex-1 min-w-0 flex flex-col justify-center ml-1">
-          <h1 v-if="!isRegeneratingTitle" class="min-w-0 text-[15px] font-bold text-ui-text truncate tracking-tight">
-            {{ headerRenderState.title }}
-          </h1>
+          <div v-if="!isRegeneratingTitle" class="flex items-center gap-2 min-w-0">
+            <h1 class="min-w-0 text-[15px] font-bold text-ui-text truncate tracking-tight">
+              {{ headerRenderState.title }}
+            </h1>
+            <span
+              v-if="activeSessionSourceLabel === 'wechat'"
+              class="inline-flex shrink-0 items-center rounded-full border border-emerald-500/25 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:text-emerald-300"
+              aria-label="当前会话来自微信"
+            >
+              微信
+            </span>
+          </div>
           <div v-else class="flex items-center gap-1.5 text-ui-accent">
             <span class="text-[13px] font-bold tracking-tight animate-pulse">正在重新生成标题</span>
             <span class="flex gap-0.5">

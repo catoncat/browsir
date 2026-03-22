@@ -15,6 +15,7 @@ export interface SessionListRenderSessionItem {
   title?: string;
   updatedAt?: string;
   parentSessionId?: string;
+  sourceLabel?: string;
   forkedFrom?: {
     sessionId?: string;
     leafId?: string;

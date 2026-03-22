@@ -56,11 +56,13 @@ export async function handleSession(
     const sessions = await Promise.all(
       index.sessions.map(async (entry) => {
         const meta = await orchestrator.sessions.getMeta(entry.id);
+        const metadata = toRecord(meta?.header?.metadata);
         return {
           ...entry,
           title: normalizeSessionTitle(meta?.header?.title, ""),
           parentSessionId: String(meta?.header?.parentSessionId || ""),
           forkedFrom: readForkedFrom(meta),
+          sourceLabel: String(metadata.sourceLabel || "").trim() || undefined,
         };
       }),
     );

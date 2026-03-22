@@ -23,6 +23,7 @@ export interface SessionIndexEntry {
   createdAt: string;
   updatedAt: string;
   parentSessionId?: string;
+  sourceLabel?: string;
   forkedFrom?: SessionForkSource | null;
 }
 

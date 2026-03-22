@@ -18,6 +18,7 @@ interface Session {
   title?: string;
   updatedAt?: string;
   parentSessionId?: string;
+  sourceLabel?: string;
   forkedFrom?: {
     sessionId?: string;
     leafId?: string;
@@ -222,8 +223,18 @@ onMounted(() => {
             </div>
 
             <div class="flex-1 min-w-0 pr-10">
-              <div v-if="renamingId !== session.id" class="truncate text-[14px] leading-snug" :class="activeId === session.id ? 'font-bold text-ui-text' : 'font-medium text-ui-text/90'">
-                {{ displayTitle(session) }}
+              <div
+                v-if="renamingId !== session.id"
+                class="flex items-center min-w-0 text-[14px] leading-snug"
+                :class="activeId === session.id ? 'font-bold text-ui-text' : 'font-medium text-ui-text/90'"
+              >
+                <span class="truncate">{{ displayTitle(session) }}</span>
+                <span
+                  v-if="session.sourceLabel === 'wechat'"
+                  class="ml-2 inline-flex shrink-0 items-center rounded-full border border-emerald-500/25 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:text-emerald-300 align-middle"
+                >
+                  微信
+                </span>
               </div>
               <div v-else class="flex items-center gap-1 -ml-1">
                 <input

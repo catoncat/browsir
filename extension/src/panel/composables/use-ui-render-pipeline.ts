@@ -245,6 +245,7 @@ export function useUiRenderPipeline(deps: UiRenderPipelineDeps) {
           title: String(session.title || "").trim() || "新对话",
           updatedAt: String(session.updatedAt || "").trim() || undefined,
           parentSessionId: String(session.parentSessionId || "").trim() || undefined,
+          sourceLabel: String(session.sourceLabel || "").trim() || undefined,
           forkedFromSessionId: String(session.forkedFrom?.sessionId || "").trim() || undefined,
         }))
         .filter((item) => item.id),
@@ -270,6 +271,7 @@ export function useUiRenderPipeline(deps: UiRenderPipelineDeps) {
         title: String(session.title || "").trim() || "新对话",
         updatedAt: String(session.updatedAt || "").trim() || undefined,
         parentSessionId: String(session.parentSessionId || "").trim() || undefined,
+        sourceLabel: String(session.sourceLabel || "").trim() || undefined,
         forkedFrom: String(session.forkedFromSessionId || "").trim()
           ? { sessionId: String(session.forkedFromSessionId || "").trim() }
           : null,

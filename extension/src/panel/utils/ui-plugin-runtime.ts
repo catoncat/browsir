@@ -88,6 +88,7 @@ export interface UiSessionListRenderItem {
   title: string;
   updatedAt?: string;
   parentSessionId?: string;
+  sourceLabel?: string;
   forkedFromSessionId?: string;
 }
 

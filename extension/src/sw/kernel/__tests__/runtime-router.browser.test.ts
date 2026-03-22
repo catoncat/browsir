@@ -305,6 +305,35 @@ describe("runtime-router.browser", () => {
     expect(String(data.reason || "")).toBe("max_steps");
   });
 
+  it("brain.session.list should expose lightweight sourceLabel for channel-bound sessions", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    const created = await orchestrator.createSession({
+      title: "wechat-session",
+      metadata: {
+        sourceLabel: "wechat",
+        channel: {
+          kind: "wechat",
+          remoteConversationId: "conv-1",
+          remoteUserId: "user-1",
+        },
+      },
+    });
+
+    const listed = await invokeRuntime({ type: "brain.session.list" });
+    expect(listed.ok).toBe(true);
+    const sessions = Array.isArray(
+      (listed.data as Record<string, unknown>)?.sessions,
+    )
+      ? ((listed.data as Record<string, unknown>)
+          .sessions as unknown[] as Array<Record<string, unknown>>)
+      : [];
+    const meta = sessions.find(
+      (item) => String(item.id || "") === created.sessionId,
+    );
+    expect(String(meta?.sourceLabel || "")).toBe("wechat");
+  });
+
   it("supports fork session and exposes forkedFrom metadata in list/view", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
