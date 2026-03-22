@@ -30,6 +30,7 @@ function createInitialState(): WechatHostStateSnapshot {
   return {
     hostEpoch: crypto.randomUUID(),
     protocolVersion: HOST_PROTOCOL_VERSION,
+    enabled: false,
     login: {
       status: "logged_out",
       updatedAt: nowIso(),
@@ -111,6 +112,7 @@ function readState(): WechatHostStateSnapshot {
       if (!credentials) return initial;
       return {
         ...initial,
+        enabled: false,
         login: {
           status: "logged_in",
           updatedAt: nowIso(),
@@ -124,6 +126,7 @@ function readState(): WechatHostStateSnapshot {
     return {
       hostEpoch: String(parsed.hostEpoch || "").trim() || crypto.randomUUID(),
       protocolVersion: HOST_PROTOCOL_VERSION,
+      enabled: parsed.enabled === true,
       login: {
         status:
           parsed.login?.status === "pending" ||
@@ -367,7 +370,9 @@ export class WechatHostService {
           },
         });
         this.clearLoginPoll();
-        this.scheduleUpdatePoll(0);
+        if (current.enabled) {
+          this.scheduleUpdatePoll(0);
+        }
         return;
       }
       if (status.status === "expired") {
@@ -399,6 +404,27 @@ export class WechatHostService {
 
   getState(): WechatHostStateSnapshot {
     return readState();
+  }
+
+  enable(): WechatHostStateSnapshot {
+    const current = readState();
+    const next = writeState({
+      ...current,
+      enabled: true,
+    });
+    if (next.login.status === "logged_in") {
+      this.scheduleUpdatePoll(0);
+    }
+    return next;
+  }
+
+  disable(): WechatHostStateSnapshot {
+    this.clearUpdatePoll();
+    const current = readState();
+    return writeState({
+      ...current,
+      enabled: false,
+    });
   }
 
   async startLogin(): Promise<WechatHostStateSnapshot> {
@@ -437,6 +463,10 @@ export class WechatHostService {
 
   async sendReply(input: WechatReplySendInput): Promise<WechatReplySendResult> {
     const sentAt = nowIso();
+    const current = readState();
+    if (!current.enabled) {
+      throw new Error("WeChat 通道未启用，无法发送回复");
+    }
     const credentials = readCredentials();
     if (!credentials) {
       throw new Error("WeChat 未登录，无法发送回复");

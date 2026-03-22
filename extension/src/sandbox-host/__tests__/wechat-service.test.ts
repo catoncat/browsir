@@ -116,6 +116,21 @@ describe("wechat-service", () => {
       }),
     );
     localStorage.setItem(
+      "bbl.wechat.host.state.v1",
+      JSON.stringify({
+        hostEpoch: "epoch-1",
+        protocolVersion: "bbl.host.v1",
+        enabled: true,
+        login: {
+          status: "logged_in",
+          updatedAt: "2026-03-22T00:00:00.000Z",
+          baseUrl: "https://ilinkai.weixin.qq.com",
+          accountId: "bot-1",
+          botUserId: "bot-user",
+        },
+      }),
+    );
+    localStorage.setItem(
       "bbl.wechat.host.context-tokens.v1",
       JSON.stringify({
         "user-1": "ctx-1",

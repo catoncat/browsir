@@ -173,20 +173,24 @@ onMounted(() => {
               <p class="text-[13px] font-semibold text-ui-text">通道状态</p>
               <p class="text-[11px] text-ui-text-muted truncate">
                 {{
-                  wechatState.login.status === 'pending'
-                    ? '正在等待微信登录完成'
-                    : wechatState.login.status === 'logged_in'
-                      ? '已登录'
-                      : wechatState.login.status === 'error'
-                        ? '登录异常'
-                        : '未登录'
+                  !wechatState.enabled
+                    ? '已停用'
+                    : wechatState.login.status === 'pending'
+                      ? '正在等待微信登录完成'
+                      : wechatState.login.status === 'logged_in'
+                        ? '已登录'
+                        : wechatState.login.status === 'error'
+                          ? '登录异常'
+                          : '未登录'
                 }}
               </p>
             </div>
             <span
               class="inline-flex shrink-0 items-center rounded-full px-2 py-1 text-[10px] font-semibold"
               :class="
-                wechatState.login.status === 'logged_in'
+                !wechatState.enabled
+                  ? 'bg-ui-bg text-ui-text-muted'
+                  : wechatState.login.status === 'logged_in'
                   ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
                   : wechatState.login.status === 'pending'
                     ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
@@ -195,7 +199,7 @@ onMounted(() => {
                       : 'bg-ui-bg text-ui-text-muted'
               "
             >
-              {{ wechatState.login.status }}
+              {{ wechatState.enabled ? wechatState.login.status : 'disabled' }}
             </span>
           </div>
           <p class="text-[10px] text-ui-text-muted/70">
@@ -226,6 +230,14 @@ onMounted(() => {
               type="button"
               class="rounded-sm border border-ui-border bg-ui-bg px-3 py-2 text-[12px] font-semibold text-ui-text transition-colors hover:bg-ui-surface disabled:opacity-50"
               :disabled="wechatLoading"
+              @click="wechatState.enabled ? wechatStore.disable() : wechatStore.enable()"
+            >
+              {{ wechatState.enabled ? '停用通道' : '启用通道' }}
+            </button>
+            <button
+              type="button"
+              class="rounded-sm border border-ui-border bg-ui-bg px-3 py-2 text-[12px] font-semibold text-ui-text transition-colors hover:bg-ui-surface disabled:opacity-50"
+              :disabled="wechatLoading"
               @click="wechatStore.refresh"
             >
               {{ wechatLoading ? '刷新中...' : '刷新状态' }}
@@ -233,7 +245,7 @@ onMounted(() => {
             <button
               type="button"
               class="rounded-sm bg-ui-text px-3 py-2 text-[12px] font-semibold text-ui-bg transition-opacity hover:opacity-90 disabled:opacity-50"
-              :disabled="wechatLoading || wechatState.login.status === 'pending'"
+              :disabled="wechatLoading || !wechatState.enabled || wechatState.login.status === 'pending'"
               @click="wechatStore.startLogin"
             >
               开始登录

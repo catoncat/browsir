@@ -40,6 +40,7 @@ export type WechatLoginStatus = "logged_out" | "pending" | "logged_in" | "error"
 export interface WechatHostStateSnapshot {
   hostEpoch: string;
   protocolVersion: typeof HOST_PROTOCOL_VERSION;
+  enabled: boolean;
   login: {
     status: WechatLoginStatus;
     updatedAt: string;

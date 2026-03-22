@@ -180,6 +180,26 @@ export async function handleBrainChannelWechat(
       );
     }
 
+    if (action === "brain.channel.wechat.enable") {
+      return ok(
+        await sendHostCommand<Record<string, unknown>, WechatHostStateSnapshot>(
+          "wechat",
+          "enable",
+          {},
+        ),
+      );
+    }
+
+    if (action === "brain.channel.wechat.disable") {
+      return ok(
+        await sendHostCommand<Record<string, unknown>, WechatHostStateSnapshot>(
+          "wechat",
+          "disable",
+          {},
+        ),
+      );
+    }
+
     if (action === "brain.channel.wechat.inbound") {
       const remoteConversationId = readRequiredText(
         payload,

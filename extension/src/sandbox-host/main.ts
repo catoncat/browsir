@@ -149,6 +149,12 @@ async function handleWechatHostCommand(
       case "logout":
         data = wechatService.logout();
         break;
+      case "enable":
+        data = wechatService.enable();
+        break;
+      case "disable":
+        data = wechatService.disable();
+        break;
       case "reply.text":
         data = await wechatService.sendReply(
           message.payload as unknown as {
