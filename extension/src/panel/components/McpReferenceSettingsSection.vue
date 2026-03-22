@@ -144,7 +144,7 @@ function handleDeleteEnvRow(index: number): void {
     </div>
 
     <div class="space-y-3">
-      <div class="flex items-center justify-between gap-3">
+      <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div class="space-y-0.5">
           <h4 class="text-[12px] font-semibold text-ui-text">认证预设</h4>
           <p class="text-[11px] text-ui-text-muted">
@@ -154,7 +154,7 @@ function handleDeleteEnvRow(index: number): void {
         <button
           type="button"
           data-mcp-auth-add
-          class="rounded-sm border border-ui-border px-3 py-2 text-[12px] font-semibold text-ui-text hover:bg-ui-bg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+          class="w-full rounded-sm border border-ui-border px-3 py-2 text-[12px] font-semibold text-ui-text hover:bg-ui-bg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent sm:w-auto"
           @click="handleAddAuthRow"
         >
           <Plus :size="14" class="mr-1.5 inline-block" aria-hidden="true" />
@@ -210,7 +210,7 @@ function handleDeleteEnvRow(index: number): void {
             <button
               type="button"
               :data-mcp-auth-delete="index"
-              class="mt-6 shrink-0 rounded-sm border border-ui-border px-2.5 py-2 text-ui-text-muted hover:bg-ui-surface transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+              class="shrink-0 self-end rounded-sm border border-ui-border px-2.5 py-2 text-ui-text-muted hover:bg-ui-surface transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent lg:mt-6"
               aria-label="删除认证预设"
               @click="handleDeleteAuthRow(index)"
             >
@@ -222,7 +222,7 @@ function handleDeleteEnvRow(index: number): void {
     </div>
 
     <div class="space-y-3">
-      <div class="flex items-center justify-between gap-3">
+      <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div class="space-y-0.5">
           <h4 class="text-[12px] font-semibold text-ui-text">环境预设</h4>
           <p class="text-[11px] text-ui-text-muted">
@@ -232,7 +232,7 @@ function handleDeleteEnvRow(index: number): void {
         <button
           type="button"
           data-mcp-env-preset-add
-          class="rounded-sm border border-ui-border px-3 py-2 text-[12px] font-semibold text-ui-text hover:bg-ui-bg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+          class="w-full rounded-sm border border-ui-border px-3 py-2 text-[12px] font-semibold text-ui-text hover:bg-ui-bg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent sm:w-auto"
           @click="handleAddEnvRow"
         >
           <Plus :size="14" class="mr-1.5 inline-block" aria-hidden="true" />
@@ -281,7 +281,7 @@ function handleDeleteEnvRow(index: number): void {
             <button
               type="button"
               :data-mcp-env-delete="index"
-              class="mt-6 shrink-0 rounded-sm border border-ui-border px-2.5 py-2 text-ui-text-muted hover:bg-ui-surface transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+              class="shrink-0 self-end rounded-sm border border-ui-border px-2.5 py-2 text-ui-text-muted hover:bg-ui-surface transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent lg:mt-6"
               aria-label="删除环境预设"
               @click="handleDeleteEnvRow(index)"
             >

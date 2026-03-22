@@ -306,7 +306,7 @@ function handleEnvRefInput(index: number, event: Event): void {
 
 <template>
   <section class="rounded-sm border border-ui-border bg-ui-surface/30 p-4 space-y-4">
-    <div class="flex items-start justify-between gap-3">
+    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
       <div class="space-y-1">
         <h3 class="text-[13px] font-semibold text-ui-text">MCP 工具接入</h3>
         <p class="text-[12px] leading-relaxed text-ui-text-muted">
@@ -316,7 +316,7 @@ function handleEnvRefInput(index: number, event: Event): void {
       <button
         type="button"
         data-mcp-add
-        class="shrink-0 rounded-sm border border-ui-border px-3 py-2 text-[12px] font-semibold text-ui-text hover:bg-ui-bg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+        class="w-full rounded-sm border border-ui-border px-3 py-2 text-[12px] font-semibold text-ui-text hover:bg-ui-bg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent sm:w-auto sm:shrink-0"
         @click="handleAddServer"
       >
         <Plus :size="14" class="inline-block mr-1.5" aria-hidden="true" />
@@ -338,70 +338,76 @@ function handleEnvRefInput(index: number, event: Event): void {
         :data-mcp-server="index"
         class="overflow-hidden rounded-sm border border-ui-border bg-ui-bg/60"
       >
-        <div class="flex items-start gap-3 px-3 py-3">
-          <div
-            class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-sm border border-ui-border bg-ui-surface/60 text-ui-text-muted"
-            aria-hidden="true"
-          >
-            <Globe v-if="server.transport === 'streamable-http'" :size="15" />
-            <Terminal v-else :size="15" />
-          </div>
-
-          <div class="min-w-0 flex-1 space-y-1">
-            <div class="flex flex-wrap items-center gap-2">
-              <h4 class="text-[13px] font-semibold text-ui-text">
-                {{ serverTitle(server, index) }}
-              </h4>
-              <span class="rounded-full bg-ui-surface px-2 py-0.5 text-[10px] font-semibold text-ui-text-muted">
-                {{ serverTransportLabel(server) }}
-              </span>
-              <span
-                v-if="server.enabled === false"
-                class="rounded-full bg-ui-surface px-2 py-0.5 text-[10px] font-semibold text-ui-text-muted"
-              >
-                已暂停
-              </span>
+        <div class="px-3 py-3">
+          <div class="flex items-start gap-3">
+            <div
+              class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-sm border border-ui-border bg-ui-surface/60 text-ui-text-muted"
+              aria-hidden="true"
+            >
+              <Globe v-if="server.transport === 'streamable-http'" :size="15" />
+              <Terminal v-else :size="15" />
             </div>
-            <p class="truncate text-[12px] text-ui-text">
-              {{ serverSummary(server) }}
-            </p>
-            <p class="text-[11px] text-ui-text-muted">
-              标识：{{ previewServerId(server, index) }}
-            </p>
+
+            <div class="min-w-0 flex-1 space-y-1">
+              <div class="flex flex-wrap items-center gap-2">
+                <h4 class="text-[13px] font-semibold text-ui-text">
+                  {{ serverTitle(server, index) }}
+                </h4>
+                <span class="rounded-full bg-ui-surface px-2 py-0.5 text-[10px] font-semibold text-ui-text-muted">
+                  {{ serverTransportLabel(server) }}
+                </span>
+                <span
+                  v-if="server.enabled === false"
+                  class="rounded-full bg-ui-surface px-2 py-0.5 text-[10px] font-semibold text-ui-text-muted"
+                >
+                  已暂停
+                </span>
+              </div>
+              <p class="truncate text-[12px] text-ui-text">
+                {{ serverSummary(server) }}
+              </p>
+              <p class="text-[11px] text-ui-text-muted">
+                标识：{{ previewServerId(server, index) }}
+              </p>
+            </div>
           </div>
 
-          <label class="flex shrink-0 items-center gap-2 text-[12px] text-ui-text-muted">
-            <span>启用</span>
-            <input
-              :checked="server.enabled !== false"
-              :data-mcp-enabled="index"
-              type="checkbox"
-              class="h-4 w-4 rounded border-ui-border bg-ui-bg text-ui-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-              @change="handleEnabledChange(index, $event)"
-            />
-          </label>
+          <div class="mt-3 flex flex-wrap items-center justify-between gap-2 sm:justify-end">
+            <label class="flex shrink-0 items-center gap-2 text-[12px] text-ui-text-muted">
+              <span>启用</span>
+              <input
+                :checked="server.enabled !== false"
+                :data-mcp-enabled="index"
+                type="checkbox"
+                class="h-4 w-4 rounded border-ui-border bg-ui-bg text-ui-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+                @change="handleEnabledChange(index, $event)"
+              />
+            </label>
 
-          <button
-            type="button"
-            :data-mcp-toggle="index"
-            class="shrink-0 rounded-sm border border-ui-border px-2.5 py-2 text-ui-text-muted hover:bg-ui-surface transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-            :aria-expanded="expandedIndex === index"
-            :aria-label="expandedIndex === index ? '收起服务器设置' : '展开服务器设置'"
-            @click="handleToggleExpanded(index)"
-          >
-            <ChevronUp v-if="expandedIndex === index" :size="15" aria-hidden="true" />
-            <ChevronDown v-else :size="15" aria-hidden="true" />
-          </button>
+            <div class="flex items-center gap-2">
+              <button
+                type="button"
+                :data-mcp-toggle="index"
+                class="shrink-0 rounded-sm border border-ui-border px-2.5 py-2 text-ui-text-muted hover:bg-ui-surface transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+                :aria-expanded="expandedIndex === index"
+                :aria-label="expandedIndex === index ? '收起服务器设置' : '展开服务器设置'"
+                @click="handleToggleExpanded(index)"
+              >
+                <ChevronUp v-if="expandedIndex === index" :size="15" aria-hidden="true" />
+                <ChevronDown v-else :size="15" aria-hidden="true" />
+              </button>
 
-          <button
-            type="button"
-            :data-mcp-delete="index"
-            class="shrink-0 rounded-sm border border-ui-border px-2.5 py-2 text-ui-text-muted hover:bg-ui-surface transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-            aria-label="删除服务器"
-            @click="handleDeleteServer(index)"
-          >
-            <Trash2 :size="15" aria-hidden="true" />
-          </button>
+              <button
+                type="button"
+                :data-mcp-delete="index"
+                class="shrink-0 rounded-sm border border-ui-border px-2.5 py-2 text-ui-text-muted hover:bg-ui-surface transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+                aria-label="删除服务器"
+                @click="handleDeleteServer(index)"
+              >
+                <Trash2 :size="15" aria-hidden="true" />
+              </button>
+            </div>
+          </div>
         </div>
 
         <div
