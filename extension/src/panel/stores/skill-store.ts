@@ -54,6 +54,14 @@ export interface SkillDiscoverResult {
   skills?: SkillMetadata[];
 }
 
+export interface SkillSaveInput {
+  sessionId?: string;
+  location: string;
+  content: string;
+  source?: string;
+  enabled?: boolean;
+}
+
 export function extractContentFromStepExecuteResult(value: unknown): string {
   const root = toRecord(value);
   const rootData = toRecord(root.data);
@@ -187,6 +195,18 @@ export const useSkillStore = defineStore("skill", () => {
     return out.skill;
   }
 
+  async function saveSkill(input: SkillSaveInput): Promise<SkillMetadata> {
+    const sessionId = await ensureSkillSessionId(input.sessionId);
+    const out = await sendMessage<{ skill: SkillMetadata }>("brain.skill.save", {
+      sessionId,
+      location: String(input.location || "").trim(),
+      content: String(input.content || ""),
+      ...(input.source ? { source: input.source } : {}),
+      ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+    });
+    return out.skill;
+  }
+
   async function enableSkill(skillId: string): Promise<SkillMetadata> {
     const out = await sendMessage<{ skill: SkillMetadata }>(
       "brain.skill.enable",
@@ -245,6 +265,7 @@ export const useSkillStore = defineStore("skill", () => {
     readVirtualFile,
     writeVirtualFile,
     installSkill,
+    saveSkill,
     enableSkill,
     disableSkill,
     uninstallSkill,

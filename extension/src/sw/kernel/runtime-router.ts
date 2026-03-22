@@ -16,6 +16,7 @@ import {
 import { handleBrainAgentRun } from "./runtime-router/agent-run-controller";
 import { handleBrainDebug } from "./runtime-router/debug-controller";
 import { handleBrainMcp } from "./runtime-router/mcp-controller";
+import { ensureBuiltinSkills } from "./builtin-skills";
 import {
   handleBrainPlugin,
   rehydratePersistedPlugins,
@@ -112,14 +113,14 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
   let runtimeReady: Promise<void> | null = null;
   const ensureRuntimeReady = (): Promise<void> => {
     if (!runtimeReady) {
-      runtimeReady = rehydratePersistedPlugins(
-        orchestrator,
-        pluginControllerDeps,
-      ).catch(
-        (error) => {
+      runtimeReady = (async () => {
+        try {
+          await rehydratePersistedPlugins(orchestrator, pluginControllerDeps);
+          await ensureBuiltinSkills(orchestrator);
+        } catch (error) {
           console.warn("[runtime-router] runtime rehydrate failed", error);
-        },
-      );
+        }
+      })();
     }
     return runtimeReady;
   };

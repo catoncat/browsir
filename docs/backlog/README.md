@@ -89,6 +89,12 @@ acceptance_ref: docs/<某设计文档>.md
   - `assignee: unassigned`
   - 说明：用户已提供 snapshot，但同一 session 在 live `brain.debug.dump` 中不存在，需排查 session 持久化/恢复链路。
 
+3. `ISSUE-040` [Skill 包主文档存在双真相与受管边界过宽](./2026-03-22-skill-source-of-truth-and-namespace-boundary.md)
+  - `status: in-progress`
+  - `priority: p1`
+  - `assignee: agent`
+  - 说明：方向已纠偏为 `Skill = file package`。当前已保留直改 `mem://skills/...` 的能力，后续重点转到 frontmatter / registry 的双真相收敛与 package reconcile。
+
 ### 已归档
 
 以下 issue 已完成并移入 `archive/` 子目录：
@@ -104,8 +110,9 @@ acceptance_ref: docs/<某设计文档>.md
 ## 推荐领取顺序
 
 1. `ISSUE-039` 可优先排查，范围相对独立，且直接影响调试与历史可用性。
-2. `ISSUE-023` 由 human 负责，agent 不要并行改其 `write_scope`。
-3. 如有新需求，创建新的 backlog slice。
+2. `ISSUE-040` 已由 agent 开始处理，后续 agent 若接手，继续沿“file package + 热加载 + 可直接改文件”的方向收敛，不要再把 skill 收口成只能走专用 tool 的受管对象。
+3. `ISSUE-023` 由 human 负责，agent 不要并行改其 `write_scope`。
+4. 如有新需求，创建新的 backlog slice。
 
 ## 维护规则
 

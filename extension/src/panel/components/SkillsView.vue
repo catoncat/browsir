@@ -24,8 +24,11 @@ const pageError = ref("");
 const pageStatus = ref("");
 const viewMode = ref<"manage" | "edit">("manage");
 const editorMode = ref<"create" | "edit">("create");
+const editorReadonly = ref(false);
 const editorSkillLabel = ref("");
 const editorSourceSkillId = ref("");
+const editorSkillSource = ref("browser");
+const editorSkillEnabled = ref(true);
 const showDiscoverPanel = ref(false);
 const skillEditButtonRefs = new Map<string, HTMLButtonElement>();
 
@@ -69,12 +72,19 @@ function ensureSkillLocationForId(skillId: string): string {
   return `mem://skills/${normalizedId}/SKILL.md`;
 }
 
+function isBuiltinSkill(skill: SkillMetadata): boolean {
+  return String(skill.source || "").trim() === "builtin";
+}
+
 function resetEditorDraft() {
   editorLocation.value = "mem://skills/new-skill/SKILL.md";
   editorSkillId.value = "skill.new";
   editorSkillName.value = "新技能";
   editorSkillDescription.value = "描述这个技能要解决什么问题";
   editorContent.value = "# SKILL\n1. 读取输入\n2. 执行步骤\n3. 输出结果\n";
+  editorSkillSource.value = "browser";
+  editorSkillEnabled.value = true;
+  editorReadonly.value = false;
 }
 
 async function scrollElementIntoView(element: HTMLElement | null, block: ScrollLogicalPosition = "start") {
@@ -120,6 +130,7 @@ async function focusEditorSurface(target: "name" | "content") {
 function openCreateMode() {
   resetEditorDraft();
   editorMode.value = "create";
+  editorReadonly.value = false;
   editorSkillLabel.value = "";
   editorSourceSkillId.value = "";
   viewMode.value = "edit";
@@ -258,6 +269,8 @@ function applyEditorFromSkill(skill: SkillMetadata, markdown: string) {
   editorSkillName.value = parsed.skillName || skill.name || skill.id;
   editorSkillDescription.value = parsed.skillDescription || skill.description || "";
   editorContent.value = parsed.body || markdown || "# SKILL";
+  editorSkillSource.value = String(skill.source || "").trim() || "browser";
+  editorSkillEnabled.value = skill.enabled !== false;
 }
 
 async function handleLoadEditor(skill: SkillMetadata) {
@@ -268,10 +281,15 @@ async function handleLoadEditor(skill: SkillMetadata) {
     const markdown = await store.readVirtualFile(skill.location);
     applyEditorFromSkill(skill, markdown);
     editorMode.value = "edit";
+    editorReadonly.value = isBuiltinSkill(skill);
     editorSkillLabel.value = skill.name || skill.id;
     editorSourceSkillId.value = skill.id;
     viewMode.value = "edit";
-    setPageStatus(`已载入 ${skill.name || skill.id}，现在可直接编辑`);
+    setPageStatus(
+      editorReadonly.value
+        ? "这是内置技能，当前仅供查看；如需定制，请新建自定义技能。"
+        : `已载入 ${skill.name || skill.id}，现在可直接编辑`,
+    );
     void focusEditorSurface("content");
   } catch (error) {
     setPageError(error);
@@ -281,6 +299,10 @@ async function handleLoadEditor(skill: SkillMetadata) {
 }
 
 async function handleWriteAndInstall() {
+  if (editorReadonly.value) {
+    pageError.value = "内置技能仅供查看，不能直接改写";
+    return;
+  }
   const skillId = normalizeSkillIdSeed(editorSkillId.value);
   const skillName = String(editorSkillName.value || "").trim();
   const skillDescription = String(editorSkillDescription.value || "").trim();
@@ -312,18 +334,12 @@ async function handleWriteAndInstall() {
       skillDescription,
       body: editorContent.value
     });
-    await store.writeVirtualFile(location, markdown, "overwrite");
-    await store.installSkill(
-      {
-        id: skillId,
-        name: skillName,
-        description: skillDescription,
-        location,
-        source: "browser",
-        enabled: true
-      },
-      { replace: true }
-    );
+    await store.saveSkill({
+      location,
+      content: markdown,
+      source: editorSkillSource.value || "browser",
+      enabled: editorSkillEnabled.value,
+    });
     editorLocation.value = location;
     editorMode.value = "edit";
     editorSkillLabel.value = skillName;
@@ -519,12 +535,21 @@ onMounted(async () => {
                   <p class="text-[13px] font-semibold text-ui-text truncate">{{ skill.name || skill.id }}</p>
                   <p class="text-[11px] text-ui-text-muted truncate">{{ skill.id }}</p>
                 </div>
-                <span
-                  class="text-[10px] px-2 py-0.5 rounded-full border"
-                  :class="skill.enabled ? 'text-emerald-600 border-emerald-300 bg-emerald-50' : 'text-ui-text-muted border-ui-border bg-ui-bg'"
-                >
-                  {{ skill.enabled ? '已启用' : '已禁用' }}
-                </span>
+                <div class="flex items-center gap-1.5 shrink-0">
+                  <span
+                    v-if="isBuiltinSkill(skill)"
+                    class="text-[10px] px-2 py-0.5 rounded-full border border-ui-border bg-ui-bg text-ui-text-muted"
+                  >
+                    内置
+                  </span>
+                  <span
+                    v-if="!isBuiltinSkill(skill)"
+                    class="text-[10px] px-2 py-0.5 rounded-full border"
+                    :class="skill.enabled ? 'text-emerald-600 border-emerald-300 bg-emerald-50' : 'text-ui-text-muted border-ui-border bg-ui-bg'"
+                  >
+                    {{ skill.enabled ? '已启用' : '已禁用' }}
+                  </span>
+                </div>
               </div>
               <p v-if="skill.description" class="text-[12px] text-ui-text-muted">{{ skill.description }}</p>
               <details class="rounded border border-ui-border/70 bg-ui-bg px-2.5 py-2 text-[11px] text-ui-text-muted">
@@ -536,13 +561,14 @@ onMounted(async () => {
                   :ref="(element) => setSkillEditButtonRef(skill.id, element)"
                   class="px-2.5 py-1.5 rounded-sm border border-ui-border text-[12px] hover:bg-ui-border/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50"
                   :disabled="loadingEditorSkillId === skill.id"
-                  :aria-label="`编辑 ${skill.name || skill.id}`"
+                  :aria-label="`${isBuiltinSkill(skill) ? '查看' : '编辑'} ${skill.name || skill.id}`"
                   @click="handleLoadEditor(skill)"
                 >
                   <Loader2 v-if="loadingEditorSkillId === skill.id" :size="12" class="inline-block animate-spin mr-1" />
-                  {{ loadingEditorSkillId === skill.id ? '载入中' : '编辑' }}
+                  {{ loadingEditorSkillId === skill.id ? '载入中' : (isBuiltinSkill(skill) ? '查看' : '编辑') }}
                 </button>
                 <button
+                  v-if="!isBuiltinSkill(skill)"
                   class="px-2.5 py-1.5 rounded-sm border border-ui-border text-[12px] hover:bg-ui-border/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50"
                   :disabled="actionSkillId === skill.id"
                   :aria-label="skill.enabled ? `禁用 ${skill.name || skill.id}` : `启用 ${skill.name || skill.id}`"
@@ -561,6 +587,7 @@ onMounted(async () => {
                   运行
                 </button>
                 <button
+                  v-if="!isBuiltinSkill(skill)"
                   class="ml-auto px-2.5 py-1.5 rounded-sm border border-rose-300 text-rose-600 text-[12px] hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50 inline-flex items-center gap-1"
                   :disabled="actionSkillId === skill.id"
                   :aria-label="`卸载 ${skill.name || skill.id}`"
@@ -612,13 +639,21 @@ onMounted(async () => {
         <section ref="editorSectionRef" class="space-y-3 rounded-md border border-ui-border bg-ui-surface/20 px-3 py-3">
           <div class="space-y-1">
             <h3 class="text-[11px] font-bold uppercase tracking-[0.1em] text-ui-text-muted">
-              {{ editorMode === 'create' ? '新建技能' : '编辑技能' }}
+              {{ editorReadonly ? '内置技能' : (editorMode === 'create' ? '新建技能' : '编辑技能') }}
             </h3>
             <p class="text-[12px] text-ui-text-muted">
-              {{ editorMode === 'create'
+              {{ editorReadonly
+                ? '这是随产品版本提供的内置能力，支持查看，不支持直接改写。'
+                : editorMode === 'create'
                 ? '先填写基本信息，再补全 SKILL 正文；保存后会自动安装到当前列表。'
                 : '修改完成后保存并安装，列表中的同 ID 技能会更新为最新内容。'}}
             </p>
+          </div>
+          <div
+            v-if="editorReadonly"
+            class="rounded-md border border-ui-border bg-ui-bg px-3 py-2 text-[12px] leading-5 text-ui-text-muted"
+          >
+            内置技能会随版本更新。如果你想改成自己的工作流，建议新建一个自定义技能再继续调整。
           </div>
           <div class="grid grid-cols-1 gap-2">
             <div class="space-y-1.5">
@@ -628,6 +663,7 @@ onMounted(async () => {
                 :id="editorSkillNameId"
                 v-model="editorSkillName"
                 type="text"
+                :disabled="editorReadonly"
                 class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
               />
             </div>
@@ -637,6 +673,7 @@ onMounted(async () => {
                 :id="editorSkillDescriptionId"
                 v-model="editorSkillDescription"
                 type="text"
+                :disabled="editorReadonly"
                 class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
               />
             </div>
@@ -646,6 +683,7 @@ onMounted(async () => {
                 :id="editorSkillIdId"
                 v-model="editorSkillId"
                 type="text"
+                :disabled="editorMode === 'edit' || editorReadonly"
                 class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
               />
             </div>
@@ -658,6 +696,7 @@ onMounted(async () => {
                 :id="editorLocationId"
                 v-model="editorLocation"
                 type="text"
+                :disabled="editorMode === 'edit' || editorReadonly"
                 class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
                 placeholder="mem://skills/my-skill/SKILL.md"
               />
@@ -669,6 +708,7 @@ onMounted(async () => {
               ref="editorContentTextareaRef"
               :id="editorContentId"
               v-model="editorContent"
+              :readonly="editorReadonly"
               rows="12"
               class="w-full bg-ui-surface border border-ui-border rounded-sm px-3 py-2 text-[13px] font-mono leading-5 resize-y focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
               placeholder="# SKILL
@@ -683,9 +723,10 @@ onMounted(async () => {
               aria-label="取消编辑并返回管理"
               @click="returnToManageView"
             >
-              取消
+              {{ editorReadonly ? '返回列表' : '取消' }}
             </button>
             <button
+              v-if="!editorReadonly"
               class="px-3 py-2 rounded-sm bg-ui-text text-ui-bg text-[13px] font-semibold hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent disabled:opacity-50"
               :disabled="writingSkill"
               aria-label="保存到技能目录并安装"

@@ -210,7 +210,6 @@ const EXTENSION_AGENT_PROMPT_BASE_GUIDELINES = [
   "Default to browser sandbox (browser_*) for file/shell. Use host_* only when host-side access is explicitly needed.",
   "browser_bash paths MUST use mem:// protocol URIs (e.g. `ls mem://mydir`). Never use Unix paths like /mem or /tmp.",
   "Read before edit. Prefer *_edit_file for surgical changes; *_write_file for new files or full rewrites.",
-  "When creating/updating skills, prefer create_skill over browser_bash scaffolding.",
   BROWSER_AUTOMATION_DECISION_TREE,
   "When tab context is ambiguous, query get_current_tab/get_all_tabs before acting.",
   "Be concise. Show key file paths, tab context, and blockers clearly.",

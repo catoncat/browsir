@@ -47,6 +47,15 @@ describe("resolveVirtualPath", () => {
     expect(result.relativePath).toBe("my-skill/code.js");
   });
 
+  it("resolves builtin skills namespace", () => {
+    const result = resolveVirtualPath(
+      "mem://builtin-skills/skill-authoring/SKILL.md",
+      SESSION_ID
+    );
+    expect(result.namespace.scope).toBe("global");
+    expect(result.relativePath).toBe("skill-authoring/SKILL.md");
+  });
+
   it("resolves plugins namespace", () => {
     const result = resolveVirtualPath("mem://plugins/my-plugin/init.js", SESSION_ID);
     expect(result.namespace.scope).toBe("global");

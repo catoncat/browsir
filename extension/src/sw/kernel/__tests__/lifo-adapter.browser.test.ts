@@ -1,6 +1,7 @@
 import "./test-setup";
 
 import { beforeEach, describe, expect, it } from "vitest";
+import { BUILTIN_SKILL_SEED_SESSION_ID } from "../builtin-skill-policy";
 import { kvKeys } from "../idb-storage";
 import {
   disposeLifoAdapter,
@@ -152,6 +153,71 @@ describe("lifo-adapter.browser", () => {
     expect(String(read.content || "")).toBe("# shared skill");
   });
 
+  it("shares mem://builtin-skills across sessions", async () => {
+    await invokeLifoFrame({
+      sessionId: BUILTIN_SKILL_SEED_SESSION_ID,
+      tool: "write",
+      args: {
+        path: "mem://builtin-skills/skill-authoring/SKILL.md",
+        content: "# builtin skill",
+        mode: "overwrite",
+        runtime: "sandbox"
+      }
+    });
+
+    await disposeLifoAdapter();
+
+    const read = await invokeLifoFrame({
+      sessionId: "other-session",
+      tool: "read",
+      args: {
+        path: "mem://builtin-skills/skill-authoring/SKILL.md",
+        runtime: "sandbox"
+      }
+    });
+    expect(String(read.content || "")).toBe("# builtin skill");
+  });
+
+  it("rejects direct writes to mem://builtin-skills for normal sessions", async () => {
+    await expect(
+      invokeLifoFrame({
+        sessionId: "user-session",
+        tool: "write",
+        args: {
+          path: "mem://builtin-skills/skill-authoring/SKILL.md",
+          content: "blocked",
+          mode: "overwrite",
+          runtime: "sandbox"
+        }
+      })
+    ).rejects.toThrow("系统只读 namespace");
+  });
+
+  it("rejects edits to mem://builtin-skills for normal sessions", async () => {
+    await invokeLifoFrame({
+      sessionId: BUILTIN_SKILL_SEED_SESSION_ID,
+      tool: "write",
+      args: {
+        path: "mem://builtin-skills/skill-authoring/SKILL.md",
+        content: "seed-content",
+        mode: "overwrite",
+        runtime: "sandbox"
+      }
+    });
+
+    await expect(
+      invokeLifoFrame({
+        sessionId: "user-session",
+        tool: "edit",
+        args: {
+          path: "mem://builtin-skills/skill-authoring/SKILL.md",
+          edits: [{ old: "seed", new: "patched" }],
+          runtime: "sandbox"
+        }
+      })
+    ).rejects.toThrow("系统只读 namespace");
+  });
+
   it("flushes consecutive shared skill writes before another session reads references", async () => {
     await invokeLifoFrame({
       sessionId: "skill-authoring",
@@ -244,6 +310,67 @@ describe("lifo-adapter.browser", () => {
 
     expect(Number(out.exitCode)).toBe(0);
     expect(String(out.stdout || "")).toContain("line-1");
+  });
+
+  it("allows bash mutations to skill main documents", async () => {
+    const sessionId = "sess-bash-skill-doc";
+    await invokeLifoFrame({
+      sessionId,
+      tool: "write",
+      args: {
+        path: "mem://skills/bash-editable/SKILL.md",
+        content: "original-skill-doc",
+        mode: "overwrite",
+        runtime: "sandbox"
+      }
+    });
+
+    const out = await invokeLifoFrame({
+      sessionId,
+      tool: "bash",
+      args: {
+        cmdId: "bash.exec",
+        args: ["printf 'edited-skill-doc' > mem://skills/bash-editable/SKILL.md"],
+        runtime: "sandbox"
+      }
+    });
+    expect(Number(out.exitCode)).toBe(0);
+
+    const readBack = await invokeLifoFrame({
+      sessionId,
+      tool: "read",
+      args: {
+        path: "mem://skills/bash-editable/SKILL.md",
+        runtime: "sandbox"
+      }
+    });
+    expect(String(readBack.content || "")).toBe("edited-skill-doc");
+  });
+
+  it("rejects bash access to builtin skill namespace for normal sessions", async () => {
+    const sessionId = "sess-bash-builtin";
+    await invokeLifoFrame({
+      sessionId: BUILTIN_SKILL_SEED_SESSION_ID,
+      tool: "write",
+      args: {
+        path: "mem://builtin-skills/skill-authoring/SKILL.md",
+        content: "builtin-doc",
+        mode: "overwrite",
+        runtime: "sandbox"
+      }
+    });
+
+    await expect(
+      invokeLifoFrame({
+        sessionId,
+        tool: "bash",
+        args: {
+          cmdId: "bash.exec",
+          args: ["cat mem://builtin-skills/skill-authoring/SKILL.md"],
+          runtime: "sandbox"
+        }
+      })
+    ).rejects.toThrow("系统只读 namespace");
   });
 
   it("returns structured timeout results and keeps the session usable", async () => {

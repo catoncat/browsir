@@ -8438,6 +8438,36 @@ export default function registerUiPlugin(ui) {
     expect(restored).toBe(baseProvider);
   });
 
+  it("brain.skill.uninstall should reject builtin skills", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const listed = await invokeRuntime({
+      type: "brain.skill.list",
+    });
+    expect(listed.ok).toBe(true);
+    const skills = Array.isArray((listed.data as Record<string, unknown>)?.skills)
+      ? ((listed.data as Record<string, unknown>).skills as unknown[] as Array<
+          Record<string, unknown>
+        >)
+      : [];
+    const builtin = skills.find(
+      (item) => String(item.id || "") === "skill-authoring",
+    );
+    expect(builtin).toBeDefined();
+    expect(String(builtin?.source || "")).toBe("builtin");
+    expect(String(builtin?.location || "")).toBe(
+      "mem://builtin-skills/skill-authoring/SKILL.md",
+    );
+
+    const removed = await invokeRuntime({
+      type: "brain.skill.uninstall",
+      skillId: "skill-authoring",
+    });
+    expect(removed.ok).toBe(false);
+    expect(String(removed.error || "")).toContain("内置 skill 不允许卸载");
+  });
+
   it("supports brain.skill lifecycle routes", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -8607,6 +8637,405 @@ export default function registerUiPlugin(ui) {
     expect(String(resolvedData.content || "")).toContain(
       "Always draw a tree before response.",
     );
+  });
+
+  it("brain.skill.save updates installed skill main document without dropping sibling files", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    await invokeVirtualFrame({
+      sessionId: "skill-save",
+      tool: "write",
+      args: {
+        path: "mem://skills/pi-align/SKILL.md",
+        content: [
+          "---",
+          "id: skill.pi.align",
+          "name: PI Align",
+          "description: align runtime behavior with PI",
+          "---",
+          "",
+          "# PI Align",
+          "",
+          "align runtime behavior with PI",
+        ].join("\n"),
+        mode: "overwrite",
+        runtime: "sandbox",
+      },
+    });
+    await invokeVirtualFrame({
+      sessionId: "skill-save",
+      tool: "write",
+      args: {
+        path: "mem://skills/pi-align/references/playbook.md",
+        content: "keep-this-reference",
+        mode: "overwrite",
+        runtime: "sandbox",
+      },
+    });
+
+    const installed = await invokeRuntime({
+      type: "brain.skill.install",
+      skill: {
+        id: "skill.pi.align",
+        name: "PI Align",
+        description: "align runtime behavior with PI",
+        location: "mem://skills/pi-align/SKILL.md",
+        source: "project",
+        enabled: true,
+      },
+    });
+    expect(installed.ok).toBe(true);
+
+    const saved = await invokeRuntime({
+      type: "brain.skill.save",
+      sessionId: "skill-save",
+      location: "mem://skills/pi-align/SKILL.md",
+      content: [
+        "---",
+        "id: skill.pi.align",
+        "name: PI Align Plus",
+        "description: updated PI guidance",
+        "disable-model-invocation: true",
+        "---",
+        "",
+        "# PI Align Plus",
+        "",
+        "updated-body",
+      ].join("\n"),
+    });
+    expect(saved.ok).toBe(true);
+    const savedData = (saved.data || {}) as Record<string, unknown>;
+    expect(String(savedData.skillId || "")).toBe("skill.pi.align");
+    const savedSkill = (savedData.skill || {}) as Record<string, unknown>;
+    expect(String(savedSkill.name || "")).toBe("PI Align Plus");
+    expect(String(savedSkill.description || "")).toBe("updated PI guidance");
+    expect(savedSkill.disableModelInvocation).toBe(true);
+
+    const referenceRead = await invokeVirtualFrame({
+      sessionId: "skill-save",
+      tool: "read",
+      args: {
+        path: "mem://skills/pi-align/references/playbook.md",
+        runtime: "sandbox",
+      },
+    });
+    expect(String(referenceRead.content || "")).toBe("keep-this-reference");
+
+    const resolved = await invokeRuntime({
+      type: "brain.skill.resolve",
+      sessionId: "skill-save",
+      skillId: "skill.pi.align",
+    });
+    expect(resolved.ok).toBe(true);
+    const resolvedData = (resolved.data || {}) as Record<string, unknown>;
+    expect(String(resolvedData.promptBlock || "")).toContain(
+      'name="PI Align Plus"',
+    );
+    expect(String(resolvedData.promptBlock || "")).toContain(
+      'disable-model-invocation="true"',
+    );
+    expect(String(resolvedData.content || "")).toContain("updated-body");
+  });
+
+  it("brain.skill.save should reject builtin skills", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const listed = await invokeRuntime({
+      type: "brain.skill.list",
+    });
+    expect(listed.ok).toBe(true);
+
+    const saved = await invokeRuntime({
+      type: "brain.skill.save",
+      sessionId: "builtin-skill-save",
+      location: "mem://builtin-skills/skill-authoring/SKILL.md",
+      source: "browser",
+      content: [
+        "---",
+        "id: skill-authoring",
+        "name: 技能编写",
+        "description: 更新后的内置技能说明",
+        "---",
+        "",
+        "# 技能编写",
+        "",
+        "保留内置身份，只更新正文。",
+      ].join("\n"),
+    });
+    expect(saved.ok).toBe(false);
+    expect(String(saved.error || "")).toContain("内置 skill 为系统保留");
+  });
+
+  it("brain.skill.disable should reject builtin skills", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const disabled = await invokeRuntime({
+      type: "brain.skill.disable",
+      skillId: "skill-authoring",
+    });
+    expect(disabled.ok).toBe(false);
+    expect(String(disabled.error || "")).toContain("内置 skill 不允许禁用");
+  });
+
+  it("brain.skill.enable should keep builtin skills enabled", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const enabled = await invokeRuntime({
+      type: "brain.skill.enable",
+      skillId: "skill-authoring",
+    });
+    expect(enabled.ok).toBe(true);
+    const enabledSkill = (((enabled.data as Record<string, unknown>) || {})
+      .skill || {}) as Record<string, unknown>;
+    expect(String(enabledSkill.id || "")).toBe("skill-authoring");
+    expect(Boolean(enabledSkill.enabled)).toBe(true);
+    expect(String(enabledSkill.source || "")).toBe("builtin");
+  });
+
+  it("brain.skill.install should reject reserved builtin ids", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    await invokeVirtualFrame({
+      sessionId: "reserved-install",
+      tool: "write",
+      args: {
+        path: "mem://skills/reserved-install/SKILL.md",
+        content: "# reserved install",
+        mode: "overwrite",
+        runtime: "sandbox",
+      },
+    });
+
+    const installed = await invokeRuntime({
+      type: "brain.skill.install",
+      skill: {
+        id: "skill-authoring",
+        name: "Reserved Install",
+        description: "should fail",
+        location: "mem://skills/reserved-install/SKILL.md",
+        source: "browser",
+      },
+    });
+    expect(installed.ok).toBe(false);
+    expect(String(installed.error || "")).toContain("内置 skill 为系统保留");
+  });
+
+  it("brain.skill.create should reject reserved builtin ids", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "seed reserved create skill context",
+      autoRun: false,
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    const created = await invokeRuntime({
+      type: "brain.skill.create",
+      sessionId,
+      skill: {
+        id: "skill-authoring",
+        name: "Reserved Create",
+        description: "should fail",
+        content: "# Reserved Create",
+      },
+    });
+    expect(created.ok).toBe(false);
+    expect(String(created.error || "")).toContain("内置 skill 为系统保留");
+  });
+
+  it("brain.skill.save should rollback main document when registry update fails", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    await invokeVirtualFrame({
+      sessionId: "skill-save-rollback",
+      tool: "write",
+      args: {
+        path: "mem://skills/rollback-demo/SKILL.md",
+        content: [
+          "---",
+          "id: rollback.demo",
+          "name: Rollback Demo",
+          "description: original description",
+          "---",
+          "",
+          "# Rollback Demo",
+          "",
+          "original-body",
+        ].join("\n"),
+        mode: "overwrite",
+        runtime: "sandbox",
+      },
+    });
+    await orchestrator.installSkill(
+      {
+        id: "rollback.demo",
+        name: "Rollback Demo",
+        description: "original description",
+        location: "mem://skills/rollback-demo/SKILL.md",
+        source: "browser",
+        enabled: true,
+      },
+      { replace: true },
+    );
+    const initialized = await invokeRuntime({
+      type: "brain.skill.list",
+    });
+    expect(initialized.ok).toBe(true);
+
+    vi.spyOn(orchestrator, "installSkill").mockRejectedValueOnce(
+      new Error("registry persist failed"),
+    );
+
+    const saved = await invokeRuntime({
+      type: "brain.skill.save",
+      sessionId: "skill-save-rollback",
+      location: "mem://skills/rollback-demo/SKILL.md",
+      content: [
+        "---",
+        "id: rollback.demo",
+        "name: Rollback Demo Changed",
+        "description: changed description",
+        "---",
+        "",
+        "# Rollback Demo Changed",
+        "",
+        "changed-body",
+      ].join("\n"),
+    });
+    expect(saved.ok).toBe(false);
+    expect(String(saved.error || "")).toContain("registry persist failed");
+
+    const readBack = await invokeVirtualFrame({
+      sessionId: "skill-save-rollback",
+      tool: "read",
+      args: {
+        path: "mem://skills/rollback-demo/SKILL.md",
+        runtime: "sandbox",
+      },
+    });
+    expect(String(readBack.content || "")).toContain("original description");
+    expect(String(readBack.content || "")).toContain("original-body");
+    expect(String(readBack.content || "")).not.toContain("changed-body");
+  });
+
+  it("allows direct browser file writes to skill main documents", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "seed skill direct write context",
+      autoRun: false,
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    const executed = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "fs.write",
+      action: "invoke",
+      args: {
+        frame: {
+          tool: "write",
+          args: {
+            path: "mem://skills/direct-edit/SKILL.md",
+            content: "direct-edit-body",
+            mode: "overwrite",
+            runtime: "sandbox",
+          },
+        },
+      },
+      verifyPolicy: "off",
+    });
+    expect(executed.ok).toBe(true);
+    const result = (executed.data || {}) as Record<string, unknown>;
+    expect(result.ok).toBe(true);
+
+    const readBack = await invokeVirtualFrame({
+      sessionId,
+      tool: "read",
+      args: {
+        path: "mem://skills/direct-edit/SKILL.md",
+        runtime: "sandbox",
+      },
+    });
+    expect(String(readBack.content || "")).toBe("direct-edit-body");
+  });
+
+  it("allows browser bash mutations to skill main documents", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "seed bash skill write context",
+      autoRun: false,
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    await invokeVirtualFrame({
+      sessionId,
+      tool: "write",
+      args: {
+        path: "mem://skills/bash-editable/SKILL.md",
+        content: "original-skill-doc",
+        mode: "overwrite",
+        runtime: "sandbox",
+      },
+    });
+
+    const executed = await invokeRuntime({
+      type: "brain.step.execute",
+      sessionId,
+      capability: "process.exec",
+      action: "invoke",
+      args: {
+        frame: {
+          tool: "bash",
+          args: {
+            cmdId: "bash.exec",
+            args: [
+              "printf 'edited-skill-doc' > mem://skills/bash-editable/SKILL.md",
+            ],
+            runtime: "sandbox",
+          },
+        },
+      },
+      verifyPolicy: "off",
+    });
+    expect(executed.ok).toBe(true);
+    const result = (executed.data || {}) as Record<string, unknown>;
+    expect(result.ok).toBe(true);
+
+    const readBack = await invokeVirtualFrame({
+      sessionId,
+      tool: "read",
+      args: {
+        path: "mem://skills/bash-editable/SKILL.md",
+        runtime: "sandbox",
+      },
+    });
+    expect(String(readBack.content || "")).toBe("edited-skill-doc");
   });
 
   it("brain.skill.create should rollback staged files when install fails", async () => {
@@ -8949,6 +9378,74 @@ description missing`,
     expect(String((skipped[0] || {}).reason || "")).toContain("description");
   });
 
+  it("brain.skill.discover should skip reserved builtin skill ids", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "seed discover reserved builtin skill",
+      autoRun: false,
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    const root = "mem://skills";
+    orchestrator.registerCapabilityProvider(
+      "process.exec",
+      {
+        id: "test.skill.discover.reserved.process.exec",
+        mode: "script",
+        priority: 100,
+        invoke: async () => ({
+          stdout: `${root}/reserved/SKILL.md`,
+          stderr: "",
+          exitCode: 0,
+        }),
+      },
+      { replace: true },
+    );
+
+    orchestrator.registerCapabilityProvider(
+      "fs.read",
+      {
+        id: "test.skill.discover.reserved.fs.read",
+        mode: "script",
+        priority: 100,
+        invoke: async () => ({
+          content: `---
+id: skill-authoring
+name: Reserved Skill
+description: should not be auto installed
+---
+# SKILL
+reserved builtin id`,
+        }),
+      },
+      { replace: true },
+    );
+
+    const discovered = await invokeRuntime({
+      type: "brain.skill.discover",
+      sessionId,
+      roots: [{ root, source: "project" }],
+    });
+    expect(discovered.ok).toBe(true);
+    const data = (discovered.data || {}) as Record<string, unknown>;
+    const counts = (data.counts || {}) as Record<string, unknown>;
+    expect(Number(counts.discovered || 0)).toBe(0);
+    expect(Number(counts.installed || 0)).toBe(0);
+    expect(Number(counts.skipped || 0)).toBe(1);
+
+    const skipped = Array.isArray(data.skipped)
+      ? (data.skipped as Array<Record<string, unknown>>)
+      : [];
+    expect(String((skipped[0] || {}).reason || "")).toContain("内置 skill 为系统保留");
+  });
+
   it("brain.skill routes validate payload and missing resources", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
@@ -9036,6 +9533,27 @@ description missing`,
     expect(createMissingDescription.ok).toBe(false);
     expect(String(createMissingDescription.error || "")).toContain(
       "brain.skill.create 需要 description",
+    );
+
+    const saveMissingSessionId = await invokeRuntime({
+      type: "brain.skill.save",
+      location: "mem://skills/demo/SKILL.md",
+      content: "---\ndescription: demo\n---\n",
+    });
+    expect(saveMissingSessionId.ok).toBe(false);
+    expect(String(saveMissingSessionId.error || "")).toContain(
+      "brain.skill.save 需要 sessionId",
+    );
+
+    const saveMissingDescription = await invokeRuntime({
+      type: "brain.skill.save",
+      sessionId: "session-demo",
+      location: "mem://skills/demo/SKILL.md",
+      content: "# no frontmatter",
+    });
+    expect(saveMissingDescription.ok).toBe(false);
+    expect(String(saveMissingDescription.error || "")).toContain(
+      "brain.skill.save 需要 frontmatter.description",
     );
 
     const uninstallMissingSkill = await invokeRuntime({

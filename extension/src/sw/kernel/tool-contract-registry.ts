@@ -713,7 +713,7 @@ const BROWSER_TOOL_CONTRACTS: ToolContract[] = [
   {
     name: "create_skill",
     description:
-      "Create or update a skill package in mem://skills and register it atomically. Prefer this over browser_bash for skill scaffolding.",
+      "Create or update a skill package in mem://skills and register it atomically.",
     parameters: {
       type: "object",
       properties: {

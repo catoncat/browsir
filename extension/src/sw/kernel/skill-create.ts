@@ -1,4 +1,9 @@
 import type { SkillInstallInput } from "./skill-registry";
+import {
+  BUILTIN_SKILL_RESERVED_ERROR,
+  isBuiltinSkillId,
+  isBuiltinSkillLocation,
+} from "./builtin-skill-policy";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -154,9 +159,15 @@ function buildSkillMarkdown(input: {
 export function normalizeSkillCreateRequest(payload: Record<string, unknown>): NormalizedSkillCreateRequest {
   const row = toRecord(payload);
   const root = normalizeMemRoot(row.root || row.base || DEFAULT_SKILL_ROOT);
+  if (isBuiltinSkillLocation(root)) {
+    throw new Error(BUILTIN_SKILL_RESERVED_ERROR);
+  }
   const idSeed = String(row.id || "").trim() || String(row.name || "").trim();
   const id = normalizeSkillId(idSeed);
   if (!id) throw new Error("brain.skill.create 需要 id 或 name");
+  if (isBuiltinSkillId(id)) {
+    throw new Error(BUILTIN_SKILL_RESERVED_ERROR);
+  }
 
   const name = String(row.name || "").trim() || toNameFallback(id) || id;
   const description = String(row.description || "").trim();
@@ -170,6 +181,9 @@ export function normalizeSkillCreateRequest(payload: Record<string, unknown>): N
 
   const skillDir = `${root}/${id}`;
   const location = `${skillDir}/SKILL.md`;
+  if (isBuiltinSkillLocation(location)) {
+    throw new Error(BUILTIN_SKILL_RESERVED_ERROR);
+  }
   const writes: SkillCreateWriteFile[] = [
     {
       path: location,

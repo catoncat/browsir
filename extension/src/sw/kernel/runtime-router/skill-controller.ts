@@ -1,6 +1,15 @@
 import type { BrainOrchestrator } from "../orchestrator.browser";
+import {
+  BUILTIN_SKILL_RESERVED_ERROR,
+  isBuiltinSkillId,
+  isBuiltinSkillLocation,
+} from "../builtin-skill-policy";
 import type { RuntimeLoopController } from "../runtime-loop.browser";
 import { normalizeSkillCreateRequest } from "../skill-create";
+import {
+  normalizeSkillId,
+  parseSkillFrontmatter,
+} from "../skill-package";
 import { invokeVirtualFrame, isVirtualUri } from "../virtual-fs.browser";
 import {
   createVirtualStagingPath,
@@ -32,14 +41,6 @@ interface SkillDiscoverScanHit {
   root: string;
   source: string;
   path: string;
-}
-
-interface ParsedSkillFrontmatter {
-  id?: string;
-  name?: string;
-  description?: string;
-  disableModelInvocation?: boolean;
-  warnings: string[];
 }
 
 const DEFAULT_SKILL_DISCOVER_MAX_FILES = 256;
@@ -236,76 +237,6 @@ function shouldAcceptDiscoveredSkillPath(root: string, path: string): boolean {
   return base === "SKILL.md";
 }
 
-function trimQuotePair(text: string): string {
-  const value = String(text || "").trim();
-  if (!value) return value;
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1).trim();
-  }
-  return value;
-}
-
-function parseFrontmatterBoolean(raw: string): boolean | undefined {
-  const value = String(raw || "")
-    .trim()
-    .toLowerCase();
-  if (!value) return undefined;
-  if (["true", "yes", "on", "1"].includes(value)) return true;
-  if (["false", "no", "off", "0"].includes(value)) return false;
-  return undefined;
-}
-
-function parseSkillFrontmatter(content: string): ParsedSkillFrontmatter {
-  const out: ParsedSkillFrontmatter = { warnings: [] };
-  const lines = String(content || "").split(/\r?\n/);
-  if (!lines.length || lines[0].trim() !== "---") return out;
-
-  const fields: Record<string, string> = {};
-  let endLine = -1;
-  for (let i = 1; i < lines.length; i += 1) {
-    const line = String(lines[i] || "");
-    if (line.trim() === "---") {
-      endLine = i;
-      break;
-    }
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const match = /^([a-zA-Z0-9._-]+)\s*:\s*(.*)$/.exec(trimmed);
-    if (!match) continue;
-    fields[match[1].toLowerCase()] = trimQuotePair(match[2]);
-  }
-  if (endLine < 0) {
-    out.warnings.push("frontmatter 未闭合");
-    return out;
-  }
-
-  const id = String(fields.id || "").trim();
-  const name = String(fields.name || "").trim();
-  const description = String(fields.description || "").trim();
-  const disableRaw = String(
-    fields["disable-model-invocation"] ||
-      fields["disable_model_invocation"] ||
-      fields["disablemodelinvocation"] ||
-      "",
-  ).trim();
-
-  if (id) out.id = id;
-  if (name) out.name = name;
-  if (description) out.description = description;
-  if (disableRaw) {
-    const parsed = parseFrontmatterBoolean(disableRaw);
-    if (parsed === undefined) {
-      out.warnings.push("disable-model-invocation 不是布尔值");
-    } else {
-      out.disableModelInvocation = parsed;
-    }
-  }
-  return out;
-}
-
 function deriveSkillNameFromLocation(location: string): string {
   const base = pathBaseName(location);
   const seed =
@@ -434,6 +365,81 @@ async function writeVirtualTextFile(
   });
 }
 
+async function readVirtualTextFile(
+  path: string,
+  sessionId = "default",
+): Promise<string> {
+  const resolvedPath = String(path || "").trim();
+  if (!resolvedPath) throw new Error("read path 不能为空");
+  if (!isVirtualUri(resolvedPath)) {
+    throw new Error("read path 仅支持 mem://");
+  }
+  const result = await invokeVirtualFrame({
+    tool: "read",
+    args: {
+      path: resolvedPath,
+      runtime: "sandbox",
+    },
+    sessionId: String(sessionId || "").trim() || "default",
+  });
+  return extractSkillReadContent(result);
+}
+
+async function findSkillByLocation(
+  orchestrator: BrainOrchestrator,
+  location: string,
+) {
+  const normalized = normalizeSkillPath(location);
+  const skills = await orchestrator.listSkills();
+  return (
+    skills.find(
+      (item) => normalizeSkillPath(item.location) === normalized,
+    ) || null
+  );
+}
+
+function getBuiltinSkillMutationError(input: {
+  skillId?: unknown;
+  location?: unknown;
+}): string | null {
+  if (isBuiltinSkillId(input.skillId) || isBuiltinSkillLocation(input.location)) {
+    return BUILTIN_SKILL_RESERVED_ERROR;
+  }
+  return null;
+}
+
+async function resolveSkillMutationContext(
+  orchestrator: BrainOrchestrator,
+  input: {
+    skillId?: string;
+    location?: string;
+  },
+): Promise<{
+  existingAtLocation: Awaited<ReturnType<typeof findSkillByLocation>>;
+  existingById: Awaited<ReturnType<BrainOrchestrator["getSkill"]>>;
+  builtinSkill: Awaited<ReturnType<BrainOrchestrator["getSkill"]>>;
+}> {
+  const location = normalizeSkillPath(input.location);
+  const normalizedId = normalizeSkillId(input.skillId);
+  const existingAtLocation = location
+    ? await findSkillByLocation(orchestrator, location)
+    : null;
+  const existingById = normalizedId
+    ? await orchestrator.getSkill(normalizedId)
+    : null;
+  const builtinSkill =
+    existingAtLocation?.source === "builtin"
+      ? existingAtLocation
+      : existingById?.source === "builtin"
+        ? existingById
+        : null;
+  return {
+    existingAtLocation,
+    existingById,
+    builtinSkill,
+  };
+}
+
 export async function handleBrainSkill(
   orchestrator: BrainOrchestrator,
   runtimeLoop: RuntimeLoopController,
@@ -450,6 +456,16 @@ export async function handleBrainSkill(
       Object.keys(nested).length > 0 ? { ...payload, ...nested } : payload;
     const normalized = normalizeSkillCreateRequest(source);
     const skillId = String(normalized.skill.id || "").trim();
+    const reservedError = getBuiltinSkillMutationError({
+      skillId,
+      location: normalized.skill.location,
+    });
+    if (reservedError) return fail(reservedError);
+    const mutationContext = await resolveSkillMutationContext(orchestrator, {
+      skillId,
+      location: normalized.skill.location,
+    });
+    if (mutationContext.builtinSkill) return fail(BUILTIN_SKILL_RESERVED_ERROR);
     const stagingDir = createVirtualStagingPath(normalized.root, "skill_stage");
     const stagedWrites = buildStagedSkillWrites(
       normalized.writes,
@@ -503,6 +519,121 @@ export async function handleBrainSkill(
     });
   }
 
+  if (action === "brain.skill.save") {
+    const sessionId = String(payload.sessionId || "").trim();
+    if (!sessionId) return fail("brain.skill.save 需要 sessionId");
+
+    const location = normalizeSkillPath(payload.location);
+    if (!location) return fail("brain.skill.save 需要 location");
+    if (!isVirtualUri(location)) {
+      return fail("brain.skill.save location 仅支持 mem://");
+    }
+    if (!/\.md$/i.test(pathBaseName(location))) {
+      return fail("brain.skill.save location 必须是 markdown 主文档");
+    }
+
+    const content = String(payload.content || "");
+    const frontmatter = parseSkillFrontmatter(content);
+    const description = String(frontmatter.description || "").trim();
+    if (!description) {
+      return fail("brain.skill.save 需要 frontmatter.description");
+    }
+
+    const existingAtLocation = await findSkillByLocation(orchestrator, location);
+    const normalizedFrontmatterId = normalizeSkillId(frontmatter.id);
+    if (
+      existingAtLocation &&
+      normalizedFrontmatterId &&
+      normalizedFrontmatterId !== existingAtLocation.id
+    ) {
+      return fail("已安装 skill 不允许通过保存主文档修改 frontmatter.id");
+    }
+
+    const nextSkillId =
+      existingAtLocation?.id ||
+      normalizedFrontmatterId ||
+      normalizeSkillId(frontmatter.name) ||
+      normalizeSkillId(deriveSkillIdSeedFromLocation(location));
+    if (!nextSkillId) {
+      return fail("brain.skill.save 无法从主文档确定 skill id");
+    }
+    const reservedError = getBuiltinSkillMutationError({
+      skillId: nextSkillId,
+      location,
+    });
+    if (reservedError) return fail(reservedError);
+
+    const existingById = await orchestrator.getSkill(nextSkillId);
+    if (
+      existingById &&
+      normalizeSkillPath(existingById.location) !== location &&
+      (!existingAtLocation || existingAtLocation.id !== existingById.id)
+    ) {
+      return fail(`skill id 已被其他主文档占用: ${nextSkillId}`);
+    }
+
+    const builtinSkill =
+      existingAtLocation?.source === "builtin"
+        ? existingAtLocation
+        : existingById?.source === "builtin"
+          ? existingById
+          : null;
+    if (builtinSkill) return fail(BUILTIN_SKILL_RESERVED_ERROR);
+
+    const nextName =
+      String(frontmatter.name || "").trim() ||
+      existingAtLocation?.name ||
+      deriveSkillNameFromLocation(location);
+    const nextSource =
+      String(payload.source || existingAtLocation?.source || "browser").trim() ||
+      "browser";
+    const nextEnabled =
+      payload.enabled === undefined
+        ? existingAtLocation?.enabled !== false
+        : payload.enabled !== false;
+    const nextDisableModelInvocation =
+      frontmatter.disableModelInvocation ??
+      existingAtLocation?.disableModelInvocation ??
+      false;
+
+    const existingStat = await statVirtualPath(location, sessionId);
+    const previousContent = existingStat.exists
+      ? await readVirtualTextFile(location, sessionId)
+      : null;
+
+    try {
+      await writeVirtualTextFile(location, content, sessionId);
+      const skill = await orchestrator.installSkill(
+        {
+          id: nextSkillId,
+          name: nextName,
+          description,
+          location,
+          source: nextSource,
+          enabled: nextEnabled,
+          disableModelInvocation: nextDisableModelInvocation,
+        },
+        { replace: true },
+      );
+      return ok({
+        sessionId,
+        skillId: skill.id,
+        skill,
+        location,
+        warnings: frontmatter.warnings,
+      });
+    } catch (error) {
+      if (previousContent === null) {
+        await removeVirtualPathRecursively(location, sessionId).catch(() => undefined);
+      } else {
+        await writeVirtualTextFile(location, previousContent, sessionId).catch(
+          () => undefined,
+        );
+      }
+      return fail(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   if (action === "brain.skill.install") {
     const skillPayload =
       Object.keys(toRecord(payload.skill)).length > 0
@@ -514,20 +645,46 @@ export async function handleBrainSkill(
       return fail("brain.skill.install location 仅支持 mem://");
     }
 
+    const requestedSkillId =
+      normalizeSkillId(skillPayload.id || skillPayload.name) ||
+      normalizeSkillId(deriveSkillIdSeedFromLocation(location));
+    const reservedError = getBuiltinSkillMutationError({
+      skillId: requestedSkillId,
+      location,
+    });
+    if (reservedError) return fail(reservedError);
+    const mutationContext = await resolveSkillMutationContext(orchestrator, {
+      skillId: requestedSkillId,
+      location,
+    });
+    if (mutationContext.builtinSkill) return fail(BUILTIN_SKILL_RESERVED_ERROR);
+
     const skill = await orchestrator.installSkill(
       {
-        id: String(skillPayload.id || "").trim() || undefined,
+        id:
+          String(skillPayload.id || "").trim() ||
+          mutationContext.existingAtLocation?.id ||
+          mutationContext.existingById?.id ||
+          undefined,
         name: String(skillPayload.name || "").trim() || undefined,
         description: String(skillPayload.description || "").trim() || undefined,
         location,
-        source: String(skillPayload.source || "").trim() || undefined,
+        source:
+          String(
+            skillPayload.source ||
+              mutationContext.existingAtLocation?.source ||
+              mutationContext.existingById?.source ||
+              "",
+          ).trim() || undefined,
         enabled:
           skillPayload.enabled === undefined
-            ? undefined
+            ? mutationContext.existingAtLocation?.enabled ??
+              mutationContext.existingById?.enabled
             : skillPayload.enabled !== false,
         disableModelInvocation:
           skillPayload.disableModelInvocation === undefined
-            ? undefined
+            ? mutationContext.existingAtLocation?.disableModelInvocation ??
+              mutationContext.existingById?.disableModelInvocation
             : skillPayload.disableModelInvocation === true,
       },
       {
@@ -720,6 +877,19 @@ export async function handleBrainSkill(
         disableModelInvocation: frontmatter.disableModelInvocation === true,
         warnings: frontmatter.warnings,
       };
+      const reservedError = getBuiltinSkillMutationError({
+        skillId: candidate.id,
+        location: candidate.location,
+      });
+      if (reservedError) {
+        skipped.push({
+          location: candidate.location,
+          source: candidate.source,
+          reason: reservedError,
+          warnings: candidate.warnings,
+        });
+        continue;
+      }
       discovered.push(candidate);
 
       if (!autoInstall) continue;
@@ -776,6 +946,13 @@ export async function handleBrainSkill(
   if (action === "brain.skill.enable") {
     const skillId = String(payload.skillId || payload.id || "").trim();
     if (!skillId) return fail("brain.skill.enable 需要 skillId");
+    const current = await orchestrator.getSkill(skillId);
+    if (current?.source === "builtin") {
+      return ok({
+        skillId: current.id,
+        skill: current,
+      });
+    }
     const skill = await orchestrator.enableSkill(skillId);
     return ok({
       skillId: skill.id,
@@ -786,6 +963,10 @@ export async function handleBrainSkill(
   if (action === "brain.skill.disable") {
     const skillId = String(payload.skillId || payload.id || "").trim();
     if (!skillId) return fail("brain.skill.disable 需要 skillId");
+    const current = await orchestrator.getSkill(skillId);
+    if (current?.source === "builtin") {
+      return fail("内置 skill 不允许禁用");
+    }
     const skill = await orchestrator.disableSkill(skillId);
     return ok({
       skillId: skill.id,
@@ -798,6 +979,9 @@ export async function handleBrainSkill(
     if (!skillId) return fail("brain.skill.uninstall 需要 skillId");
     const sessionId = String(payload.sessionId || "").trim() || "default";
     const current = await orchestrator.getSkill(skillId);
+    if (current?.source === "builtin") {
+      return fail("内置 skill 不允许卸载");
+    }
     const cleanupPath = current?.location
       ? deriveSkillCleanupPath(current.location)
       : "";

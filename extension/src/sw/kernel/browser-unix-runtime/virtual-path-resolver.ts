@@ -23,6 +23,8 @@ export const SESSION_VIRTUAL_NAMESPACE_KEY_PREFIX =
   `${VIRTUAL_NAMESPACE_STORAGE_KEY_PREFIX}session:`;
 const GLOBAL_SKILLS_NAMESPACE_KEY =
   `${VIRTUAL_NAMESPACE_STORAGE_KEY_PREFIX}global:skills`;
+const GLOBAL_BUILTIN_SKILLS_NAMESPACE_KEY =
+  `${VIRTUAL_NAMESPACE_STORAGE_KEY_PREFIX}global:builtin-skills`;
 const GLOBAL_PLUGINS_NAMESPACE_KEY =
   `${VIRTUAL_NAMESPACE_STORAGE_KEY_PREFIX}global:plugins`;
 
@@ -123,6 +125,14 @@ export function createSkillsNamespace(): VirtualNamespaceDescriptor {
   };
 }
 
+export function createBuiltinSkillsNamespace(): VirtualNamespaceDescriptor {
+  return {
+    key: GLOBAL_BUILTIN_SKILLS_NAMESPACE_KEY,
+    scope: "global",
+    unixRoot: `${GLOBAL_ROOT}/builtin-skills/mem`
+  };
+}
+
 export function createPluginsNamespace(): VirtualNamespaceDescriptor {
   return {
     key: GLOBAL_PLUGINS_NAMESPACE_KEY,
@@ -143,6 +153,7 @@ export function listNamespaceDescriptors(sessionId: string): VirtualNamespaceDes
   return [
     createSessionNamespace(sessionId),
     createSkillsNamespace(),
+    createBuiltinSkillsNamespace(),
     createPluginsNamespace(),
     createSystemNamespace(sessionId)
   ];
@@ -164,6 +175,12 @@ export function resolveVirtualPath(input: unknown, sessionId: string): ResolvedV
   let normalizedPath = normalizeRelativePath(parsed.path);
   if (firstSegment === "skills") {
     namespace = createSkillsNamespace();
+    relativeSource = rawSegments.slice(1).join("/");
+    normalizedPath = [firstSegment, normalizeRelativePath(relativeSource)]
+      .filter(Boolean)
+      .join("/");
+  } else if (firstSegment === "builtin-skills") {
+    namespace = createBuiltinSkillsNamespace();
     relativeSource = rawSegments.slice(1).join("/");
     normalizedPath = [firstSegment, normalizeRelativePath(relativeSource)]
       .filter(Boolean)
@@ -220,6 +237,10 @@ export function unixPathToVirtualUri(
   const current = normalized || "/";
   const sessionRoot = sessionUnixRoot(sessionId).replace(/\/+$/, "");
   const skillsRoot = createSkillsNamespace().unixRoot.replace(/\/+$/, "");
+  const builtinSkillsRoot = createBuiltinSkillsNamespace().unixRoot.replace(
+    /\/+$/,
+    ""
+  );
   const pluginsRoot = createPluginsNamespace().unixRoot.replace(/\/+$/, "");
   const systemRoot = systemUnixRoot(sessionId).replace(/\/+$/, "");
 
@@ -237,6 +258,7 @@ export function unixPathToVirtualUri(
   return (
     toUri(sessionRoot, "mem://") ??
     toUri(skillsRoot, "mem://skills") ??
+    toUri(builtinSkillsRoot, "mem://builtin-skills") ??
     toUri(pluginsRoot, "mem://plugins") ??
     toUri(systemRoot, "mem://__bbl") ??
     current

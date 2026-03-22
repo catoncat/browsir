@@ -1,4 +1,9 @@
 import { Sandbox } from "@lifo-sh/core";
+import {
+  BUILTIN_SKILL_SEED_SESSION_ID,
+  isBuiltinSkillLocation,
+  isBuiltinSkillSeedSession,
+} from "../builtin-skill-policy";
 import { kvGet, kvKeys, kvRemove, kvSet } from "../idb-storage";
 import { sandboxBash, type SandboxBashResult, type VfsFile } from "../eval-bridge";
 import { SessionRuntimeManager } from "./session-runtime-manager";
@@ -116,6 +121,43 @@ function encodeUtf8(text: string): Uint8Array {
 function isMissingFileError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return /ENOENT|no such file or directory/i.test(String(error.message || ""));
+}
+
+function assertBuiltinNamespaceWritable(
+  path: string,
+  sessionId: string
+): void {
+  if (!isBuiltinSkillLocation(path) || isBuiltinSkillSeedSession(sessionId)) {
+    return;
+  }
+  throw new Error("mem://builtin-skills 为系统只读 namespace");
+}
+
+function assertBuiltinNamespaceShellAccess(
+  rawCommand: string,
+  rewrittenCommand: string,
+  sessionId: string,
+  cwd?: string
+): void {
+  if (isBuiltinSkillSeedSession(sessionId)) return;
+  const builtinUnixRoot = resolveVirtualPath(
+    "mem://builtin-skills",
+    BUILTIN_SKILL_SEED_SESSION_ID,
+  ).unixPath;
+  const probes = [
+    String(rawCommand || ""),
+    String(rewrittenCommand || ""),
+    String(cwd || ""),
+  ];
+  if (
+    probes.some((item) =>
+      item.includes("mem://builtin-skills") ||
+      item.includes("/mem/builtin-skills") ||
+      item.includes(builtinUnixRoot),
+    )
+  ) {
+    throw new Error("mem://builtin-skills 为系统只读 namespace");
+  }
 }
 
 function applyFindReplace(input: string, edit: JsonRecord): { content: string; replacements: number } {
@@ -710,6 +752,7 @@ async function readFrame(args: JsonRecord, sessionId: string): Promise<JsonRecor
 async function writeFrame(args: JsonRecord, sessionId: string): Promise<JsonRecord> {
   return await withSessionSandbox(sessionId, async (sandbox) => {
     const resolved = resolveVirtualPath(args.path, sessionId);
+    assertBuiltinNamespaceWritable(resolved.uri, sessionId);
     const content = String(args.content || "");
     const modeRaw = String(args.mode || "overwrite").trim();
     const mode = modeRaw === "append" || modeRaw === "create" ? modeRaw : "overwrite";
@@ -743,6 +786,7 @@ async function writeFrame(args: JsonRecord, sessionId: string): Promise<JsonReco
 async function editFrame(args: JsonRecord, sessionId: string): Promise<JsonRecord> {
   return await withSessionSandbox(sessionId, async (sandbox) => {
     const resolved = resolveVirtualPath(args.path, sessionId);
+    assertBuiltinNamespaceWritable(resolved.uri, sessionId);
     const exists = await sandbox.fs.exists(resolved.unixPath);
     if (!exists) throw new Error(`virtual file not found: ${resolved.uri}`);
 
@@ -793,6 +837,12 @@ async function bashFrame(args: JsonRecord, sessionId: string): Promise<JsonRecor
     const cwdResolved = hasExplicitCwd
       ? resolveVirtualPath(args.cwd, sessionId)
       : null;
+    assertBuiltinNamespaceShellAccess(
+      rawCommand,
+      command,
+      sessionId,
+      cwdResolved?.unixPath,
+    );
     const timeoutMs = args.timeoutMs == null ? undefined : Math.max(1000, toInt(args.timeoutMs, 120_000));
     const startedAt = Date.now();
 
@@ -895,10 +945,11 @@ function commandRequiresEval(command: string): boolean {
   if (!trimmed) return false;
 
   const firstWord = trimmed.split(/[\s;|&(]/)[0];
+  const tail = trimmed.slice(firstWord.length);
 
   // A pure builtin invocation with no pipes / chains / subshells that
   // might invoke an external (lazy-loaded) command → safe for direct SW exec.
-  if (SW_DIRECT_BUILTINS.has(firstWord) && !/[|;&`]|\$\(/.test(trimmed.slice(firstWord.length))) {
+  if (SW_DIRECT_BUILTINS.has(firstWord) && !/[|;&`<>]|\$\(/.test(tail)) {
     return false;
   }
 
