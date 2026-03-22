@@ -8,11 +8,7 @@ export interface McpServerConfig {
   command?: string;
   args?: string[];
   cwd?: string;
-  env?: Record<string, string>;
   url?: string;
-  headers?: Record<string, string>;
-  envRef?: string;
-  authRef?: string;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -34,17 +30,6 @@ function cloneStringList(value: unknown): string[] | undefined {
     out.push(normalized);
   }
   return out.length > 0 ? out : undefined;
-}
-
-function cloneStringRecord(value: unknown): Record<string, string> | undefined {
-  if (!isPlainObject(value)) return undefined;
-  const out: Record<string, string> = {};
-  for (const [key, item] of Object.entries(value)) {
-    const normalized = trimString(item);
-    if (!normalized) continue;
-    out[key] = normalized;
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 export function sanitizeMcpIdentifier(raw: unknown): string {
@@ -88,8 +73,6 @@ export function normalizeMcpServerConfig(
   const id = createMcpServerId(row.id, seed);
   const transport = normalizeTransport(row.transport);
   const args = cloneStringList(row.args);
-  const env = cloneStringRecord(row.env);
-  const headers = cloneStringRecord(row.headers);
 
   return {
     id,
@@ -99,11 +82,7 @@ export function normalizeMcpServerConfig(
     ...(trimString(row.command) ? { command: trimString(row.command) } : {}),
     ...(args ? { args } : {}),
     ...(trimString(row.cwd) ? { cwd: trimString(row.cwd) } : {}),
-    ...(env ? { env } : {}),
     ...(trimString(row.url) ? { url: trimString(row.url) } : {}),
-    ...(headers ? { headers } : {}),
-    ...(trimString(row.envRef) ? { envRef: trimString(row.envRef) } : {}),
-    ...(trimString(row.authRef) ? { authRef: trimString(row.authRef) } : {}),
   };
 }
 

@@ -121,6 +121,100 @@ describe("dispatchInvoke", () => {
     }
   });
 
+  test("disconnects an MCP server session by serverId", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "bridge-dispatch-mcp-close-"));
+    const fixturePath = new URL("./fixtures/mcp-echo-server.ts", import.meta.url).pathname;
+    try {
+      const listReq = parseInvokeFrame(
+        JSON.stringify({
+          id: "mcp-list-close-1",
+          type: "invoke",
+          tool: "mcp_list_tools",
+          args: {
+            server: {
+              id: "fixture-stdio",
+              transport: "stdio",
+              command: process.execPath,
+              args: [fixturePath],
+              cwd: root,
+            },
+          },
+        }),
+      );
+
+      await dispatchInvoke(listReq, {
+        config: createTestConfig(root),
+        fsGuard: new FsGuard("strict", [root]),
+      });
+
+      const closeReq = parseInvokeFrame(
+        JSON.stringify({
+          id: "mcp-close-1",
+          type: "invoke",
+          tool: "mcp_disconnect_server",
+          args: {
+            serverId: "fixture-stdio",
+          },
+        }),
+      );
+
+      const firstClose = await dispatchInvoke(closeReq, {
+        config: createTestConfig(root),
+        fsGuard: new FsGuard("strict", [root]),
+      });
+      expect(firstClose).toMatchObject({
+        serverId: "fixture-stdio",
+        closed: true,
+      });
+
+      const secondClose = await dispatchInvoke(closeReq, {
+        config: createTestConfig(root),
+        fsGuard: new FsGuard("strict", [root]),
+      });
+      expect(secondClose).toMatchObject({
+        serverId: "fixture-stdio",
+        closed: false,
+      });
+    } finally {
+      await resetMcpClientRegistryForTest();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects unsupported secret-bearing MCP server fields", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "bridge-dispatch-mcp-secret-"));
+    const fixturePath = new URL("./fixtures/mcp-echo-server.ts", import.meta.url).pathname;
+    try {
+      const req = parseInvokeFrame(
+        JSON.stringify({
+          id: "mcp-list-secret-1",
+          type: "invoke",
+          tool: "mcp_list_tools",
+          args: {
+            server: {
+              id: "fixture-stdio",
+              transport: "stdio",
+              command: process.execPath,
+              args: [fixturePath],
+              cwd: root,
+              envRef: "secret/demo",
+            },
+          },
+        }),
+      );
+
+      await expect(
+        dispatchInvoke(req, {
+          config: createTestConfig(root),
+          fsGuard: new FsGuard("strict", [root]),
+        }),
+      ).rejects.toThrow("MCP host/remote MVP 暂不支持这些字段");
+    } finally {
+      await resetMcpClientRegistryForTest();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("routes canonical read tool to read handler", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "bridge-dispatch-"));
     try {

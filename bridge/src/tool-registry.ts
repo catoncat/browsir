@@ -14,7 +14,8 @@ const BUILTIN_TOOL_CONTRACTS: ToolContract[] = [
   { name: "stat" },
   { name: "list" },
   { name: "mcp_list_tools" },
-  { name: "mcp_call_tool" }
+  { name: "mcp_call_tool" },
+  { name: "mcp_disconnect_server" }
 ];
 
 const builtinContracts = new Map<string, ToolContract>();

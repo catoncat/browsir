@@ -28,16 +28,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
-function cloneStringRecord(value: unknown): Record<string, string> | undefined {
-  if (!isPlainObject(value)) return undefined;
-  const out: Record<string, string> = {};
-  for (const [key, item] of Object.entries(value)) {
-    if (typeof item !== "string") continue;
-    out[key] = item;
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
-}
-
 function cloneSchema(value: unknown): Record<string, unknown> {
   return isPlainObject(value)
     ? { ...value }
@@ -62,18 +52,8 @@ function cloneServerConfig(config: McpServerConfig): McpServerConfig {
     ...(typeof config.cwd === "string" && config.cwd.trim()
       ? { cwd: config.cwd.trim() }
       : {}),
-    ...(cloneStringRecord(config.env) ? { env: cloneStringRecord(config.env) } : {}),
     ...(typeof config.url === "string" && config.url.trim()
       ? { url: config.url.trim() }
-      : {}),
-    ...(cloneStringRecord(config.headers)
-      ? { headers: cloneStringRecord(config.headers) }
-      : {}),
-    ...(typeof config.envRef === "string" && config.envRef.trim()
-      ? { envRef: config.envRef.trim() }
-      : {}),
-    ...(typeof config.authRef === "string" && config.authRef.trim()
-      ? { authRef: config.authRef.trim() }
       : {}),
   };
 }
@@ -137,11 +117,28 @@ export class McpRegistry {
     const nextNames: string[] = [];
     const active: McpDiscoveredToolRecord[] = [];
     const added: string[] = [];
+    const batchToolNames = new Map<string, string>();
 
     for (const item of tools) {
       const toolName = String(item.name || "").trim();
       if (!toolName) continue;
       const dynamicToolName = toMcpDynamicToolName(server.id, toolName);
+      const previousToolName = batchToolNames.get(dynamicToolName);
+      if (previousToolName && previousToolName !== toolName) {
+        throw new Error(
+          `MCP tool 名规范化冲突: ${toolName} 与 ${previousToolName} 会映射到同一个工具名 ${dynamicToolName}`,
+        );
+      }
+      const existing = this.toolsByName.get(dynamicToolName);
+      if (
+        existing &&
+        (existing.serverId !== server.id || existing.toolName !== toolName)
+      ) {
+        throw new Error(
+          `MCP tool 名已被占用: ${dynamicToolName} (${existing.serverId}/${existing.toolName})`,
+        );
+      }
+      batchToolNames.set(dynamicToolName, toolName);
       const record: McpDiscoveredToolRecord = {
         serverId: server.id,
         toolName,

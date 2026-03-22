@@ -87,8 +87,6 @@ function createEmptyServer(): McpServerConfig {
     args: [],
     cwd: "",
     url: "",
-    envRef: "",
-    authRef: "",
   };
 }
 
@@ -191,12 +189,6 @@ function serverSummary(server: McpServerConfig): string {
   return summary || "还没有填写启动命令";
 }
 
-function hasAdvancedFields(server: McpServerConfig): boolean {
-  return Boolean(
-    String(server.envRef || "").trim() || String(server.authRef || "").trim(),
-  );
-}
-
 function handleLabelInput(index: number, event: Event): void {
   patchServer(index, {
     label: readInputValue(event),
@@ -242,18 +234,6 @@ function handleUrlInput(index: number, event: Event): void {
     url: readInputValue(event),
   });
 }
-
-function handleEnvRefInput(index: number, event: Event): void {
-  patchServer(index, {
-    envRef: readInputValue(event),
-  });
-}
-
-function handleAuthRefInput(index: number, event: Event): void {
-  patchServer(index, {
-    authRef: readInputValue(event),
-  });
-}
 </script>
 
 <template>
@@ -262,7 +242,7 @@ function handleAuthRefInput(index: number, event: Event): void {
       <div class="space-y-1">
         <h3 class="text-[13px] font-semibold text-ui-text">MCP 工具接入</h3>
         <p class="text-[12px] leading-relaxed text-ui-text-muted">
-          把本地命令或远程服务接进系统。保存后会自动同步可用工具。
+          接入本地命令或远程 URL。当前支持无鉴权接入，保存后会自动同步可用工具。
         </p>
       </div>
       <button
@@ -474,40 +454,6 @@ function handleAuthRefInput(index: number, event: Event): void {
               />
             </label>
           </div>
-
-          <details
-            class="rounded-sm border border-ui-border bg-ui-bg/70"
-            :open="hasAdvancedFields(server)"
-          >
-            <summary class="cursor-pointer list-none px-3 py-2 text-[12px] font-semibold text-ui-text">
-              高级选项
-            </summary>
-            <div class="grid gap-3 border-t border-ui-border px-3 py-3 sm:grid-cols-2">
-              <label class="block space-y-1.5">
-                <span class="block text-[12px] font-semibold text-ui-text">环境变量引用</span>
-                <input
-                  :value="server.envRef || ''"
-                  :data-mcp-field="`envRef-${index}`"
-                  type="text"
-                  class="w-full rounded-sm border border-ui-border bg-ui-surface px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-                  placeholder="例如 host_env/github"
-                  @input="handleEnvRefInput(index, $event)"
-                />
-              </label>
-
-              <label class="block space-y-1.5">
-                <span class="block text-[12px] font-semibold text-ui-text">认证引用</span>
-                <input
-                  :value="server.authRef || ''"
-                  :data-mcp-field="`authRef-${index}`"
-                  type="text"
-                  class="w-full rounded-sm border border-ui-border bg-ui-surface px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-                  placeholder="例如 secret/github_token"
-                  @input="handleAuthRefInput(index, $event)"
-                />
-              </label>
-            </div>
-          </details>
         </div>
       </article>
     </div>

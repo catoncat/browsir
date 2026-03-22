@@ -30,3 +30,13 @@ export async function runMcpCallTool(
     _meta: result._meta,
   };
 }
+
+export async function runMcpDisconnectServer(
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const closed = await mcpClientRegistry.closeServer(args.serverId);
+  return {
+    serverId: String(args.serverId || "").trim(),
+    closed,
+  };
+}

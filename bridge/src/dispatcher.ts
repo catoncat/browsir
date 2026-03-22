@@ -8,7 +8,11 @@ import { runEdit } from "./tools/edit";
 import { runBash } from "./tools/bash";
 import { runStat } from "./tools/stat";
 import { runList } from "./tools/list";
-import { runMcpCallTool, runMcpListTools } from "./tools/mcp";
+import {
+  runMcpCallTool,
+  runMcpDisconnectServer,
+  runMcpListTools,
+} from "./tools/mcp";
 
 export interface DispatchContext {
   config: BridgeConfig;
@@ -48,6 +52,11 @@ const BUILTIN_TOOL_HANDLERS: Record<string, InvokeToolHandler> = {
     (await runMcpListTools(req.args)) as unknown as Record<string, unknown>,
   mcp_call_tool: async (req) =>
     (await runMcpCallTool(req.args)) as unknown as Record<string, unknown>,
+  mcp_disconnect_server: async (req) =>
+    (await runMcpDisconnectServer(req.args)) as unknown as Record<
+      string,
+      unknown
+    >,
 };
 const overrideToolHandlers = new Map<string, InvokeToolHandler>();
 

@@ -46,6 +46,25 @@ export function buildMcpToolContract(
   };
 }
 
+async function disconnectMcpServerSession(
+  infra: RuntimeInfraHandler,
+  serverId: string,
+): Promise<void> {
+  try {
+    await infra.handleMessage({
+      type: "bridge.invoke",
+      payload: {
+        tool: "mcp_disconnect_server",
+        args: { serverId },
+        sessionId: `mcp-disconnect:${serverId}`,
+      },
+    });
+  } catch {
+    // Bridge-side session cleanup is best-effort. If bridge is already down,
+    // the remote session is gone with it.
+  }
+}
+
 export async function syncMcpServerTools(input: {
   orchestrator: BrainOrchestrator;
   infra: RuntimeInfraHandler;
@@ -58,6 +77,7 @@ export async function syncMcpServerTools(input: {
     throw new Error(`MCP server 未注册: ${input.serverId}`);
   }
   if (server.enabled === false) {
+    await disconnectMcpServerSession(input.infra, server.id);
     const removed = registry.removeServer(server.id);
     for (const name of removed) {
       input.orchestrator.unregisterToolContract(name);
@@ -65,56 +85,61 @@ export async function syncMcpServerTools(input: {
     return { serverId: server.id, toolNames: [] };
   }
 
-  const bridgeResult = await input.infra.handleMessage({
-    type: "bridge.invoke",
-    payload: {
-      tool: "mcp_list_tools",
-      args: {
-        server,
-        refresh: input.refresh === true,
+  try {
+    const bridgeResult = await input.infra.handleMessage({
+      type: "bridge.invoke",
+      payload: {
+        tool: "mcp_list_tools",
+        args: {
+          server,
+          refresh: input.refresh === true,
+        },
+        sessionId: `mcp-sync:${server.id}`,
       },
-      sessionId: `mcp-sync:${server.id}`,
-    },
-  });
-  if (!bridgeResult || bridgeResult.ok !== true) {
-    throw new Error(`MCP bridge 调用失败: ${server.id}`);
-  }
-
-  const invokeResult = toRecord(bridgeResult.data);
-  if (invokeResult.ok !== true) {
-    throw new Error(
-      String(toRecord(invokeResult.error).message || "MCP tools 枚举失败"),
-    );
-  }
-
-  const payload = toRecord(invokeResult.data);
-  const rawTools = Array.isArray(payload.tools)
-    ? payload.tools.filter(isPlainObject)
-    : [];
-  const normalizedTools: McpDiscoveredToolInput[] = rawTools.map((item) => ({
-    name: String(item.name || "").trim(),
-    ...(typeof item.title === "string" && item.title.trim()
-      ? { title: item.title.trim() }
-      : {}),
-    ...(typeof item.description === "string"
-      ? { description: item.description.trim() }
-      : {}),
-    inputSchema: cloneSchema(item.inputSchema),
-  }));
-
-  const next = registry.replaceServerTools(server.id, normalizedTools);
-  for (const name of next.removed) {
-    input.orchestrator.unregisterToolContract(name);
-  }
-  for (const tool of next.active) {
-    input.orchestrator.registerToolContract(buildMcpToolContract(tool), {
-      replace: true,
     });
+    if (!bridgeResult || bridgeResult.ok !== true) {
+      throw new Error(`MCP bridge 调用失败: ${server.id}`);
+    }
+
+    const invokeResult = toRecord(bridgeResult.data);
+    if (invokeResult.ok !== true) {
+      throw new Error(
+        String(toRecord(invokeResult.error).message || "MCP tools 枚举失败"),
+      );
+    }
+
+    const payload = toRecord(invokeResult.data);
+    const rawTools = Array.isArray(payload.tools)
+      ? payload.tools.filter(isPlainObject)
+      : [];
+    const normalizedTools: McpDiscoveredToolInput[] = rawTools.map((item) => ({
+      name: String(item.name || "").trim(),
+      ...(typeof item.title === "string" && item.title.trim()
+        ? { title: item.title.trim() }
+        : {}),
+      ...(typeof item.description === "string"
+        ? { description: item.description.trim() }
+        : {}),
+      inputSchema: cloneSchema(item.inputSchema),
+    }));
+
+    const next = registry.replaceServerTools(server.id, normalizedTools);
+    for (const name of next.removed) {
+      input.orchestrator.unregisterToolContract(name);
+    }
+    for (const tool of next.active) {
+      input.orchestrator.registerToolContract(buildMcpToolContract(tool), {
+        replace: true,
+      });
+    }
+    return {
+      serverId: server.id,
+      toolNames: next.active.map((item) => item.dynamicToolName),
+    };
+  } catch (error) {
+    await disconnectMcpServerSession(input.infra, server.id);
+    throw error;
   }
-  return {
-    serverId: server.id,
-    toolNames: next.active.map((item) => item.dynamicToolName),
-  };
 }
 
 function unregisterToolNames(
@@ -142,6 +167,7 @@ export async function syncConfiguredMcpServers(input: {
 
   for (const existing of input.orchestrator.listMcpServers()) {
     if (configuredIds.has(existing.id)) continue;
+    await disconnectMcpServerSession(input.infra, existing.id);
     unregisterToolNames(input.orchestrator, registry.removeServer(existing.id));
   }
 
@@ -151,6 +177,9 @@ export async function syncConfiguredMcpServers(input: {
 
   for (const server of configuredServers) {
     if (server.enabled === false) {
+      if (registry.getServer(server.id)) {
+        await disconnectMcpServerSession(input.infra, server.id);
+      }
       unregisterToolNames(input.orchestrator, registry.removeServer(server.id));
       continue;
     }

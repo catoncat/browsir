@@ -1140,9 +1140,18 @@ export const useConfigStore = defineStore("config", () => {
       config.value = normalized;
       const payload = convertToLegacyBridgeConfig(normalized);
       await sendMessage("config.save", { payload });
-      await sendMessage("bridge.connect");
-      await sendMessage("brain.mcp.sync-config", { refresh: true });
-      await refreshHealth();
+      try {
+        await sendMessage("bridge.connect");
+        await sendMessage("brain.mcp.sync-config", { refresh: true });
+      } catch (syncError) {
+        const reason =
+          syncError instanceof Error ? syncError.message : String(syncError);
+        const wrapped = new Error(`配置已保存，但运行时同步失败：${reason}`);
+        error.value = wrapped.message;
+        throw wrapped;
+      } finally {
+        await refreshHealth().catch(() => {});
+      }
     } catch (err) {
       error.value = err instanceof Error ? err.message : String(err);
       throw err;

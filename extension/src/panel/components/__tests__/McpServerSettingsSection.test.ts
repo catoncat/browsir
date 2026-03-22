@@ -103,6 +103,13 @@ describe("McpServerSettingsSection", () => {
     enabledInput!.dispatchEvent(new Event("change", { bubbles: true }));
     await flushUi();
 
+    expect(
+      view.root.querySelector('input[data-mcp-field="envRef-0"]'),
+    ).toBeNull();
+    expect(
+      view.root.querySelector('input[data-mcp-field="authRef-0"]'),
+    ).toBeNull();
+
     expect(view.servers.value).toHaveLength(1);
     expect(view.servers.value[0]).toMatchObject({
       label: "GitHub",

@@ -329,7 +329,6 @@ describe("config-store Phase 1", () => {
             enabled: true,
             transport: "streamable-http",
             url: "https://mcp.example.com",
-            authRef: "secret/github_token",
           },
         ],
         browserRuntimeStrategy: "browser-first",
@@ -419,7 +418,6 @@ describe("config-store Phase 1", () => {
           enabled: true,
           transport: "streamable-http",
           url: "https://mcp.example.com",
-          authRef: "secret/github_token",
         },
       ]);
     });
@@ -505,6 +503,9 @@ describe("config-store Phase 1", () => {
             transport: "streamable-http",
             url: "https://mcp.example.com",
             authRef: "secret/github_token",
+            headers: {
+              authorization: "Bearer demo",
+            },
           },
           {
             label: "Filesystem",
@@ -524,7 +525,6 @@ describe("config-store Phase 1", () => {
           enabled: true,
           transport: "streamable-http",
           url: "https://mcp.example.com",
-          authRef: "secret/github_token",
         },
         {
           id: "filesystem",

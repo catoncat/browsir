@@ -16,6 +16,13 @@ interface McpClientSession {
   client: Client;
 }
 
+const UNSUPPORTED_MCP_SERVER_FIELDS = [
+  "env",
+  "headers",
+  "envRef",
+  "authRef",
+] as const;
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value);
@@ -54,24 +61,6 @@ function asStringArray(value: unknown, field: string): string[] {
   return out;
 }
 
-function asStringRecord(
-  value: unknown,
-  field: string,
-): Record<string, string> | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (!isPlainObject(value)) {
-    throw new BridgeError("E_ARGS", `${field} must be an object`);
-  }
-  const out: Record<string, string> = {};
-  for (const [key, item] of Object.entries(value)) {
-    if (typeof item !== "string") {
-      throw new BridgeError("E_ARGS", `${field}.${key} must be a string`);
-    }
-    out[key] = item;
-  }
-  return out;
-}
-
 function normalizeTransport(value: unknown): McpTransport {
   const text = typeof value === "string" ? value.trim() : "";
   if (text === "stdio" || text === "streamable-http") return text;
@@ -93,6 +82,25 @@ function sortJsonValue(value: unknown): unknown {
 
 function fingerprintServer(server: NormalizedMcpServerConfig): string {
   return JSON.stringify(sortJsonValue(server));
+}
+
+function hasMeaningfulValue(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (isPlainObject(value)) return Object.keys(value).length > 0;
+  return true;
+}
+
+function rejectUnsupportedServerFields(raw: Record<string, unknown>): void {
+  const unsupported = UNSUPPORTED_MCP_SERVER_FIELDS.filter((field) =>
+    hasMeaningfulValue(raw[field]),
+  );
+  if (unsupported.length <= 0) return;
+  throw new BridgeError(
+    "E_ARGS",
+    `MCP host/remote MVP 暂不支持这些字段: ${unsupported.join(", ")}`,
+  );
 }
 
 function toDiscoveredTool(tool: Record<string, unknown>): McpDiscoveredTool {
@@ -124,10 +132,9 @@ export function normalizeMcpServerConfig(
     throw new BridgeError("E_ARGS", "server must be an object");
   }
 
+  rejectUnsupportedServerFields(raw);
   const id = asNonEmptyString(raw.id, "server.id");
   const transport = normalizeTransport(raw.transport);
-  const envRef = asOptionalString(raw.envRef, "server.envRef");
-  const authRef = asOptionalString(raw.authRef, "server.authRef");
 
   if (transport === "stdio") {
     return {
@@ -138,11 +145,6 @@ export function normalizeMcpServerConfig(
       ...(asOptionalString(raw.cwd, "server.cwd")
         ? { cwd: asOptionalString(raw.cwd, "server.cwd") }
         : {}),
-      ...(asStringRecord(raw.env, "server.env")
-        ? { env: asStringRecord(raw.env, "server.env") }
-        : {}),
-      ...(envRef ? { envRef } : {}),
-      ...(authRef ? { authRef } : {}),
     };
   }
 
@@ -159,11 +161,6 @@ export function normalizeMcpServerConfig(
     id,
     transport,
     url,
-    ...(asStringRecord(raw.headers, "server.headers")
-      ? { headers: asStringRecord(raw.headers, "server.headers") }
-      : {}),
-    ...(envRef ? { envRef } : {}),
-    ...(authRef ? { authRef } : {}),
   };
 }
 
@@ -195,17 +192,12 @@ export class McpClientRegistry {
             command: server.command || "",
             args: server.args || [],
             ...(server.cwd ? { cwd: server.cwd } : {}),
-            ...(server.env ? { env: server.env } : {}),
             stderr: "pipe",
           }),
         );
       } else {
         await client.connect(
-          new StreamableHTTPClientTransport(new URL(server.url || ""), {
-            ...(server.headers
-              ? { requestInit: { headers: server.headers } }
-              : {}),
-          }),
+          new StreamableHTTPClientTransport(new URL(server.url || "")),
         );
       }
     } catch (error) {
@@ -342,10 +334,39 @@ export class McpClientRegistry {
     }
   }
 
+  async closeServer(serverId: unknown): Promise<boolean> {
+    const normalizedId = asNonEmptyString(serverId, "serverId");
+    const current = this.sessions.get(normalizedId);
+    const pendingTask = this.pending.get(normalizedId);
+    this.sessions.delete(normalizedId);
+
+    await closeSession(current);
+
+    if (!pendingTask) {
+      return Boolean(current);
+    }
+
+    try {
+      const pendingSession = await pendingTask;
+      if (this.sessions.get(normalizedId) === pendingSession) {
+        this.sessions.delete(normalizedId);
+      }
+      await closeSession(pendingSession);
+    } catch {
+      // Pending connect already failed; nothing else to tear down.
+    }
+
+    return true;
+  }
+
   async closeAll(): Promise<void> {
-    const sessions = Array.from(this.sessions.values());
-    this.sessions.clear();
-    await Promise.all(sessions.map((session) => closeSession(session)));
+    const serverIds = new Set<string>([
+      ...Array.from(this.sessions.keys()),
+      ...Array.from(this.pending.keys()),
+    ]);
+    await Promise.all(
+      Array.from(serverIds).map((serverId) => this.closeServer(serverId)),
+    );
   }
 }
 

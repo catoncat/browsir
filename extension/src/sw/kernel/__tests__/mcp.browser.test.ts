@@ -11,8 +11,24 @@ import type { RuntimeInfraHandler, RuntimeInfraResult } from "../runtime-infra.b
 
 type InfraCall = Record<string, unknown>;
 
-function createMockInfra() {
+function createMockInfra(options: {
+  discoveredTools?: Array<Record<string, unknown>>;
+} = {}) {
   const calls: InfraCall[] = [];
+  const discoveredTools = options.discoveredTools || [
+    {
+      name: "echo",
+      title: "Echo Tool",
+      description: "Echoes the provided text.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          text: { type: "string" },
+        },
+        required: ["text"],
+      },
+    },
+  ];
   const infra: RuntimeInfraHandler = {
     async handleMessage(message: unknown): Promise<RuntimeInfraResult | null> {
       const msg = (message || {}) as Record<string, unknown>;
@@ -28,20 +44,7 @@ function createMockInfra() {
             ok: true,
             data: {
               serverId: "fixture-stdio",
-              tools: [
-                {
-                  name: "echo",
-                  title: "Echo Tool",
-                  description: "Echoes the provided text.",
-                  inputSchema: {
-                    type: "object",
-                    properties: {
-                      text: { type: "string" },
-                    },
-                    required: ["text"],
-                  },
-                },
-              ],
+              tools: discoveredTools,
             },
           },
         };
@@ -66,6 +69,21 @@ function createMockInfra() {
               structuredContent: {
                 echoed: String(toolArgs.text || ""),
               },
+            },
+          },
+        };
+      }
+      if (String(payload.tool || "") === "mcp_disconnect_server") {
+        return {
+          ok: true,
+          data: {
+            ok: true,
+            data: {
+              serverId: String(
+                ((((payload.args || {}) as Record<string, unknown>).serverId ||
+                  "") as string),
+              ),
+              closed: true,
             },
           },
         };
@@ -197,5 +215,100 @@ describe("mcp.browser", () => {
         .listToolContracts()
         .some((item) => item.name === "mcp__fixture_stdio__echo"),
     ).toBe(false);
+
+    const disconnectCalls = mock.calls.filter((item) => {
+      if (String(item.type || "") !== "bridge.invoke") return false;
+      const payload = (item.payload || {}) as Record<string, unknown>;
+      return String(payload.tool || "") === "mcp_disconnect_server";
+    });
+    expect(disconnectCalls).toHaveLength(1);
+    expect(
+      String(
+        (
+          (((disconnectCalls[0]?.payload || {}) as Record<string, unknown>)
+            .args || {}) as Record<string, unknown>
+        ).serverId || "",
+      ),
+    ).toBe("fixture_stdio");
+  });
+
+  it("disconnects bridge session when a server is disabled", async () => {
+    const orchestrator = new BrainOrchestrator();
+    const mock = createMockInfra();
+    createRuntimeLoopController(orchestrator, mock.infra);
+
+    await syncConfiguredMcpServers({
+      orchestrator,
+      infra: mock.infra,
+      servers: [
+        {
+          id: "fixture stdio",
+          label: "Fixture",
+          enabled: true,
+          transport: "stdio",
+          command: "bun",
+          args: ["./fixture.ts"],
+        },
+      ],
+    });
+
+    await syncConfiguredMcpServers({
+      orchestrator,
+      infra: mock.infra,
+      servers: [
+        {
+          id: "fixture stdio",
+          label: "Fixture",
+          enabled: false,
+          transport: "stdio",
+          command: "bun",
+          args: ["./fixture.ts"],
+        },
+      ],
+    });
+
+    const disconnectCalls = mock.calls.filter((item) => {
+      if (String(item.type || "") !== "bridge.invoke") return false;
+      const payload = (item.payload || {}) as Record<string, unknown>;
+      return String(payload.tool || "") === "mcp_disconnect_server";
+    });
+    expect(disconnectCalls).toHaveLength(1);
+  });
+
+  it("rejects discovered MCP tools whose normalized names collide", async () => {
+    const orchestrator = new BrainOrchestrator();
+    const mock = createMockInfra({
+      discoveredTools: [
+        {
+          name: "foo-bar",
+          title: "Foo Bar",
+          description: "First",
+          inputSchema: { type: "object", properties: {}, required: [] },
+        },
+        {
+          name: "foo_bar",
+          title: "Foo Bar 2",
+          description: "Second",
+          inputSchema: { type: "object", properties: {}, required: [] },
+        },
+      ],
+    });
+    createRuntimeLoopController(orchestrator, mock.infra);
+
+    orchestrator.upsertMcpServer({
+      id: "fixture-stdio",
+      enabled: true,
+      transport: "stdio",
+      command: "bun",
+      args: ["./fixture.ts"],
+    });
+
+    await expect(
+      syncMcpServerTools({
+        orchestrator,
+        infra: mock.infra,
+        serverId: "fixture-stdio",
+      }),
+    ).rejects.toThrow("MCP tool 名规范化冲突");
   });
 });

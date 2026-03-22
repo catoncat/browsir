@@ -6,11 +6,7 @@ export interface McpServerConfig {
   command?: string;
   args?: string[];
   cwd?: string;
-  env?: Record<string, string>;
   url?: string;
-  headers?: Record<string, string>;
-  envRef?: string;
-  authRef?: string;
 }
 
 export interface NormalizedMcpServerConfig {
@@ -19,11 +15,7 @@ export interface NormalizedMcpServerConfig {
   command?: string;
   args?: string[];
   cwd?: string;
-  env?: Record<string, string>;
   url?: string;
-  headers?: Record<string, string>;
-  envRef?: string;
-  authRef?: string;
 }
 
 export interface McpDiscoveredTool {
