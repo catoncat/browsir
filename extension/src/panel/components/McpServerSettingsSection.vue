@@ -146,6 +146,50 @@ function formatArgsInput(value: string[] | undefined): string {
   return Array.isArray(value) ? value.join("\n") : "";
 }
 
+function parseHeaderInput(raw: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of raw.split(/\r?\n/g)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const separator = trimmed.indexOf(":");
+    if (separator <= 0) continue;
+    const key = trimmed.slice(0, separator).trim().toLowerCase();
+    const value = trimmed.slice(separator + 1).trim();
+    if (!key || !value) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+function formatHeaderInput(value: Record<string, string> | undefined): string {
+  if (!value) return "";
+  return Object.entries(value)
+    .map(([key, item]) => `${key}: ${item}`)
+    .join("\n");
+}
+
+function parseEnvInput(raw: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of raw.split(/\r?\n/g)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const separator = trimmed.indexOf("=");
+    if (separator <= 0) continue;
+    const key = trimmed.slice(0, separator).trim();
+    const value = trimmed.slice(separator + 1).trim();
+    if (!key || !value) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+function formatEnvInput(value: Record<string, string> | undefined): string {
+  if (!value) return "";
+  return Object.entries(value)
+    .map(([key, item]) => `${key}=${item}`)
+    .join("\n");
+}
+
 function handleLabelBlur(index: number): void {
   const current = servers.value[index];
   if (!current) return;
@@ -234,6 +278,30 @@ function handleUrlInput(index: number, event: Event): void {
     url: readInputValue(event),
   });
 }
+
+function handleHeadersInput(index: number, event: Event): void {
+  patchServer(index, {
+    headers: parseHeaderInput(readInputValue(event)),
+  });
+}
+
+function handleAuthRefInput(index: number, event: Event): void {
+  patchServer(index, {
+    authRef: readInputValue(event),
+  });
+}
+
+function handleEnvInput(index: number, event: Event): void {
+  patchServer(index, {
+    env: parseEnvInput(readInputValue(event)),
+  });
+}
+
+function handleEnvRefInput(index: number, event: Event): void {
+  patchServer(index, {
+    envRef: readInputValue(event),
+  });
+}
 </script>
 
 <template>
@@ -242,7 +310,7 @@ function handleUrlInput(index: number, event: Event): void {
       <div class="space-y-1">
         <h3 class="text-[13px] font-semibold text-ui-text">MCP 工具接入</h3>
         <p class="text-[12px] leading-relaxed text-ui-text-muted">
-          接入本地命令或远程 URL。当前支持无鉴权接入，保存后会自动同步可用工具。
+          先定义每个服务器怎么连，再决定是否复用认证和环境预设。保存后会自动同步可用工具。
         </p>
       </div>
       <button
@@ -260,7 +328,7 @@ function handleUrlInput(index: number, event: Event): void {
       v-if="servers.length <= 0"
       class="rounded-sm border border-dashed border-ui-border px-3 py-5 text-[12px] leading-relaxed text-ui-text-muted"
     >
-      还没有添加 MCP 服务器。可以先接一个本地命令，后续再补远程服务。
+      还没有添加 MCP 服务器。可以先接远程 URL，也可以接本地命令。
     </div>
 
     <div v-else class="space-y-3">
@@ -416,29 +484,60 @@ function handleUrlInput(index: number, event: Event): void {
               />
             </label>
 
-            <label class="block space-y-1.5">
-              <span class="block text-[12px] font-semibold text-ui-text">命令参数</span>
-              <textarea
-                :value="formatArgsInput(server.args)"
-                :data-mcp-field="`args-${index}`"
-                rows="4"
-                class="w-full rounded-sm border border-ui-border bg-ui-bg px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent resize-y"
-                placeholder="每行一个参数，例如&#10;run&#10;start"
-                @input="handleArgsInput(index, $event)"
-              />
-            </label>
+            <div class="grid gap-3 lg:grid-cols-2">
+              <label class="block space-y-1.5">
+                <span class="block text-[12px] font-semibold text-ui-text">命令参数</span>
+                <textarea
+                  :value="formatArgsInput(server.args)"
+                  :data-mcp-field="`args-${index}`"
+                  rows="4"
+                  class="w-full rounded-sm border border-ui-border bg-ui-bg px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent resize-y"
+                  placeholder="每行一个参数，例如&#10;run&#10;start"
+                  @input="handleArgsInput(index, $event)"
+                />
+              </label>
 
-            <label class="block space-y-1.5">
-              <span class="block text-[12px] font-semibold text-ui-text">工作目录</span>
-              <input
-                :value="server.cwd || ''"
-                :data-mcp-field="`cwd-${index}`"
-                type="text"
-                class="w-full rounded-sm border border-ui-border bg-ui-bg px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-                placeholder="例如 /Users/name/work/project"
-                @input="handleCwdInput(index, $event)"
-              />
-            </label>
+              <label class="block space-y-1.5">
+                <span class="block text-[12px] font-semibold text-ui-text">工作目录</span>
+                <input
+                  :value="server.cwd || ''"
+                  :data-mcp-field="`cwd-${index}`"
+                  type="text"
+                  class="w-full rounded-sm border border-ui-border bg-ui-bg px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+                  placeholder="例如 /Users/name/work/project"
+                  @input="handleCwdInput(index, $event)"
+                />
+              </label>
+            </div>
+
+            <div class="grid gap-3 lg:grid-cols-2">
+              <label class="block space-y-1.5">
+                <span class="block text-[12px] font-semibold text-ui-text">环境变量</span>
+                <textarea
+                  :value="formatEnvInput(server.env)"
+                  :data-mcp-field="`env-${index}`"
+                  rows="4"
+                  class="w-full rounded-sm border border-ui-border bg-ui-bg px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent resize-y"
+                  placeholder="每行一个变量，例如&#10;NODE_ENV=production&#10;API_BASE=https://example.com"
+                  @input="handleEnvInput(index, $event)"
+                />
+              </label>
+
+              <label class="block space-y-1.5">
+                <span class="block text-[12px] font-semibold text-ui-text">环境引用</span>
+                <input
+                  :value="server.envRef || ''"
+                  :data-mcp-field="`envRef-${index}`"
+                  type="text"
+                  class="w-full rounded-sm border border-ui-border bg-ui-bg px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+                  placeholder="例如 filesystem_prod"
+                  @input="handleEnvRefInput(index, $event)"
+                />
+                <p class="text-[11px] text-ui-text-muted">
+                  直接填写的环境变量会覆盖同名预设项。
+                </p>
+              </label>
+            </div>
           </div>
 
           <div v-else class="space-y-3">
@@ -453,6 +552,35 @@ function handleUrlInput(index: number, event: Event): void {
                 @input="handleUrlInput(index, $event)"
               />
             </label>
+
+            <div class="grid gap-3 lg:grid-cols-2">
+              <label class="block space-y-1.5">
+                <span class="block text-[12px] font-semibold text-ui-text">请求头</span>
+                <textarea
+                  :value="formatHeaderInput(server.headers)"
+                  :data-mcp-field="`headers-${index}`"
+                  rows="4"
+                  class="w-full rounded-sm border border-ui-border bg-ui-bg px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent resize-y"
+                  placeholder="每行一个请求头，例如&#10;x-api-key: demo&#10;x-team: growth"
+                  @input="handleHeadersInput(index, $event)"
+                />
+              </label>
+
+              <label class="block space-y-1.5">
+                <span class="block text-[12px] font-semibold text-ui-text">认证引用</span>
+                <input
+                  :value="server.authRef || ''"
+                  :data-mcp-field="`authRef-${index}`"
+                  type="text"
+                  class="w-full rounded-sm border border-ui-border bg-ui-bg px-3 py-2 text-[13px] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+                  placeholder="例如 hey_grok_token"
+                  @input="handleAuthRefInput(index, $event)"
+                />
+                <p class="text-[11px] text-ui-text-muted">
+                  会把预设值写入 `authorization` 请求头；手动填写的请求头优先级更高。
+                </p>
+              </label>
+            </div>
           </div>
         </div>
       </article>

@@ -55,6 +55,42 @@ function cloneServerConfig(config: McpServerConfig): McpServerConfig {
     ...(typeof config.url === "string" && config.url.trim()
       ? { url: config.url.trim() }
       : {}),
+    ...(isPlainObject(config.headers)
+      ? {
+          headers: Object.fromEntries(
+            Object.entries(config.headers)
+              .filter(
+                ([key, value]) =>
+                  typeof key === "string" &&
+                  key.trim() &&
+                  typeof value === "string" &&
+                  value.trim(),
+              )
+              .map(([key, value]) => [key.trim().toLowerCase(), value.trim()]),
+          ),
+        }
+      : {}),
+    ...(typeof config.authRef === "string" && config.authRef.trim()
+      ? { authRef: config.authRef.trim() }
+      : {}),
+    ...(isPlainObject(config.env)
+      ? {
+          env: Object.fromEntries(
+            Object.entries(config.env)
+              .filter(
+                ([key, value]) =>
+                  typeof key === "string" &&
+                  key.trim() &&
+                  typeof value === "string" &&
+                  value.trim(),
+              )
+              .map(([key, value]) => [key.trim(), value.trim()]),
+          ),
+        }
+      : {}),
+    ...(typeof config.envRef === "string" && config.envRef.trim()
+      ? { envRef: config.envRef.trim() }
+      : {}),
   };
 }
 

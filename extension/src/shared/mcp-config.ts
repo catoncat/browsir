@@ -1,5 +1,10 @@
 export type McpTransport = "stdio" | "streamable-http";
 
+export interface McpRefConfig {
+  auth?: Record<string, string>;
+  env?: Record<string, Record<string, string>>;
+}
+
 export interface McpServerConfig {
   id: string;
   label?: string;
@@ -9,6 +14,10 @@ export interface McpServerConfig {
   args?: string[];
   cwd?: string;
   url?: string;
+  headers?: Record<string, string>;
+  authRef?: string;
+  env?: Record<string, string>;
+  envRef?: string;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -30,6 +39,71 @@ function cloneStringList(value: unknown): string[] | undefined {
     out.push(normalized);
   }
   return out.length > 0 ? out : undefined;
+}
+
+function cloneStringRecord(
+  value: unknown,
+  options: {
+    normalizeKey?: (key: string) => string;
+  } = {},
+): Record<string, string> | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [rawKey, rawValue] of Object.entries(value)) {
+    const baseKey = trimString(rawKey);
+    if (!baseKey) continue;
+    const key = options.normalizeKey ? options.normalizeKey(baseKey) : baseKey;
+    if (!key) continue;
+    const normalizedValue = trimString(rawValue);
+    if (!normalizedValue) continue;
+    out[key] = normalizedValue;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function cloneNestedStringRecord(
+  value: unknown,
+): Record<string, Record<string, string>> | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const out: Record<string, Record<string, string>> = {};
+  for (const [rawKey, rawValue] of Object.entries(value)) {
+    const key = trimString(rawKey);
+    if (!key) continue;
+    const normalizedValue = cloneStringRecord(rawValue);
+    if (!normalizedValue) continue;
+    out[key] = normalizedValue;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function cloneHeaderRecord(value: unknown): Record<string, string> | undefined {
+  return cloneStringRecord(value, {
+    normalizeKey: (key) => key.toLowerCase(),
+  });
+}
+
+function mergeStringRecord(
+  base: Record<string, string> | undefined,
+  override: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  const out: Record<string, string> = {};
+  if (base) {
+    for (const [key, value] of Object.entries(base)) {
+      const normalizedKey = trimString(key);
+      const normalizedValue = trimString(value);
+      if (!normalizedKey || !normalizedValue) continue;
+      out[normalizedKey] = normalizedValue;
+    }
+  }
+  if (override) {
+    for (const [key, value] of Object.entries(override)) {
+      const normalizedKey = trimString(key);
+      const normalizedValue = trimString(value);
+      if (!normalizedKey || !normalizedValue) continue;
+      out[normalizedKey] = normalizedValue;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 export function sanitizeMcpIdentifier(raw: unknown): string {
@@ -83,6 +157,10 @@ export function normalizeMcpServerConfig(
     ...(args ? { args } : {}),
     ...(trimString(row.cwd) ? { cwd: trimString(row.cwd) } : {}),
     ...(trimString(row.url) ? { url: trimString(row.url) } : {}),
+    ...(cloneHeaderRecord(row.headers) ? { headers: cloneHeaderRecord(row.headers) } : {}),
+    ...(trimString(row.authRef) ? { authRef: trimString(row.authRef) } : {}),
+    ...(cloneStringRecord(row.env) ? { env: cloneStringRecord(row.env) } : {}),
+    ...(trimString(row.envRef) ? { envRef: trimString(row.envRef) } : {}),
   };
 }
 
@@ -104,4 +182,43 @@ export function normalizeMcpServerList(raw: unknown): McpServerConfig[] {
   }
 
   return out;
+}
+
+export function normalizeMcpRefConfig(raw: unknown): McpRefConfig {
+  const row = isPlainObject(raw) ? raw : {};
+  return {
+    ...(cloneStringRecord(row.auth) ? { auth: cloneStringRecord(row.auth) } : {}),
+    ...(cloneNestedStringRecord(row.env)
+      ? { env: cloneNestedStringRecord(row.env) }
+      : {}),
+  };
+}
+
+export function resolveMcpServerRuntimeConfig(
+  server: McpServerConfig,
+  refs: McpRefConfig | null | undefined,
+): McpServerConfig {
+  const normalizedServer = normalizeMcpServerConfig(server, server.id || "mcp_server");
+  const normalizedRefs = normalizeMcpRefConfig(refs);
+
+  const authHeaderValue =
+    normalizedServer.authRef &&
+    normalizedRefs.auth &&
+    trimString(normalizedRefs.auth[normalizedServer.authRef]);
+  const headersFromRef = authHeaderValue
+    ? ({ authorization: authHeaderValue } satisfies Record<string, string>)
+    : undefined;
+  const resolvedHeaders = mergeStringRecord(headersFromRef, normalizedServer.headers);
+
+  const envFromRef =
+    normalizedServer.envRef && normalizedRefs.env
+      ? normalizedRefs.env[normalizedServer.envRef]
+      : undefined;
+  const resolvedEnv = mergeStringRecord(envFromRef, normalizedServer.env);
+
+  return {
+    ...normalizedServer,
+    ...(resolvedHeaders ? { headers: resolvedHeaders } : {}),
+    ...(resolvedEnv ? { env: resolvedEnv } : {}),
+  };
 }

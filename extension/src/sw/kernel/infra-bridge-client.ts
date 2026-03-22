@@ -12,7 +12,9 @@ import {
 } from "../../shared/compaction";
 import { normalizeProviderConnectionConfig } from "../../shared/llm-provider-config";
 import {
+  normalizeMcpRefConfig,
   normalizeMcpServerList,
+  type McpRefConfig,
   type McpServerConfig,
 } from "../../shared/mcp-config";
 
@@ -24,6 +26,7 @@ export interface BridgeConfig {
   bridgeUrl: string;
   bridgeToken: string;
   mcpServers?: McpServerConfig[];
+  mcpRefs?: McpRefConfig;
   browserRuntimeStrategy: BrowserRuntimeStrategy;
   compaction: CompactionSettings;
   llmDefaultProfile?: string;
@@ -355,6 +358,7 @@ export function createBridgeClient(): BridgeClient {
       "bridgeUrl",
       "bridgeToken",
       "mcpServers",
+      "mcpRefs",
       "browserRuntimeStrategy",
       "compaction",
       "llmDefaultProfile",
@@ -381,6 +385,7 @@ export function createBridgeClient(): BridgeClient {
       bridgeUrl: String(data.bridgeUrl || DEFAULT_BRIDGE_URL),
       bridgeToken: String(data.bridgeToken || DEFAULT_BRIDGE_TOKEN),
       mcpServers: normalizeMcpServerList(data.mcpServers),
+      mcpRefs: normalizeMcpRefConfig(data.mcpRefs),
       browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
         data.browserRuntimeStrategy,
         DEFAULT_BROWSER_RUNTIME_STRATEGY,
@@ -460,6 +465,9 @@ export function createBridgeClient(): BridgeClient {
       ),
       mcpServers: normalizeMcpServerList(
         source.mcpServers !== undefined ? source.mcpServers : current.mcpServers,
+      ),
+      mcpRefs: normalizeMcpRefConfig(
+        source.mcpRefs !== undefined ? source.mcpRefs : current.mcpRefs,
       ),
       browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
         source.browserRuntimeStrategy,

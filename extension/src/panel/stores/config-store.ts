@@ -17,7 +17,9 @@ import {
   type ProviderRuntimeKind,
 } from "../../shared/llm-provider-config";
 import {
+  normalizeMcpRefConfig,
   normalizeMcpServerList,
+  type McpRefConfig,
   type McpServerConfig,
 } from "../../shared/mcp-config";
 import { resolveCursorHelpDisplayModel } from "../../shared/cursor-help-protocol";
@@ -75,6 +77,7 @@ export interface PanelConfig {
   bridgeUrl: string;
   bridgeToken: string;
   mcpServers: McpServerConfig[];
+  mcpRefs: McpRefConfig;
   browserRuntimeStrategy: BrowserRuntimeStrategy;
   compaction: CompactionSettings;
   llmDefaultProfile: string;
@@ -148,6 +151,7 @@ export interface PanelConfigNew {
   bridgeUrl: string;
   bridgeToken: string;
   mcpServers: McpServerConfig[];
+  mcpRefs: McpRefConfig;
   browserRuntimeStrategy: BrowserRuntimeStrategy;
   compaction: CompactionSettings;
   llmProviders: PanelLlmProvider[];
@@ -417,6 +421,7 @@ function normalizeLegacyConfig(
     bridgeUrl,
     bridgeToken,
     mcpServers: normalizeMcpServerList(raw?.mcpServers),
+    mcpRefs: normalizeMcpRefConfig(raw?.mcpRefs),
     browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
       raw?.browserRuntimeStrategy,
       "browser-first",
@@ -1041,6 +1046,7 @@ export function convertToLegacyBridgeConfig(
     bridgeUrl: newConfig.bridgeUrl,
     bridgeToken: newConfig.bridgeToken,
     mcpServers: normalizeMcpServerList(newConfig.mcpServers),
+    mcpRefs: normalizeMcpRefConfig(newConfig.mcpRefs),
     browserRuntimeStrategy: newConfig.browserRuntimeStrategy,
     compaction: newConfig.compaction,
     llmDefaultProfile: newConfig.llmDefaultProfile,
