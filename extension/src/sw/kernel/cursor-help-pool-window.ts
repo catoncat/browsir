@@ -83,7 +83,7 @@ export async function tryAdoptExistingCursorHelpSlots(
       continue;
     }
     const inspect = await waitForCursorHelpInspectReady(tab.id, 8_000);
-    if (!canCursorHelpSlotBootExecute(inspect)) continue;
+    if (!inspect || !canCursorHelpSlotBootExecute(inspect)) continue;
     adoptedSlots.push({
       slotId: randomSlotId(),
       tabId: tab.id,
@@ -154,7 +154,7 @@ export async function createCursorHelpPoolWindow(
   await markCursorHelpTabStable(firstTab.id);
   const firstSlot = buildCursorHelpSlotRecord(firstTab, "primary");
   const firstInspect = await waitForCursorHelpInspectReady(firstTab.id, 8_000);
-  if (canCursorHelpSlotBootExecute(firstInspect)) {
+  if (firstInspect && canCursorHelpSlotBootExecute(firstInspect)) {
     firstSlot.status = "idle";
     firstSlot.lastReadyAt = nowMs();
     firstSlot.lastHealthCheckedAt = nowMs();
@@ -173,7 +173,7 @@ export async function createCursorHelpPoolWindow(
     await markCursorHelpTabStable(tab.id);
     const slot = buildCursorHelpSlotRecord(tab, "auxiliary");
     const inspect = await waitForCursorHelpInspectReady(tab.id, 8_000);
-    if (canCursorHelpSlotBootExecute(inspect)) {
+    if (inspect && canCursorHelpSlotBootExecute(inspect)) {
       slot.status = "idle";
       slot.lastReadyAt = nowMs();
       slot.lastHealthCheckedAt = nowMs();

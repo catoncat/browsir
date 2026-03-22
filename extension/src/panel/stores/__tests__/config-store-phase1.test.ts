@@ -325,12 +325,9 @@ describe("config-store Phase 1", () => {
         browserRuntimeStrategy: "browser-first",
         compaction: {
           enabled: true,
-          contextWindow: 32000,
-          maxTokens: 16000,
+          contextWindowTokens: 32000,
           reserveTokens: 4000,
-          keepSystemPrompt: true,
-          keepToolSchema: true,
-          keepRecentUserMessages: 4,
+          keepRecentTokens: 16000,
         },
         llmProviders: [
           {

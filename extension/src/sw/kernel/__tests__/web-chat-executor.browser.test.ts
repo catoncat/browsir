@@ -250,6 +250,14 @@ function defaultExecuteResponse(): { ok: true } {
   return { ok: true };
 }
 
+function asStoredPoolState(
+  value: unknown,
+): { slots?: Array<Record<string, unknown>> } & Record<string, unknown> {
+  return (value && typeof value === "object"
+    ? value
+    : {}) as { slots?: Array<Record<string, unknown>> } & Record<string, unknown>;
+}
+
 describe("web-chat-executor.browser", () => {
   beforeEach(async () => {
     (globalThis as typeof globalThis & {
@@ -1457,13 +1465,16 @@ describe("web-chat-executor.browser", () => {
 
     await ensureCursorHelpPoolReady(3);
     const stored = await chrome.storage.local.get(CURSOR_HELP_POOL_STORAGE_KEY);
-    const firstSlot = stored[CURSOR_HELP_POOL_STORAGE_KEY]?.slots?.[0] as Record<string, unknown> | undefined;
+    const storedPoolState = asStoredPoolState(stored[CURSOR_HELP_POOL_STORAGE_KEY]);
+    const firstSlot = storedPoolState.slots?.[0];
     expect(firstSlot).toBeTruthy();
 
     const missingTabId = Number(firstSlot?.tabId || 0);
     const slotId = String(firstSlot?.slotId || "");
     const tabsGet = chrome.tabs.get as unknown as ReturnType<typeof vi.fn>;
-    const originalGet = tabsGet.getMockImplementation();
+    const originalGet = tabsGet.getMockImplementation() as
+      | ((tabId: number) => Promise<unknown>)
+      | undefined;
     tabsGet.mockImplementation(async (tabId: number) => {
       if (tabId === missingTabId) return null;
       return await originalGet?.(tabId);
@@ -1759,13 +1770,14 @@ describe("web-chat-executor.browser", () => {
       expect((error as Error).message).toContain("网页 provider 请求未启动");
 
       const stored = await chrome.storage.local.get(CURSOR_HELP_POOL_STORAGE_KEY);
+      const storedPoolState = asStoredPoolState(stored[CURSOR_HELP_POOL_STORAGE_KEY]);
       expect(stored[CURSOR_HELP_POOL_STORAGE_KEY]).toMatchObject({
         version: 1,
         windowId: 2,
       });
       expect(
-        Array.isArray(stored[CURSOR_HELP_POOL_STORAGE_KEY]?.slots) &&
-          stored[CURSOR_HELP_POOL_STORAGE_KEY].slots.some(
+        Array.isArray(storedPoolState.slots) &&
+          storedPoolState.slots.some(
             (slot: Record<string, unknown>) =>
               String(slot.status || "") === "stale" &&
               String(slot.lastError || "").includes("网页 provider 请求未启动")
@@ -1991,7 +2003,8 @@ describe("web-chat-executor.browser", () => {
     // First heartbeat should shrink from 4→3
     await runCursorHelpPoolHeartbeat();
     const after1 = await chrome.storage.local.get(CURSOR_HELP_POOL_STORAGE_KEY);
-    const slots1 = (after1[CURSOR_HELP_POOL_STORAGE_KEY] as Record<string, unknown>).slots as Array<Record<string, unknown>>;
+    const after1PoolState = asStoredPoolState(after1[CURSOR_HELP_POOL_STORAGE_KEY]);
+    const slots1 = (after1PoolState.slots || []) as Array<Record<string, unknown>>;
     expect(slots1.length).toBe(3);
 
     // Make remaining slots idle again
@@ -1999,7 +2012,7 @@ describe("web-chat-executor.browser", () => {
       slots1[i] = { ...slots1[i], status: "idle", lastUsedAt: longAgo, lastReadyAt: longAgo, lastHealthReason: "ready" };
     }
     await chrome.storage.local.set({
-      [CURSOR_HELP_POOL_STORAGE_KEY]: { ...after1[CURSOR_HELP_POOL_STORAGE_KEY], slots: slots1 },
+      [CURSOR_HELP_POOL_STORAGE_KEY]: { ...after1PoolState, slots: slots1 },
     });
 
     // Second heartbeat — cooldown should block shrink (60s cooldown not elapsed)

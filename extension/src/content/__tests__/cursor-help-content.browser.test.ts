@@ -14,19 +14,43 @@ type RuntimeListener = (
 
 let runtimeListener: RuntimeListener | null = null;
 
+function createOnMessageEvent(): typeof chrome.runtime.onMessage {
+  return {
+    addListener(listener: RuntimeListener) {
+      runtimeListener = listener;
+    },
+    removeListener(listener: RuntimeListener) {
+      if (runtimeListener === listener) {
+        runtimeListener = null;
+      }
+    },
+    hasListener(listener: RuntimeListener) {
+      return runtimeListener === listener;
+    },
+    hasListeners() {
+      return runtimeListener !== null;
+    },
+    addRules() {
+      // no-op for tests
+    },
+    getRules() {
+      // no-op for tests
+    },
+    removeRules() {
+      // no-op for tests
+    },
+  } as typeof chrome.runtime.onMessage;
+}
+
 function installChromeMock(): void {
   runtimeListener = null;
-  (globalThis as typeof globalThis & { chrome: Record<string, unknown> }).chrome = {
+  (globalThis as typeof globalThis & { chrome: typeof chrome }).chrome = {
     runtime: {
       id: "test-extension-id",
-      onMessage: {
-        addListener(listener: RuntimeListener) {
-          runtimeListener = listener;
-        },
-      },
+      onMessage: createOnMessageEvent(),
       sendMessage: async () => ({ ok: true }),
     },
-  };
+  } as unknown as typeof chrome;
 }
 
 function dispatchPageMessage(data: Record<string, unknown>): void {
@@ -39,8 +63,9 @@ function dispatchPageMessage(data: Record<string, unknown>): void {
 }
 
 function mockInspectRpc(payload: Record<string, unknown> = {}) {
-  const originalPostMessage = window.postMessage.bind(window);
-  return vi.spyOn(window, "postMessage").mockImplementation((message: unknown, targetOrigin?: string, transfer?: Transferable[]) => {
+  const originalPostMessage = window.postMessage.bind(window) as (...args: any[]) => void;
+  return vi.spyOn(window, "postMessage").mockImplementation((...args: any[]) => {
+    const [message] = args;
     const record = message && typeof message === "object" ? (message as Record<string, unknown>) : {};
     if (record.source === CONTENT_SOURCE && record.type === "WEBCHAT_INSPECT") {
       const requestPayload =
@@ -63,14 +88,18 @@ function mockInspectRpc(payload: Record<string, unknown> = {}) {
       });
       return undefined;
     }
-    return originalPostMessage(message as MessageEventSource | string, targetOrigin as string, transfer as Transferable[]);
+    return originalPostMessage(...args);
   });
+}
+
+function getContentScriptModuleUrl(): string {
+  return new URL("../cursor-help-content.ts", import.meta.url).href;
 }
 
 async function loadContentScript(): Promise<void> {
   vi.resetModules();
   delete (globalThis as Record<string, unknown>)[CONTENT_INSTALLED_FLAG];
-  await import("../cursor-help-content");
+  await import(/* @vite-ignore */ getContentScriptModuleUrl());
 }
 
 async function sendRuntimeMessage(message: Record<string, unknown>): Promise<Record<string, unknown>> {

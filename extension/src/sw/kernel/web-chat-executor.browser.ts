@@ -103,6 +103,7 @@ type JsonRecord = Record<string, unknown>;
 interface CursorHelpPoolDebugView {
   summary: JsonRecord;
   window: JsonRecord | null;
+  tabDecisionTrace: JsonRecord[];
   slots: JsonRecord[];
 }
 

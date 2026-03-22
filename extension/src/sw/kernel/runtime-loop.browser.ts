@@ -2492,7 +2492,7 @@ export function createRuntimeLoopController(
           }
         }
 
-        if (finalStatus === "stopped" || finalStatus === "progress_uncertain") {
+        if (finalStatus !== "done") {
           break;
         }
         if (skipRemainingToolCallsBySteer) {

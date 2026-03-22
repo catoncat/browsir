@@ -33,10 +33,10 @@ async function ensureStealthWindow(): Promise<number> {
     width: 800,
     height: 600,
   });
-  stealthWindowId = win.id ?? null;
-  if (stealthWindowId === null) {
+  if (!win?.id) {
     throw new Error("Failed to create stealth window");
   }
+  stealthWindowId = win.id;
 
   // The new window comes with a blank tab — close it
   const blankTabs = win.tabs ?? [];

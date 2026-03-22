@@ -2,15 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { collectDiagnostics } from "../diagnostics";
 
-declare global {
-  // eslint-disable-next-line no-var
-  var chrome: {
-    runtime: {
-      sendMessage: ReturnType<typeof vi.fn>;
-    };
-  };
-}
-
 describe("diagnostics", () => {
   afterEach(() => {
     vi.restoreAllMocks();

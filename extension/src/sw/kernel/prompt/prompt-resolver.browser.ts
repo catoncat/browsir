@@ -18,7 +18,7 @@ export interface SystemPromptContextRefService {
     sessionMeta: SessionMeta | null;
     refs: PromptContextRefInput[];
   }): Promise<ResolvedContextRef[]>;
-  buildContextRefFailureMessage(refs: ResolvedContextRef[]): string;
+  buildContextRefFailureMessage(refs: ResolvedContextRef[]): string | null;
   materializeContextRefs(params: {
     sessionId: string;
     refs: ResolvedContextRef[];

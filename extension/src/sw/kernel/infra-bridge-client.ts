@@ -100,7 +100,7 @@ function normalizeCustomSystemPrompt(raw: unknown, fallback = ""): string {
 
 function normalizeStoredLlmProfiles(raw: unknown): unknown {
   const source = Array.isArray(raw) ? raw : [];
-  const normalized = source.map((item) => {
+  const normalized: JsonRecord[] = source.map((item) => {
     const row = asRecord(item);
     const { role: _role, ...rest } = row;
     const connection = normalizeProviderConnectionConfig({

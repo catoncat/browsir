@@ -14,7 +14,7 @@ export function useMessageEditing(deps: {
     entryId: string,
     content: string,
     opts: { setActive: boolean }
-  ) => Promise<{ mode: string; sessionId: string; activeSourceEntryId?: string }>;
+  ) => Promise<{ mode: "retry" | "fork"; sessionId: string; activeSourceEntryId?: string }>;
   switchForkSession: (id: string, opts: { startedAt?: number }) => Promise<void>;
   cancelForkScene: () => void;
   onError: (err: unknown, fallback: string) => void;

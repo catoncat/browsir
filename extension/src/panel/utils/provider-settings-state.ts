@@ -56,11 +56,15 @@ function trim(value: unknown): string {
   return String(value || "").trim();
 }
 
-function isBuiltinCursorProfile(profile: PanelLlmProfileNew | null | undefined): boolean {
+function isBuiltinCursorProfile(
+  profile: PanelLlmProfileNew | null | undefined,
+): boolean {
   return trim(profile?.id) === BUILTIN_CURSOR_HELP_PROFILE_ID;
 }
 
-function isManagedProfile(profile: PanelLlmProfileNew | null | undefined): boolean {
+function isManagedProfile(
+  profile: PanelLlmProfileNew | null | undefined,
+): profile is PanelLlmProfileNew {
   return Boolean(profile) && !isBuiltinCursorProfile(profile);
 }
 

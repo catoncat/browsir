@@ -15,18 +15,43 @@ type RuntimeListener = (
 let runtimeListener: RuntimeListener | null = null;
 let inspectPayload: Record<string, unknown> = {};
 
+function createOnMessageEvent(): typeof chrome.runtime.onMessage {
+  return {
+    addListener(listener: RuntimeListener) {
+      runtimeListener = listener;
+    },
+    removeListener(listener: RuntimeListener) {
+      if (runtimeListener === listener) {
+        runtimeListener = null;
+      }
+    },
+    hasListener(listener: RuntimeListener) {
+      return runtimeListener === listener;
+    },
+    hasListeners() {
+      return runtimeListener !== null;
+    },
+    addRules() {
+      // no-op for tests
+    },
+    getRules() {
+      // no-op for tests
+    },
+    removeRules() {
+      // no-op for tests
+    },
+  } as typeof chrome.runtime.onMessage;
+}
+
 function installChromeMock(): void {
-  (globalThis as typeof globalThis & { chrome?: Record<string, unknown> }).chrome = {
+  runtimeListener = null;
+  (globalThis as typeof globalThis & { chrome: typeof chrome }).chrome = {
     runtime: {
       id: "test-extension",
-      onMessage: {
-        addListener(listener: RuntimeListener) {
-          runtimeListener = listener;
-        }
-      },
+      onMessage: createOnMessageEvent(),
       sendMessage: vi.fn(async () => ({ ok: true }))
     }
-  };
+  } as unknown as typeof chrome;
 }
 
 function installPageRpcBridge(): void {
@@ -71,10 +96,14 @@ async function inspectWebchat(): Promise<Record<string, unknown>> {
   });
 }
 
+function getContentScriptModuleUrl(): string {
+  return new URL("../cursor-help-content.ts", import.meta.url).href;
+}
+
 beforeAll(async () => {
   installChromeMock();
   installPageRpcBridge();
-  await import("../cursor-help-content");
+  await import(/* @vite-ignore */ getContentScriptModuleUrl());
 });
 
 beforeEach(() => {

@@ -84,7 +84,7 @@ export async function ensureCursorHelpSlotUsable(
     lastKnownUrl: String(inspect?.url || tab.url || slot.lastKnownUrl || ""),
     lastReadyAt: canCursorHelpSlotBootExecute(inspect) ? nowMs() : slot.lastReadyAt,
   });
-  if (!canCursorHelpSlotBootExecute(inspect)) {
+  if (!inspect || !canCursorHelpSlotBootExecute(inspect)) {
     if (options.throwOnRuntimeMismatch && inspect?.runtimeMismatch) {
       throw new Error(formatInspectFailure(inspect));
     }
