@@ -1,4 +1,5 @@
 import type { BrainOrchestrator } from "./orchestrator.browser";
+import { sendHostCommand } from "./channel-broker";
 import type { BrainEventEnvelope } from "./events";
 import { randomId } from "./types";
 import {
@@ -7,6 +8,8 @@ import {
   createWechatReplyProjection,
 } from "./channel-projection";
 import type { ChannelTurnRecord } from "./channel-types";
+import type { ChannelOutboxRecord } from "./channel-types";
+import type { WechatReplySendInput, WechatReplySendResult } from "./host-protocol";
 
 function toRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object"
@@ -135,6 +138,73 @@ export function attachChannelObserver(orchestrator: BrainOrchestrator): void {
           terminalStatus: status,
         },
       });
+
+      try {
+        const sendInput: WechatReplySendInput = {
+          deliveryId: outbox.deliveryId,
+          channelTurnId: outbox.channelTurnId,
+          sessionId: outbox.sessionId,
+          parts: outbox.replyProjection.parts,
+        };
+        const sendResult = await sendHostCommand<
+          WechatReplySendInput,
+          WechatReplySendResult
+        >("wechat", "reply.text", sendInput);
+
+        const deliveredOutbox: ChannelOutboxRecord = {
+          ...outbox,
+          deliveryStatus: "delivered",
+          attemptCount: outbox.attemptCount + 1,
+          updatedAt: sendResult.sentAt,
+        };
+        await orchestrator.channels.store.putOutbox(deliveredOutbox);
+        await orchestrator.channels.store.putTurn({
+          ...turn,
+          lifecycleStatus: "delivered",
+          deliveryStatus: "delivered",
+          assistantEntryId: latestAssistant.entryId,
+          deliveryId: outbox.deliveryId,
+          updatedAt: sendResult.sentAt,
+        });
+        await orchestrator.channels.store.appendEvent({
+          eventId: randomId("channel_event"),
+          channelTurnId: turn.channelTurnId,
+          sessionId: turn.sessionId,
+          type: "channel.turn.delivered",
+          createdAt: sendResult.sentAt,
+          payload: {
+            deliveryId: outbox.deliveryId,
+          },
+        });
+      } catch (error) {
+        const uncertainAt = new Date().toISOString();
+        await orchestrator.channels.store.putOutbox({
+          ...outbox,
+          deliveryStatus: "uncertain",
+          attemptCount: outbox.attemptCount + 1,
+          lastError: error instanceof Error ? error.message : String(error),
+          updatedAt: uncertainAt,
+        });
+        await orchestrator.channels.store.putTurn({
+          ...turn,
+          lifecycleStatus: "sending",
+          deliveryStatus: "uncertain",
+          assistantEntryId: latestAssistant.entryId,
+          deliveryId: outbox.deliveryId,
+          updatedAt: uncertainAt,
+        });
+        await orchestrator.channels.store.appendEvent({
+          eventId: randomId("channel_event"),
+          channelTurnId: turn.channelTurnId,
+          sessionId: turn.sessionId,
+          type: "channel.turn.delivery_uncertain",
+          createdAt: uncertainAt,
+          payload: {
+            deliveryId: outbox.deliveryId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        });
+      }
     })().catch((error) => {
       console.warn("[channel-observer] failed", error);
     });

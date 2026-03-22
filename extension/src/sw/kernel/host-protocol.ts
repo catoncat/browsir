@@ -46,3 +46,15 @@ export interface WechatHostStateSnapshot {
     lastError?: string;
   };
 }
+
+export interface WechatReplySendInput {
+  deliveryId: string;
+  channelTurnId: string;
+  sessionId: string;
+  parts: Array<{ kind: "text"; text: string }>;
+}
+
+export interface WechatReplySendResult {
+  deliveryId: string;
+  sentAt: string;
+}

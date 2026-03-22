@@ -149,6 +149,16 @@ function handleWechatHostCommand(
       case "logout":
         data = wechatService.logout();
         break;
+      case "reply.text":
+        data = wechatService.sendReply(
+          message.payload as unknown as {
+            deliveryId: string;
+            channelTurnId: string;
+            sessionId: string;
+            parts: Array<{ kind: "text"; text: string }>;
+          },
+        );
+        break;
       default:
         return {
           type: "host.response",

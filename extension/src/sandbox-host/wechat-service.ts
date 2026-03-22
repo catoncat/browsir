@@ -1,9 +1,12 @@
 import {
   HOST_PROTOCOL_VERSION,
+  type WechatReplySendInput,
+  type WechatReplySendResult,
   type WechatHostStateSnapshot,
 } from "../sw/kernel/host-protocol";
 
 const WECHAT_STATE_KEY = "bbl.wechat.host.state.v1";
+const WECHAT_SEND_LOG_KEY = "bbl.wechat.host.send-log.v1";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -55,6 +58,28 @@ function writeState(state: WechatHostStateSnapshot): WechatHostStateSnapshot {
   return state;
 }
 
+function appendSendLog(payload: WechatReplySendInput, sentAt: string): void {
+  const raw = localStorage.getItem(WECHAT_SEND_LOG_KEY);
+  let list: unknown[] = [];
+  try {
+    const parsed = raw ? JSON.parse(raw) : [];
+    list = Array.isArray(parsed) ? parsed : [];
+  } catch {
+    list = [];
+  }
+  const next = [
+    ...list.slice(-19),
+    {
+      deliveryId: payload.deliveryId,
+      channelTurnId: payload.channelTurnId,
+      sessionId: payload.sessionId,
+      parts: payload.parts,
+      sentAt,
+    },
+  ];
+  localStorage.setItem(WECHAT_SEND_LOG_KEY, JSON.stringify(next));
+}
+
 export class WechatHostService {
   getState(): WechatHostStateSnapshot {
     return readState();
@@ -80,5 +105,14 @@ export class WechatHostService {
         updatedAt: nowIso(),
       },
     });
+  }
+
+  sendReply(input: WechatReplySendInput): WechatReplySendResult {
+    const sentAt = nowIso();
+    appendSendLog(input, sentAt);
+    return {
+      deliveryId: input.deliveryId,
+      sentAt,
+    };
   }
 }

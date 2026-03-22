@@ -7,6 +7,7 @@ import {
   __resetIdbStorageForTest,
   clearIdbStores,
 } from "../idb-storage";
+import { HOST_PROTOCOL_VERSION } from "../host-protocol";
 import { BrainOrchestrator } from "../orchestrator.browser";
 import {
   buildChannelBindingKey,
@@ -57,6 +58,30 @@ function createRunningTurn(sessionId: string): ChannelTurnRecord {
 beforeEach(async () => {
   await __resetIdbStorageForTest();
   await clearIdbStores();
+  (globalThis as any).chrome.runtime.getContexts = async () => [
+    { contextType: "OFFSCREEN_DOCUMENT" },
+  ];
+  (globalThis as any).chrome.runtime.sendMessage = async (
+    message: Record<string, unknown>,
+  ) => {
+    if (message.type === "host.command" && message.service === "wechat") {
+      return {
+        type: "host.response",
+        protocolVersion: HOST_PROTOCOL_VERSION,
+        id: String(message.id || ""),
+        service: "wechat",
+        action: String(message.action || ""),
+        ok: true,
+        data: {
+          deliveryId: String(
+            (message.payload as Record<string, unknown>)?.deliveryId || "",
+          ),
+          sentAt: "2026-03-22T00:00:01.000Z",
+        },
+      };
+    }
+    return { ok: true };
+  };
 });
 
 describe("channel-observer", () => {
@@ -93,15 +118,20 @@ describe("channel-observer", () => {
       toolSteps: 0,
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    const deadline = Date.now() + 1000;
+    let turn = await store.getTurn("turn-1");
+    while (Date.now() < deadline && turn?.deliveryStatus !== "delivered") {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      turn = await store.getTurn("turn-1");
+    }
 
-    const turn = await store.getTurn("turn-1");
-    expect(turn?.deliveryStatus).toBe("queued");
+    expect(turn?.deliveryStatus).toBe("delivered");
     expect(turn?.assistantEntryId).toBeTruthy();
 
     const outbox = await store.listOutboxByTurn("turn-1");
     expect(outbox).toHaveLength(1);
     expect(outbox[0]?.projection.visibleText).toBe("final answer");
     expect(outbox[0]?.projection.projectionKind).toBe("final_text");
+    expect(outbox[0]?.deliveryStatus).toBe("delivered");
   });
 });

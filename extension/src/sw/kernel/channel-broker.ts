@@ -25,7 +25,7 @@ async function ensureOffscreenHost(): Promise<void> {
   });
 }
 
-export async function sendHostCommand<TPayload extends Record<string, unknown>, TData>(
+export async function sendHostCommand<TPayload extends object, TData>(
   service: HostServiceId,
   action: string,
   payload: TPayload,
