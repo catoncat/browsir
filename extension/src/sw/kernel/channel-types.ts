@@ -83,6 +83,7 @@ export interface ChannelTurnRecord {
   repairStatus: ChannelRepairStatus;
   anomalyFlags: string[];
   runAttemptCount: number;
+  queuedPromptId?: string;
   currentRunId?: string;
   assistantEntryId?: string;
   deliveryId?: string;

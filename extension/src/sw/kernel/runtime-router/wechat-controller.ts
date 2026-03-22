@@ -219,11 +219,15 @@ export async function handleBrainChannelWechat(
           "followUp",
           text,
         );
+        const queuedPrompt = [...queuedRuntime.queue.items]
+          .filter((item) => item.behavior === "followUp")
+          .at(-1);
         await orchestrator.channels.store.putTurn({
           ...turn,
           queuedMode: "followUp",
           lifecycleStatus: "queued",
           dispatchStatus: "queued",
+          queuedPromptId: String(queuedPrompt?.id || "").trim() || undefined,
           updatedAt: nowIso(),
         });
         await orchestrator.channels.store.appendEvent({
@@ -233,6 +237,7 @@ export async function handleBrainChannelWechat(
           type: "channel.turn.follow_up_queued",
           createdAt: nowIso(),
           payload: {
+            queuedPromptId: String(queuedPrompt?.id || "").trim() || undefined,
             queueTotal: queuedRuntime.queue.total,
           },
         });

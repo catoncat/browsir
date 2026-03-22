@@ -8,6 +8,7 @@ export * from "./storage-reset.browser";
 export * from "./session-manager.browser";
 export * from "./compaction.browser";
 export * from "./orchestrator.browser";
+export * from "./channel-observer";
 export * from "./tool-provider-registry";
 export * from "./llm-provider";
 export * from "./llm-provider-registry";

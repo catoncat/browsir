@@ -1,7 +1,13 @@
-import { BrainOrchestrator, initSessionIndex, registerRuntimeRouter } from "../sw/kernel";
+import {
+  BrainOrchestrator,
+  attachChannelObserver,
+  initSessionIndex,
+  registerRuntimeRouter,
+} from "../sw/kernel";
 
 const orchestrator = new BrainOrchestrator();
 registerRuntimeRouter(orchestrator);
+attachChannelObserver(orchestrator);
 
 const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:8787/ws";
 const DEFAULT_BRIDGE_TOKEN = "";
