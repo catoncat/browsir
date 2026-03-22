@@ -919,6 +919,7 @@ export function normalizeNewConfig(
     bridgeUrl,
     bridgeToken,
     mcpServers: normalizeMcpServerList(raw?.mcpServers),
+    mcpRefs: normalizeMcpRefConfig(raw?.mcpRefs),
     browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
       raw?.browserRuntimeStrategy,
       "browser-first",
