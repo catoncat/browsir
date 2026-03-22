@@ -76,6 +76,11 @@ export class ChannelStore {
     return (await db.get("channelTurns", channelTurnId)) ?? null;
   }
 
+  async putTurn(record: ChannelTurnRecord): Promise<void> {
+    const db = await getDB();
+    await db.put("channelTurns", record);
+  }
+
   async getTurnByRemoteMessage(
     channelKind: ChannelKind,
     remoteConversationId: string,

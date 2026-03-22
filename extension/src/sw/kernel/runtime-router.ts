@@ -242,7 +242,13 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
         }
 
         if (type.startsWith("brain.channel.wechat.")) {
-          return await applyAfter(await handleBrainChannelWechat(routeMessage));
+          return await applyAfter(
+            await handleBrainChannelWechat(
+              orchestrator,
+              runtimeLoop,
+              routeMessage,
+            ),
+          );
         }
 
         if (type.startsWith("brain.mcp.")) {
