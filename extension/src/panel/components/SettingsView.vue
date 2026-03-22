@@ -2,11 +2,15 @@
 import { storeToRefs } from "pinia";
 import { onMounted, ref } from "vue";
 import { useConfigStore } from "../stores/config-store";
+import { useWechatStore } from "../stores/wechat-store";
 import { ShieldCheck, Cpu, Loader2, ArrowLeft, Eye, EyeOff } from "lucide-vue-next";
 
 const emit = defineEmits(["close"]);
 const store = useConfigStore();
 const { config, savingConfig, error } = storeToRefs(store);
+const wechatStore = useWechatStore();
+const { state: wechatState, loading: wechatLoading, error: wechatError } =
+  storeToRefs(wechatStore);
 
 const dialogRef = ref<HTMLElement | null>(null);
 const systemPromptCustomId = "settings-system-prompt-custom";
@@ -32,6 +36,7 @@ async function handleSave() {
 
 onMounted(() => {
   dialogRef.value?.focus();
+  void wechatStore.refresh();
 });
 </script>
 
@@ -153,6 +158,81 @@ onMounted(() => {
               />
               <p class="text-[10px] text-ui-text-muted/60 px-0.5">保留最近工作区间，其余部分合并进摘要。</p>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="space-y-4">
+        <div class="flex items-center gap-2 text-ui-text-muted opacity-60">
+          <ShieldCheck :size="14" />
+          <h3 class="text-[10px] font-bold uppercase tracking-[0.1em]">微信通道</h3>
+        </div>
+        <div class="space-y-3 rounded-sm border border-ui-border bg-ui-surface px-3 py-3">
+          <div class="flex items-center justify-between gap-3">
+            <div class="space-y-0.5 min-w-0">
+              <p class="text-[13px] font-semibold text-ui-text">通道状态</p>
+              <p class="text-[11px] text-ui-text-muted truncate">
+                {{
+                  wechatState.login.status === 'pending'
+                    ? '正在等待微信登录完成'
+                    : wechatState.login.status === 'logged_in'
+                      ? '已登录'
+                      : wechatState.login.status === 'error'
+                        ? '登录异常'
+                        : '未登录'
+                }}
+              </p>
+            </div>
+            <span
+              class="inline-flex shrink-0 items-center rounded-full px-2 py-1 text-[10px] font-semibold"
+              :class="
+                wechatState.login.status === 'logged_in'
+                  ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                  : wechatState.login.status === 'pending'
+                    ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
+                    : wechatState.login.status === 'error'
+                      ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300'
+                      : 'bg-ui-bg text-ui-text-muted'
+              "
+            >
+              {{ wechatState.login.status }}
+            </span>
+          </div>
+          <p class="text-[10px] text-ui-text-muted/70">
+            当前 host epoch：{{ wechatState.hostEpoch || '未初始化' }}
+          </p>
+          <p v-if="wechatError" class="text-[10px] text-rose-500">{{ wechatError }}</p>
+          <p
+            v-else-if="wechatState.login.lastError"
+            class="text-[10px] text-rose-500"
+          >
+            {{ wechatState.login.lastError }}
+          </p>
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              class="rounded-sm border border-ui-border bg-ui-bg px-3 py-2 text-[12px] font-semibold text-ui-text transition-colors hover:bg-ui-surface disabled:opacity-50"
+              :disabled="wechatLoading"
+              @click="wechatStore.refresh"
+            >
+              {{ wechatLoading ? '刷新中...' : '刷新状态' }}
+            </button>
+            <button
+              type="button"
+              class="rounded-sm bg-ui-text px-3 py-2 text-[12px] font-semibold text-ui-bg transition-opacity hover:opacity-90 disabled:opacity-50"
+              :disabled="wechatLoading || wechatState.login.status === 'pending'"
+              @click="wechatStore.startLogin"
+            >
+              开始登录
+            </button>
+            <button
+              type="button"
+              class="rounded-sm border border-ui-border bg-ui-bg px-3 py-2 text-[12px] font-semibold text-ui-text transition-colors hover:bg-ui-surface disabled:opacity-50"
+              :disabled="wechatLoading || wechatState.login.status === 'logged_out'"
+              @click="wechatStore.logout"
+            >
+              退出登录
+            </button>
           </div>
         </div>
       </section>
