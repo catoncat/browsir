@@ -112,6 +112,18 @@ vi.mock("../components/ProviderSettingsView.vue", async () => {
   };
 });
 
+vi.mock("../components/McpSettingsView.vue", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    default: defineComponent({
+      name: "McpSettingsViewStub",
+      setup() {
+        return () => h("div");
+      },
+    }),
+  };
+});
+
 vi.mock("../components/SkillsView.vue", async () => {
   const { defineComponent, h } = await import("vue");
   return {

@@ -9,6 +9,7 @@ import ChatView from "./ChatView.vue";
 import SessionList from "./components/SessionList.vue";
 import SettingsView from "./components/SettingsView.vue";
 import ProviderSettingsView from "./components/ProviderSettingsView.vue";
+import McpSettingsView from "./components/McpSettingsView.vue";
 import SkillsView from "./components/SkillsView.vue";
 import PluginsView from "./components/PluginsView.vue";
 import DebugView from "./components/DebugView.vue";
@@ -83,6 +84,7 @@ onMounted(() => {
 
     <SettingsView v-if="activeView === 'settings'" @close="activeView = 'chat'" />
     <ProviderSettingsView v-if="activeView === 'provider-settings'" @close="activeView = 'chat'" />
+    <McpSettingsView v-if="activeView === 'mcp-settings'" @close="activeView = 'chat'" />
     <SkillsView v-if="activeView === 'skills'" @close="activeView = 'chat'" />
     <PluginsView v-if="activeView === 'plugins'" @close="activeView = 'chat'" />
     <DebugView v-if="activeView === 'debug'" @close="activeView = 'chat'" />

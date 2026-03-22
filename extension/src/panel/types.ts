@@ -1,7 +1,14 @@
 import type { PanelMessageLike } from "./utils/message-actions";
 import type { ToolPendingStepState } from "./utils/tool-formatters";
 
-export type ViewMode = "chat" | "settings" | "provider-settings" | "skills" | "plugins" | "debug";
+export type ViewMode =
+  | "chat"
+  | "settings"
+  | "provider-settings"
+  | "mcp-settings"
+  | "skills"
+  | "plugins"
+  | "debug";
 
 export interface SessionListRenderSessionItem {
   id: string;

@@ -1,17 +1,14 @@
 <script setup lang="ts">
 import { storeToRefs } from "pinia";
-import { computed, onMounted, ref } from "vue";
+import { onMounted, ref } from "vue";
 import { useConfigStore } from "../stores/config-store";
 import { ShieldCheck, Cpu, Loader2, ArrowLeft, Eye, EyeOff } from "lucide-vue-next";
-import McpServerSettingsSection from "./McpServerSettingsSection.vue";
-import { normalizeMcpServerList } from "../../shared/mcp-config";
 
 const emit = defineEmits(["close"]);
 const store = useConfigStore();
 const { config, savingConfig, error } = storeToRefs(store);
 
 const dialogRef = ref<HTMLElement | null>(null);
-const localError = ref("");
 const systemPromptCustomId = "settings-system-prompt-custom";
 const maxStepsId = "settings-max-steps";
 const autoTitleIntervalId = "settings-auto-title-interval";
@@ -24,36 +21,7 @@ const bridgeUrlId = "settings-bridge-url";
 const bridgeTokenId = "settings-bridge-token";
 const showBridgeToken = ref(false);
 
-function validateMcpServers(): string {
-  const servers = normalizeMcpServerList(config.value.mcpServers);
-  for (const server of servers) {
-    if (server.enabled === false) continue;
-    if (server.transport === "stdio") {
-      if (!String(server.command || "").trim()) {
-        return `请先为 MCP 服务器 ${server.label || server.id} 填写启动命令。`;
-      }
-      continue;
-    }
-    const url = String(server.url || "").trim();
-    if (!url) {
-      return `请先为 MCP 服务器 ${server.label || server.id} 填写服务地址。`;
-    }
-    try {
-      new URL(url);
-    } catch {
-      return `MCP 服务器 ${server.label || server.id} 的服务地址格式不正确。`;
-    }
-  }
-  return "";
-}
-
 async function handleSave() {
-  localError.value = "";
-  const mcpError = validateMcpServers();
-  if (mcpError) {
-    localError.value = mcpError;
-    return;
-  }
   try {
     await store.saveConfig();
     emit("close");
@@ -65,8 +33,6 @@ async function handleSave() {
 onMounted(() => {
   dialogRef.value?.focus();
 });
-
-const visibleError = computed(() => localError.value || error.value);
 </script>
 
 <template>
@@ -230,12 +196,10 @@ const visibleError = computed(() => localError.value || error.value);
           </div>
         </div>
       </section>
-
-      <McpServerSettingsSection v-model="config.mcpServers" />
     </div>
 
     <footer class="p-4 border-t border-ui-border bg-ui-surface/20">
-      <p v-if="visibleError" class="text-[11px] text-red-500 mb-3 px-1">{{ visibleError }}</p>
+      <p v-if="error" class="text-[11px] text-red-500 mb-3 px-1">{{ error }}</p>
       <button
         class="w-full bg-ui-text text-ui-bg py-2.5 rounded-sm font-bold flex items-center justify-center gap-2 hover:opacity-90 transition-opacity disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
         :disabled="savingConfig"
