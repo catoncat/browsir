@@ -6523,6 +6523,22 @@ describe("runtime-router.browser", () => {
             "runtime.builtin.plugin.capability.browser.action.cdp.provider",
       ),
     ).toBe(true);
+    expect(
+      capabilityProviders.some(
+        (item) =>
+          String(item.capability || "") === "mcp.call" &&
+          String(item.id || "") ===
+            "runtime.builtin.capability.mcp.call.browser",
+      ),
+    ).toBe(true);
+    expect(
+      capabilityProviders.some(
+        (item) =>
+          String(item.capability || "") === "mcp.call" &&
+          String(item.id || "") ===
+            "runtime.builtin.capability.mcp.call.bridge",
+      ),
+    ).toBe(true);
   });
 
   it("builtin send-success plugin should emit bbloop.global.message on brain.run.start", async () => {

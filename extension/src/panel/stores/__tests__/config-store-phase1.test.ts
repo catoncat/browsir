@@ -331,6 +331,7 @@ describe("config-store Phase 1", () => {
             url: "https://mcp.example.com",
           },
         ],
+        mcpRefs: {},
         browserRuntimeStrategy: "browser-first",
         compaction: {
           enabled: true,
@@ -525,6 +526,10 @@ describe("config-store Phase 1", () => {
           enabled: true,
           transport: "streamable-http",
           url: "https://mcp.example.com",
+          authRef: "secret/github_token",
+          headers: {
+            authorization: "Bearer demo",
+          },
         },
         {
           id: "filesystem",

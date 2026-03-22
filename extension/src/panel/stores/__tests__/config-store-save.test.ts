@@ -16,7 +16,7 @@ describe("config-store saveConfig", () => {
     sendMessageMock.mockReset();
   });
 
-  it("reports runtime sync failures as already saved", async () => {
+  it("syncs remote-only MCP config without requiring bridge.connect", async () => {
     const store = useConfigStore();
     store.config = normalizePanelConfig({
       mcpServers: [
@@ -32,7 +32,38 @@ describe("config-store saveConfig", () => {
 
     sendMessageMock.mockImplementation(async (type: string) => {
       if (type === "config.save") return {};
-      if (type === "bridge.connect") {
+      if (type === "brain.mcp.sync-config") return {};
+      if (type === "brain.debug.config") return {};
+      return {};
+    });
+
+    await expect(store.saveConfig()).resolves.toBeUndefined();
+    expect(sendMessageMock).toHaveBeenCalledWith("config.save", expect.any(Object));
+    expect(sendMessageMock).toHaveBeenCalledWith("brain.mcp.sync-config", {
+      refresh: true,
+    });
+    expect(sendMessageMock).not.toHaveBeenCalledWith("bridge.connect");
+    expect(sendMessageMock).toHaveBeenCalledWith("brain.debug.config");
+  });
+
+  it("reports stdio runtime sync failures as already saved", async () => {
+    const store = useConfigStore();
+    store.config = normalizePanelConfig({
+      mcpServers: [
+        {
+          id: "local-bun",
+          label: "Local Bun",
+          enabled: true,
+          transport: "stdio",
+          command: "bun",
+          args: ["./mcp.ts"],
+        },
+      ],
+    });
+
+    sendMessageMock.mockImplementation(async (type: string) => {
+      if (type === "config.save") return {};
+      if (type === "brain.mcp.sync-config") {
         throw new Error("bridge offline");
       }
       if (type === "brain.debug.config") return {};
@@ -43,15 +74,13 @@ describe("config-store saveConfig", () => {
       "配置已保存，但运行时同步失败：bridge offline",
     );
     expect(store.error).toBe("配置已保存，但运行时同步失败：bridge offline");
-    expect(sendMessageMock).toHaveBeenCalledWith("config.save", expect.any(Object));
-    expect(sendMessageMock).toHaveBeenCalledWith("bridge.connect");
-    expect(sendMessageMock).not.toHaveBeenCalledWith("brain.mcp.sync-config", {
+    expect(sendMessageMock).toHaveBeenCalledWith("brain.mcp.sync-config", {
       refresh: true,
     });
-    expect(sendMessageMock).toHaveBeenCalledWith("brain.debug.config");
+    expect(sendMessageMock).not.toHaveBeenCalledWith("bridge.connect");
   });
 
-  it("does not persist stripped secret fields in MCP server payload", async () => {
+  it("persists MCP browser-first config fields", async () => {
     const store = useConfigStore();
     store.config = normalizePanelConfig({
       mcpServers: [
@@ -65,11 +94,26 @@ describe("config-store saveConfig", () => {
           headers: {
             authorization: "Bearer demo",
           },
+          env: {
+            APP_MODE: "browser",
+          },
+          envRef: "env/shared",
         },
       ],
+      mcpRefs: {
+        auth: {
+          "secret/github_token": "Bearer demo",
+        },
+        env: {
+          "env/shared": {
+            API_BASE: "https://api.example.com",
+          },
+        },
+      },
     });
 
     sendMessageMock.mockImplementation(async (type: string) => {
+      if (type === "brain.mcp.sync-config") return {};
       if (type === "brain.debug.config") return {};
       return {};
     });
@@ -85,8 +129,26 @@ describe("config-store saveConfig", () => {
             enabled: true,
             transport: "streamable-http",
             url: "https://mcp.example.com",
+            authRef: "secret/github_token",
+            headers: {
+              authorization: "Bearer demo",
+            },
+            env: {
+              APP_MODE: "browser",
+            },
+            envRef: "env/shared",
           },
         ],
+        mcpRefs: {
+          auth: {
+            "secret/github_token": "Bearer demo",
+          },
+          env: {
+            "env/shared": {
+              API_BASE: "https://api.example.com",
+            },
+          },
+        },
       }),
     });
   });

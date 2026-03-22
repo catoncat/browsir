@@ -1148,7 +1148,6 @@ export const useConfigStore = defineStore("config", () => {
       const payload = convertToLegacyBridgeConfig(normalized);
       await sendMessage("config.save", { payload });
       try {
-        await sendMessage("bridge.connect");
         await sendMessage("brain.mcp.sync-config", { refresh: true });
       } catch (syncError) {
         const reason =

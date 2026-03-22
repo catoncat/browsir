@@ -44,6 +44,7 @@ export async function handleBrainMcp(
       orchestrator,
       infra,
       servers: toRecord(configResult.data).mcpServers,
+      refs: toRecord(configResult.data).mcpRefs,
       refresh: payload.refresh === true,
     });
     if (synced.failures.length > 0) {

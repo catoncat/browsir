@@ -90,6 +90,7 @@ import {
   shouldVerifyStep,
   shouldAcquireLease,
 } from "./loop-browser-proof";
+import { browserMcpClientRegistry } from "./browser-mcp-client-registry";
 import {
   buildFocusEscalationToolCall,
   parseToolCallArgs,
@@ -467,6 +468,14 @@ export function createRuntimeLoopController(
   orchestrator: BrainOrchestrator,
   infra: RuntimeInfraHandler,
 ): RuntimeLoopController {
+  type CapabilityProviderStepInput = {
+    sessionId: string;
+    action?: string;
+    capability?: ExecuteCapability;
+    verifyPolicy?: StepVerifyPolicy;
+    args?: JsonRecord;
+  };
+
   const llmProviders = orchestrator.getLlmProviderRegistry();
   const mcpRegistry = orchestrator.getMcpRegistry();
   const filesystemInspect = createFilesystemInspectService({
@@ -668,25 +677,68 @@ export function createRuntimeLoopController(
   };
 
   const ensureBuiltinMcpCapabilityProviders = (): void => {
-    const providerId = "runtime.builtin.capability.mcp.call.bridge";
-    const existed = orchestrator
+    const resolveMcpTool = (stepInput: CapabilityProviderStepInput) => {
+      const dynamicToolName = String(stepInput.action || "").trim();
+      const tool = mcpRegistry.getTool(dynamicToolName);
+      if (!tool) {
+        throw createRuntimeError(`MCP tool 未注册: ${dynamicToolName}`, {
+          code: "E_TOOL",
+          retryable: false,
+          details: { dynamicToolName },
+        });
+      }
+      return tool;
+    };
+
+    const browserProviderId = "runtime.builtin.capability.mcp.call.browser";
+    const hasBrowserProvider = orchestrator
       .getCapabilityProviders(CAPABILITIES.mcpCall)
-      .some((provider) => provider.id === providerId);
-    if (existed) return;
+      .some((provider) => provider.id === browserProviderId);
+    if (!hasBrowserProvider) {
+      orchestrator.registerCapabilityProvider(CAPABILITIES.mcpCall, {
+        id: browserProviderId,
+        mode: "script",
+        priority: -90,
+        canHandle: (stepInput) => {
+          const tool = mcpRegistry.getTool(String(stepInput.action || "").trim());
+          return tool?.server.transport === "streamable-http";
+        },
+        invoke: async (stepInput) => {
+          const tool = resolveMcpTool(stepInput);
+          const result = await browserMcpClientRegistry.callTool({
+            server: tool.server,
+            toolName: tool.toolName,
+            arguments: toRecord(stepInput.args),
+          });
+          return {
+            type: "invoke",
+            response: {
+              ok: true,
+              data: {
+                ok: true,
+                data: result,
+              },
+            },
+          };
+        },
+      });
+    }
+
+    const bridgeProviderId = "runtime.builtin.capability.mcp.call.bridge";
+    const hasBridgeProvider = orchestrator
+      .getCapabilityProviders(CAPABILITIES.mcpCall)
+      .some((provider) => provider.id === bridgeProviderId);
+    if (hasBridgeProvider) return;
     orchestrator.registerCapabilityProvider(CAPABILITIES.mcpCall, {
-      id: providerId,
+      id: bridgeProviderId,
       mode: "bridge",
       priority: -100,
+      canHandle: (stepInput) => {
+        const tool = mcpRegistry.getTool(String(stepInput.action || "").trim());
+        return tool?.server.transport !== "streamable-http";
+      },
       invoke: async (stepInput) => {
-        const dynamicToolName = String(stepInput.action || "").trim();
-        const tool = mcpRegistry.getTool(dynamicToolName);
-        if (!tool) {
-          throw createRuntimeError(`MCP tool 未注册: ${dynamicToolName}`, {
-            code: "E_TOOL",
-            retryable: false,
-            details: { dynamicToolName },
-          });
-        }
+        const tool = resolveMcpTool(stepInput);
         const response = await callInfra(infra, {
           type: "bridge.invoke",
           payload: {
@@ -1011,14 +1063,6 @@ export function createRuntimeLoopController(
   };
 
   const ensureBuiltinCapabilityPlugins = (): void => {
-    type CapabilityStepInput = {
-      sessionId: string;
-      action?: string;
-      capability?: ExecuteCapability;
-      verifyPolicy?: StepVerifyPolicy;
-      args?: JsonRecord;
-    };
-
     interface BuiltinCapabilityPluginInput {
       pluginId: string;
       pluginName: string;
@@ -1026,8 +1070,8 @@ export function createRuntimeLoopController(
       providerId: string;
       mode: ExecuteMode;
       priority: number;
-      canHandle?: (stepInput: CapabilityStepInput) => boolean;
-      invoke: (stepInput: CapabilityStepInput) => Promise<unknown>;
+      canHandle?: (stepInput: CapabilityProviderStepInput) => boolean;
+      invoke: (stepInput: CapabilityProviderStepInput) => Promise<unknown>;
     }
 
     const hasPlugin = (pluginId: string): boolean =>
@@ -1069,7 +1113,7 @@ export function createRuntimeLoopController(
       capability: ExecuteCapability,
       runtime: "bridge" | "sandbox",
     ) => {
-      return (stepInput: CapabilityStepInput): boolean => {
+      return (stepInput: CapabilityProviderStepInput): boolean => {
         const frame = toRecord(toRecord(stepInput.args).frame);
         if (!String(frame.tool || "").trim()) return false;
         if (runtime === "bridge") {
@@ -1177,7 +1221,7 @@ export function createRuntimeLoopController(
       });
     }
 
-    const createBrowserCapabilityInput = (stepInput: CapabilityStepInput) => ({
+    const createBrowserCapabilityInput = (stepInput: CapabilityProviderStepInput) => ({
       sessionId: stepInput.sessionId,
       action: String(stepInput.action || "").trim(),
       args: toRecord(stepInput.args),

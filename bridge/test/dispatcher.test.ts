@@ -181,13 +181,13 @@ describe("dispatchInvoke", () => {
     }
   });
 
-  test("rejects unsupported secret-bearing MCP server fields", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "bridge-dispatch-mcp-secret-"));
+  test("accepts MCP compatibility fields without rejecting them", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "bridge-dispatch-mcp-compat-"));
     const fixturePath = new URL("./fixtures/mcp-echo-server.ts", import.meta.url).pathname;
     try {
       const req = parseInvokeFrame(
         JSON.stringify({
-          id: "mcp-list-secret-1",
+          id: "mcp-list-compat-1",
           type: "invoke",
           tool: "mcp_list_tools",
           args: {
@@ -197,18 +197,29 @@ describe("dispatchInvoke", () => {
               command: process.execPath,
               args: [fixturePath],
               cwd: root,
+              env: {
+                MCP_TEST_MODE: "1",
+              },
               envRef: "secret/demo",
+              authRef: "secret/auth",
+              headers: {
+                authorization: "Bearer demo",
+              },
             },
           },
         }),
       );
 
-      await expect(
-        dispatchInvoke(req, {
-          config: createTestConfig(root),
-          fsGuard: new FsGuard("strict", [root]),
-        }),
-      ).rejects.toThrow("MCP host/remote MVP 暂不支持这些字段");
+      const out = await dispatchInvoke(req, {
+        config: createTestConfig(root),
+        fsGuard: new FsGuard("strict", [root]),
+      });
+
+      expect(String(out.serverId || "")).toBe("fixture-stdio");
+      const tools = Array.isArray(out.tools) ? out.tools : [];
+      expect(
+        tools.map((item) => String((item as Record<string, unknown>).name || "")),
+      ).toEqual(["echo", "sum"]);
     } finally {
       await resetMcpClientRegistryForTest();
       await rm(root, { recursive: true, force: true });

@@ -16,13 +16,6 @@ interface McpClientSession {
   client: Client;
 }
 
-const UNSUPPORTED_MCP_SERVER_FIELDS = [
-  "env",
-  "headers",
-  "envRef",
-  "authRef",
-] as const;
-
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value);
@@ -61,6 +54,29 @@ function asStringArray(value: unknown, field: string): string[] {
   return out;
 }
 
+function cloneStringRecord(
+  value: unknown,
+  field: string,
+  options: {
+    normalizeKey?: (key: string) => string;
+  } = {},
+): Record<string, string> | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isPlainObject(value)) {
+    throw new BridgeError("E_ARGS", `${field} must be a string record`);
+  }
+  const out: Record<string, string> = {};
+  for (const [rawKey, rawValue] of Object.entries(value)) {
+    const baseKey = asOptionalString(rawKey, `${field}.key`);
+    const normalizedValue = asOptionalString(rawValue, `${field}.${rawKey}`);
+    if (!baseKey || !normalizedValue) continue;
+    const key = options.normalizeKey ? options.normalizeKey(baseKey) : baseKey;
+    if (!key) continue;
+    out[key] = normalizedValue;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function normalizeTransport(value: unknown): McpTransport {
   const text = typeof value === "string" ? value.trim() : "";
   if (text === "stdio" || text === "streamable-http") return text;
@@ -82,25 +98,6 @@ function sortJsonValue(value: unknown): unknown {
 
 function fingerprintServer(server: NormalizedMcpServerConfig): string {
   return JSON.stringify(sortJsonValue(server));
-}
-
-function hasMeaningfulValue(value: unknown): boolean {
-  if (value === undefined || value === null) return false;
-  if (typeof value === "string") return value.trim().length > 0;
-  if (Array.isArray(value)) return value.length > 0;
-  if (isPlainObject(value)) return Object.keys(value).length > 0;
-  return true;
-}
-
-function rejectUnsupportedServerFields(raw: Record<string, unknown>): void {
-  const unsupported = UNSUPPORTED_MCP_SERVER_FIELDS.filter((field) =>
-    hasMeaningfulValue(raw[field]),
-  );
-  if (unsupported.length <= 0) return;
-  throw new BridgeError(
-    "E_ARGS",
-    `MCP host/remote MVP 暂不支持这些字段: ${unsupported.join(", ")}`,
-  );
 }
 
 function toDiscoveredTool(tool: Record<string, unknown>): McpDiscoveredTool {
@@ -132,9 +129,12 @@ export function normalizeMcpServerConfig(
     throw new BridgeError("E_ARGS", "server must be an object");
   }
 
-  rejectUnsupportedServerFields(raw);
   const id = asNonEmptyString(raw.id, "server.id");
   const transport = normalizeTransport(raw.transport);
+  const env = cloneStringRecord(raw.env, "server.env");
+  const headers = cloneStringRecord(raw.headers, "server.headers", {
+    normalizeKey: (key) => key.toLowerCase(),
+  });
 
   if (transport === "stdio") {
     return {
@@ -145,6 +145,8 @@ export function normalizeMcpServerConfig(
       ...(asOptionalString(raw.cwd, "server.cwd")
         ? { cwd: asOptionalString(raw.cwd, "server.cwd") }
         : {}),
+      ...(env ? { env } : {}),
+      ...(headers ? { headers } : {}),
     };
   }
 
@@ -161,6 +163,8 @@ export function normalizeMcpServerConfig(
     id,
     transport,
     url,
+    ...(headers ? { headers } : {}),
+    ...(env ? { env } : {}),
   };
 }
 
@@ -192,12 +196,21 @@ export class McpClientRegistry {
             command: server.command || "",
             args: server.args || [],
             ...(server.cwd ? { cwd: server.cwd } : {}),
+            ...(server.env ? { env: server.env } : {}),
             stderr: "pipe",
           }),
         );
       } else {
         await client.connect(
-          new StreamableHTTPClientTransport(new URL(server.url || "")),
+          new StreamableHTTPClientTransport(new URL(server.url || ""), {
+            ...(server.headers
+              ? {
+                  requestInit: {
+                    headers: new Headers(server.headers),
+                  },
+                }
+              : {}),
+          }),
         );
       }
     } catch (error) {
