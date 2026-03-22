@@ -29,6 +29,11 @@ describe("wechat-service", () => {
       value: new LocalStorageMock(),
       configurable: true,
     });
+    (globalThis as any).chrome = {
+      runtime: {
+        sendMessage: vi.fn(async () => ({ ok: true })),
+      },
+    };
   });
 
   afterEach(() => {
@@ -155,5 +160,100 @@ describe("wechat-service", () => {
     expect(body.msg?.context_token).toBe("ctx-1");
     expect(body.msg?.to_user_id).toBe("user-1");
     expect(body.msg?.item_list?.[0]?.text_item?.text).toBe("hello");
+  });
+
+  it("confirmed login can poll updates, cache context token, and use it for reply", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            qrcode: "qr-token",
+            qrcode_img_content: "https://example.com/qr.png",
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            status: "confirmed",
+            bot_token: "token-1",
+            ilink_bot_id: "bot-1",
+            ilink_user_id: "bot-user",
+            baseurl: "https://ilinkai.weixin.qq.com",
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            ret: 0,
+            msgs: [
+              {
+                message_id: 1,
+                from_user_id: "user-2",
+                to_user_id: "bot-user",
+                client_id: "client-1",
+                create_time_ms: Date.parse("2026-03-22T00:00:01.000Z"),
+                message_type: 1,
+                message_state: 2,
+                context_token: "ctx-2",
+                item_list: [
+                  { type: 1, text_item: { text: "hello from wechat" } },
+                ],
+              },
+            ],
+            get_updates_buf: "cursor-1",
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ret: 0 }), { status: 200 }),
+      );
+
+    (globalThis as any).chrome.runtime.sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "brain.channel.wechat.inbound") {
+        return { ok: true, data: { status: "accepted" } };
+      }
+      return { ok: true };
+    });
+
+    const service = new WechatHostService();
+    service.enable();
+    await service.startLogin();
+    await vi.advanceTimersByTimeAsync(2_000);
+    const deadline = Date.now() + 200;
+    while (Date.now() < deadline) {
+      const cached = JSON.parse(
+        localStorage.getItem("bbl.wechat.host.context-tokens.v1") || "{}",
+      ) as Record<string, string>;
+      if (cached["user-2"] === "ctx-2") break;
+      await vi.advanceTimersByTimeAsync(10);
+    }
+
+    await service.sendReply({
+      deliveryId: "delivery-2",
+      channelTurnId: "turn-2",
+      sessionId: "session-2",
+      userId: "user-2",
+      parts: [{ kind: "text", text: "reply after poll" }],
+    });
+
+    expect((globalThis as any).chrome.runtime.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "brain.channel.wechat.inbound",
+        remoteUserId: "user-2",
+      }),
+    );
+
+    const fetchCalls = vi.mocked(globalThis.fetch).mock.calls;
+    const sendCall = fetchCalls.at(-1);
+    expect(String(sendCall?.[0] || "")).toContain("/ilink/bot/sendmessage");
+    const body = JSON.parse(String((sendCall?.[1] as RequestInit)?.body || "{}")) as {
+      msg?: { context_token?: string };
+    };
+    expect(body.msg?.context_token).toBe("ctx-2");
   });
 });
