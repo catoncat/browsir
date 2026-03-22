@@ -42,6 +42,7 @@ import { handleBrainSkill } from "./runtime-router/skill-controller";
 import { handleSession } from "./runtime-router/session-controller";
 import { handleStep } from "./runtime-router/step-controller";
 import { handleStorage } from "./runtime-router/storage-controller";
+import { handleBrainChannelWechat } from "./runtime-router/wechat-controller";
 import { handleWebChatRuntimeMessage } from "./web-chat-executor.browser";
 
 interface RuntimeOk<T = unknown> {
@@ -238,6 +239,10 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
 
         if (type.startsWith("brain.storage.")) {
           return await applyAfter(await handleStorage(orchestrator, routeMessage));
+        }
+
+        if (type.startsWith("brain.channel.wechat.")) {
+          return await applyAfter(await handleBrainChannelWechat(routeMessage));
         }
 
         if (type.startsWith("brain.mcp.")) {

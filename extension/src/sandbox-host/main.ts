@@ -1,18 +1,27 @@
 /**
  * sandbox-host/main.ts
  *
- * Offscreen document (or standalone host page) that embeds the
- * eval-sandbox.html iframe and relays messages between the Service Worker
- * and the sandbox page.
+ * Offscreen document (or standalone host page) that hosts long-lived services
+ * for the extension:
+ * - sandbox relay -> eval-sandbox iframe
+ * - wechat host service -> login/state skeleton for channel runtime
  *
  * Communication flow:
  *   SW  →  chrome.runtime.sendMessage  →  this page
- *   this page  →  postMessage  →  sandbox iframe
- *   sandbox iframe  →  postMessage  →  this page
+ *   this page  →  service dispatch / postMessage  →  child service
+ *   child service  →  this page
  *   this page  →  sendResponse  →  SW
  */
 
+import {
+  HOST_PROTOCOL_VERSION,
+  type HostCommandEnvelope,
+  type HostResponseEnvelope,
+} from "../sw/kernel/host-protocol";
+import { WechatHostService } from "./wechat-service";
+
 const SANDBOX_URL = chrome.runtime.getURL("eval-sandbox.html");
+const wechatService = new WechatHostService();
 
 // --- State ---
 
@@ -111,12 +120,95 @@ function sendToIframe(
   el.contentWindow?.postMessage(data, "*");
 }
 
+function handleWechatHostCommand(
+  message: HostCommandEnvelope<Record<string, unknown>>,
+): HostResponseEnvelope<unknown> {
+  if (message.protocolVersion !== HOST_PROTOCOL_VERSION) {
+    return {
+      type: "host.response",
+      protocolVersion: HOST_PROTOCOL_VERSION,
+      id: message.id,
+      service: message.service,
+      action: message.action,
+      ok: false,
+      error: `Unsupported host protocol version: ${String(
+        message.protocolVersion || "unknown",
+      )}`,
+    };
+  }
+
+  try {
+    let data: unknown;
+    switch (message.action) {
+      case "get_state":
+        data = wechatService.getState();
+        break;
+      case "login.start":
+        data = wechatService.startLogin();
+        break;
+      case "logout":
+        data = wechatService.logout();
+        break;
+      default:
+        return {
+          type: "host.response",
+          protocolVersion: HOST_PROTOCOL_VERSION,
+          id: message.id,
+          service: message.service,
+          action: message.action,
+          ok: false,
+          error: `Unsupported wechat action: ${message.action}`,
+        };
+    }
+
+    return {
+      type: "host.response",
+      protocolVersion: HOST_PROTOCOL_VERSION,
+      id: message.id,
+      service: message.service,
+      action: message.action,
+      ok: true,
+      data,
+    };
+  } catch (error) {
+    return {
+      type: "host.response",
+      protocolVersion: HOST_PROTOCOL_VERSION,
+      id: message.id,
+      service: message.service,
+      action: message.action,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 // --- Message relay: SW → this page ---
 
 chrome.runtime.onMessage.addListener(
   (message: unknown, _sender: chrome.runtime.MessageSender, sendResponse: (response?: any) => void) => {
     const data = message as Record<string, unknown> | undefined;
     if (!data || typeof data.type !== "string") return false;
+
+    if (data.type === "host.command") {
+      const envelope = data as unknown as HostCommandEnvelope<
+        Record<string, unknown>
+      >;
+      if (envelope.service === "wechat") {
+        sendResponse(handleWechatHostCommand(envelope));
+        return false;
+      }
+      sendResponse({
+        type: "host.response",
+        protocolVersion: HOST_PROTOCOL_VERSION,
+        id: String(envelope.id || ""),
+        service: envelope.service,
+        action: envelope.action,
+        ok: false,
+        error: `Unsupported host service: ${String(envelope.service || "unknown")}`,
+      });
+      return false;
+    }
 
     // Only handle sandbox-* messages
     if (!String(data.type).startsWith("sandbox-")) return false;

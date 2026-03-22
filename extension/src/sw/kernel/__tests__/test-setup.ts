@@ -50,6 +50,9 @@ beforeEach(() => {
       getContexts: async () => []
     },
     offscreen: {
+      Reason: {
+        WORKERS: "WORKERS"
+      },
       createDocument: async () => {}
     },
     sidePanel: {
