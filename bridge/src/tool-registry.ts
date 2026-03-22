@@ -12,7 +12,9 @@ const BUILTIN_TOOL_CONTRACTS: ToolContract[] = [
   { name: "edit" },
   { name: "bash" },
   { name: "stat" },
-  { name: "list" }
+  { name: "list" },
+  { name: "mcp_list_tools" },
+  { name: "mcp_call_tool" }
 ];
 
 const builtinContracts = new Map<string, ToolContract>();

@@ -322,6 +322,16 @@ describe("config-store Phase 1", () => {
       const newConfig: PanelConfigNew = {
         bridgeUrl: "ws://127.0.0.1:8787/ws",
         bridgeToken: "token-abc",
+        mcpServers: [
+          {
+            id: "github",
+            label: "GitHub",
+            enabled: true,
+            transport: "streamable-http",
+            url: "https://mcp.example.com",
+            authRef: "secret/github_token",
+          },
+        ],
         browserRuntimeStrategy: "browser-first",
         compaction: {
           enabled: true,
@@ -402,6 +412,16 @@ describe("config-store Phase 1", () => {
         maxOutputTokens: 4096,
         endpointTag: "shared",
       });
+      expect(result.mcpServers).toEqual([
+        {
+          id: "github",
+          label: "GitHub",
+          enabled: true,
+          transport: "streamable-http",
+          url: "https://mcp.example.com",
+          authRef: "secret/github_token",
+        },
+      ]);
     });
 
     it("throws when a profile points to a missing provider", () => {
@@ -473,6 +493,52 @@ describe("config-store Phase 1", () => {
       expect(cursorProfile).toBeDefined();
       expect(cursorProfile?.provider).toBe("cursor_help_web");
       expect(cursorProfile?.llmModel).toBe("auto");
+    });
+
+    it("normalizes and preserves MCP servers across panel config roundtrip", () => {
+      const normalized = normalizePanelConfig({
+        mcpServers: [
+          {
+            id: "GitHub Server",
+            label: "GitHub",
+            enabled: true,
+            transport: "streamable-http",
+            url: "https://mcp.example.com",
+            authRef: "secret/github_token",
+          },
+          {
+            label: "Filesystem",
+            enabled: false,
+            transport: "stdio",
+            command: "bun",
+            args: ["run", "start"],
+            cwd: "/tmp/fs",
+          },
+        ],
+      });
+
+      expect(normalized.mcpServers).toEqual([
+        {
+          id: "github_server",
+          label: "GitHub",
+          enabled: true,
+          transport: "streamable-http",
+          url: "https://mcp.example.com",
+          authRef: "secret/github_token",
+        },
+        {
+          id: "filesystem",
+          label: "Filesystem",
+          enabled: false,
+          transport: "stdio",
+          command: "bun",
+          args: ["run", "start"],
+          cwd: "/tmp/fs",
+        },
+      ]);
+
+      const converted = convertToLegacyBridgeConfig(normalized);
+      expect(converted.mcpServers).toEqual(normalized.mcpServers);
     });
   });
 });

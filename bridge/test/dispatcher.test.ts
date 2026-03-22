@@ -8,6 +8,7 @@ import type { BridgeConfig } from "../src/config";
 import type { InvokeRequest } from "../src/types";
 import { registerToolContract, unregisterToolContract } from "../src/tool-registry";
 import { parseInvokeFrame } from "../src/protocol";
+import { resetMcpClientRegistryForTest } from "../src/mcp/client-registry";
 
 function createTestConfig(root: string): BridgeConfig {
   return {
@@ -29,6 +30,97 @@ function createTestConfig(root: string): BridgeConfig {
 }
 
 describe("dispatchInvoke", () => {
+  test("lists tools from a stdio MCP server", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "bridge-dispatch-mcp-list-"));
+    const fixturePath = new URL("./fixtures/mcp-echo-server.ts", import.meta.url).pathname;
+    try {
+      const req = parseInvokeFrame(
+        JSON.stringify({
+          id: "mcp-list-1",
+          type: "invoke",
+          tool: "mcp_list_tools",
+          args: {
+            server: {
+              id: "fixture-stdio",
+              transport: "stdio",
+              command: process.execPath,
+              args: [fixturePath],
+              cwd: root,
+            },
+          },
+        }),
+      );
+
+      const out = await dispatchInvoke(req, {
+        config: createTestConfig(root),
+        fsGuard: new FsGuard("strict", [root]),
+      });
+
+      expect(String(out.serverId || "")).toBe("fixture-stdio");
+      const tools = Array.isArray(out.tools) ? out.tools : [];
+      expect(
+        tools.map((item) => String((item as Record<string, unknown>).name || "")),
+      ).toEqual(["echo", "sum"]);
+      expect(String(((tools[0] as Record<string, unknown>).title) || "")).toBe(
+        "Echo Tool",
+      );
+    } finally {
+      await resetMcpClientRegistryForTest();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("calls a tool on a stdio MCP server", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "bridge-dispatch-mcp-call-"));
+    const fixturePath = new URL("./fixtures/mcp-echo-server.ts", import.meta.url).pathname;
+    try {
+      const req = parseInvokeFrame(
+        JSON.stringify({
+          id: "mcp-call-1",
+          type: "invoke",
+          tool: "mcp_call_tool",
+          args: {
+            server: {
+              id: "fixture-stdio",
+              transport: "stdio",
+              command: process.execPath,
+              args: [fixturePath],
+              cwd: root,
+            },
+            toolName: "echo",
+            arguments: {
+              text: "hello-mcp",
+            },
+          },
+        }),
+      );
+
+      const out = await dispatchInvoke(req, {
+        config: createTestConfig(root),
+        fsGuard: new FsGuard("strict", [root]),
+      });
+
+      expect(String(out.serverId || "")).toBe("fixture-stdio");
+      expect(String(out.toolName || "")).toBe("echo");
+      expect(Boolean(out.isError)).toBe(false);
+      const content = Array.isArray(out.content) ? out.content : [];
+      expect(
+        content.some(
+          (item) =>
+            String((item as Record<string, unknown>).type || "") === "text" &&
+            String((item as Record<string, unknown>).text || "") ===
+              "echo:hello-mcp",
+        ),
+      ).toBe(true);
+      expect((out.structuredContent as Record<string, unknown>).echoed).toBe(
+        "hello-mcp",
+      );
+    } finally {
+      await resetMcpClientRegistryForTest();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("routes canonical read tool to read handler", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "bridge-dispatch-"));
     try {

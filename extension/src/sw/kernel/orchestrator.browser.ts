@@ -45,6 +45,7 @@ import { createOpenAiCompatibleLlmProvider } from "./llm-openai-compatible-provi
 import { createCursorHelpWebProvider } from "./web-chat-executor.browser";
 import { DEFAULT_LLM_PROVIDER_ID, type LlmProviderAdapter } from "./llm-provider";
 import { LlmProviderRegistry, type RegisterLlmProviderOptions } from "./llm-provider-registry";
+import { McpRegistry, type McpServerConfig, type McpDiscoveredToolRecord } from "./mcp-registry";
 import {
   normalizeCompactionSettings,
   type CompactionSettings,
@@ -60,6 +61,7 @@ export type { CapabilityExecutionPolicy, RegisterCapabilityPolicyOptions } from 
 export type { RegisterToolContractOptions, ToolContract, ToolContractView, ToolDefinition } from "./tool-contract-registry";
 export type { SkillMetadata, SkillInstallInput } from "./skill-registry";
 export type { SkillContentReader, SkillPromptAugmenter, ResolvedSkillContent, ResolveSkillContentOptions, SkillResolverDebugView } from "./skill-content-resolver";
+export type { McpServerConfig, McpDiscoveredToolRecord } from "./mcp-registry";
 
 export interface OrchestratorOptions {
   retryMaxAttempts?: number;
@@ -162,6 +164,7 @@ export class BrainOrchestrator {
   private readonly toolProviders = new ToolProviderRegistry();
   private readonly toolContracts = new ToolContractRegistry();
   private readonly capabilityPolicies = new CapabilityPolicyRegistry();
+  private readonly mcpRegistry = new McpRegistry();
   private readonly llmProviders = new LlmProviderRegistry();
   private readonly skills: SkillRegistry;
   private readonly skillResolver: SkillContentResolver;
@@ -271,6 +274,22 @@ export class BrainOrchestrator {
 
   listToolContracts(): ToolContractView[] {
     return this.toolContracts.listContracts();
+  }
+
+  getMcpRegistry(): McpRegistry {
+    return this.mcpRegistry;
+  }
+
+  upsertMcpServer(config: McpServerConfig): McpServerConfig {
+    return this.mcpRegistry.upsertServer(config);
+  }
+
+  listMcpServers(): McpServerConfig[] {
+    return this.mcpRegistry.listServers();
+  }
+
+  getMcpDiscoveredTools(): McpDiscoveredToolRecord[] {
+    return this.mcpRegistry.listTools();
   }
 
   listLlmToolDefinitions(): ToolDefinition[] {

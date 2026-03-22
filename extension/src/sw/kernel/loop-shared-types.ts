@@ -202,6 +202,7 @@ export const CAPABILITIES = {
   fsRead: "fs.read",
   fsWrite: "fs.write",
   fsEdit: "fs.edit",
+  mcpCall: "mcp.call",
   browserSnapshot: "browser.snapshot",
   browserAction: "browser.action",
 } as const;

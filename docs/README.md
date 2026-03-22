@@ -8,7 +8,9 @@
    - Kernel 引擎架构：6 大子系统、50 模块、消息协议、事件总线。
 2. `docs/background-mode-design-2026-06.md`
    - 后台自动化模式设计：Content Script DOM 快照 + DomLocator 合成事件，对标 AIPex 5 层隔离。Phase 1-3 全部实现完毕。
-3. `bdd/README.md`
+3. `docs/mcp-host-remote-mvp-design-2026-03-22.md`
+   - MCP 接入设计：host-first、remote-ready、动态工具物化、Bridge 持有 transport/secret。
+4. `bdd/README.md`
    - 门禁语义与证明链路（contract → feature → mapping → evidence → gate）。
 
 ## 2. 调试与诊断

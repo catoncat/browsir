@@ -15,6 +15,7 @@ import {
 } from "./plugin-materializer";
 import { handleBrainAgentRun } from "./runtime-router/agent-run-controller";
 import { handleBrainDebug } from "./runtime-router/debug-controller";
+import { handleBrainMcp } from "./runtime-router/mcp-controller";
 import {
   handleBrainPlugin,
   rehydratePersistedPlugins,
@@ -236,6 +237,14 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
 
         if (type.startsWith("brain.storage.")) {
           return await applyAfter(await handleStorage(orchestrator, routeMessage));
+        }
+
+        if (type.startsWith("brain.mcp.")) {
+          return await applyAfter(
+            await runInstrumented(() =>
+              handleBrainMcp(orchestrator, infra, routeMessage),
+            ),
+          );
         }
 
         if (type.startsWith("brain.skill.")) {

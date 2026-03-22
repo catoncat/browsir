@@ -16,6 +16,10 @@ import {
   providerRequiresApiConnection,
   type ProviderRuntimeKind,
 } from "../../shared/llm-provider-config";
+import {
+  normalizeMcpServerList,
+  type McpServerConfig,
+} from "../../shared/mcp-config";
 import { resolveCursorHelpDisplayModel } from "../../shared/cursor-help-protocol";
 import { sendMessage } from "./send-message";
 import { toIntInRange, toRecord } from "./store-helpers";
@@ -70,6 +74,7 @@ export interface PanelLlmProfile {
 export interface PanelConfig {
   bridgeUrl: string;
   bridgeToken: string;
+  mcpServers: McpServerConfig[];
   browserRuntimeStrategy: BrowserRuntimeStrategy;
   compaction: CompactionSettings;
   llmDefaultProfile: string;
@@ -142,6 +147,7 @@ export interface PanelLlmProfileNew {
 export interface PanelConfigNew {
   bridgeUrl: string;
   bridgeToken: string;
+  mcpServers: McpServerConfig[];
   browserRuntimeStrategy: BrowserRuntimeStrategy;
   compaction: CompactionSettings;
   llmProviders: PanelLlmProvider[];
@@ -410,6 +416,7 @@ function normalizeLegacyConfig(
   return {
     bridgeUrl,
     bridgeToken,
+    mcpServers: normalizeMcpServerList(raw?.mcpServers),
     browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
       raw?.browserRuntimeStrategy,
       "browser-first",
@@ -906,6 +913,7 @@ export function normalizeNewConfig(
   return {
     bridgeUrl,
     bridgeToken,
+    mcpServers: normalizeMcpServerList(raw?.mcpServers),
     browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
       raw?.browserRuntimeStrategy,
       "browser-first",
@@ -1032,6 +1040,7 @@ export function convertToLegacyBridgeConfig(
   return {
     bridgeUrl: newConfig.bridgeUrl,
     bridgeToken: newConfig.bridgeToken,
+    mcpServers: normalizeMcpServerList(newConfig.mcpServers),
     browserRuntimeStrategy: newConfig.browserRuntimeStrategy,
     compaction: newConfig.compaction,
     llmDefaultProfile: newConfig.llmDefaultProfile,
@@ -1132,6 +1141,7 @@ export const useConfigStore = defineStore("config", () => {
       const payload = convertToLegacyBridgeConfig(normalized);
       await sendMessage("config.save", { payload });
       await sendMessage("bridge.connect");
+      await sendMessage("brain.mcp.sync-config", { refresh: true });
       await refreshHealth();
     } catch (err) {
       error.value = err instanceof Error ? err.message : String(err);

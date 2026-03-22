@@ -468,6 +468,7 @@ export function createRuntimeLoopController(
   infra: RuntimeInfraHandler,
 ): RuntimeLoopController {
   const llmProviders = orchestrator.getLlmProviderRegistry();
+  const mcpRegistry = orchestrator.getMcpRegistry();
   const filesystemInspect = createFilesystemInspectService({
     invokeHostTool: async (frame) =>
       toRecord(
@@ -664,6 +665,46 @@ export function createRuntimeLoopController(
           }),
       });
     }
+  };
+
+  const ensureBuiltinMcpCapabilityProviders = (): void => {
+    const providerId = "runtime.builtin.capability.mcp.call.bridge";
+    const existed = orchestrator
+      .getCapabilityProviders(CAPABILITIES.mcpCall)
+      .some((provider) => provider.id === providerId);
+    if (existed) return;
+    orchestrator.registerCapabilityProvider(CAPABILITIES.mcpCall, {
+      id: providerId,
+      mode: "bridge",
+      priority: -100,
+      invoke: async (stepInput) => {
+        const dynamicToolName = String(stepInput.action || "").trim();
+        const tool = mcpRegistry.getTool(dynamicToolName);
+        if (!tool) {
+          throw createRuntimeError(`MCP tool 未注册: ${dynamicToolName}`, {
+            code: "E_TOOL",
+            retryable: false,
+            details: { dynamicToolName },
+          });
+        }
+        const response = await callInfra(infra, {
+          type: "bridge.invoke",
+          payload: {
+            tool: "mcp_call_tool",
+            args: {
+              server: tool.server,
+              toolName: tool.toolName,
+              arguments: toRecord(stepInput.args),
+            },
+            sessionId: stepInput.sessionId,
+          },
+        });
+        return {
+          type: "invoke",
+          response,
+        };
+      },
+    });
   };
 
   async function withTabLease<T>(
@@ -1191,6 +1232,7 @@ export function createRuntimeLoopController(
   ensureBuiltinCapabilityPlugins();
   ensureBuiltinBridgeCapabilityProviders();
   ensureBuiltinSandboxCapabilityProviders();
+  ensureBuiltinMcpCapabilityProviders();
   ensureBuiltinBrowserCapabilityProviders();
 
   async function executeStep(input: {

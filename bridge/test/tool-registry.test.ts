@@ -15,6 +15,8 @@ describe("tool-registry", () => {
     expect(resolveToolName("bash")).toBe("bash");
     expect(resolveToolName("stat")).toBe("stat");
     expect(resolveToolName("list")).toBe("list");
+    expect(resolveToolName("mcp_list_tools")).toBe("mcp_list_tools");
+    expect(resolveToolName("mcp_call_tool")).toBe("mcp_call_tool");
   });
 
   test("rejects legacy alias names", () => {
@@ -36,6 +38,8 @@ describe("tool-registry", () => {
     expect(names).toContain("bash");
     expect(names).toContain("stat");
     expect(names).toContain("list");
+    expect(names).toContain("mcp_list_tools");
+    expect(names).toContain("mcp_call_tool");
   });
 
   test("supports dynamic register/unregister for custom contract", () => {

@@ -11,6 +11,10 @@ import {
   type CompactionSettings,
 } from "../../shared/compaction";
 import { normalizeProviderConnectionConfig } from "../../shared/llm-provider-config";
+import {
+  normalizeMcpServerList,
+  type McpServerConfig,
+} from "../../shared/mcp-config";
 
 // ──────────────── types ────────────────
 
@@ -19,6 +23,7 @@ type JsonRecord = Record<string, unknown>;
 export interface BridgeConfig {
   bridgeUrl: string;
   bridgeToken: string;
+  mcpServers?: McpServerConfig[];
   browserRuntimeStrategy: BrowserRuntimeStrategy;
   compaction: CompactionSettings;
   llmDefaultProfile?: string;
@@ -349,6 +354,7 @@ export function createBridgeClient(): BridgeClient {
     const data = await chrome.storage.local.get([
       "bridgeUrl",
       "bridgeToken",
+      "mcpServers",
       "browserRuntimeStrategy",
       "compaction",
       "llmDefaultProfile",
@@ -374,6 +380,7 @@ export function createBridgeClient(): BridgeClient {
     bridgeConfigCache = {
       bridgeUrl: String(data.bridgeUrl || DEFAULT_BRIDGE_URL),
       bridgeToken: String(data.bridgeToken || DEFAULT_BRIDGE_TOKEN),
+      mcpServers: normalizeMcpServerList(data.mcpServers),
       browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
         data.browserRuntimeStrategy,
         DEFAULT_BROWSER_RUNTIME_STRATEGY,
@@ -450,6 +457,9 @@ export function createBridgeClient(): BridgeClient {
       ).trim(),
       bridgeToken: String(
         source.bridgeToken ?? current.bridgeToken ?? DEFAULT_BRIDGE_TOKEN,
+      ),
+      mcpServers: normalizeMcpServerList(
+        source.mcpServers !== undefined ? source.mcpServers : current.mcpServers,
       ),
       browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
         source.browserRuntimeStrategy,

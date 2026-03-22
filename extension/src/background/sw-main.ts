@@ -24,6 +24,17 @@ function broadcast(message: Record<string, unknown>): void {
 
 async function bootstrapSessionStore(): Promise<void> {
   await initSessionIndex();
+  const syncResult = await chrome.runtime
+    .sendMessage({
+      type: "brain.mcp.sync-config",
+    })
+    .catch((error) => {
+      console.warn("[mcp] startup sync failed", error);
+      return null;
+    });
+  if (syncResult && syncResult.ok !== true) {
+    console.warn("[mcp] startup sync failed", syncResult.error);
+  }
 }
 
 function toIntInRange(raw: unknown, fallback: number, min: number, max: number): number {
