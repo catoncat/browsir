@@ -97,15 +97,21 @@ export function attachChannelObserver(orchestrator: BrainOrchestrator): void {
         orchestrator,
         event.sessionId,
       );
-      const visibleText =
-        latestAssistant.text ||
-        (status === "done" ? "任务已完成。" : "请求未能完成。");
+      const hasFreshAssistant =
+        !!latestAssistant.entryId &&
+        latestAssistant.entryId !== turn.assistantBaselineEntryId;
       const projectionKind =
-        status === "done" ? "final_text" : "safe_failure";
+        status === "done" && hasFreshAssistant
+          ? "final_text"
+          : "safe_failure";
+      const visibleText =
+        projectionKind === "final_text"
+          ? latestAssistant.text
+          : "本轮未生成新的可回复结果，请在插件中查看。";
       const projection = createProjectionOutcome({
         channelTurnId: turn.channelTurnId,
         sessionId: turn.sessionId,
-        assistantEntryId: latestAssistant.entryId,
+        assistantEntryId: hasFreshAssistant ? latestAssistant.entryId : undefined,
         projectionKind,
         visibleText,
       });
@@ -119,12 +125,12 @@ export function attachChannelObserver(orchestrator: BrainOrchestrator): void {
       await orchestrator.channels.store.putOutbox(outbox);
       await orchestrator.channels.store.putTurn({
         ...turn,
-        lifecycleStatus: status === "done" ? "projected" : "closed",
-        deliveryStatus: "queued",
-        assistantEntryId: latestAssistant.entryId,
-        deliveryId: outbox.deliveryId,
-        updatedAt: new Date().toISOString(),
-      });
+          lifecycleStatus: status === "done" ? "projected" : "closed",
+          deliveryStatus: "queued",
+          assistantEntryId: hasFreshAssistant ? latestAssistant.entryId : undefined,
+          deliveryId: outbox.deliveryId,
+          updatedAt: new Date().toISOString(),
+        });
       await orchestrator.channels.store.appendEvent({
         eventId: randomId("channel_event"),
         channelTurnId: turn.channelTurnId,
@@ -134,7 +140,7 @@ export function attachChannelObserver(orchestrator: BrainOrchestrator): void {
         payload: {
           projectionKind,
           deliveryId: outbox.deliveryId,
-          assistantEntryId: latestAssistant.entryId,
+          assistantEntryId: hasFreshAssistant ? latestAssistant.entryId : undefined,
           terminalStatus: status,
         },
       });
@@ -163,7 +169,7 @@ export function attachChannelObserver(orchestrator: BrainOrchestrator): void {
           ...turn,
           lifecycleStatus: "delivered",
           deliveryStatus: "delivered",
-          assistantEntryId: latestAssistant.entryId,
+          assistantEntryId: hasFreshAssistant ? latestAssistant.entryId : undefined,
           deliveryId: outbox.deliveryId,
           updatedAt: sendResult.sentAt,
         });
@@ -190,7 +196,7 @@ export function attachChannelObserver(orchestrator: BrainOrchestrator): void {
           ...turn,
           lifecycleStatus: "sending",
           deliveryStatus: "uncertain",
-          assistantEntryId: latestAssistant.entryId,
+          assistantEntryId: hasFreshAssistant ? latestAssistant.entryId : undefined,
           deliveryId: outbox.deliveryId,
           updatedAt: uncertainAt,
         });

@@ -53,6 +53,20 @@ function buildChannelMetadata(binding: ChannelBindingRecord, channelTurnId: stri
   } satisfies Record<string, unknown>;
 }
 
+async function readLatestAssistantEntryId(
+  orchestrator: BrainOrchestrator,
+  sessionId: string,
+): Promise<string | undefined> {
+  const entries = await orchestrator.sessions.getEntries(sessionId);
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const entry = entries[i];
+    if (entry.type !== "message" || entry.role !== "assistant") continue;
+    if (!String(entry.id || "").trim()) continue;
+    return String(entry.id || "").trim();
+  }
+  return undefined;
+}
+
 async function upsertBinding(
   orchestrator: BrainOrchestrator,
   payload: Record<string, unknown>,
@@ -223,10 +237,18 @@ export async function handleBrainChannelWechat(
 
       const binding = await upsertBinding(orchestrator, payload);
       const turn = createTurn(binding, payload);
+      const assistantBaselineEntryId = await readLatestAssistantEntryId(
+        orchestrator,
+        binding.sessionId,
+      );
+      const acceptedTurn: ChannelTurnRecord = {
+        ...turn,
+        assistantBaselineEntryId,
+      };
       await orchestrator.channels.store.acceptInbound({
         binding,
-        turn,
-        initialEvent: createAcceptedEvent(turn),
+        turn: acceptedTurn,
+        initialEvent: createAcceptedEvent(acceptedTurn),
       });
 
       const currentRuntime = orchestrator.getRunState(binding.sessionId);
@@ -243,7 +265,7 @@ export async function handleBrainChannelWechat(
           .filter((item) => item.behavior === "followUp")
           .at(-1);
         await orchestrator.channels.store.putTurn({
-          ...turn,
+          ...acceptedTurn,
           queuedMode: "followUp",
           lifecycleStatus: "queued",
           dispatchStatus: "queued",
@@ -275,7 +297,7 @@ export async function handleBrainChannelWechat(
         autoRun: true,
       });
       await orchestrator.channels.store.putTurn({
-        ...turn,
+        ...acceptedTurn,
         lifecycleStatus: "running",
         dispatchStatus: "queued",
         runAttemptCount: 1,
@@ -309,10 +331,10 @@ export async function handleBrainChannelWechat(
       }));
       return ok({
         status: "accepted",
-        sessionId: binding.sessionId,
-        channelTurnId: turn.channelTurnId,
-        queuedMode: "start",
-      });
+          sessionId: binding.sessionId,
+          channelTurnId: acceptedTurn.channelTurnId,
+          queuedMode: "start",
+        });
     }
   } catch (error) {
     return fail(error instanceof Error ? error.message : String(error));

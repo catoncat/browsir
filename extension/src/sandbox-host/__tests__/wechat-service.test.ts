@@ -73,6 +73,39 @@ describe("wechat-service", () => {
     expect(service.getState().login.status).toBe("pending");
   });
 
+  it("startLogin clears stale cursor and cached context tokens before requesting a new QR", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          qrcode: "qr-token",
+          qrcode_img_content: "https://example.com/qr.png",
+        }),
+        { status: 200 },
+      ),
+    );
+    localStorage.setItem("bbl.wechat.host.cursor.v1", "old-cursor");
+    localStorage.setItem(
+      "bbl.wechat.host.context-tokens.v1",
+      JSON.stringify({ "user-old": "ctx-old" }),
+    );
+    localStorage.setItem(
+      "bbl.wechat.host.credentials.v1",
+      JSON.stringify({
+        token: "old-token",
+        baseUrl: "https://ilinkai.weixin.qq.com",
+        accountId: "old-bot",
+        userId: "old-user",
+      }),
+    );
+
+    const service = new WechatHostService();
+    await service.startLogin();
+
+    expect(localStorage.getItem("bbl.wechat.host.cursor.v1")).toBeNull();
+    expect(localStorage.getItem("bbl.wechat.host.context-tokens.v1")).toBeNull();
+    expect(localStorage.getItem("bbl.wechat.host.credentials.v1")).toBeNull();
+  });
+
   it("polling confirmation promotes state to logged_in and persists credentials", async () => {
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(
@@ -224,8 +257,7 @@ describe("wechat-service", () => {
     service.enable();
     await service.startLogin();
     await vi.advanceTimersByTimeAsync(2_000);
-    const deadline = Date.now() + 200;
-    while (Date.now() < deadline) {
+    for (let i = 0; i < 20; i += 1) {
       const cached = JSON.parse(
         localStorage.getItem("bbl.wechat.host.context-tokens.v1") || "{}",
       ) as Record<string, string>;

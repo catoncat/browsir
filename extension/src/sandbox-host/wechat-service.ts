@@ -429,6 +429,10 @@ export class WechatHostService {
 
   async startLogin(): Promise<WechatHostStateSnapshot> {
     this.clearLoginPoll();
+    this.clearUpdatePoll();
+    clearCursor();
+    clearContextTokens();
+    clearCredentials();
     const current = readState();
     const qr = await fetchQrCode(DEFAULT_BASE_URL);
     const next = writeState({

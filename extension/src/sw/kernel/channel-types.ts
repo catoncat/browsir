@@ -84,6 +84,7 @@ export interface ChannelTurnRecord {
   anomalyFlags: string[];
   runAttemptCount: number;
   queuedPromptId?: string;
+  assistantBaselineEntryId?: string;
   currentRunId?: string;
   assistantEntryId?: string;
   deliveryId?: string;
