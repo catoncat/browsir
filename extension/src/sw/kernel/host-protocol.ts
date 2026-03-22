@@ -56,6 +56,7 @@ export interface WechatReplySendInput {
   deliveryId: string;
   channelTurnId: string;
   sessionId: string;
+  userId: string;
   parts: Array<{ kind: "text"; text: string }>;
 }
 

@@ -21,6 +21,30 @@ export interface WechatCredentials {
   userId: string;
 }
 
+export interface WechatMessage {
+  message_id: number;
+  from_user_id: string;
+  to_user_id: string;
+  client_id: string;
+  create_time_ms: number;
+  message_type: 1 | 2;
+  message_state: 0 | 1 | 2;
+  context_token: string;
+  item_list: Array<{
+    type: number;
+    text_item?: { text: string };
+  }>;
+}
+
+export interface WechatGetUpdatesResponse {
+  ret: number;
+  msgs: WechatMessage[];
+  get_updates_buf: string;
+  longpolling_timeout_ms?: number;
+  errcode?: number;
+  errmsg?: string;
+}
+
 export class WechatApiError extends Error {
   readonly status: number;
   readonly code?: number;
@@ -154,8 +178,8 @@ export async function getUpdates(
   token: string,
   cursor: string,
   signal?: AbortSignal,
-): Promise<Record<string, unknown>> {
-  return apiPost<Record<string, unknown>>(
+): Promise<WechatGetUpdatesResponse> {
+  return apiPost<WechatGetUpdatesResponse>(
     baseUrl,
     "/ilink/bot/getupdates",
     {

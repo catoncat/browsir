@@ -101,4 +101,44 @@ describe("wechat-service", () => {
     expect(state.login.accountId).toBe("bot-1");
     expect(state.login.botUserId).toBe("user-1");
   });
+
+  it("sendReply uses cached context_token and sendmessage endpoint", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ ret: 0 }), { status: 200 }),
+    );
+    localStorage.setItem(
+      "bbl.wechat.host.credentials.v1",
+      JSON.stringify({
+        token: "token-1",
+        baseUrl: "https://ilinkai.weixin.qq.com",
+        accountId: "bot-1",
+        userId: "bot-user",
+      }),
+    );
+    localStorage.setItem(
+      "bbl.wechat.host.context-tokens.v1",
+      JSON.stringify({
+        "user-1": "ctx-1",
+      }),
+    );
+
+    const service = new WechatHostService();
+    const result = await service.sendReply({
+      deliveryId: "delivery-1",
+      channelTurnId: "turn-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      parts: [{ kind: "text", text: "hello" }],
+    });
+
+    expect(result.deliveryId).toBe("delivery-1");
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0] || [];
+    expect(String(url || "")).toContain("/ilink/bot/sendmessage");
+    const body = JSON.parse(String((init as RequestInit)?.body || "{}")) as {
+      msg?: { context_token?: string; to_user_id?: string; item_list?: Array<{ text_item?: { text?: string } }> };
+    };
+    expect(body.msg?.context_token).toBe("ctx-1");
+    expect(body.msg?.to_user_id).toBe("user-1");
+    expect(body.msg?.item_list?.[0]?.text_item?.text).toBe("hello");
+  });
 });

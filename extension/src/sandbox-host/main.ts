@@ -120,9 +120,9 @@ function sendToIframe(
   el.contentWindow?.postMessage(data, "*");
 }
 
-function handleWechatHostCommand(
+async function handleWechatHostCommand(
   message: HostCommandEnvelope<Record<string, unknown>>,
-): HostResponseEnvelope<unknown> {
+): Promise<HostResponseEnvelope<unknown>> {
   if (message.protocolVersion !== HOST_PROTOCOL_VERSION) {
     return {
       type: "host.response",
@@ -150,11 +150,12 @@ function handleWechatHostCommand(
         data = wechatService.logout();
         break;
       case "reply.text":
-        data = wechatService.sendReply(
+        data = await wechatService.sendReply(
           message.payload as unknown as {
             deliveryId: string;
             channelTurnId: string;
             sessionId: string;
+            userId: string;
             parts: Array<{ kind: "text"; text: string }>;
           },
         );
@@ -205,8 +206,8 @@ chrome.runtime.onMessage.addListener(
         Record<string, unknown>
       >;
       if (envelope.service === "wechat") {
-        sendResponse(handleWechatHostCommand(envelope));
-        return false;
+        void handleWechatHostCommand(envelope).then(sendResponse);
+        return true;
       }
       sendResponse({
         type: "host.response",

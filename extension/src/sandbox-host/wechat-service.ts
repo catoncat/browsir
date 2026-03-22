@@ -7,13 +7,19 @@ import {
 import {
   DEFAULT_BASE_URL,
   fetchQrCode,
+  getUpdates,
   pollQrStatus,
+  sendTextMessage,
+  type WechatGetUpdatesResponse,
+  type WechatMessage,
   type WechatCredentials,
 } from "./wechat-api";
 
 const WECHAT_STATE_KEY = "bbl.wechat.host.state.v1";
 const WECHAT_SEND_LOG_KEY = "bbl.wechat.host.send-log.v1";
 const WECHAT_CREDENTIALS_KEY = "bbl.wechat.host.credentials.v1";
+const WECHAT_CURSOR_KEY = "bbl.wechat.host.cursor.v1";
+const WECHAT_CONTEXT_TOKENS_KEY = "bbl.wechat.host.context-tokens.v1";
 const QR_POLL_INTERVAL_MS = 2_000;
 
 function nowIso(): string {
@@ -59,6 +65,41 @@ function writeCredentials(credentials: WechatCredentials): void {
 
 function clearCredentials(): void {
   localStorage.removeItem(WECHAT_CREDENTIALS_KEY);
+}
+
+function readCursor(): string {
+  return String(localStorage.getItem(WECHAT_CURSOR_KEY) || "").trim();
+}
+
+function writeCursor(cursor: string): void {
+  localStorage.setItem(WECHAT_CURSOR_KEY, String(cursor || ""));
+}
+
+function clearCursor(): void {
+  localStorage.removeItem(WECHAT_CURSOR_KEY);
+}
+
+function readContextTokens(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(WECHAT_CONTEXT_TOKENS_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    if (!parsed || typeof parsed !== "object") return {};
+    return Object.fromEntries(
+      Object.entries(parsed as Record<string, unknown>)
+        .map(([key, value]) => [String(key), String(value || "").trim()])
+        .filter(([key, value]) => key && value),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function writeContextTokens(tokens: Record<string, string>): void {
+  localStorage.setItem(WECHAT_CONTEXT_TOKENS_KEY, JSON.stringify(tokens));
+}
+
+function clearContextTokens(): void {
+  localStorage.removeItem(WECHAT_CONTEXT_TOKENS_KEY);
 }
 
 function readState(): WechatHostStateSnapshot {
@@ -158,6 +199,8 @@ function appendSendLog(payload: WechatReplySendInput, sentAt: string): void {
 
 export class WechatHostService {
   private loginPollTimer: ReturnType<typeof setTimeout> | null = null;
+  private updatePollTimer: ReturnType<typeof setTimeout> | null = null;
+  private updatePollController: AbortController | null = null;
 
   private clearLoginPoll(): void {
     if (!this.loginPollTimer) return;
@@ -165,11 +208,124 @@ export class WechatHostService {
     this.loginPollTimer = null;
   }
 
+  private clearUpdatePoll(): void {
+    if (this.updatePollTimer) {
+      clearTimeout(this.updatePollTimer);
+      this.updatePollTimer = null;
+    }
+    this.updatePollController?.abort();
+    this.updatePollController = null;
+  }
+
   private scheduleLoginPoll(qrCode: string): void {
     this.clearLoginPoll();
     this.loginPollTimer = setTimeout(() => {
       void this.pollLogin(qrCode);
     }, QR_POLL_INTERVAL_MS);
+  }
+
+  private scheduleUpdatePoll(delayMs = 0): void {
+    this.clearUpdatePoll();
+    this.updatePollTimer = setTimeout(() => {
+      void this.pollUpdates();
+    }, delayMs);
+  }
+
+  private rememberContext(message: WechatMessage): void {
+    const userId =
+      message.message_type === 1 ? message.from_user_id : message.to_user_id;
+    if (!userId || !message.context_token) return;
+    const tokens = readContextTokens();
+    tokens[userId] = message.context_token;
+    writeContextTokens(tokens);
+  }
+
+  private toInboundMessage(message: WechatMessage): Record<string, unknown> | null {
+    if (message.message_type !== 1) return null;
+    const text = message.item_list
+      ?.filter((item) => Number(item.type) === 1)
+      .map((item) => String(item.text_item?.text || "").trim())
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    if (!text) return null;
+    return {
+      type: "brain.channel.wechat.inbound",
+      remoteConversationId: message.from_user_id,
+      remoteUserId: message.from_user_id,
+      remoteMessageId: String(message.message_id || "").trim(),
+      text,
+      contextToken: message.context_token,
+      receivedAt: new Date(message.create_time_ms).toISOString(),
+    };
+  }
+
+  private async deliverInboundBatch(
+    updates: WechatGetUpdatesResponse,
+  ): Promise<void> {
+    for (const message of updates.msgs || []) {
+      this.rememberContext(message);
+      const inbound = this.toInboundMessage(message);
+      if (!inbound) continue;
+      const response = (await chrome.runtime.sendMessage(inbound)) as
+        | { ok?: boolean; data?: Record<string, unknown>; error?: string }
+        | undefined;
+      if (!response?.ok) {
+        throw new Error(response?.error || "Inbound handoff failed");
+      }
+      const status = String((response.data as Record<string, unknown>)?.status || "");
+      if (status !== "accepted" && status !== "duplicate") {
+        throw new Error(`Unexpected inbound status: ${status || "unknown"}`);
+      }
+    }
+    if (updates.get_updates_buf) {
+      writeCursor(updates.get_updates_buf);
+    }
+  }
+
+  private async pollUpdates(): Promise<void> {
+    const credentials = readCredentials();
+    if (!credentials) return;
+    const current = readState();
+    if (current.login.status !== "logged_in") return;
+
+    try {
+      this.updatePollController = new AbortController();
+      const updates = await getUpdates(
+        credentials.baseUrl,
+        credentials.token,
+        readCursor(),
+        this.updatePollController.signal,
+      );
+      this.updatePollController = null;
+      await this.deliverInboundBatch(updates);
+      this.scheduleUpdatePoll(0);
+    } catch (error) {
+      this.updatePollController = null;
+      const err = error as { code?: number; message?: string };
+      if (typeof err?.code === "number" && err.code === -14) {
+        this.logout();
+        writeState({
+          ...readState(),
+          login: {
+            status: "logged_out",
+            updatedAt: nowIso(),
+            lastError: "微信会话已过期，请重新登录。",
+          },
+        });
+        return;
+      }
+      writeState({
+        ...current,
+        login: {
+          ...current.login,
+          status: "error",
+          updatedAt: nowIso(),
+          lastError: error instanceof Error ? error.message : String(error),
+        },
+      });
+      this.scheduleUpdatePoll(2_000);
+    }
   }
 
   private async pollLogin(qrCode: string): Promise<void> {
@@ -211,6 +367,7 @@ export class WechatHostService {
           },
         });
         this.clearLoginPoll();
+        this.scheduleUpdatePoll(0);
         return;
       }
       if (status.status === "expired") {
@@ -264,7 +421,10 @@ export class WechatHostService {
 
   logout(): WechatHostStateSnapshot {
     this.clearLoginPoll();
+    this.clearUpdatePoll();
     clearCredentials();
+    clearCursor();
+    clearContextTokens();
     const current = readState();
     return writeState({
       ...current,
@@ -275,8 +435,27 @@ export class WechatHostService {
     });
   }
 
-  sendReply(input: WechatReplySendInput): WechatReplySendResult {
+  async sendReply(input: WechatReplySendInput): Promise<WechatReplySendResult> {
     const sentAt = nowIso();
+    const credentials = readCredentials();
+    if (!credentials) {
+      throw new Error("WeChat 未登录，无法发送回复");
+    }
+    const tokens = readContextTokens();
+    const contextToken = tokens[input.userId];
+    if (!contextToken) {
+      throw new Error(`缺少用户 ${input.userId} 的 context_token，无法发送回复`);
+    }
+    for (const part of input.parts) {
+      if (part.kind !== "text") continue;
+      await sendTextMessage({
+        baseUrl: credentials.baseUrl,
+        token: credentials.token,
+        userId: input.userId,
+        contextToken,
+        text: part.text,
+      });
+    }
     appendSendLog(input, sentAt);
     return {
       deliveryId: input.deliveryId,

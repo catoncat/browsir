@@ -144,6 +144,7 @@ export function attachChannelObserver(orchestrator: BrainOrchestrator): void {
           deliveryId: outbox.deliveryId,
           channelTurnId: outbox.channelTurnId,
           sessionId: outbox.sessionId,
+          userId: turn.remoteUserId,
           parts: outbox.replyProjection.parts,
         };
         const sendResult = await sendHostCommand<

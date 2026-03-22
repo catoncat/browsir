@@ -208,6 +208,19 @@ onMounted(() => {
           >
             {{ wechatState.login.lastError }}
           </p>
+          <div
+            v-if="wechatState.login.status === 'pending' && wechatState.login.qrImageUrl"
+            class="flex flex-col items-center gap-2 rounded-sm border border-ui-border bg-ui-bg/60 px-3 py-3"
+          >
+            <img
+              :src="wechatState.login.qrImageUrl"
+              alt="微信登录二维码"
+              class="h-36 w-36 rounded-sm border border-ui-border bg-white object-contain"
+            />
+            <p class="text-[10px] text-ui-text-muted/70">
+              使用微信扫码完成登录
+            </p>
+          </div>
           <div class="flex items-center gap-2">
             <button
               type="button"
