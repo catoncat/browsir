@@ -43,6 +43,11 @@ export interface WechatHostStateSnapshot {
   login: {
     status: WechatLoginStatus;
     updatedAt: string;
+    qrCode?: string;
+    qrImageUrl?: string;
+    baseUrl?: string;
+    accountId?: string;
+    botUserId?: string;
     lastError?: string;
   };
 }
