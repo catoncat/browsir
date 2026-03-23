@@ -32,6 +32,28 @@ async function readLatestAssistantText(
   return { text: "" };
 }
 
+async function readLatestAssistantTextFromStepStream(
+  orchestrator: BrainOrchestrator,
+  sessionId: string,
+  notBeforeIso: string,
+): Promise<string> {
+  const threshold = Date.parse(notBeforeIso);
+  const stream = await orchestrator.getStepStream(sessionId);
+  for (let i = stream.length - 1; i >= 0; i -= 1) {
+    const item = stream[i];
+    if (String(item.type || "") !== "hosted_chat.turn_resolved") continue;
+    const ts = Date.parse(String(item.timestamp || ""));
+    if (Number.isFinite(threshold) && Number.isFinite(ts) && ts < threshold) {
+      continue;
+    }
+    const payload = toRecord(item.payload);
+    const result = toRecord(payload.result);
+    const text = String(result.assistantText || "").trim();
+    if (text) return text;
+  }
+  return "";
+}
+
 async function findRunningTurn(
   orchestrator: BrainOrchestrator,
   sessionId: string,
@@ -97,16 +119,31 @@ export function attachChannelObserver(orchestrator: BrainOrchestrator): void {
         orchestrator,
         event.sessionId,
       );
+      const fallbackAssistantText =
+        latestAssistant.entryId &&
+        latestAssistant.entryId !== turn.assistantBaselineEntryId
+          ? ""
+          : await readLatestAssistantTextFromStepStream(
+              orchestrator,
+              event.sessionId,
+              turn.createdAt,
+            );
       const hasFreshAssistant =
+        (!!latestAssistant.entryId &&
+          latestAssistant.entryId !== turn.assistantBaselineEntryId) ||
+        !!fallbackAssistantText;
+      const resolvedAssistantText =
         !!latestAssistant.entryId &&
-        latestAssistant.entryId !== turn.assistantBaselineEntryId;
+        latestAssistant.entryId !== turn.assistantBaselineEntryId
+          ? latestAssistant.text
+          : fallbackAssistantText;
       const projectionKind =
         status === "done" && hasFreshAssistant
           ? "final_text"
           : "safe_failure";
       const visibleText =
         projectionKind === "final_text"
-          ? latestAssistant.text
+          ? resolvedAssistantText
           : "本轮未生成新的可回复结果，请在插件中查看。";
       const projection = createProjectionOutcome({
         channelTurnId: turn.channelTurnId,

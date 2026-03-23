@@ -134,4 +134,61 @@ describe("channel-observer", () => {
     expect(outbox[0]?.projection.projectionKind).toBe("final_text");
     expect(outbox[0]?.deliveryStatus).toBe("delivered");
   });
+
+  it("falls back to hosted_chat.turn_resolved assistantText when a fresh assistant entry is not yet persisted", async () => {
+    const orchestrator = new BrainOrchestrator();
+    attachChannelObserver(orchestrator);
+    const created = await orchestrator.createSession({
+      metadata: {
+        sourceLabel: "wechat",
+        channel: {
+          kind: "wechat",
+          remoteConversationId: "conv-1",
+          remoteUserId: "user-1",
+        },
+      },
+    });
+
+    const sessionId = created.sessionId;
+    const store = new ChannelStore();
+    await orchestrator.sessions.appendMessage({
+      sessionId,
+      role: "assistant",
+      text: "old answer",
+    });
+    const baselineEntry = (await orchestrator.sessions.getEntries(sessionId)).at(-1);
+    await store.acceptInbound({
+      binding: createBinding(sessionId),
+      turn: {
+        ...createRunningTurn(sessionId),
+        assistantBaselineEntryId: String(baselineEntry?.id || ""),
+      },
+      initialEvent: null,
+    });
+
+    orchestrator.events.emit("hosted_chat.turn_resolved", sessionId, {
+      result: {
+        assistantText: "fresh stream answer",
+        toolCalls: [],
+        finishReason: "stop",
+      },
+    });
+    await orchestrator.flushSessionTraceWrites(sessionId);
+    orchestrator.events.emit("loop_done", sessionId, {
+      status: "done",
+      llmSteps: 1,
+      toolSteps: 0,
+    });
+
+    const deadline = Date.now() + 1000;
+    let outbox = await store.listOutboxByTurn("turn-1");
+    while (Date.now() < deadline && outbox[0]?.deliveryStatus !== "delivered") {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      outbox = await store.listOutboxByTurn("turn-1");
+    }
+
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]?.projection.visibleText).toBe("fresh stream answer");
+    expect(outbox[0]?.projection.projectionKind).toBe("final_text");
+  });
 });
