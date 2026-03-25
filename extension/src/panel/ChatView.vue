@@ -14,8 +14,6 @@ import type {
   QueuedPromptViewItem,
 } from "./types";
 import { shouldAlwaysShowToolMessage } from "./utils/tool-formatters";
-import type { RunTimelineItem } from "./utils/run-timeline";
-
 
 import { useForkScene } from "./composables/use-fork-scene";
 import { useMessageEditing } from "./composables/use-message-editing";
@@ -237,15 +235,9 @@ const {
   onError: setErrorMessage,
 });
 const queuedPromotingIds = ref<Set<string>>(new Set());
-
-function clearCompletedRunArtifacts() {
-  // Legacy runtime timeline cards are no longer rendered in chat.
-}
 // Forward references for llm-streaming functions (resolved after useLlmStreaming)
 let _applyStreamEvent: (type: string, payload: Record<string, unknown>, sid: string) => import("./composables/use-llm-streaming").LlmStreamEventResult = () => ({ handled: false });
 let _resetLlmStreamingState: () => void = () => {};
-let _clearLiveRunTimeline: () => void = () => {};
-let _getLiveRunTimelineItems: () => RunTimelineItem[] = () => [];
 const {
   runPhase,
   toolPendingStepStates,
@@ -273,11 +265,6 @@ const {
   runSafely,
   applyStreamEvent: (type, payload, sid) => _applyStreamEvent(type, payload, sid),
   resetLlmStreamingState: () => _resetLlmStreamingState(),
-  clearLiveRunTimeline: () => _clearLiveRunTimeline(),
-  getLiveRunTimelineItems: () => _getLiveRunTimelineItems(),
-  upsertLiveRunTimelineToolStep: (step) => upsertLiveRunTimelineToolStep(step),
-  captureCompletedRunArtifacts: () => {},
-  clearCompletedRunArtifacts,
 });
 
 const {
@@ -285,9 +272,6 @@ const {
   llmStreamingActive,
   shouldShowStreamingDraft,
   shouldShowStartPendingDraft,
-  clearLiveRunTimeline,
-  getLiveRunTimelineItems,
-  upsertLiveRunTimelineToolStep,
   resetLlmStreamingState,
   applyStreamEvent,
   cleanup: cleanupLlmStreaming,
@@ -301,8 +285,6 @@ const {
 });
 _applyStreamEvent = applyStreamEvent;
 _resetLlmStreamingState = resetLlmStreamingState;
-_clearLiveRunTimeline = clearLiveRunTimeline;
-_getLiveRunTimelineItems = () => getLiveRunTimelineItems();
 const toolHistoryToggleLabel = computed(() =>
   showToolHistory.value ? "隐藏工具轨迹" : "显示工具轨迹"
 );
@@ -446,8 +428,6 @@ const {
   hasRunningToolPendingActivity,
   llmStreamingActive,
   llmStreamingText,
-  clearLiveRunTimeline,
-  clearCompletedRunArtifacts,
   finalAssistantStreamingPhase,
   pendingRegenerate,
   userPendingRegenerate,
@@ -462,8 +442,8 @@ const {
   stopInitialToolSync,
   syncActiveToolRun,
   resetLlmStreamingState,
-  clearRunHint,
   setLlmRunHint,
+  clearRunHint,
   resetEditingState,
   isExpectedForkSwitch: isForkSceneExpectedSwitch,
   bumpForkSceneToken,
@@ -479,8 +459,6 @@ const {
 useChatScrollSync({
   scrollContainer,
   stableMessages,
-  shouldShowRunTimeline: computed(() => false),
-  runTimelineStructureTokens: computed(() => []),
   shouldShowStreamingDraft,
   activeSessionId,
   activeRunToken,

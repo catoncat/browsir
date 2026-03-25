@@ -49,8 +49,6 @@ describe("useLlmStreaming", () => {
     );
 
     expect(result.handled).toBe(true);
-    // No frozen text in timeline — text is persisted to session via content blocks
-    expect(harness.liveRunTimelineItems.value).toHaveLength(0);
     expect(harness.llmStreamingText.value).toBe("");
     expect(harness.llmStreamingActive.value).toBe(false);
     expect(harness.shouldShowStreamingDraft.value).toBe(false);
@@ -72,7 +70,6 @@ describe("useLlmStreaming", () => {
     );
 
     expect(result.handled).toBe(true);
-    expect(harness.liveRunTimelineItems.value).toHaveLength(0);
     expect(harness.llmStreamingText.value).toBe("");
     expect(harness.llmStreamingActive.value).toBe(false);
     expect(harness.shouldShowStreamingDraft.value).toBe(false);
@@ -94,42 +91,8 @@ describe("useLlmStreaming", () => {
     );
 
     expect(result.handled).toBe(true);
-    expect(harness.liveRunTimelineItems.value).toHaveLength(0);
     expect(harness.llmStreamingText.value).toBe("");
     expect(harness.llmStreamingActive.value).toBe(false);
     expect(harness.shouldShowStreamingDraft.value).toBe(false);
-  });
-
-  it("tool step tracking still works via liveRunTimelineItems", () => {
-    const harness = createHarness();
-    harness.upsertLiveRunTimelineToolStep({
-      step: 1,
-      action: "search_elements",
-      detail: "参数：query=input",
-      status: "running",
-      logs: [],
-    });
-
-    expect(harness.liveRunTimelineItems.value).toHaveLength(1);
-    expect(harness.liveRunTimelineItems.value[0]).toMatchObject({
-      kind: "tool",
-      step: 1,
-      action: "search_elements",
-    });
-  });
-
-  it("clears live timeline items when clearLiveRunTimeline is called", () => {
-    const harness = createHarness();
-    harness.upsertLiveRunTimelineToolStep({
-      step: 1,
-      action: "click",
-      detail: "目标：发送按钮",
-      status: "done",
-      logs: [],
-    });
-
-    harness.clearLiveRunTimeline();
-
-    expect(harness.liveRunTimelineItems.value).toEqual([]);
   });
 });

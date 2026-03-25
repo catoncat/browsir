@@ -1,11 +1,5 @@
 import { ref, computed, type Ref, type ComputedRef } from "vue";
 import type { DisplayMessage, RunViewPhase } from "../types";
-import {
-  cloneRunTimelineItems,
-  type RunTimelineItem,
-  upsertRunTimelineToolItem,
-} from "../utils/run-timeline";
-import type { ToolPendingStepState } from "../utils/tool-formatters";
 
 export interface LlmStreamEventResult {
   handled: boolean;
@@ -28,7 +22,6 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
   const llmStreamingSessionId = ref("");
   const llmStreamingActive = ref(false);
   const llmStreamingPendingText = ref("");
-  const liveRunTimelineItems = ref<RunTimelineItem[]>([]);
 
   let llmStreamFlushRaf: number | null = null;
   let llmStreamingDeltaBuffer: string[] = [];
@@ -70,21 +63,6 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
     llmStreamingText.value = "";
     llmStreamingSessionId.value = "";
     llmStreamingActive.value = false;
-  }
-
-  function clearLiveRunTimeline() {
-    liveRunTimelineItems.value = [];
-  }
-
-  function getLiveRunTimelineItems(): RunTimelineItem[] {
-    return cloneRunTimelineItems(liveRunTimelineItems.value);
-  }
-
-  function upsertLiveRunTimelineToolStep(step: ToolPendingStepState) {
-    liveRunTimelineItems.value = upsertRunTimelineToolItem(
-      liveRunTimelineItems.value,
-      step,
-    );
   }
 
   const shouldShowStreamingDraft = computed(() => {
@@ -282,7 +260,6 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
       llmStreamFlushRaf = null;
     }
     llmStreamingDeltaBuffer = [];
-    liveRunTimelineItems.value = [];
   }
 
   return {
@@ -290,15 +267,11 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
     llmStreamingSessionId,
     llmStreamingActive,
     llmStreamingPendingText,
-    liveRunTimelineItems,
     shouldShowStreamingDraft,
     shouldShowStartPendingDraft,
     flushLlmStreamingDeltaBuffer,
     appendLlmStreamingDelta,
     commitPendingLlmStreamingText,
-    clearLiveRunTimeline,
-    getLiveRunTimelineItems,
-    upsertLiveRunTimelineToolStep,
     resetLlmStreamingState,
     applyStreamEvent,
     cleanup,
