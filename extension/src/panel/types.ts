@@ -31,6 +31,8 @@ export interface DisplayMessage extends PanelMessageLike {
     | { type: "text"; text: string }
     | { type: "toolCall"; id: string; name: string; arguments: string }
   >;
+  /** Tool results paired from subsequent tool messages, keyed by toolCallId */
+  toolResults?: Record<string, string>;
   entryId: string;
   toolName?: string;
   toolCallId?: string;

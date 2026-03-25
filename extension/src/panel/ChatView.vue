@@ -75,7 +75,7 @@ const prompt = ref("");
 const scrollContainer = ref<HTMLElement | null>(null);
 const chatSceneOverlayRef = ref<HTMLElement | null>(null);
 const showMoreMenu = ref(false);
-const showToolHistory = ref(false);
+const showToolHistory = ref(true);
 const creatingSession = ref(false);
 const moreMenuRef = ref(null);
 const exportMenuRef = ref(null);
@@ -339,23 +339,70 @@ const shouldHideInlineToolMessages = computed(() =>
 );
 
 const baseConversationMessages = computed<DisplayMessage[]>(() => {
-  return (messages.value || [])
+  const raw = messages.value || [];
+
+  // Collect toolCallIds from assistant messages with contentBlocks
+  // so their subsequent tool result messages can be absorbed inline
+  const absorbedToolCallIds = new Set<string>();
+  for (const item of raw) {
+    if (String(item?.role || "") !== "assistant") continue;
+    const blocks = item?.contentBlocks;
+    if (!Array.isArray(blocks) || blocks.length === 0) continue;
+    for (const b of blocks) {
+      if (b.type === "toolCall" && b.id) absorbedToolCallIds.add(b.id);
+    }
+  }
+
+  // Build toolResults map: toolCallId -> result content
+  const toolResultMap = new Map<string, string>();
+  for (const item of raw) {
+    if (String(item?.role || "") !== "tool") continue;
+    const tcId = String(item?.toolCallId || "");
+    if (tcId && absorbedToolCallIds.has(tcId)) {
+      toolResultMap.set(tcId, String(item?.content || ""));
+    }
+  }
+
+  return raw
     .filter((item) => {
       const role = String(item?.role || "");
-      if (role !== "tool") return true;
-      if (shouldHideInlineToolMessages.value) return false;
-      if (shouldAlwaysShowToolMessage(item)) return true;
-      if (showToolHistory.value) return true;
-      return false;
+      if (role === "tool") {
+        const tcId = String(item?.toolCallId || "");
+        // Hide tool messages absorbed into contentBlocks
+        if (tcId && absorbedToolCallIds.has(tcId)) return false;
+        if (shouldHideInlineToolMessages.value) return false;
+        if (shouldAlwaysShowToolMessage(item)) return true;
+        if (showToolHistory.value) return true;
+        return false;
+      }
+      return true;
     })
-    .map((item) => ({
-      role: String(item?.role || ""),
-      content: String(item?.content || ""),
-      contentBlocks: item?.contentBlocks,
-      entryId: String(item?.entryId || ""),
-      toolName: String(item?.toolName || ""),
-      toolCallId: String(item?.toolCallId || "")
-    }));
+    .map((item) => {
+      const blocks = item?.contentBlocks;
+      const hasBlocks = Array.isArray(blocks) && blocks.length > 0;
+      // Attach paired tool results to assistant messages with contentBlocks
+      let toolResults: Record<string, string> | undefined;
+      if (hasBlocks && String(item?.role || "") === "assistant") {
+        const results: Record<string, string> = {};
+        let found = false;
+        for (const b of blocks!) {
+          if (b.type === "toolCall" && b.id && toolResultMap.has(b.id)) {
+            results[b.id] = toolResultMap.get(b.id)!;
+            found = true;
+          }
+        }
+        if (found) toolResults = results;
+      }
+      return {
+        role: String(item?.role || ""),
+        content: String(item?.content || ""),
+        contentBlocks: item?.contentBlocks,
+        ...(toolResults ? { toolResults } : {}),
+        entryId: String(item?.entryId || ""),
+        toolName: String(item?.toolName || ""),
+        toolCallId: String(item?.toolCallId || ""),
+      };
+    });
 });
 
 const {
@@ -824,6 +871,7 @@ defineExpose({ handleCreateSession, sessionListRenderState });
             :role="msg.role"
             :content="msg.content"
             :content-blocks="msg.contentBlocks"
+            :tool-results="msg.toolResults"
             :entry-id="msg.entryId"
             :tool-name="msg.toolName"
             :tool-call-id="msg.toolCallId"

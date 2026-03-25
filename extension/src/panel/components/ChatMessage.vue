@@ -39,6 +39,8 @@ const props = defineProps<{
     | { type: "text"; text: string }
     | { type: "toolCall"; id: string; name: string; arguments: string }
   >;
+  /** Tool results paired from subsequent tool messages, keyed by toolCallId */
+  toolResults?: Record<string, string>;
   entryId: string;
   streamingMode?: "markdown" | "plain";
   toolName?: string;
@@ -114,6 +116,29 @@ const contentBlockTextContent = computed(() => {
     .filter((b): b is { type: "text"; text: string } => b.type === "text")
     .map((b) => b.text)
     .join("\n");
+});
+
+/** Ordered renderable blocks with paired tool results */
+const renderableBlocks = computed(() => {
+  if (!hasContentBlocks.value) return null;
+  return (props.contentBlocks || []).map((block, idx) => {
+    if (block.type === "text") {
+      return { key: `text-${idx}`, type: "text" as const, text: block.text };
+    }
+    const resultContent = props.toolResults?.[block.id] || "";
+    const rendered = resultContent
+      ? resolveToolRender({ content: resultContent, toolName: block.name, toolCallId: block.id })
+      : null;
+    return {
+      key: `tool-${block.id}`,
+      type: "toolCall" as const,
+      id: block.id,
+      name: block.name,
+      arguments: block.arguments,
+      result: rendered,
+      resultContent,
+    };
+  });
 });
 
 const showThinking = ref(false);
@@ -666,34 +691,66 @@ onClickOutside(executionTimelinePopupRef, () => {
       :aria-label="isAssistantStreaming ? '助手正在生成回复' : '助手回复的内容'"
       :data-testid="isAssistantStreaming ? 'assistant-streaming-message' : undefined"
     >
-      <!-- AI Content -->
-      <div
-        class="prose max-w-none text-[14px] text-ui-text font-normal focus:outline-none"
-        tabindex="0"
-      >
-        <div
-          v-if="isStreamingPlainText"
-          class="whitespace-pre-wrap break-all font-mono text-[13px] leading-relaxed"
-        >
-          {{ props.content }}
-        </div>
-        <ThemeProvider v-else :theme="incremarkTheme">
-          <IncremarkContent :content="hasContentBlocks ? contentBlockTextContent : props.content" :is-finished="isFinished" :components="incremarkComponents" />
-        </ThemeProvider>
-      </div>
+      <!-- Ordered Content Blocks rendering (industry standard: text/toolCall interleaved) -->
+      <template v-if="renderableBlocks">
+        <template v-for="block in renderableBlocks" :key="block.key">
+          <!-- Text Block -->
+          <div
+            v-if="block.type === 'text'"
+            class="prose max-w-none text-[14px] text-ui-text font-normal focus:outline-none"
+            tabindex="0"
+          >
+            <ThemeProvider :theme="incremarkTheme">
+              <IncremarkContent :content="block.text" :is-finished="isFinished" :components="incremarkComponents" />
+            </ThemeProvider>
+          </div>
 
-      <!-- Inline Tool Call Indicators (from contentBlocks) -->
-      <div v-if="contentBlockToolCalls.length > 0" class="flex flex-wrap gap-1.5 mt-1">
+          <!-- Tool Call Block with inline result -->
+          <div
+            v-else
+            class="rounded-lg border border-ui-border/60 bg-ui-surface/40 px-3 py-2"
+          >
+            <div class="flex items-center gap-2 min-w-0">
+              <div class="h-5 w-5 shrink-0 rounded-md flex items-center justify-center"
+                :class="block.result
+                  ? (block.result.tone === 'error' ? 'bg-rose-500/10 text-rose-500' : 'bg-emerald-500/10 text-emerald-600')
+                  : 'bg-ui-bg/85 text-ui-text-muted'"
+              >
+                <CircleAlert v-if="block.result?.tone === 'error'" :size="12" aria-hidden="true" />
+                <Check v-else-if="block.result" :size="12" aria-hidden="true" />
+                <Cpu v-else :size="12" aria-hidden="true" />
+              </div>
+              <p class="text-[12px] font-semibold leading-snug text-ui-text truncate">
+                {{ block.result?.title || block.name }}
+              </p>
+              <span v-if="block.result?.subtitle" class="ml-auto text-[11px] text-ui-text-muted truncate max-w-[120px]">
+                {{ block.result.subtitle }}
+              </span>
+            </div>
+            <p v-if="block.result?.detail" class="mt-1 text-[11px] leading-snug text-ui-text-muted line-clamp-2 break-all">
+              {{ block.result.detail }}
+            </p>
+          </div>
+        </template>
+      </template>
+
+      <!-- Fallback: plain content (no contentBlocks) -->
+      <template v-else>
         <div
-          v-for="tc in contentBlockToolCalls"
-          :key="tc.id"
-          class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] font-medium bg-ui-surface/80 text-ui-text-muted border border-ui-border/50"
-          :title="`${tc.name}(${tc.arguments.slice(0, 100)})`"
+          class="prose max-w-none text-[14px] text-ui-text font-normal focus:outline-none"
+          tabindex="0"
         >
-          <Cpu :size="13" class="shrink-0 opacity-60" aria-hidden="true" />
-          <span class="truncate max-w-[200px]">{{ tc.name }}</span>
+          <div
+            v-if="isStreamingPlainText"
+            class="whitespace-pre-wrap break-all font-mono text-[13px] leading-relaxed"
+          >
+            {{ props.content }}
+          </div>
+          <ThemeProvider v-else :theme="incremarkTheme">
+            <IncremarkContent :content="props.content" :is-finished="isFinished" :components="incremarkComponents" />
+          </ThemeProvider>
         </div>
-      </div>
+      </template>
 
       <div
         v-if="isAssistantStreaming"
