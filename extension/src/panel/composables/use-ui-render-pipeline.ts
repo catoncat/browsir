@@ -439,6 +439,8 @@ export function useUiRenderPipeline(deps: UiRenderPipelineDeps) {
     return {
       role,
       content: String(row.content ?? fallback.content ?? ""),
+      contentBlocks: fallback.contentBlocks,
+      toolResults: fallback.toolResults,
       entryId,
       toolName: String(row.toolName ?? fallback.toolName ?? "").trim() || "",
       toolCallId: String(row.toolCallId ?? fallback.toolCallId ?? "").trim() || "",
