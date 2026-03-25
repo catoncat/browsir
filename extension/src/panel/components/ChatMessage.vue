@@ -129,6 +129,13 @@ const renderableBlocks = computed(() => {
     const rendered = resultContent
       ? resolveToolRender({ content: resultContent, toolName: block.name, toolCallId: block.id })
       : null;
+    const title = rendered ? normalizeToolHeadline(rendered.title) : block.name;
+    const subtitle = rendered ? normalizeToolSubtitle(rendered.subtitle) : "";
+    const rawDetail = (rendered?.detail || "").trim();
+    // Deduplicate: skip detail when it just repeats the subtitle content
+    const detail = (subtitle && rawDetail && (rawDetail === subtitle || rawDetail.startsWith(subtitle)))
+      ? rawDetail.slice(subtitle.length).replace(/^\s*\n?/, "").trim()
+      : rawDetail;
     return {
       key: `tool-${block.id}`,
       type: "toolCall" as const,
@@ -137,6 +144,9 @@ const renderableBlocks = computed(() => {
       arguments: block.arguments,
       result: rendered,
       resultContent,
+      title,
+      subtitle,
+      detail,
     };
   });
 });
@@ -721,14 +731,14 @@ onClickOutside(executionTimelinePopupRef, () => {
                 <Cpu v-else :size="12" aria-hidden="true" />
               </div>
               <p class="text-[12px] font-semibold leading-snug text-ui-text truncate">
-                {{ block.result?.title || block.name }}
+                {{ block.title }}
               </p>
-              <span v-if="block.result?.subtitle" class="ml-auto text-[11px] text-ui-text-muted truncate max-w-[120px]">
-                {{ block.result.subtitle }}
+              <span v-if="block.subtitle" class="ml-auto text-[11px] text-ui-text-muted truncate max-w-[180px]">
+                {{ block.subtitle }}
               </span>
             </div>
-            <p v-if="block.result?.detail" class="mt-1 text-[11px] leading-snug text-ui-text-muted line-clamp-2 break-all">
-              {{ block.result.detail }}
+            <p v-if="block.detail" class="mt-1 text-[11px] leading-snug text-ui-text-muted line-clamp-2 break-all">
+              {{ block.detail }}
             </p>
           </div>
         </template>
