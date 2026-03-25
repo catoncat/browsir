@@ -209,4 +209,29 @@ await mcp.call("search_docs", {“q”：“runtime router”})
     expect(normalized).toContain("接下来我会继续填写表单");
     expect(normalized).not.toContain("我是 Cursor 支持助手");
   });
+
+  it("preserves markdown newlines when no identity rewrite is needed", () => {
+    const markdown = [
+      "根据维基百科3月25日页面，以下是**历史上的今天**大事记：",
+      "",
+      "---",
+      "",
+      "## 历史上的今天（3月25日）",
+      "",
+      "### 大事记",
+      "",
+      "| 年份 | 事件 |",
+      "|---|---|",
+      "| **410年** | 南燕灭亡 |",
+    ].join("\n");
+
+    const normalized = normalizeHostedAssistantIdentity(
+      "帮我总结3月25日历史大事",
+      markdown,
+    );
+
+    expect(normalized).toBe(markdown);
+    expect(normalized).toContain("\n\n## 历史上的今天（3月25日）\n\n");
+    expect(normalized).toContain("\n| 年份 | 事件 |\n|---|---|\n");
+  });
 });

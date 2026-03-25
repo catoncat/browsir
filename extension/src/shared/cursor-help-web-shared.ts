@@ -441,8 +441,16 @@ function containsCjk(text: string): boolean {
   return /[\u3400-\u9fff]/.test(text);
 }
 
+function normalizeIdentitySourceText(value: unknown): string {
+  return String(value || "")
+    .replace(/\r\n/g, "\n")
+    .trim();
+}
+
 function normalizeIdentityText(value: unknown): string {
-  return String(value || "").replace(/\s+/g, " ").trim();
+  return normalizeIdentitySourceText(value)
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 const IDENTITY_QUESTION_PATTERNS: RegExp[] = [
@@ -493,9 +501,9 @@ function buildCanonicalIdentityAnswer(latestUserMessage: string): string {
 }
 
 function stripLeadingIdentityDriftSentence(text: string): string {
-  const normalized = normalizeIdentityText(text);
+  const normalized = normalizeIdentitySourceText(text);
   if (!normalized) return "";
-  const lead = normalized.slice(0, 220);
+  const lead = normalizeIdentityText(normalized.slice(0, 220));
   if (!hasCursorIdentityDrift(lead)) return normalized;
 
   const punctuationMatch = /[。！？!?]|(?:\.\s)|\n{2,}/.exec(normalized);
@@ -511,19 +519,23 @@ export function normalizeHostedAssistantIdentity(
   assistantText: unknown,
 ): string {
   const userText = normalizeIdentityText(latestUserMessage);
-  const replyText = normalizeIdentityText(assistantText);
+  const userSourceText = normalizeIdentitySourceText(latestUserMessage);
+  const replyText = normalizeIdentitySourceText(assistantText);
   if (!replyText) return "";
-  if (mentionsBblIdentity(replyText) && !hasCursorIdentityDrift(replyText.slice(0, 220))) {
+  if (
+    mentionsBblIdentity(replyText) &&
+    !hasCursorIdentityDrift(normalizeIdentityText(replyText.slice(0, 220)))
+  ) {
     return replyText;
   }
 
-  const canonicalIdentity = buildCanonicalIdentityAnswer(userText);
+  const canonicalIdentity = buildCanonicalIdentityAnswer(userSourceText || userText);
   if (isHostedIdentityQuestion(userText)) {
     const remainder = stripLeadingIdentityDriftSentence(replyText);
     return remainder ? `${canonicalIdentity}\n\n${remainder}` : canonicalIdentity;
   }
 
-  const lead = replyText.slice(0, 220);
+  const lead = normalizeIdentityText(replyText.slice(0, 220));
   if (!hasCursorIdentityDrift(lead)) return replyText;
   const remainder = stripLeadingIdentityDriftSentence(replyText);
   return remainder ? `${canonicalIdentity}\n\n${remainder}` : canonicalIdentity;

@@ -72,12 +72,8 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
     llmStreamingActive.value = false;
   }
 
-  function clearFrozenPreToolText() {
-    liveRunTimelineItems.value = [];
-  }
-
   function clearLiveRunTimeline() {
-    clearFrozenPreToolText();
+    liveRunTimelineItems.value = [];
   }
 
   function getLiveRunTimelineItems(): RunTimelineItem[] {
@@ -132,11 +128,6 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
     !shouldShowStreamingDraft.value &&
     !deps.shouldShowToolPendingCard.value
   );
-
-  const shouldShowFrozenPreToolText = computed(() => {
-    if (!deps.isRunActive.value) return false;
-    return liveRunTimelineItems.value.length > 0;
-  });
 
   function applyStreamEvent(
     type: string,
@@ -302,11 +293,9 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
     liveRunTimelineItems,
     shouldShowStreamingDraft,
     shouldShowStartPendingDraft,
-    shouldShowFrozenPreToolText,
     flushLlmStreamingDeltaBuffer,
     appendLlmStreamingDelta,
     commitPendingLlmStreamingText,
-    clearFrozenPreToolText,
     clearLiveRunTimeline,
     getLiveRunTimelineItems,
     upsertLiveRunTimelineToolStep,

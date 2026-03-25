@@ -1,11 +1,9 @@
 <script setup lang="ts">
-import { onClickOutside } from "@vueuse/core";
 import { ref, computed, watch, nextTick } from "vue";
 import {
   Sparkles,
   ChevronDown,
   ChevronUp,
-  Workflow,
   Loader2,
   Globe,
   Database,
@@ -23,7 +21,6 @@ import { resolveToolRender } from "../utils/tool-renderers";
 import { IncremarkContent, ThemeProvider } from "@incremark/vue";
 import IncremarkCodeBlock from "./IncremarkCodeBlock.vue";
 import { usePanelDarkMode } from "../utils/use-panel-dark-mode";
-import type { RunTimelineItem } from "../utils/run-timeline";
 
 interface ToolPendingStepData {
   step: number;
@@ -67,9 +64,6 @@ const props = defineProps<{
   showCopyAction?: boolean;
   showRetryAction?: boolean;
   showForkAction?: boolean;
-  showExecutionStepsAction?: boolean;
-  executionStepsLabel?: string;
-  executionTimelineItems?: RunTimelineItem[];
 }>();
 
 const emit = defineEmits<{
@@ -104,26 +98,52 @@ const isFinished = computed(() => props.role !== "assistant_streaming");
 const hasContentBlocks = computed(() =>
   Array.isArray(props.contentBlocks) && props.contentBlocks.length > 0
 );
-const contentBlockToolCalls = computed(() => {
-  if (!hasContentBlocks.value) return [];
-  return (props.contentBlocks || []).filter(
-    (b): b is { type: "toolCall"; id: string; name: string; arguments: string } => b.type === "toolCall"
-  );
-});
-const contentBlockTextContent = computed(() => {
-  if (!hasContentBlocks.value) return props.content;
-  return (props.contentBlocks || [])
-    .filter((b): b is { type: "text"; text: string } => b.type === "text")
-    .map((b) => b.text)
-    .join("\n");
-});
+
+type RenderableAssistantTextBlock = {
+  key: string;
+  type: "text";
+  text: string;
+};
+
+type RenderableAssistantToolBlock = {
+  key: string;
+  type: "toolCall";
+  id: string;
+  name: string;
+  arguments: string;
+  result: ReturnType<typeof resolveToolRender> | null;
+  resultContent: string;
+  title: string;
+  subtitle: string;
+  detail: string;
+};
+
+type RenderableAssistantBlock = RenderableAssistantTextBlock | RenderableAssistantToolBlock;
+
+function normalizeMarkdownSegment(text: string): string {
+  const value = String(text || "");
+  if (!value.trim()) return "";
+  return `${value.replace(/\s+$/u, "")}\n\n`;
+}
 
 /** Ordered renderable blocks with paired tool results */
-const renderableBlocks = computed(() => {
+const renderableBlocks = computed<RenderableAssistantBlock[] | null>(() => {
   if (!hasContentBlocks.value) return null;
-  return (props.contentBlocks || []).map((block, idx) => {
+  const blocks: RenderableAssistantBlock[] = [];
+  let textIndex = 0;
+
+  for (const block of props.contentBlocks || []) {
     if (block.type === "text") {
-      return { key: `text-${idx}`, type: "text" as const, text: block.text };
+      const text = normalizeMarkdownSegment(block.text);
+      if (!text) continue;
+      const previous = blocks[blocks.length - 1];
+      if (previous?.type === "text") {
+        previous.text = `${previous.text}${text}`;
+      } else {
+        blocks.push({ key: `text-${textIndex}`, type: "text", text });
+        textIndex += 1;
+      }
+      continue;
     }
     const resultContent = props.toolResults?.[block.id] || "";
     const rendered = resultContent
@@ -136,9 +156,9 @@ const renderableBlocks = computed(() => {
     const detail = (subtitle && rawDetail && (rawDetail === subtitle || rawDetail.startsWith(subtitle)))
       ? rawDetail.slice(subtitle.length).replace(/^\s*\n?/, "").trim()
       : rawDetail;
-    return {
+    blocks.push({
       key: `tool-${block.id}`,
-      type: "toolCall" as const,
+      type: "toolCall",
       id: block.id,
       name: block.name,
       arguments: block.arguments,
@@ -147,16 +167,16 @@ const renderableBlocks = computed(() => {
       title,
       subtitle,
       detail,
-    };
-  });
+    });
+  }
+
+  return blocks.length > 0 ? blocks : null;
 });
 
 const showThinking = ref(false);
-const showExecutionTimeline = ref(false);
 const showSystemSummary = ref(false);
 const inlineTextarea = ref<HTMLTextAreaElement | null>(null);
 const pendingActivityViewport = ref<HTMLElement | null>(null);
-const executionTimelinePopupRef = ref<HTMLElement | null>(null);
 const pendingCardStickToBottom = ref(true);
 const pendingDetailsExpanded = ref(false);
 const TOOL_COMPACT_LINE_MAX = 120;
@@ -199,21 +219,7 @@ function decorateInlineTokens(raw: string): string {
     .replace(/\b(stdout|stderr|errorCode|error|exitCode)\b/giu, '<span class="tool-token tool-token-keyword">$1</span>');
 }
 
-const toolTitle = computed(() => toolRender.value.title);
-const toolSubtitle = computed(() => toolRender.value.subtitle);
 const toolDetail = computed(() => toolRender.value.detail);
-const hasExecutionTimelineItems = computed(() =>
-  Array.isArray(props.executionTimelineItems) && props.executionTimelineItems.length > 0,
-);
-const executionStepsLabel = computed(() => {
-  const label = String(props.executionStepsLabel || "").trim();
-  return label || "查看执行过程";
-});
-
-function toggleExecutionTimeline() {
-  if (!hasExecutionTimelineItems.value) return;
-  showExecutionTimeline.value = !showExecutionTimeline.value;
-}
 
 const toolIconContainerClass = computed(() => {
   if (toolRender.value.tone === "error") return "bg-rose-500/10 text-rose-600 dark:text-rose-400";
@@ -518,7 +524,6 @@ watch(
   () => {
     pendingDetailsExpanded.value = false;
     pendingCardStickToBottom.value = true;
-    showExecutionTimeline.value = false;
   }
 );
 
@@ -545,10 +550,6 @@ watch(
   },
   { immediate: true }
 );
-
-onClickOutside(executionTimelinePopupRef, () => {
-  showExecutionTimeline.value = false;
-});
 </script>
 
 <template>
@@ -775,7 +776,7 @@ onClickOutside(executionTimelinePopupRef, () => {
 
       <!-- Action Bar: Copy + Retry + Fork -->
       <div
-        v-if="isAssistant && (props.showCopyAction || props.showRetryAction || props.showForkAction || props.showExecutionStepsAction)"
+        v-if="isAssistant && (props.showCopyAction || props.showRetryAction || props.showForkAction)"
         class="relative flex items-center gap-1 transition-opacity"
         :class="(props.retrying || props.forking) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'"
         role="toolbar"
@@ -819,92 +820,6 @@ onClickOutside(executionTimelinePopupRef, () => {
         >
           <GitBranch :size="14" :class="props.forking ? 'animate-pulse text-ui-accent' : ''" aria-hidden="true" />
         </button>
-
-        <button
-          v-if="props.showExecutionStepsAction && hasExecutionTimelineItems"
-          type="button"
-          class="p-1.5 hover:bg-ui-surface rounded-md text-ui-text-muted hover:text-ui-text transition-all disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-          :aria-label="executionStepsLabel"
-          :title="executionStepsLabel"
-          :aria-expanded="showExecutionTimeline"
-          @click="toggleExecutionTimeline"
-        >
-          <Workflow :size="14" :class="showExecutionTimeline ? 'text-ui-accent' : ''" aria-hidden="true" />
-        </button>
-
-        <div
-          v-if="showExecutionTimeline && hasExecutionTimelineItems"
-          ref="executionTimelinePopupRef"
-          class="absolute bottom-full right-0 z-20 mb-2 w-[min(20rem,calc(100vw-2.75rem))] max-w-[calc(100vw-2.75rem)] overflow-hidden rounded-2xl border border-ui-border/80 bg-ui-bg/96 shadow-[0_18px_48px_rgba(15,23,42,0.18)] backdrop-blur animate-in fade-in zoom-in-95 slide-in-from-bottom-1 duration-150"
-          role="dialog"
-          :aria-label="executionStepsLabel"
-        >
-          <div
-            class="pointer-events-none absolute right-4 top-full h-3 w-3 -translate-y-1/2 rotate-45 border-b border-r border-ui-border/80 bg-ui-bg/96"
-            aria-hidden="true"
-          />
-
-          <div class="mb-2 flex items-center justify-between gap-2 border-b border-ui-border/60 px-3 py-2">
-            <p class="min-w-0 truncate text-[12px] font-semibold text-ui-text">
-              {{ executionStepsLabel }}
-            </p>
-            <button
-              type="button"
-              class="rounded-md p-1 text-ui-text-muted transition-colors hover:bg-ui-surface hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-              aria-label="关闭执行步骤"
-              title="关闭执行步骤"
-              @click="showExecutionTimeline = false"
-            >
-              <X :size="12" aria-hidden="true" />
-            </button>
-          </div>
-
-          <div class="max-h-72 space-y-2 overflow-y-auto px-2 pb-2 custom-scrollbar" role="list">
-            <div
-              v-for="item in props.executionTimelineItems"
-              :key="`execution-${item.id}`"
-              class="rounded-lg border border-ui-border/60 bg-ui-surface/45 px-3 py-2"
-            >
-                <div class="flex items-start gap-2">
-                  <div class="mt-0.5 h-5 w-5 shrink-0 rounded-md bg-ui-bg/85 text-ui-text-muted flex items-center justify-center">
-                    <Loader2
-                      v-if="item.status === 'running'"
-                      :size="12"
-                      class="animate-spin"
-                      aria-hidden="true"
-                    />
-                    <Check
-                      v-else-if="item.status === 'done'"
-                      :size="12"
-                      aria-hidden="true"
-                    />
-                    <X
-                      v-else
-                      :size="12"
-                      aria-hidden="true"
-                    />
-                  </div>
-                  <div class="min-w-0 flex-1">
-                    <p class="text-[12px] font-semibold leading-snug text-ui-text">
-                      {{ item.headline }}
-                    </p>
-                    <p class="mt-1 text-[11px] leading-snug text-ui-text-muted break-all">
-                      {{ item.line }}
-                    </p>
-                    <div v-if="item.logs.length" class="mt-1.5 space-y-1">
-                      <p
-                        v-for="(log, logIdx) in item.logs.slice(-6)"
-                        :key="`${item.id}-log-${logIdx}`"
-                        class="break-all whitespace-pre-wrap font-mono text-[10px] leading-snug text-ui-text-muted"
-                      >
-                        <span class="text-ui-text-muted/70">› </span>{{ log }}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-        </div>
       </div>
     </div>
 

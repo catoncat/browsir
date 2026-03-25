@@ -237,10 +237,9 @@ const {
   onError: setErrorMessage,
 });
 const queuedPromotingIds = ref<Set<string>>(new Set());
-const completedRunTimelineItems = ref<RunTimelineItem[]>([]);
 
 function clearCompletedRunArtifacts() {
-  completedRunTimelineItems.value = [];
+  // Legacy runtime timeline cards are no longer rendered in chat.
 }
 // Forward references for llm-streaming functions (resolved after useLlmStreaming)
 let _applyStreamEvent: (type: string, payload: Record<string, unknown>, sid: string) => import("./composables/use-llm-streaming").LlmStreamEventResult = () => ({ handled: false });
@@ -277,25 +276,15 @@ const {
   clearLiveRunTimeline: () => _clearLiveRunTimeline(),
   getLiveRunTimelineItems: () => _getLiveRunTimelineItems(),
   upsertLiveRunTimelineToolStep: (step) => upsertLiveRunTimelineToolStep(step),
-  captureCompletedRunArtifacts: (items) => {
-    completedRunTimelineItems.value = items.map((item) =>
-      ({ ...item, logs: Array.isArray(item.logs) ? [...item.logs] : [] }),
-    );
-  },
+  captureCompletedRunArtifacts: () => {},
   clearCompletedRunArtifacts,
 });
 
 const {
   llmStreamingText,
-  llmStreamingSessionId,
   llmStreamingActive,
-  llmStreamingPendingText,
-  liveRunTimelineItems,
   shouldShowStreamingDraft,
   shouldShowStartPendingDraft,
-  flushLlmStreamingDeltaBuffer,
-  appendLlmStreamingDelta,
-  commitPendingLlmStreamingText,
   clearLiveRunTimeline,
   getLiveRunTimelineItems,
   upsertLiveRunTimelineToolStep,
@@ -316,26 +305,6 @@ _clearLiveRunTimeline = clearLiveRunTimeline;
 _getLiveRunTimelineItems = () => getLiveRunTimelineItems();
 const toolHistoryToggleLabel = computed(() =>
   showToolHistory.value ? "隐藏工具轨迹" : "显示工具轨迹"
-);
-
-const shouldShowCompletedRunTimeline = computed(() =>
-  !isRunActive.value &&
-  completedRunTimelineItems.value.length > 0 &&
-  stableMessages.value.length > 0,
-);
-
-const liveRunTimelineStructureTokens = computed(() =>
-  liveRunTimelineItems.value.map((item) =>
-    `tool:${item.id}:${item.step}:${item.status}`,
-  ),
-);
-
-const shouldShowLiveRunTimeline = computed(() =>
-  liveRunTimelineItems.value.length > 0 && !finalAssistantStreamingPhase.value,
-);
-
-const shouldHideInlineToolMessages = computed(() =>
-  shouldShowLiveRunTimeline.value,
 );
 
 const baseConversationMessages = computed<DisplayMessage[]>(() => {
@@ -370,7 +339,6 @@ const baseConversationMessages = computed<DisplayMessage[]>(() => {
         const tcId = String(item?.toolCallId || "");
         // Hide tool messages absorbed into contentBlocks
         if (tcId && absorbedToolCallIds.has(tcId)) return false;
-        if (shouldHideInlineToolMessages.value) return false;
         if (shouldAlwaysShowToolMessage(item)) return true;
         if (showToolHistory.value) return true;
         return false;
@@ -508,27 +476,11 @@ const {
     panelUiRuntime.runHook("ui.session.changed", payload),
 });
 
-const completedRunTimelineSummary = computed(() => {
-  const toolCount = completedRunTimelineItems.value.filter((item) => item.kind === "tool").length;
-  if (toolCount > 0) return `查看本轮执行过程（${toolCount}步）`;
-  return `查看本轮执行过程`;
-});
-
-const latestAssistantMessageEntryId = computed(() => {
-  for (let index = stableMessages.value.length - 1; index >= 0; index -= 1) {
-    const item = stableMessages.value[index];
-    if (String(item?.role || "") !== "assistant") continue;
-    const entryId = String(item?.entryId || "").trim();
-    if (entryId) return entryId;
-  }
-  return "";
-});
-
 useChatScrollSync({
   scrollContainer,
   stableMessages,
-  shouldShowRunTimeline: shouldShowLiveRunTimeline,
-  runTimelineStructureTokens: liveRunTimelineStructureTokens,
+  shouldShowRunTimeline: computed(() => false),
+  runTimelineStructureTokens: computed(() => []),
   shouldShowStreamingDraft,
   activeSessionId,
   activeRunToken,
@@ -631,9 +583,7 @@ watch(
 
 const hasVisibleConversation = computed(() =>
   stableMessages.value.length > 0
-  || shouldShowLiveRunTimeline.value
   || shouldShowStreamingDraft.value
-  || shouldShowCompletedRunTimeline.value
   || shouldShowStartPendingDraft.value
 );
 
@@ -889,9 +839,6 @@ defineExpose({ handleCreateSession, sessionListRenderState });
               :show-copy-action="canCopyMessage(msg) && !isRunActive"
               :show-retry-action="canRetryMessage(msg, index) && !isRunActive"
               :show-fork-action="canForkMessage(msg, index) && !isRunActive"
-              :show-execution-steps-action="shouldShowCompletedRunTimeline && msg.entryId === latestAssistantMessageEntryId"
-              :execution-steps-label="completedRunTimelineSummary"
-              :execution-timeline-items="shouldShowCompletedRunTimeline && msg.entryId === latestAssistantMessageEntryId ? completedRunTimelineItems : []"
               @copy="handleCopyMessage"
               @edit="handleEditMessage"
               @edit-change="handleEditDraftChange"
@@ -907,25 +854,6 @@ defineExpose({ handleCreateSession, sessionListRenderState });
             :active="true"
             waiting-label="正在启动响应"
           />
-
-          <template
-            v-for="item in liveRunTimelineItems"
-            :key="`live-${String(activeSessionId || '__global__')}-${activeRunToken}-${item.id}`"
-          >
-            <ChatMessage
-              role="tool_pending"
-              content=""
-              :entry-id="`live-tool-${item.id}`"
-              :tool-name="item.action"
-              :tool-pending="true"
-              :tool-pending-leaving="false"
-              :tool-pending-status="item.status"
-              :tool-pending-headline="item.headline"
-              :tool-pending-action="item.action"
-              :tool-pending-detail="item.detail"
-              :tool-pending-steps-data="[{ step: item.step, status: item.status, line: item.line, logs: item.logs }]"
-            />
-          </template>
 
           <StreamingDraftContainer
             v-if="shouldShowStreamingDraft"

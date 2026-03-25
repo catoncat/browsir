@@ -116,10 +116,9 @@ describe("useLlmStreaming", () => {
       step: 1,
       action: "search_elements",
     });
-    expect(harness.shouldShowFrozenPreToolText.value).toBe(true);
   });
 
-  it("clears live timeline items when clearFrozenPreToolText is called", () => {
+  it("clears live timeline items when clearLiveRunTimeline is called", () => {
     const harness = createHarness();
     harness.upsertLiveRunTimelineToolStep({
       step: 1,
@@ -129,9 +128,8 @@ describe("useLlmStreaming", () => {
       logs: [],
     });
 
-    harness.clearFrozenPreToolText();
+    harness.clearLiveRunTimeline();
 
     expect(harness.liveRunTimelineItems.value).toEqual([]);
-    expect(harness.shouldShowFrozenPreToolText.value).toBe(false);
   });
 });
