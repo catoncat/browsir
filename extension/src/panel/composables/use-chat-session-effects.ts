@@ -37,6 +37,8 @@ export interface ChatSessionEffectsDeps {
   stopInitialToolSync: () => void;
   syncActiveToolRun: (sessionId: string) => Promise<void>;
   resetLlmStreamingState: () => void;
+  clearLiveRunTimeline: () => void;
+  clearCompletedRunArtifacts: () => void;
   clearRunHint: () => void;
   setLlmRunHint: (label: string, detail?: string) => void;
   resetEditingState: () => void;
@@ -120,6 +122,8 @@ export function useChatSessionEffects(deps: ChatSessionEffectsDeps) {
     deps.clearActiveToolRun();
     deps.clearToolPendingSteps();
     deps.resetLlmStreamingState();
+    deps.clearLiveRunTimeline();
+    deps.clearCompletedRunArtifacts();
     deps.clearRunHint();
     if (!deps.activeSession.value?.forkedFrom?.sessionId) {
       deps.setForkSessionHighlight(false);

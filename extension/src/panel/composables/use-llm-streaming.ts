@@ -1,5 +1,12 @@
 import { ref, computed, type Ref, type ComputedRef } from "vue";
 import type { DisplayMessage, RunViewPhase } from "../types";
+import {
+  appendRunTimelineText,
+  cloneRunTimelineItems,
+  type RunTimelineItem,
+  upsertRunTimelineToolItem,
+} from "../utils/run-timeline";
+import type { ToolPendingStepState } from "../utils/tool-formatters";
 
 export interface LlmStreamEventResult {
   handled: boolean;
@@ -22,6 +29,7 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
   const llmStreamingSessionId = ref("");
   const llmStreamingActive = ref(false);
   const llmStreamingPendingText = ref("");
+  const liveRunTimelineItems = ref<RunTimelineItem[]>([]);
 
   let llmStreamFlushRaf: number | null = null;
   let llmStreamingDeltaBuffer: string[] = [];
@@ -65,6 +73,38 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
     llmStreamingActive.value = false;
   }
 
+  /** 将当前流式文本冻结到独立列表，然后完全重置流式状态。 */
+  function freezeAndResetStreaming(explicitText?: string) {
+    flushLlmStreamingDeltaBuffer();
+    commitPendingLlmStreamingText();
+    const text = String(explicitText || "").trim() || llmStreamingText.value.trim();
+    liveRunTimelineItems.value = appendRunTimelineText(
+      liveRunTimelineItems.value,
+      text,
+    );
+    resetLlmStreamingState();
+  }
+
+  /** 清除冻结文本（仅在 loop 终态/重启时调用）。 */
+  function clearFrozenPreToolText() {
+    liveRunTimelineItems.value = [];
+  }
+
+  function clearLiveRunTimeline() {
+    clearFrozenPreToolText();
+  }
+
+  function getLiveRunTimelineItems(): RunTimelineItem[] {
+    return cloneRunTimelineItems(liveRunTimelineItems.value);
+  }
+
+  function upsertLiveRunTimelineToolStep(step: ToolPendingStepState) {
+    liveRunTimelineItems.value = upsertRunTimelineToolItem(
+      liveRunTimelineItems.value,
+      step,
+    );
+  }
+
   const shouldShowStreamingDraft = computed(() => {
     if (!deps.isRunActive.value) return false;
 
@@ -106,6 +146,11 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
     !shouldShowStreamingDraft.value &&
     !deps.shouldShowToolPendingCard.value
   );
+
+  const shouldShowFrozenPreToolText = computed(() => {
+    if (!deps.isRunActive.value) return false;
+    return liveRunTimelineItems.value.length > 0;
+  });
 
   function applyStreamEvent(
     type: string,
@@ -153,7 +198,7 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
     }
 
     if (type === "hosted_chat.tool_call_detected") {
-      resetLlmStreamingState();
+      freezeAndResetStreaming(String(payload.assistantText || ""));
       return {
         handled: true,
         runPhase: "llm",
@@ -165,7 +210,11 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
     if (type === "hosted_chat.turn_resolved") {
       const finishReason = String(payload.finishReason || "").trim();
       if (finishReason === "tool_calls") {
-        resetLlmStreamingState();
+        const resolvedText =
+          typeof payload.assistantText === "string"
+            ? payload.assistantText
+            : String((payload.result as Record<string, unknown> | undefined)?.assistantText || "");
+        freezeAndResetStreaming(resolvedText);
         return {
           handled: true,
           runPhase: "llm",
@@ -226,7 +275,7 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
       const responseSource = String(payload.source || "").trim();
       const isHostedTransport = responseSource === "hosted_chat_transport";
       if (Number.isFinite(toolCalls) && toolCalls > 0) {
-        resetLlmStreamingState();
+        freezeAndResetStreaming();
         return {
           handled: true,
           runPhase: "llm",
@@ -257,6 +306,7 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
       llmStreamFlushRaf = null;
     }
     llmStreamingDeltaBuffer = [];
+    liveRunTimelineItems.value = [];
   }
 
   return {
@@ -264,11 +314,18 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
     llmStreamingSessionId,
     llmStreamingActive,
     llmStreamingPendingText,
+    liveRunTimelineItems,
     shouldShowStreamingDraft,
     shouldShowStartPendingDraft,
+    shouldShowFrozenPreToolText,
     flushLlmStreamingDeltaBuffer,
     appendLlmStreamingDelta,
     commitPendingLlmStreamingText,
+    freezeAndResetStreaming,
+    clearFrozenPreToolText,
+    clearLiveRunTimeline,
+    getLiveRunTimelineItems,
+    upsertLiveRunTimelineToolStep,
     resetLlmStreamingState,
     applyStreamEvent,
     cleanup,

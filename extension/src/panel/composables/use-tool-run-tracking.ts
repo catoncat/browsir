@@ -24,6 +24,11 @@ import {
   toRecord,
   type ToolPendingStepState,
 } from "../utils/tool-formatters";
+import {
+  cloneRunTimelineItems,
+  type RunTimelineItem,
+  upsertRunTimelineToolItem,
+} from "../utils/run-timeline";
 
 const TOOL_STREAM_SYNC_MAX_EVENTS = 5000;
 const TOOL_STREAM_SYNC_MAX_BYTES = 4 * 1024 * 1024;
@@ -50,6 +55,11 @@ export interface ToolRunTrackingDeps {
     eventSessionId: string,
   ) => LlmStreamEventResult;
   resetLlmStreamingState: () => void;
+  clearLiveRunTimeline: () => void;
+  getLiveRunTimelineItems: () => RunTimelineItem[];
+  upsertLiveRunTimelineToolStep: (step: ToolPendingStepState) => void;
+  captureCompletedRunArtifacts: (items: RunTimelineItem[]) => void;
+  clearCompletedRunArtifacts: () => void;
 }
 
 export function useToolRunTracking(deps: ToolRunTrackingDeps) {
@@ -342,6 +352,8 @@ export function useToolRunTracking(deps: ToolRunTrackingDeps) {
       bumpRunViewEpoch("llm");
       clearToolPendingCardLeaveTimer();
       clearBoundLlmStreamingState();
+      deps.clearLiveRunTimeline();
+      deps.clearCompletedRunArtifacts();
       finalAssistantStreamingPhase.value = false;
       setLlmRunHint("分析任务", "正在规划下一步动作");
       return;
@@ -404,6 +416,13 @@ export function useToolRunTracking(deps: ToolRunTrackingDeps) {
         status: "running",
         logs: [],
       });
+      deps.upsertLiveRunTimelineToolStep({
+        step,
+        action,
+        detail,
+        status: "running",
+        logs: [],
+      });
       activeToolRun.value = {
         step,
         action,
@@ -426,6 +445,14 @@ export function useToolRunTracking(deps: ToolRunTrackingDeps) {
       const ok = payload.ok === true;
       const errorText = String(payload.error || "").trim();
       upsertToolPendingStepState({
+        step,
+        action,
+        detail,
+        status: ok ? "done" : "failed",
+        error: errorText,
+        logs: existing?.logs || [],
+      });
+      deps.upsertLiveRunTimelineToolStep({
         step,
         action,
         detail,
@@ -462,8 +489,15 @@ export function useToolRunTracking(deps: ToolRunTrackingDeps) {
       return;
     }
     if (LOOP_TERMINAL_TYPES.has(type)) {
+      const completedTimeline = cloneRunTimelineItems(
+        deps.getLiveRunTimelineItems(),
+      );
+      if (completedTimeline.length > 0) {
+        deps.captureCompletedRunArtifacts(completedTimeline);
+      }
       activeToolRun.value = null;
       clearBoundLlmStreamingState();
+      deps.clearLiveRunTimeline();
       clearToolPendingCardLeaveTimer();
       finalAssistantStreamingPhase.value = false;
       runPhase.value = "idle";

@@ -7,6 +7,8 @@ const MAIN_SCROLL_BOTTOM_THRESHOLD_PX = 120;
 export interface ChatScrollSyncDeps {
   scrollContainer: Ref<HTMLElement | null>;
   stableMessages: Ref<DisplayMessage[]>;
+  shouldShowRunTimeline: ComputedRef<boolean>;
+  runTimelineStructureTokens: Ref<string[]> | ComputedRef<string[]>;
   shouldShowStreamingDraft: ComputedRef<boolean>;
   activeSessionId: Ref<string>;
   activeRunToken: Ref<number>;
@@ -27,6 +29,9 @@ export function useChatScrollSync(deps: ChatScrollSyncDeps) {
   const visibleMessageStructureKey = computed(() =>
     [
       deps.stableMessages.value.map((item) => `${item.role}:${item.entryId}`).join("|"),
+      deps.shouldShowRunTimeline.value
+        ? `timeline:${String(deps.activeSessionId.value || "__global__")}:${deps.activeRunToken.value}:${deps.runTimelineStructureTokens.value.join("||")}`
+        : "",
       deps.shouldShowStreamingDraft.value
         ? `draft:${String(deps.activeSessionId.value || "__global__")}:${deps.activeRunToken.value}`
         : "",
@@ -49,6 +54,11 @@ export function useChatScrollSync(deps: ChatScrollSyncDeps) {
   });
 
   watch(deps.llmStreamingText, async () => {
+    if (!deps.isRunActive.value) return;
+    await followScrollIfNeeded();
+  });
+
+  watch(deps.runTimelineStructureTokens, async () => {
     if (!deps.isRunActive.value) return;
     await followScrollIfNeeded();
   });

@@ -39,6 +39,7 @@
 - `docs/browser-agent-reliability-checklist.md` — 可靠性检查表
 - `docs/cursor-toolbox-reference-2026-03-15.md` — Cursor-Toolbox 外部参考
 - `docs/cursor-help-runtime-alignment-plan-2026-03-12.md` — Cursor Help 运行时对齐
+- `docs/tool-call-streaming-ux-research-2026-03-25.md` — Tool Call 过程中文本闪烁/清空体验研究
 - `docs/context-reference-filesystem-and-kernel-boundaries-design-2026-03-13.md` — 上下文引用与边界设计
 
 ## 5. 已归档（历史口径，仅供考古）

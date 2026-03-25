@@ -55,3 +55,4 @@ replyx.json
 
 # Tool-generated local state
 .cunzhi-memory/
+.claude/settings.local.json

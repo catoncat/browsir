@@ -13,10 +13,8 @@ import type {
   DisplayMessage,
   QueuedPromptViewItem,
 } from "./types";
-import {
-  toRecord,
-  shouldAlwaysShowToolMessage,
-} from "./utils/tool-formatters";
+import { shouldAlwaysShowToolMessage } from "./utils/tool-formatters";
+import type { RunTimelineItem } from "./utils/run-timeline";
 
 
 import { useForkScene } from "./composables/use-fork-scene";
@@ -239,24 +237,24 @@ const {
   onError: setErrorMessage,
 });
 const queuedPromotingIds = ref<Set<string>>(new Set());
+const completedRunTimelineItems = ref<RunTimelineItem[]>([]);
+
+function clearCompletedRunArtifacts() {
+  completedRunTimelineItems.value = [];
+}
 // Forward references for llm-streaming functions (resolved after useLlmStreaming)
 let _applyStreamEvent: (type: string, payload: Record<string, unknown>, sid: string) => import("./composables/use-llm-streaming").LlmStreamEventResult = () => ({ handled: false });
 let _resetLlmStreamingState: () => void = () => {};
+let _clearLiveRunTimeline: () => void = () => {};
+let _getLiveRunTimelineItems: () => RunTimelineItem[] = () => [];
 const {
   runPhase,
-  activeToolRun,
   toolPendingStepStates,
   activeRunToken,
   finalAssistantStreamingPhase,
-  toolPendingCardLeaving,
+  shouldShowToolPendingCard,
   hasRunningToolPendingActivity,
   hasToolPendingActivity,
-  toolPendingCardStatus,
-  toolPendingCardHeadline,
-  shouldShowToolPendingCard,
-  toolPendingCardAction,
-  toolPendingCardDetail,
-  toolPendingCardStepsData,
   activeRunHint,
   setLlmRunHint,
   clearRunHint,
@@ -276,6 +274,17 @@ const {
   runSafely,
   applyStreamEvent: (type, payload, sid) => _applyStreamEvent(type, payload, sid),
   resetLlmStreamingState: () => _resetLlmStreamingState(),
+  clearLiveRunTimeline: () => _clearLiveRunTimeline(),
+  getLiveRunTimelineItems: () => _getLiveRunTimelineItems(),
+  upsertLiveRunTimelineToolStep: (step) => upsertLiveRunTimelineToolStep(step),
+  captureCompletedRunArtifacts: (items) => {
+    completedRunTimelineItems.value = items.map((item) =>
+      item.kind === "text"
+        ? { ...item }
+        : { ...item, logs: Array.isArray(item.logs) ? [...item.logs] : [] },
+    );
+  },
+  clearCompletedRunArtifacts,
 });
 
 const {
@@ -283,11 +292,15 @@ const {
   llmStreamingSessionId,
   llmStreamingActive,
   llmStreamingPendingText,
+  liveRunTimelineItems,
   shouldShowStreamingDraft,
   shouldShowStartPendingDraft,
   flushLlmStreamingDeltaBuffer,
   appendLlmStreamingDelta,
   commitPendingLlmStreamingText,
+  clearLiveRunTimeline,
+  getLiveRunTimelineItems,
+  upsertLiveRunTimelineToolStep,
   resetLlmStreamingState,
   applyStreamEvent,
   cleanup: cleanupLlmStreaming,
@@ -301,8 +314,32 @@ const {
 });
 _applyStreamEvent = applyStreamEvent;
 _resetLlmStreamingState = resetLlmStreamingState;
+_clearLiveRunTimeline = clearLiveRunTimeline;
+_getLiveRunTimelineItems = () => getLiveRunTimelineItems();
 const toolHistoryToggleLabel = computed(() =>
   showToolHistory.value ? "隐藏工具轨迹" : "显示工具轨迹"
+);
+
+const shouldShowCompletedRunTimeline = computed(() =>
+  !isRunActive.value &&
+  completedRunTimelineItems.value.length > 0 &&
+  stableMessages.value.length > 0,
+);
+
+const liveRunTimelineStructureTokens = computed(() =>
+  liveRunTimelineItems.value.map((item) =>
+    item.kind === "text"
+      ? `text:${item.id}:${item.text}`
+      : `tool:${item.id}:${item.step}:${item.status}`,
+  ),
+);
+
+const shouldShowLiveRunTimeline = computed(() =>
+  liveRunTimelineItems.value.length > 0 && !finalAssistantStreamingPhase.value,
+);
+
+const shouldHideInlineToolMessages = computed(() =>
+  shouldShowLiveRunTimeline.value,
 );
 
 const baseConversationMessages = computed<DisplayMessage[]>(() => {
@@ -310,8 +347,10 @@ const baseConversationMessages = computed<DisplayMessage[]>(() => {
     .filter((item) => {
       const role = String(item?.role || "");
       if (role !== "tool") return true;
+      if (shouldHideInlineToolMessages.value) return false;
+      if (shouldAlwaysShowToolMessage(item)) return true;
       if (showToolHistory.value) return true;
-      return shouldAlwaysShowToolMessage(item);
+      return false;
     })
     .map((item) => ({
       role: String(item?.role || ""),
@@ -395,6 +434,8 @@ const {
   hasRunningToolPendingActivity,
   llmStreamingActive,
   llmStreamingText,
+  clearLiveRunTimeline,
+  clearCompletedRunArtifacts,
   finalAssistantStreamingPhase,
   pendingRegenerate,
   userPendingRegenerate,
@@ -422,9 +463,28 @@ const {
   emitUiSessionChanged: (payload) =>
     panelUiRuntime.runHook("ui.session.changed", payload),
 });
+
+const completedRunTimelineSummary = computed(() => {
+  const toolCount = completedRunTimelineItems.value.filter((item) => item.kind === "tool").length;
+  if (toolCount > 0) return `查看本轮执行过程（${toolCount}步）`;
+  return `查看本轮执行过程`;
+});
+
+const latestAssistantMessageEntryId = computed(() => {
+  for (let index = stableMessages.value.length - 1; index >= 0; index -= 1) {
+    const item = stableMessages.value[index];
+    if (String(item?.role || "") !== "assistant") continue;
+    const entryId = String(item?.entryId || "").trim();
+    if (entryId) return entryId;
+  }
+  return "";
+});
+
 useChatScrollSync({
   scrollContainer,
   stableMessages,
+  shouldShowRunTimeline: shouldShowLiveRunTimeline,
+  runTimelineStructureTokens: liveRunTimelineStructureTokens,
   shouldShowStreamingDraft,
   activeSessionId,
   activeRunToken,
@@ -527,8 +587,9 @@ watch(
 
 const hasVisibleConversation = computed(() =>
   stableMessages.value.length > 0
+  || shouldShowLiveRunTimeline.value
   || shouldShowStreamingDraft.value
-  || shouldShowToolPendingCard.value
+  || shouldShowCompletedRunTimeline.value
   || shouldShowStartPendingDraft.value
 );
 
@@ -782,6 +843,9 @@ defineExpose({ handleCreateSession, sessionListRenderState });
               :show-copy-action="canCopyMessage(msg)"
               :show-retry-action="canRetryMessage(msg, index)"
               :show-fork-action="canForkMessage(msg, index)"
+              :show-execution-steps-action="shouldShowCompletedRunTimeline && msg.entryId === latestAssistantMessageEntryId"
+              :execution-steps-label="completedRunTimelineSummary"
+              :execution-timeline-items="shouldShowCompletedRunTimeline && msg.entryId === latestAssistantMessageEntryId ? completedRunTimelineItems : []"
               @copy="handleCopyMessage"
               @edit="handleEditMessage"
               @edit-change="handleEditDraftChange"
@@ -798,27 +862,36 @@ defineExpose({ handleCreateSession, sessionListRenderState });
             waiting-label="正在启动响应"
           />
 
+          <template
+            v-for="item in liveRunTimelineItems"
+            :key="`live-${String(activeSessionId || '__global__')}-${activeRunToken}-${item.id}`"
+          >
+            <StreamingDraftContainer
+              v-if="item.kind === 'text'"
+              :content="item.text"
+              :active="false"
+            />
+            <ChatMessage
+              v-else
+              role="tool_pending"
+              content=""
+              :entry-id="`live-tool-${item.id}`"
+              :tool-name="item.action"
+              :tool-pending="true"
+              :tool-pending-leaving="false"
+              :tool-pending-status="item.status"
+              :tool-pending-headline="item.headline"
+              :tool-pending-action="item.action"
+              :tool-pending-detail="item.detail"
+              :tool-pending-steps-data="[{ step: item.step, status: item.status, line: item.line, logs: item.logs }]"
+            />
+          </template>
+
           <StreamingDraftContainer
             v-if="shouldShowStreamingDraft"
             :content="llmStreamingText"
             :active="llmStreamingActive"
             :waiting-label="isCompacting ? '正在整理上下文' : (activeRunHint?.label || '等待模型响应')"
-          />
-
-          <ChatMessage
-            v-if="shouldShowToolPendingCard"
-            :key="`__tool_pending__${String(activeSessionId || '__global__')}__${activeRunToken}`"
-            role="tool_pending"
-            content=""
-            :entry-id="`__tool_pending__${String(activeSessionId || '__global__')}__${activeRunToken}`"
-            :tool-name="activeToolRun?.action || toolPendingCardAction || 'llm'"
-            :tool-pending="true"
-            :tool-pending-leaving="toolPendingCardLeaving"
-            :tool-pending-status="toolPendingCardStatus"
-            :tool-pending-headline="toolPendingCardHeadline"
-            :tool-pending-action="toolPendingCardAction"
-            :tool-pending-detail="toolPendingCardDetail"
-            :tool-pending-steps-data="toolPendingCardStepsData"
           />
 
         </div>

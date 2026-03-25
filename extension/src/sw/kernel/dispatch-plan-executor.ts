@@ -1063,15 +1063,23 @@ main().catch((error) => {
         );
       }
       case "step.element_action": {
+        const explicitExpect = normalizeVerifyExpect(plan.expect || null);
+        const actionArgs = explicitExpect
+          ? {
+              ...plan.action,
+              expect: explicitExpect,
+            }
+          : { ...plan.action };
         const out = await executeStep({
           sessionId,
           capability: plan.capability,
-          action: "action",
+          action: plan.kindValue,
           args: {
             tabId: plan.tabId,
-            action: plan.action,
-            expect: plan.expect,
+            action: actionArgs,
+            ...(explicitExpect ? { expect: explicitExpect } : {}),
           },
+          ...(explicitExpect ? { verifyPolicy: "always" as const } : {}),
         });
         if (!out.ok) {
           return buildStepFailureEnvelope(
@@ -1094,7 +1102,6 @@ main().catch((error) => {
         );
         const actionData =
           providerAction.data !== undefined ? providerAction.data : out.data;
-        const explicitExpect = normalizeVerifyExpect(plan.expect || null);
         const hardFail = !!explicitExpect;
         if (!verified && hardFail) {
           const errorReason = mapVerifyReasonToFailureReason(verifyReason);

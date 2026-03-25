@@ -83,6 +83,9 @@ describe("stealth-tab", () => {
         focused: false,
       }),
     );
+    const createArgs = (chrome.windows.create as any).mock.calls[0]?.[0] || {};
+    expect(createArgs.width).toBeUndefined();
+    expect(createArgs.height).toBeUndefined();
     expect(isStealthTab(tab.id!)).toBe(true);
     expect(getStealthTabCount()).toBe(1);
   });

@@ -30,8 +30,6 @@ async function ensureStealthWindow(): Promise<number> {
     type: "popup",
     state: "minimized",
     focused: false,
-    width: 800,
-    height: 600,
   });
   if (!win?.id) {
     throw new Error("Failed to create stealth window");
