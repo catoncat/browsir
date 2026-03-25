@@ -683,14 +683,14 @@ onClickOutside(executionTimelinePopupRef, () => {
       </div>
 
       <!-- Inline Tool Call Indicators (from contentBlocks) -->
-      <div v-if="contentBlockToolCalls.length > 0" class="flex flex-wrap gap-1.5">
+      <div v-if="contentBlockToolCalls.length > 0" class="flex flex-wrap gap-1.5 mt-1">
         <div
           v-for="tc in contentBlockToolCalls"
           :key="tc.id"
-          class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] font-medium bg-purple-500/8 text-purple-700 dark:text-purple-300 border border-purple-500/15"
+          class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] font-medium bg-ui-surface/80 text-ui-text-muted border border-ui-border/50"
           :title="`${tc.name}(${tc.arguments.slice(0, 100)})`"
         >
-          <Cpu :size="12" class="shrink-0 opacity-70" aria-hidden="true" />
+          <Cpu :size="13" class="shrink-0 opacity-60" aria-hidden="true" />
           <span class="truncate max-w-[200px]">{{ tc.name }}</span>
         </div>
       </div>
