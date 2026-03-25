@@ -87,4 +87,4 @@ tags: [prompt, hosted-chat, role, cursor-help, llm, ux]
 ## 相关 commits
 
 - `02a321a` `Refine user-facing model copy and hide hosted-chat branding`
-- `未提交` 本轮 hosted chat 身份漂移修复
+- `d120bd3` `Clamp hosted-chat identity drift to BBL`
