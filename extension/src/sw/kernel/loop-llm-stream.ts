@@ -235,7 +235,7 @@ export async function readHostedChatTurnFromTransportStream(
   } | null;
   if (latestTransportError) {
     const error = new Error(
-      latestTransportError.message || "网页宿主聊天执行失败",
+      latestTransportError.message || "生成失败",
     ) as RuntimeErrorWithMeta;
     error.code = "E_HOSTED_CHAT_TRANSPORT";
     error.details = latestTransportError.meta;
@@ -245,7 +245,7 @@ export async function readHostedChatTurnFromTransportStream(
 
   if (!resolved) {
     const error = new Error(
-      "网页宿主聊天回合未返回最终结果",
+      "未返回完整结果，请重试。",
     ) as RuntimeErrorWithMeta;
     error.code = "E_HOSTED_CHAT_NO_TURN_RESULT";
     error.retryable = false;
@@ -263,7 +263,7 @@ export function hostedChatTurnToMessage(
   result: HostedChatTurnResult,
 ): JsonRecord {
   return {
-    content: result.finishReason === "tool_calls" ? "" : result.assistantText,
+    content: result.assistantText,
     tool_calls: result.toolCalls,
     finish_reason: result.finishReason,
     meta: result.meta,

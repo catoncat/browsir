@@ -1,5 +1,5 @@
 import type { BrainOrchestrator } from "../orchestrator.browser";
-import { nowIso, randomId, type MessageEntry, type SessionEntry, type SessionMeta } from "../types";
+import { nowIso, randomId, type ContentBlock, type MessageEntry, type SessionEntry, type SessionMeta } from "../types";
 
 const SESSION_TITLE_MAX = 28;
 const SESSION_TITLE_MIN = 2;
@@ -160,6 +160,7 @@ export async function buildConversationView(
   messages: Array<{
     role: string;
     content: string;
+    contentBlocks?: ContentBlock[];
     entryId: string;
     toolName?: string;
     toolCallId?: string;
@@ -185,6 +186,7 @@ export async function buildConversationView(
     .map((entry) => ({
       role: entry.role,
       content: entry.text,
+      ...(entry.contentBlocks?.length ? { contentBlocks: entry.contentBlocks } : {}),
       entryId: entry.id,
       toolName: entry.toolName,
       toolCallId: entry.toolCallId,

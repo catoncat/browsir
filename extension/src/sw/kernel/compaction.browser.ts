@@ -172,6 +172,12 @@ function normalizeSummary(text: string): string {
 
 function entryToText(entry: SessionEntry): string {
   if (entry.type === "message") {
+    if (entry.contentBlocks?.length) {
+      const parts = entry.contentBlocks.map((b) =>
+        b.type === "text" ? b.text : `[tool_call:${b.name}]`
+      );
+      return `[${entry.role}] ${parts.join(" ")}`;
+    }
     return `[${entry.role}] ${entry.text}`;
   }
   if (entry.type === "compaction") {

@@ -70,10 +70,17 @@ export interface SessionEntryBase {
   custom?: Record<string, unknown>;
 }
 
+/** Ordered content block inside an assistant message (text + tool call mixed). */
+export type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "toolCall"; id: string; name: string; arguments: string };
+
 export interface MessageEntry extends SessionEntryBase {
   type: "message";
   role: SessionMessageRole;
   text: string;
+  /** Ordered content blocks for assistant messages with tool calls. Optional for backward compat. */
+  contentBlocks?: ContentBlock[];
   toolName?: string;
   toolCallId?: string;
   metadata?: Record<string, unknown>;
@@ -158,6 +165,7 @@ export interface SessionContextMessage {
   role: SessionContextMessageRole;
   content: string;
   llmContent?: string;
+  contentBlocks?: ContentBlock[];
   entryId: string;
   toolName?: string;
   toolCallId?: string;

@@ -1,5 +1,7 @@
 type JsonRecord = Record<string, unknown>;
 
+import type { ContentBlock } from "./types";
+
 export interface LlmToolCall {
   id: string;
   type: "function";
@@ -44,6 +46,7 @@ export interface SessionContextMessageLike {
   role: string;
   content: string;
   llmContent?: string;
+  contentBlocks?: ContentBlock[];
   entryId?: string;
   toolName?: string;
   toolCallId?: string;
@@ -548,6 +551,28 @@ export function convertSessionContextMessagesToLlm(messages: SessionContextMessa
     }
 
     if (role === "user" || role === "assistant" || role === "system") {
+      // For assistant messages with contentBlocks, restore tool_calls for LLM context
+      if (role === "assistant" && item.contentBlocks?.length) {
+        const textParts = item.contentBlocks
+          .filter((b): b is ContentBlock & { type: "text" } => b.type === "text")
+          .map((b) => b.text)
+          .join("\n");
+        const toolCallBlocks = item.contentBlocks
+          .filter((b): b is ContentBlock & { type: "toolCall" } => b.type === "toolCall");
+        if (toolCallBlocks.length > 0) {
+          const msg: JsonRecord = {
+            role: "assistant",
+            content: textParts || null,
+            tool_calls: toolCallBlocks.map((tc) => ({
+              id: tc.id,
+              type: "function",
+              function: { name: tc.name, arguments: tc.arguments },
+            })),
+          };
+          out.push(msg);
+          continue;
+        }
+      }
       out.push({
         role,
         content

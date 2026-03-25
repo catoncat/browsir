@@ -55,6 +55,7 @@ import {
 import { createSystemPromptResolver } from "./prompt/prompt-resolver.browser";
 import {
   nowIso,
+  type ContentBlock,
   type SessionEntry,
   type SessionMeta,
   type StreamingBehavior,
@@ -2326,8 +2327,7 @@ export function createRuntimeLoopController(
         });
 
         if (toolCalls.length === 0) {
-          // 仅在最终回答阶段（无工具调用）写入 assistant 文本。
-          // 含 tool_calls 的中间思考阶段只通过流式态和工具步骤卡展示，避免正文被切碎成多段。
+          // 最终回答阶段（无工具调用）
           await orchestrator.sessions.appendMessage({
             sessionId,
             role: "assistant",
@@ -2341,6 +2341,26 @@ export function createRuntimeLoopController(
           });
           break;
         }
+
+        // 含 tool_calls 的中间回合也写入 assistant 消息，用 contentBlocks 保留完整结构
+        const contentBlocks: ContentBlock[] = [];
+        if (assistantText) {
+          contentBlocks.push({ type: "text", text: assistantText });
+        }
+        for (const tc of toolCalls) {
+          contentBlocks.push({
+            type: "toolCall",
+            id: tc.id,
+            name: tc.function.name,
+            arguments: tc.function.arguments,
+          });
+        }
+        await orchestrator.sessions.appendMessage({
+          sessionId,
+          role: "assistant",
+          text: assistantText,
+          contentBlocks,
+        });
 
         const toolCallSignature = buildToolCallSignature(toolCalls);
         const previousEvidenceFingerprint = toolCallSignature

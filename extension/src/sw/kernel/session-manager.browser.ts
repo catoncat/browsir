@@ -11,6 +11,7 @@ import {
   normalizeSessionWorkingContext,
   nowIso,
   randomId,
+  type ContentBlock,
   type CompactionDraft,
   type CompactionEntry,
   type MessageEntry,
@@ -35,6 +36,7 @@ export interface AppendMessageInput {
   sessionId: string;
   role: SessionMessageRole;
   text: string;
+  contentBlocks?: ContentBlock[];
   toolName?: string;
   toolCallId?: string;
   custom?: Record<string, unknown>;
@@ -154,6 +156,7 @@ export class BrowserSessionManager {
         timestamp: nowIso(),
         role: input.role,
         text: input.text,
+        ...(input.contentBlocks?.length ? { contentBlocks: input.contentBlocks } : {}),
         toolName: input.toolName,
         toolCallId: input.toolCallId,
         metadata: input.metadata,
@@ -277,6 +280,7 @@ export class BrowserSessionManager {
           typeof entry.metadata?.llmText === "string"
             ? entry.metadata.llmText
             : undefined,
+        contentBlocks: entry.contentBlocks,
         entryId: entry.id,
         toolName: entry.toolName,
         toolCallId: entry.toolCallId
