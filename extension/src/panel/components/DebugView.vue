@@ -37,6 +37,14 @@ function shortId(value: unknown) {
   return text.length > 14 ? `${text.slice(0, 6)}...${text.slice(-6)}` : text;
 }
 
+function resolveLlmSourceLabel(providerId: unknown): string {
+  const normalized = String(providerId || "").trim();
+  if (!normalized) return "未配置";
+  if (normalized === "cursor_help_web") return "内置模型";
+  if (normalized === "openai_compatible") return "通用 API";
+  return "自定义服务";
+}
+
 const summary = computed(() => {
   const raw = diagnosticsPayload.value?.summary;
   return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
@@ -80,6 +88,20 @@ const currentSessionTitle = computed(() => {
 });
 
 const sessionLabel = computed(() => currentSessionTitle.value);
+const llmSourceLabel = computed(() => resolveLlmSourceLabel(health.value.llmProvider));
+const llmModelLabel = computed(() => String(health.value.llmModel || "").trim() || "自动");
+const llmAuxLabel = computed(() =>
+  String(health.value.llmAuxProfile || "").trim() ? "单独设置" : "跟随主对话",
+);
+const llmFallbackLabel = computed(() =>
+  String(health.value.llmFallbackProfile || "").trim() ? "已开启" : "未开启",
+);
+const llmConnectionLabel = computed(() => {
+  const providerId = String(health.value.llmProvider || "").trim();
+  if (!providerId) return "当前未设置模型来源";
+  if (providerId === "cursor_help_web") return "当前使用内置模型";
+  return health.value.hasLlmApiKey ? "当前服务已连接" : "当前服务缺少密钥";
+});
 
 function sessionOptionLabel(session: { id?: string; title?: string; updatedAt?: string }) {
   const title = sessionTitle(session?.title);
@@ -286,14 +308,14 @@ onMounted(() => {
             <div class="text-[10px] uppercase tracking-wider text-ui-text-muted flex items-center gap-1">
               <Radio :size="12" /> LLM
             </div>
-            <p class="mt-1 text-[12px] font-semibold text-ui-text">{{ health.llmProvider || "未配置 Provider" }}</p>
+            <p class="mt-1 text-[12px] font-semibold text-ui-text">{{ llmSourceLabel }}</p>
             <p class="text-[10px] text-ui-text-muted">
-              {{ `${health.llmDefaultProfile || "default"} · ${health.llmModel || "auto"}` }}
+              {{ `当前模型 ${llmModelLabel}` }}
             </p>
             <p class="text-[10px] text-ui-text-muted">
-              {{ `辅助 ${health.llmAuxProfile || "跟随主对话"} · 备用 ${health.llmFallbackProfile || "未启用"}` }}
+              {{ `标题与摘要 ${llmAuxLabel} · 失败兜底 ${llmFallbackLabel}` }}
             </p>
-            <p class="text-[10px] text-ui-text-muted">{{ health.hasLlmApiKey ? "当前默认 Profile 可用" : "当前默认 Profile 缺少凭据" }}</p>
+            <p class="text-[10px] text-ui-text-muted">{{ llmConnectionLabel }}</p>
           </div>
           <div class="rounded border border-ui-border bg-ui-bg p-2.5">
             <div class="text-[10px] uppercase tracking-wider text-ui-text-muted flex items-center gap-1">

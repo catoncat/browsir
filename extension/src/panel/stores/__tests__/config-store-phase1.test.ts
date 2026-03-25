@@ -281,7 +281,7 @@ describe("config-store Phase 1", () => {
           },
           {
             id: "cursor_help_web",
-            name: "Cursor 宿主聊天",
+            name: "内置模型",
             type: "hosted_chat",
             builtin: true,
           },
@@ -358,7 +358,7 @@ describe("config-store Phase 1", () => {
           },
           {
             id: "cursor_help_web",
-            name: "Cursor 宿主聊天",
+            name: "内置模型",
             type: "hosted_chat",
             options: {
               targetSite: "cursor_help",

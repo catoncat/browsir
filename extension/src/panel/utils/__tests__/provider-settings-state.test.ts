@@ -206,8 +206,8 @@ describe("provider-settings-state", () => {
     });
 
     expect(options.map((item) => item.label)).toEqual([
-      "内置免费 / GPT-5",
-      "内置免费 / Sonnet 4.6",
+      "内置模型 / GPT-5",
+      "内置模型 / Sonnet 4.6",
       "OpenRouter / gpt-4.1",
       "OpenRouter / gpt-4o-mini",
     ]);
@@ -236,9 +236,9 @@ describe("provider-settings-state", () => {
 
     const options = collectSceneModelOptions(config, builtinCatalog);
     expect(options.map((item) => item.label)).toEqual([
-      "内置免费 / Sonnet 4.6",
-      "内置免费 / GPT-5.1 Codex Mini",
-      "内置免费 / Gemini 3 Flash",
+      "内置模型 / Sonnet 4.6",
+      "内置模型 / GPT-5.1 Codex Mini",
+      "内置模型 / Gemini 3 Flash",
     ]);
 
     expect(deriveSceneModelDraft(config, builtinCatalog).primaryValue).toBe(

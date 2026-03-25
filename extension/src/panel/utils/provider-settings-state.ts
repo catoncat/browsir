@@ -16,7 +16,7 @@ export interface ProviderSettingsDraft {
 type ManagedRole = "primary" | "aux" | "fallback";
 
 export const ADD_CUSTOM_PROVIDER_OPTION_VALUE = "__add_custom_provider__";
-export const BUILTIN_FREE_PROVIDER_LABEL = "内置免费";
+export const BUILTIN_FREE_PROVIDER_LABEL = "内置模型";
 
 export interface BuiltinFreeModelCatalog {
   selectedModel: string;

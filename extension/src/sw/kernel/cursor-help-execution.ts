@@ -135,11 +135,11 @@ export function clearStaleExecution(slotId: string, tabId: number): void {
       continue;
     }
     if (entry.startedAt === null && Date.now() - entry.createdAt >= EXECUTION_BOOT_TIMEOUT_MS) {
-      failExecution(entry, "网页 provider 请求启动超时，已自动回收旧执行");
+      failExecution(entry, "请求启动超时，请稍后重试。");
       continue;
     }
     if (Date.now() - entry.lastEventAt < EXECUTION_STALE_MS) continue;
-    failExecution(entry, "网页 provider 请求已超时，已自动回收旧执行");
+    failExecution(entry, "请求超时，请稍后重试。");
   }
 }
 

@@ -127,6 +127,15 @@ const AUTOSCALE_EXPAND_COOLDOWN_MS = 10_000;
 const AUTOSCALE_SHRINK_COOLDOWN_MS = 60_000;
 const AUTOSCALE_IDLE_THRESHOLD_MS = 120_000;
 const HOSTED_CHAT_RESPONSE_CONTENT_TYPE = "application/x-browser-brain-loop-hosted-chat+jsonl";
+const GENERIC_BUSY_MESSAGE = "当前请求仍在处理中，请稍后重试。";
+const GENERIC_QUEUE_MESSAGE = "当前请求较多，请稍后重试。";
+const GENERIC_NOT_READY_MESSAGE = "生成通道尚未准备好，请稍后重试。";
+const GENERIC_PAGE_NOT_READY_MESSAGE = "页面尚未准备好，请稍后重试。";
+const GENERIC_ENV_RESET_MESSAGE = "执行环境已重置，请重试。";
+const GENERIC_ENV_CLOSED_MESSAGE = "执行环境已关闭，请重试。";
+const GENERIC_ENV_REBUILT_MESSAGE = "执行环境已重建，请重试。";
+const GENERIC_BOOT_TIMEOUT_MESSAGE = "请求启动超时，请稍后重试。";
+const GENERIC_TIMEOUT_MESSAGE = "请求超时，请稍后重试。";
 let cursorHelpSlotLifecycleBoundTabs: typeof chrome.tabs | null = null;
 let cursorHelpSlotLifecycleBoundWindows: typeof chrome.windows | null = null;
 let cursorHelpHeartbeatTimer: ReturnType<typeof setTimeout> | null = null;
@@ -244,7 +253,7 @@ function resolveSessionLaneConflict(
     return {
       kind: "same-lane-busy",
       reason: `same-lane:${lane}`,
-      message: `会话 ${normalizedSessionId} 已有执行中的 ${lane} 网页 provider 请求`,
+      message: GENERIC_BUSY_MESSAGE,
     };
   }
 
@@ -253,7 +262,7 @@ function resolveSessionLaneConflict(
     return {
       kind: "lane-rule-reject",
       reason: `${lane}-waits-for:title`,
-      message: `会话 ${normalizedSessionId} 的 ${lane} lane 需等待 title 完成后再执行`,
+      message: GENERIC_BUSY_MESSAGE,
     };
   }
 
@@ -262,7 +271,7 @@ function resolveSessionLaneConflict(
     return {
       kind: "lane-rule-reject",
       reason: `title-waits-for:${blocking.lane}`,
-      message: `会话 ${normalizedSessionId} 的 title lane 需等待 ${blocking.lane} 完成后再执行`,
+      message: GENERIC_BUSY_MESSAGE,
     };
   }
 
@@ -437,7 +446,7 @@ async function cleanupOrphanedManagedSlots(
   }
   if (orphaned.length <= 0) return slots;
   for (const slot of orphaned) {
-    closeActiveRequestForSlot(slot.slotId, "Cursor Help 孤儿槽位已回收");
+    closeActiveRequestForSlot(slot.slotId, GENERIC_ENV_RESET_MESSAGE);
     clearSlotPreferences(slot.slotId);
   }
 
@@ -665,7 +674,8 @@ async function waitForCursorHelpSlot(
           conversationKey,
         };
       }
-      lastUnavailableReason = String(chosen.lastError || "").trim() || "Cursor Help 页面尚未完成启动";
+      lastUnavailableReason =
+        String(chosen.lastError || "").trim() || GENERIC_PAGE_NOT_READY_MESSAGE;
     } else {
       sawBusyCandidates = state.slots.length > 0;
       if (sawBusyCandidates) {
@@ -685,27 +695,18 @@ async function waitForCursorHelpSlot(
         }
       }
       lastUnavailableReason = sawBusyCandidates
-        ? "当前所有槽位都有活动中的网页 provider 请求"
-        : "暂无可用的 Cursor Help 槽位";
+        ? GENERIC_QUEUE_MESSAGE
+        : "暂时没有可用的生成通道，请稍后重试。";
     }
     await new Promise((resolve) => setTimeout(resolve, pollInterval));
     pollInterval = Math.min(pollInterval * 1.5, 2000);
   }
 
   if (sawBusyCandidates) {
-    throw new Error(
-      lane === "primary"
-        ? "Cursor Help 主执行槽位繁忙，请稍后重试。"
-        : "Cursor Help 辅助执行槽位繁忙，请稍后重试。",
-    );
+    throw new Error(GENERIC_QUEUE_MESSAGE);
   }
 
-  const prefix = lane === "primary"
-    ? "Cursor Help 主执行槽位未就绪"
-    : "Cursor Help 辅助执行槽位未就绪";
-  throw new Error(
-    lastUnavailableReason ? `${prefix}：${lastUnavailableReason}` : prefix,
-  );
+  throw new Error(lastUnavailableReason || GENERIC_NOT_READY_MESSAGE);
 }
 
 function closeActiveRequestForSlot(slotId: string, reason: string): void {
@@ -725,7 +726,7 @@ async function removeCursorHelpSlotByTabId(tabId: number): Promise<void> {
   const removedSlots = current.slots.filter((slot) => slot.tabId === tabId);
   if (removedSlots.length <= 0) return;
   for (const slot of removedSlots) {
-    closeActiveRequestForSlot(slot.slotId, "Cursor Help 槽位标签页已关闭");
+    closeActiveRequestForSlot(slot.slotId, GENERIC_ENV_CLOSED_MESSAGE);
     clearSlotPreferences(slot.slotId);
   }
   current.slots = current.slots.filter((slot) => slot.tabId !== tabId);
@@ -739,7 +740,7 @@ async function removeCursorHelpSlotsByWindowId(windowId: number): Promise<void> 
   const removedPrimaryPoolWindow = current.windowId === windowId;
   if (removedSlots.length <= 0 && !removedPrimaryPoolWindow) return;
   for (const slot of removedSlots) {
-    closeActiveRequestForSlot(slot.slotId, "Cursor Help 专用窗口已关闭");
+    closeActiveRequestForSlot(slot.slotId, GENERIC_ENV_CLOSED_MESSAGE);
     clearSlotPreferences(slot.slotId);
   }
   current.slots = current.slots.filter((slot) => slot.windowId !== windowId);
@@ -858,7 +859,7 @@ export async function rebuildCursorHelpPool(
   }
   for (const slot of current.slots) {
     clearSlotPreferences(slot.slotId);
-    closeActiveRequestForSlot(slot.slotId, "Cursor Help 运行池已重建");
+    closeActiveRequestForSlot(slot.slotId, GENERIC_ENV_REBUILT_MESSAGE);
   }
   await saveCursorHelpPoolState({
     version: 1,
@@ -920,48 +921,48 @@ function summarizeCursorHelpModelCatalogProbe(
 
   if (windowStatus === "missing" && summary.recoveryCooldownActive === true) {
     return {
-      statusMessage: "内置免费运行池窗口缺失，当前仍在冷却期。",
+      statusMessage: "内置模型暂时不可用。",
       statusDetail:
-        lastWindowEventReason || "请稍后重试，或再次点击重试触发重建。",
+        lastWindowEventReason || "系统正在恢复，请稍后重试。",
       lastAction: recoveryAction,
     };
   }
 
   if (windowStatus === "missing" || summary.shouldRebuildWindow === true) {
     return {
-      statusMessage: "内置免费运行池窗口缺失，需要重新拉起。",
+      statusMessage: "内置模型需要重新连接。",
       statusDetail:
-        lastWindowEventReason || "点击重试后将尝试重新拉起运行池。",
+        lastWindowEventReason || "点击重试后会重新检测可用模型。",
       lastAction: recoveryAction,
     };
   }
 
   if (slotCount <= 0) {
     return {
-      statusMessage: "内置免费运行池尚未初始化。",
-      statusDetail: "点击重试后会尝试创建并探测运行池。",
+      statusMessage: "内置模型正在准备中。",
+      statusDetail: "点击重试后会重新检测可用模型。",
       lastAction: recoveryAction,
     };
   }
 
   if (errorCount > 0) {
     return {
-      statusMessage: "内置免费运行池当前异常。",
-      statusDetail: errorDetail || lastWindowEventReason || "请点击重试重新探测。",
+      statusMessage: "内置模型暂时不可用。",
+      statusDetail: errorDetail || lastWindowEventReason || "请点击重试重新检测。",
       lastAction: recoveryAction,
     };
   }
 
   if (readyCount <= 0 && busyCount > 0) {
     return {
-      statusMessage: "内置免费正在初始化，请稍后重试。",
+      statusMessage: "内置模型正在准备中，请稍后重试。",
       statusDetail: "",
       lastAction: recoveryAction,
     };
   }
 
   return {
-    statusMessage: "尚未从内置免费探测到可用模型。",
+    statusMessage: "暂未检测到可用的内置模型。",
     statusDetail: errorDetail || lastWindowEventReason,
     lastAction: recoveryAction,
   };
@@ -1152,7 +1153,7 @@ export function createCursorHelpWebProvider() {
       emitProviderDebugLog(
         "provider.resolve_slot",
         "running",
-        `lane=${lane} 开始解析目标 Cursor Help 执行槽位`,
+        `lane=${lane} 开始解析目标执行槽位`,
       );
 
       const resolved = await waitForCursorHelpSlot(input, lane);
@@ -1172,17 +1173,13 @@ export function createCursorHelpWebProvider() {
           "failed",
           `session=${sessionId} lane=${lane} kind=${laneConflict.kind} reason=${laneConflict.reason}`,
         );
-        throw new Error(laneConflict.message || `会话 ${sessionId} 的 ${lane} lane 当前不可用`);
+        throw new Error(laneConflict.message || GENERIC_BUSY_MESSAGE);
       }
       if (ACTIVE_REQUEST_ID_BY_SLOT.has(slot.slotId)) {
-        throw new Error(
-          `槽位 ${slot.slotId} 正在执行网页 provider 请求`,
-        );
+        throw new Error(GENERIC_BUSY_MESSAGE);
       }
       if (ACTIVE_REQUEST_ID_BY_TAB.has(slot.tabId)) {
-        throw new Error(
-          `目标标签页 ${slot.tabId} 正在执行网页 provider 请求`,
-        );
+        throw new Error(GENERIC_BUSY_MESSAGE);
       }
 
       const requestId = `cursor-help-${crypto.randomUUID()}`;
@@ -1246,7 +1243,7 @@ export function createCursorHelpWebProvider() {
       armExecutionWatchdog(
         entry,
         EXECUTION_BOOT_TIMEOUT_MS,
-        "网页 provider 请求未启动，请确认 Cursor Help 页面已加载完成",
+        GENERIC_BOOT_TIMEOUT_MESSAGE,
       );
       emitProviderDebugLog(
         "provider.execute",
@@ -1265,7 +1262,7 @@ export function createCursorHelpWebProvider() {
             .catch(() => {
               // noop
             });
-          failExecution(entry, "webchat provider aborted");
+          failExecution(entry, "请求已取消");
         },
         { once: true },
       );
@@ -1337,7 +1334,7 @@ export async function handleWebChatRuntimeMessage(message: unknown, senderTabId?
     enqueueHostedEvent(entry, event);
     if (event.stage === "request_started") {
       entry.startedAt = nowMs();
-      armExecutionWatchdog(entry, EXECUTION_STALE_MS, "网页 provider 请求长时间未结束");
+      armExecutionWatchdog(entry, EXECUTION_STALE_MS, GENERIC_TIMEOUT_MESSAGE);
       const requestedConversationKey = String(toRecord(event.meta).conversationKey || "").trim();
       if (requestedConversationKey && !entry.conversationKey) {
         entry.conversationKey = requestedConversationKey;
@@ -1368,7 +1365,7 @@ export async function handleWebChatRuntimeMessage(message: unknown, senderTabId?
       entry.firstDeltaLogged = true;
       emitProviderDebugLog("provider.first_delta", "done", `收到输出片段，长度=${event.deltaText.length}`);
     }
-    armExecutionWatchdog(entry, EXECUTION_STALE_MS, "网页 provider 请求长时间无新输出");
+    armExecutionWatchdog(entry, EXECUTION_STALE_MS, GENERIC_TIMEOUT_MESSAGE);
     return true;
   }
 
@@ -1379,7 +1376,7 @@ export async function handleWebChatRuntimeMessage(message: unknown, senderTabId?
       "done",
       `检测到 ${event.toolCalls.length} 个工具计划`
     );
-    armExecutionWatchdog(entry, EXECUTION_STALE_MS, "网页 provider 请求长时间无新输出");
+    armExecutionWatchdog(entry, EXECUTION_STALE_MS, GENERIC_TIMEOUT_MESSAGE);
     return true;
   }
 

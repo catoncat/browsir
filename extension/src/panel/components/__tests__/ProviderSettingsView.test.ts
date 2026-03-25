@@ -114,7 +114,7 @@ describe("ProviderSettingsView", () => {
     expect(primary.value).toBe(createSceneModelValue("cursor_help_web", "GPT-5"));
     expect(getOptionLabels(primary)).toEqual([
       "请选择模型",
-      "内置免费 / GPT-5",
+      "内置模型 / GPT-5",
     ]);
     expect(view.root.textContent || "").not.toContain("通用 API");
   });
@@ -125,13 +125,13 @@ describe("ProviderSettingsView", () => {
     const initialValue = primary.value;
 
     const addButton = Array.from(view.root.querySelectorAll("button")).find(
-      (button) => (button.textContent || "").includes("添加自定义服务商"),
+      (button) => (button.textContent || "").includes("添加服务"),
     ) as HTMLButtonElement | undefined;
     expect(addButton).toBeDefined();
     addButton?.click();
     await flushUi();
 
-    expect(view.root.textContent || "").toContain("添加自定义服务商");
+    expect(view.root.textContent || "").toContain("添加自定义服务");
 
     const backButton = view.root.querySelector(
       'button[aria-label="返回模型设置"]',
@@ -161,7 +161,7 @@ describe("ProviderSettingsView", () => {
     const initialValue = getSceneSelect(view.root, "primary").value;
 
     const addButton = Array.from(view.root.querySelectorAll("button")).find(
-      (button) => (button.textContent || "").includes("添加自定义服务商"),
+      (button) => (button.textContent || "").includes("添加服务"),
     ) as HTMLButtonElement | undefined;
     expect(addButton).toBeDefined();
     addButton?.click();
@@ -204,7 +204,7 @@ describe("ProviderSettingsView", () => {
     await flushUi();
 
     const saveButton = Array.from(view.root.querySelectorAll("button")).find((button) =>
-      (button.textContent || "").includes("保存服务商"),
+      (button.textContent || "").includes("保存服务"),
     ) as HTMLButtonElement | undefined;
     expect(saveButton).toBeDefined();
     saveButton?.click();
@@ -247,7 +247,7 @@ describe("ProviderSettingsView", () => {
       }),
     });
 
-    expect(view.root.textContent || "").toContain("已添加服务商");
+    expect(view.root.textContent || "").toContain("自定义服务");
     expect(view.root.textContent || "").toContain("rs");
     expect(view.root.textContent || "").toContain("2 个模型");
 
@@ -258,7 +258,7 @@ describe("ProviderSettingsView", () => {
     manageButton?.click();
     await flushUi();
 
-    expect(view.root.textContent || "").toContain("编辑自定义服务商");
+    expect(view.root.textContent || "").toContain("编辑自定义服务");
     expect(
       (
         view.root.querySelector('input[data-provider-field="name"]') as HTMLInputElement
@@ -279,7 +279,7 @@ describe("ProviderSettingsView", () => {
       },
     });
 
-    expect(view.root.textContent || "").toContain("内置免费模型加载失败");
+    expect(view.root.textContent || "").toContain("内置模型暂时不可用");
   });
 
   it("shows visible feedback when builtin free model catalog is empty", async () => {
@@ -290,6 +290,6 @@ describe("ProviderSettingsView", () => {
       },
     });
 
-    expect(view.root.textContent || "").toContain("内置免费当前不可用");
+    expect(view.root.textContent || "").toContain("当前没有可用的内置模型");
   });
 });

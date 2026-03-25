@@ -736,7 +736,7 @@ function classifyCursorHelpInvalidResponse(status: number, contentType: string, 
   const normalizedType = String(contentType || "").trim() || "(empty)";
   const detail = String(bodyText || "").trim();
   const suffix = detail ? ` ${detail}` : "";
-  return `Cursor Help 返回非 SSE 响应 (${status}, ${normalizedType})。${suffix}`.trim();
+  return `返回了不支持的响应格式 (${status}, ${normalizedType})。${suffix}`.trim();
 }
 
 function logToContent(step: string, status: "running" | "done" | "failed", detail: string): void {
@@ -1107,7 +1107,7 @@ function installFetchHook(): void {
         desiredConversationKey: execution.conversationKey
       });
       if (!rewritten.rewritten) {
-        throw new Error("Cursor Help 原生请求体无法定位目标消息");
+        throw new Error("原生请求体中未找到目标消息");
       }
       execution.state = "request_started";
       execution.matchedUrl = requestUrl;

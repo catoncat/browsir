@@ -115,7 +115,7 @@ export async function waitForCursorHelpTabReady(tabId: number, timeoutMs = 20_00
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error("等待 Cursor Help 页面加载超时");
+  throw new Error("等待页面加载超时");
 }
 
 export async function waitForCursorHelpInspectReady(

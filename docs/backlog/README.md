@@ -95,6 +95,12 @@ acceptance_ref: docs/<某设计文档>.md
   - `assignee: agent`
   - 说明：方向已纠偏为 `Skill = file package`。当前已保留直改 `mem://skills/...` 的能力，后续重点转到 frontmatter / registry 的双真相收敛与 package reconcile。
 
+4. `ISSUE-041` [hosted chat 内部 prompt 仍会先把自己识别成 Cursor](./2026-03-25-hosted-chat-role-drift-still-thinks-it-is-cursor.md)
+  - `status: open`
+  - `priority: p1`
+  - `assignee: unassigned`
+  - 说明：用户面文案已去品牌，但 hosted chat 内部角色约束仍不稳定，回答内容可能继续泄露 Cursor 身份。
+
 ### 已归档
 
 以下 issue 已完成并移入 `archive/` 子目录：
@@ -112,7 +118,8 @@ acceptance_ref: docs/<某设计文档>.md
 1. `ISSUE-039` 可优先排查，范围相对独立，且直接影响调试与历史可用性。
 2. `ISSUE-040` 已由 agent 开始处理，后续 agent 若接手，继续沿“file package + 热加载 + 可直接改文件”的方向收敛，不要再把 skill 收口成只能走专用 tool 的受管对象。
 3. `ISSUE-023` 由 human 负责，agent 不要并行改其 `write_scope`。
-4. 如有新需求，创建新的 backlog slice。
+4. `ISSUE-041` 适合单独切一刀做 prompt / rewrite / response guard 排查，不要和 UI 文案收口混做。
+5. 如有新需求，创建新的 backlog slice。
 
 ## 维护规则
 

@@ -604,7 +604,7 @@ export function parseHostedChatTransportEvent(raw: unknown): HostedChatTransport
     return {
       type,
       requestId,
-      error: String(parsed.error || "网页宿主聊天执行失败"),
+      error: String(parsed.error || "生成失败"),
       meta: toRecord(parsed.meta)
     };
   }

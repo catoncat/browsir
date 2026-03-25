@@ -758,7 +758,7 @@ describe("web-chat-executor.browser", () => {
           tool_choice: "auto"
         }
       })
-    ).rejects.toThrow("会话 session-a 已有执行中的");
+    ).rejects.toThrow("当前请求仍在处理中，请稍后重试。");
 
     const requestId = getLastExecuteRequestId();
     await handleWebChatRuntimeMessage({
@@ -874,7 +874,7 @@ describe("web-chat-executor.browser", () => {
           tool_choice: "auto",
         },
       }),
-    ).rejects.toThrow("title lane 需等待 primary 完成后再执行");
+    ).rejects.toThrow("当前请求仍在处理中，请稍后重试。");
 
     const requestId = getLastExecuteRequestId();
     await handleWebChatRuntimeMessage({
@@ -931,7 +931,7 @@ describe("web-chat-executor.browser", () => {
           tool_choice: "auto",
         },
       }),
-    ).rejects.toThrow("title lane 需等待 compaction 完成后再执行");
+    ).rejects.toThrow("当前请求仍在处理中，请稍后重试。");
 
     const requestId = getLastExecuteRequestId();
     await handleWebChatRuntimeMessage({
@@ -988,7 +988,7 @@ describe("web-chat-executor.browser", () => {
           tool_choice: "auto",
         },
       }),
-    ).rejects.toThrow("compaction lane 需等待 title 完成后再执行");
+    ).rejects.toThrow("当前请求仍在处理中，请稍后重试。");
 
     const requestId = getLastExecuteRequestId();
     await handleWebChatRuntimeMessage({
@@ -1456,7 +1456,7 @@ describe("web-chat-executor.browser", () => {
     expect(Number(debugState.summary.errorCount || 0)).toBeGreaterThan(0);
     expect(String(debugState.slots[0]?.status || "")).toBe("error");
     expect(String(debugState.slots[0]?.lastHealthReason || "")).toBe("runtime-mismatch");
-    expect(String(debugState.slots[0]?.lastError || "")).toContain("运行时版本不一致");
+    expect(String(debugState.slots[0]?.lastError || "")).toContain("页面环境需要刷新");
   });
 
   it("heartbeat auto-recovers a missing slot tab when the pool window is still alive", async () => {
@@ -1674,7 +1674,7 @@ describe("web-chat-executor.browser", () => {
           tool_choice: "auto"
         }
       })
-    ).rejects.toThrow("Cursor Help 运行时版本不一致");
+    ).rejects.toThrow("页面环境需要刷新");
 
     expect(
       sendMessage.mock.calls.some(
@@ -1857,7 +1857,7 @@ describe("web-chat-executor.browser", () => {
       await Promise.resolve();
       const error = await textErrorPromise;
       expect(error).toBeInstanceOf(Error);
-      expect((error as Error).message).toContain("网页 provider 请求未启动");
+      expect((error as Error).message).toContain("请求启动超时");
 
       const stored = await chrome.storage.local.get(CURSOR_HELP_POOL_STORAGE_KEY);
       const storedPoolState = asStoredPoolState(stored[CURSOR_HELP_POOL_STORAGE_KEY]);
@@ -1870,7 +1870,7 @@ describe("web-chat-executor.browser", () => {
           storedPoolState.slots.some(
             (slot: Record<string, unknown>) =>
               String(slot.status || "") === "stale" &&
-              String(slot.lastError || "").includes("网页 provider 请求未启动")
+              String(slot.lastError || "").includes("请求启动超时")
           )
       ).toBe(true);
     } finally {
@@ -1955,7 +1955,7 @@ describe("web-chat-executor.browser", () => {
 
     const result = await readResponseText(response).catch((err) => err);
     expect(result).toBeInstanceOf(Error);
-    expect((result as Error).message).toContain("aborted");
+    expect((result as Error).message).toContain("请求已取消");
 
     const sendMessage = chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>;
     const abortCall = sendMessage.mock.calls.find(

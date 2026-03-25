@@ -135,8 +135,8 @@ async function refreshBuiltinFreeCatalog(forceRefresh = false): Promise<void> {
   } catch (err) {
     const detail = trim(err instanceof Error ? err.message : String(err));
     builtinFreeError.value = detail
-      ? `内置免费模型加载失败：${detail}`
-      : "内置免费模型加载失败，请稍后重试。";
+      ? `内置模型暂时不可用：${detail}`
+      : "内置模型暂时不可用，请稍后重试。";
   } finally {
     if (!sceneSelectionDirty.value) {
       syncSceneDraft();
@@ -203,7 +203,7 @@ async function handleDiscoverModels(): Promise<void> {
   const apiKey = trim(apiKeyInput.value);
 
   if (!providerName) {
-    localError.value = "请先填写服务商名称。";
+    localError.value = "请先填写服务名称。";
     return;
   }
   if (!apiBase || !apiKey) {
@@ -288,7 +288,7 @@ function handleSaveProvider(): void {
   const apiKey = trim(apiKeyInput.value);
 
   if (!providerName) {
-    localError.value = "请先填写服务商名称。";
+    localError.value = "请先填写服务名称。";
     return;
   }
   if (!apiBase || !apiKey) {
@@ -348,7 +348,7 @@ const builtinFreeStatus = computed(() => {
   const availableModels = builtinFreeCatalog.value.availableModels;
   const selectedModel = trim(builtinFreeCatalog.value.selectedModel);
   if (availableModels.length > 0 || selectedModel) return "";
-  return "内置免费当前不可用，尚未检测到可用模型。";
+  return "当前没有可用的内置模型。";
 });
 const builtinFreeStatusDetail = computed(() => {
   if (builtinFreeError.value) return "";
@@ -362,7 +362,7 @@ const customProviders = computed(() =>
   listCustomProviders(draftConfig.value),
 );
 const providerEditorTitle = computed(() =>
-  editingProviderId.value ? "编辑自定义服务商" : "添加自定义服务商",
+  editingProviderId.value ? "编辑自定义服务" : "添加自定义服务",
 );
 const providerEditorSummary = computed(() => {
   if (availableModels.value.length <= 0) return "";
@@ -490,15 +490,15 @@ onMounted(() => {
       <section class="rounded-sm border border-ui-border bg-ui-surface/30 p-4 space-y-3">
         <div class="flex items-center justify-between gap-3">
           <div class="space-y-1">
-            <h3 class="text-[13px] font-semibold text-ui-text">已添加服务商</h3>
-            <p class="text-[12px] text-ui-text-muted">管理哪些模型会出现在场景选择里。</p>
+            <h3 class="text-[13px] font-semibold text-ui-text">自定义服务</h3>
+            <p class="text-[12px] text-ui-text-muted">只有这里添加的服务会出现在模型选择里。</p>
           </div>
           <button
             type="button"
             class="rounded-sm border border-ui-border px-3 py-2 text-[12px] font-semibold text-ui-text hover:bg-ui-bg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
             @click="openAddProviderSheet"
           >
-            添加自定义服务商
+            添加服务
           </button>
         </div>
 
@@ -506,7 +506,7 @@ onMounted(() => {
           v-if="customProviders.length <= 0"
           class="rounded-sm border border-dashed border-ui-border px-3 py-4 text-[12px] text-ui-text-muted"
         >
-          还没有自定义服务商。
+          还没有添加自定义服务。
         </div>
 
         <div v-else class="space-y-2">
@@ -550,16 +550,16 @@ onMounted(() => {
       <section class="rounded-sm border border-ui-border bg-ui-surface/30 p-4 space-y-4">
         <div class="space-y-1">
           <h3 class="text-[15px] font-semibold tracking-tight text-ui-text">
-            {{ editingProviderId ? "更新兼容服务" : "连接兼容服务" }}
+            {{ providerEditorTitle }}
           </h3>
           <p class="text-[12px] text-ui-text-muted leading-relaxed">
-            获取模型后，勾选你要加入可选列表的模型。
+            连接后，你可以把想使用的模型加入可选列表。
           </p>
         </div>
 
         <div class="space-y-1.5">
           <label class="block text-[11px] font-bold text-ui-text-muted/80 uppercase tracking-tighter">
-            服务商名称
+            服务名称
           </label>
           <input
             v-model="providerNameInput"
@@ -683,7 +683,7 @@ onMounted(() => {
           class="flex-[1.4] rounded-sm bg-ui-text py-2.5 text-[13px] font-bold text-ui-bg hover:opacity-90 transition-opacity focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
           @click="handleSaveProvider"
         >
-          保存服务商
+          保存服务
         </button>
       </div>
 

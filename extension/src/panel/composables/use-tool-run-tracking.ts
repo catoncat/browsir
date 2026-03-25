@@ -371,7 +371,7 @@ export function useToolRunTracking(deps: ToolRunTrackingDeps) {
       }
       const responseSource = String(payload.source || "").trim();
       if (responseSource === "hosted_chat_transport") {
-        setLlmRunHint("宿主生成中", "正在通过网页会话规划下一步");
+        setLlmRunHint("思考中", "正在规划下一步");
         return;
       }
       setLlmRunHint("调用模型", "正在生成下一步计划");

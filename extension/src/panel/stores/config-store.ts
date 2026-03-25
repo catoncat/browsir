@@ -219,7 +219,7 @@ function normalizeStop(raw: unknown): string[] | undefined {
 
 function getProviderNameFromId(providerId: string): string {
   const nameMap: Record<string, string> = {
-    [CURSOR_HELP_WEB_PROVIDER_ID]: "Cursor 宿主聊天",
+    [CURSOR_HELP_WEB_PROVIDER_ID]: "内置模型",
     [DEFAULT_OPENAI_PROVIDER_ID]: "通用 API",
     openai: "OpenAI",
     anthropic: "Anthropic",

@@ -402,7 +402,7 @@ function parseCursorHelpSseLine(line: string): {
   if (parsed.type === "error") {
     return {
       kind: "error",
-      error: String(parsed.errorText || parsed.message || "Cursor Help SSE error")
+      error: String(parsed.errorText || parsed.message || "流式响应异常")
     };
   }
   return { kind: "ignore" };
@@ -576,7 +576,7 @@ function handleHostedTransportPayload(payload: Record<string, unknown>): void {
       type: "hosted_chat.debug",
       requestId,
       stage: "request_started",
-      detail: "网页宿主会话已发出请求",
+      detail: "已发送请求",
       meta: {
         sessionKey: String(payload.sessionKey || "").trim() || undefined,
         conversationKey: String(payload.conversationKey || "").trim() || undefined,
@@ -596,7 +596,7 @@ function handleHostedTransportPayload(payload: Record<string, unknown>): void {
       emitHostedTransportEvent({
         type: "hosted_chat.transport_error",
         requestId,
-        error: String(parsed.error || "网页宿主聊天执行失败"),
+        error: String(parsed.error || "生成失败"),
         meta: {
           transportType
         }
@@ -638,7 +638,7 @@ function handleHostedTransportPayload(payload: Record<string, unknown>): void {
     emitHostedTransportEvent({
       type: "hosted_chat.transport_error",
       requestId,
-      error: String(payload.error || payload.bodyText || "网页宿主聊天执行失败"),
+      error: String(payload.error || payload.bodyText || "生成失败"),
       meta: {
         transportType,
         status: Number(payload.status || 0) || undefined,
@@ -797,14 +797,14 @@ async function ensureCursorHelpChatReady(): Promise<void> {
 
   const openButton = findOpenChatButton();
   if (openButton) {
-    emitDemoLog("content.chat_ui", "running", "打开 Cursor Help 聊天入口");
+    emitDemoLog("content.chat_ui", "running", "打开聊天入口");
     openButton.click();
     if (await waitForChatInput(1_500)) return;
   }
 
   const expandButton = findExpandChatSidebarButton();
   if (expandButton) {
-    emitDemoLog("content.chat_ui", "running", "展开 Cursor Help 聊天侧栏");
+    emitDemoLog("content.chat_ui", "running", "展开聊天侧栏");
     expandButton.click();
     if (await waitForChatInput(1_500)) return;
   }
@@ -844,22 +844,22 @@ function summarizePageInspect(pageInspect: JsonRecord): string {
 
 function formatSenderNotReadyError(pageInspect: JsonRecord): string {
   if (pageInspect.rpcError) {
-    return `Cursor Help 页面 inspect 未响应。 ${String(pageInspect.rpcError || "")}`.trim();
+    return `页面检查未响应。 ${String(pageInspect.rpcError || "")}`.trim();
   }
   if (pageInspect.pageHookReady !== true) {
-    return "Cursor Help 页面 hook 未就绪，请稍后重试。";
+    return "页面尚未准备好，请稍后重试。";
   }
   if (pageInspect.fetchHookReady !== true) {
-    return "Cursor Help 请求接管未就绪，请稍后重试。";
+    return "请求通道尚未准备好，请稍后重试。";
   }
   if (pageInspect.runtimeMismatch === true) {
-    return String(pageInspect.runtimeMismatchReason || "Cursor Help 运行时版本不一致，请刷新页面并重载扩展。").trim();
+    return String(pageInspect.runtimeMismatchReason || "页面环境需要刷新后重试。").trim();
   }
   const detail = String(pageInspect.lastSenderError || "").trim();
   if (pageInspect.senderReady !== true) {
-    return `Cursor Help 内部入口未就绪。${detail ? ` ${detail}` : ""}`.trim();
+    return `输入入口尚未准备好。${detail ? ` ${detail}` : ""}`.trim();
   }
-  return "Cursor Help 页面暂不可执行正式链路。";
+  return "当前页面暂时无法执行，请稍后重试。";
 }
 
 async function waitForPageSenderReady(timeoutMs = PAGE_SENDER_READY_TIMEOUT_MS): Promise<JsonRecord> {
@@ -909,7 +909,7 @@ function ensurePageHookInjected(): Promise<void> {
     pageReadyPromise = new Promise<void>((resolve, reject) => {
       const timeout = window.setTimeout(() => {
         emitDemoLog("content.ensure_page_hook", "failed", "等待 WEBCHAT_PAGE_READY 超时");
-        reject(new Error("Cursor Help page hook 未就绪"));
+        reject(new Error("页面尚未准备好，请稍后重试。"));
       }, PAGE_RPC_TIMEOUT_MS);
       pageReadyResolver = () => {
         window.clearTimeout(timeout);
@@ -1097,7 +1097,7 @@ if (!contentScope[CONTENT_INSTALLED_FLAG]) {
             ).trim();
             const runtimeMismatch = pageHookReady ? isCursorHelpRuntimeMismatch(pageRuntimeVersion, CURSOR_HELP_RUNTIME_VERSION) : false;
             const runtimeMismatchReason = runtimeMismatch
-              ? `Cursor Help 页面运行时版本不一致。page=${pageRuntimeVersion || "(empty)"} expected=${CURSOR_HELP_RUNTIME_VERSION}`
+              ? `页面环境需要刷新后重试。page=${pageRuntimeVersion || "(empty)"} expected=${CURSOR_HELP_RUNTIME_VERSION}`
               : "";
             sendResponse({
               ok: true,

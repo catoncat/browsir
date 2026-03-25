@@ -20,18 +20,12 @@ export function canCursorHelpSlotBootExecute(
 }
 
 export function formatInspectFailure(inspect: CursorHelpInspectResult | null): string {
-  if (!inspect) return "未找到可用的 Cursor Help 页面。请确认页面已完成加载。";
-  if (!inspect.pageHookReady) return "Cursor Help 页面 hook 未就绪，请稍后重试。";
-  if (!inspect.fetchHookReady) return "Cursor Help 请求接管未就绪，请稍后重试。";
-  if (inspect.runtimeMismatch) {
-    const suffix = inspect.runtimeMismatchReason ? ` ${inspect.runtimeMismatchReason}` : "";
-    return `Cursor Help 运行时版本不一致。${suffix}`.trim();
-  }
-  if (!inspect.senderReady) {
-    const suffix = inspect.lastSenderError ? ` ${inspect.lastSenderError}` : "";
-    return `Cursor Help 内部入口未就绪。${suffix}`.trim();
-  }
-  return "Cursor Help 页面暂不可执行正式链路。";
+  if (!inspect) return "页面尚未准备好，请稍后重试。";
+  if (!inspect.pageHookReady) return "页面尚未准备好，请稍后重试。";
+  if (!inspect.fetchHookReady) return "请求通道尚未准备好，请稍后重试。";
+  if (inspect.runtimeMismatch) return "页面环境需要刷新后重试。";
+  if (!inspect.senderReady) return "输入入口尚未准备好，请稍后重试。";
+  return "当前页面暂时无法执行，请稍后重试。";
 }
 
 export function classifyInspectHealth(
@@ -41,7 +35,7 @@ export function classifyInspectHealth(
     return {
       status: "stale",
       lastHealthReason: "inspect-failed",
-      lastError: "未找到可用的 Cursor Help 页面。请确认页面已完成加载。",
+      lastError: "页面尚未准备好，请稍后重试。",
     };
   }
   if (inspect.runtimeMismatch) {

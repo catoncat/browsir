@@ -343,7 +343,7 @@ export async function handleBrainDebug(
       }).catch((err) => ({
         selectedModel: "",
         availableModels: [],
-        statusMessage: "内置免费探测失败。",
+        statusMessage: "内置模型暂时不可用。",
         statusDetail: clipText(err instanceof Error ? err.message : String(err)),
         checkedAt: new Date().toISOString(),
         lastAction: "probe-error",

@@ -430,7 +430,7 @@ export function locateCursorHelpNativeSender(
   if (candidates.length <= 0) {
     return {
       sender: null,
-      error: `未找到 Cursor Help 聊天输入组件（${discoverySummary}）`,
+      error: `未找到可用的聊天输入组件（${discoverySummary}）`,
       probeCount: 0
     };
   }
@@ -452,7 +452,7 @@ export function locateCursorHelpNativeSender(
 
   return {
     sender: null,
-    error: `Cursor Help 内部发送入口未定位（已探测 ${candidates.length} 个输入组件；${discoverySummary}）`,
+    error: `未找到可用的发送入口（已探测 ${candidates.length} 个输入组件；${discoverySummary}）`,
     probeCount: candidates.length
   };
 }

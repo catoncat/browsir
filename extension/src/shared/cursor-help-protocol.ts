@@ -655,11 +655,11 @@ export function rewriteCursorHelpNativeRequestBody(rawBody: unknown, rewritePlan
 export function classifyCursorHelpHttpError(status: number, bodyText: string): string {
   const detail = String(bodyText || "").trim();
   const suffix = detail ? ` ${detail}` : "";
-  if (status === 401) return `Cursor Help 未登录或登录态失效。请先在 cursor.com 登录。${suffix}`.trim();
-  if (status === 403) return `Cursor Help 当前账号无权访问该请求。${suffix}`.trim();
-  if (status === 404) return `Cursor Help /api/chat 不可用。${suffix}`.trim();
-  if (status === 429) return `Cursor Help 请求过于频繁，已被限流。${suffix}`.trim();
-  if (status >= 500) return `Cursor Help 服务暂时异常 (${status})。${suffix}`.trim();
+  if (status === 401) return `登录状态已失效，请先重新登录。${suffix}`.trim();
+  if (status === 403) return `当前账号无权访问该请求。${suffix}`.trim();
+  if (status === 404) return `当前服务暂不可用。${suffix}`.trim();
+  if (status === 429) return `请求过于频繁，请稍后重试。${suffix}`.trim();
+  if (status >= 500) return `服务暂时异常 (${status})。${suffix}`.trim();
   return detail ? `/api/chat 请求失败: ${status} ${detail}` : `/api/chat 请求失败: ${status}`;
 }
 
@@ -667,7 +667,7 @@ export function classifyCursorHelpInvalidResponse(status: number, contentType: s
   const normalizedType = String(contentType || "").trim() || "(empty)";
   const detail = String(bodyText || "").trim();
   const suffix = detail ? ` ${detail}` : "";
-  return `Cursor Help 返回非 SSE 响应 (${status}, ${normalizedType})。${suffix}`.trim();
+  return `返回了不支持的响应格式 (${status}, ${normalizedType})。${suffix}`.trim();
 }
 
 export function parseCursorHelpSseLine(line: string): CursorHelpParsedSseEvent {
@@ -696,7 +696,7 @@ export function parseCursorHelpSseLine(line: string): CursorHelpParsedSseEvent {
   if (parsed.type === "error") {
     return {
       kind: "error",
-      error: String(parsed.errorText || parsed.message || "Cursor Help SSE error")
+      error: String(parsed.errorText || parsed.message || "流式响应异常")
     };
   }
   return { kind: "ignore" };

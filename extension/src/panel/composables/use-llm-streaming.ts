@@ -169,7 +169,7 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
         handled: true,
         runPhase: "llm",
         finalAssistant: false,
-        hint: { label: "宿主生成中", detail: "正在接管网页会话" },
+        hint: { label: "思考中", detail: "正在准备回复" },
       };
     }
 
@@ -193,7 +193,7 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
         handled: true,
         runPhase: "llm",
         finalAssistant: false,
-        hint: { label: "宿主生成中", detail: "正在等待网页会话完成当前回合" },
+        hint: { label: "生成中", detail: "正在生成回复" },
       };
     }
 
@@ -203,7 +203,7 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
         handled: true,
         runPhase: "llm",
         finalAssistant: false,
-        hint: { label: "检测到工具计划", detail: "即将进入工具执行" },
+        hint: { label: "准备执行操作", detail: "已生成操作计划" },
       };
     }
 
@@ -219,7 +219,10 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
           handled: true,
           runPhase: "llm",
           finalAssistant: false,
-          hint: { label: "准备执行工具", detail: "宿主回合已完成，正在交给工具执行" },
+          hint: {
+            label: "准备执行操作",
+            detail: "已生成操作计划，即将开始执行",
+          },
         };
       }
       flushLlmStreamingDeltaBuffer();
@@ -228,7 +231,7 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
       return {
         handled: true,
         finalAssistant: true,
-        hint: { label: "整理回复", detail: "正在整理网页会话结果" },
+        hint: { label: "整理回复", detail: "正在整理最终回答" },
       };
     }
 
@@ -291,7 +294,7 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
         hint: {
           label: "整理回复",
           detail: isHostedTransport
-            ? "正在生成网页宿主聊天的最终回答"
+            ? "正在整理最终回答"
             : "正在生成最终回答",
         },
       };
