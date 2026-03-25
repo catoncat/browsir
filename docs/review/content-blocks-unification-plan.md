@@ -1,7 +1,7 @@
 # Content Blocks 统一消息模型改造方案
 
 > 日期：2026-03-25  
-> 状态：方案设计  
+> 状态：✅ 全部完成  
 > 前置文档：[tool-call-streaming-ux-research-2026-03-25.md](../tool-call-streaming-ux-research-2026-03-25.md)
 
 ## 问题本质
@@ -339,7 +339,7 @@ if (entry.type === "message") {
 
 ## 改造顺序
 
-### Phase 1：存储层扩展（不改 UI，纯后端）
+### Phase 1：存储层扩展（不改 UI，纯后端） ✅ `934cef7`
 
 1. `types.ts` 新增 `ContentBlock` 类型和 `MessageEntry.contentBlocks`
 2. `session-manager.browser.ts` 扩展 `AppendMessageInput` 和 `appendMessage()`
@@ -352,7 +352,7 @@ if (entry.type === "message") {
 
 **验证**：`bun run test` 通过 + kernel 能正确持久化和重建 tool_call turn assistant message
 
-### Phase 2：Panel 渲染改造
+### Phase 2：Panel 渲染改造 ✅ `d39f7b4`
 
 1. `chat-store.ts` / `types.ts` 扩展 `ConversationMessage` / `PanelMessageLike`
 2. `ChatMessage.vue` 支持 content blocks 渲染
@@ -362,7 +362,7 @@ if (entry.type === "message") {
 
 **验证**：手动测试 tool_call 场景 + 历史回看
 
-### Phase 3：清理补丁代码
+### Phase 3：清理补丁代码 ✅ `4623359`
 
 1. 移除 freeze/run-timeline 临时机制
 2. 更新/移除相关测试
