@@ -481,6 +481,7 @@ export class WechatHostService {
       await sendTextMessage({
         baseUrl: credentials.baseUrl,
         token: credentials.token,
+        fromUserId: credentials.userId,
         userId: input.userId,
         contextToken,
         text: part.text,

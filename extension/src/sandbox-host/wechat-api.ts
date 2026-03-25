@@ -195,6 +195,7 @@ export async function getUpdates(
 export async function sendTextMessage(input: {
   baseUrl: string;
   token: string;
+  fromUserId: string;
   userId: string;
   contextToken: string;
   text: string;
@@ -204,7 +205,7 @@ export async function sendTextMessage(input: {
     "/ilink/bot/sendmessage",
     {
       msg: {
-        from_user_id: "",
+        from_user_id: input.fromUserId,
         to_user_id: input.userId,
         client_id: crypto.randomUUID(),
         message_type: 2,
