@@ -5,6 +5,10 @@ import { sendMessage } from "./send-message";
 export interface ConversationMessage {
   role: string;
   content: string;
+  contentBlocks?: Array<
+    | { type: "text"; text: string }
+    | { type: "toolCall"; id: string; name: string; arguments: string }
+  >;
   entryId: string;
   toolName?: string;
   toolCallId?: string;

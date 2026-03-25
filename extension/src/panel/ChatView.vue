@@ -355,6 +355,7 @@ const baseConversationMessages = computed<DisplayMessage[]>(() => {
     .map((item) => ({
       role: String(item?.role || ""),
       content: String(item?.content || ""),
+      contentBlocks: item?.contentBlocks,
       entryId: String(item?.entryId || ""),
       toolName: String(item?.toolName || ""),
       toolCallId: String(item?.toolCallId || "")
@@ -826,6 +827,7 @@ defineExpose({ handleCreateSession, sessionListRenderState });
             :key="msg.entryId"
             :role="msg.role"
             :content="msg.content"
+            :content-blocks="msg.contentBlocks"
             :entry-id="msg.entryId"
             :tool-name="msg.toolName"
             :tool-call-id="msg.toolCallId"

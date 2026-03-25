@@ -35,6 +35,10 @@ interface ToolPendingStepData {
 const props = defineProps<{
   role: string;
   content: string;
+  contentBlocks?: Array<
+    | { type: "text"; text: string }
+    | { type: "toolCall"; id: string; name: string; arguments: string }
+  >;
   entryId: string;
   streamingMode?: "markdown" | "plain";
   toolName?: string;
@@ -94,6 +98,23 @@ const isDark = usePanelDarkMode();
 const incremarkTheme = computed(() => isDark.value ? "dark" : "default");
 
 const isFinished = computed(() => props.role !== "assistant_streaming");
+
+const hasContentBlocks = computed(() =>
+  Array.isArray(props.contentBlocks) && props.contentBlocks.length > 0
+);
+const contentBlockToolCalls = computed(() => {
+  if (!hasContentBlocks.value) return [];
+  return (props.contentBlocks || []).filter(
+    (b): b is { type: "toolCall"; id: string; name: string; arguments: string } => b.type === "toolCall"
+  );
+});
+const contentBlockTextContent = computed(() => {
+  if (!hasContentBlocks.value) return props.content;
+  return (props.contentBlocks || [])
+    .filter((b): b is { type: "text"; text: string } => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
+});
 
 const showThinking = ref(false);
 const showExecutionTimeline = ref(false);
@@ -657,8 +678,21 @@ onClickOutside(executionTimelinePopupRef, () => {
           {{ props.content }}
         </div>
         <ThemeProvider v-else :theme="incremarkTheme">
-          <IncremarkContent :content="props.content" :is-finished="isFinished" :components="incremarkComponents" />
+          <IncremarkContent :content="hasContentBlocks ? contentBlockTextContent : props.content" :is-finished="isFinished" :components="incremarkComponents" />
         </ThemeProvider>
+      </div>
+
+      <!-- Inline Tool Call Indicators (from contentBlocks) -->
+      <div v-if="contentBlockToolCalls.length > 0" class="flex flex-wrap gap-1.5">
+        <div
+          v-for="tc in contentBlockToolCalls"
+          :key="tc.id"
+          class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] font-medium bg-purple-500/8 text-purple-700 dark:text-purple-300 border border-purple-500/15"
+          :title="`${tc.name}(${tc.arguments.slice(0, 100)})`"
+        >
+          <Cpu :size="12" class="shrink-0 opacity-70" aria-hidden="true" />
+          <span class="truncate max-w-[200px]">{{ tc.name }}</span>
+        </div>
       </div>
 
       <div
