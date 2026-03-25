@@ -1,21 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
-  appendRunTimelineText,
   cloneRunTimelineItems,
   upsertRunTimelineToolItem,
 } from "../run-timeline";
 
 describe("run timeline helpers", () => {
-  it("appends texts and tool steps in true insertion order", () => {
-    let items = appendRunTimelineText([], "我先看页面。");
-    items = upsertRunTimelineToolItem(items, {
+  it("appends tool steps and updates in place", () => {
+    let items = upsertRunTimelineToolItem([], {
       step: 1,
       action: "search_elements",
       detail: "参数：query=input",
       status: "done",
       logs: [],
     });
-    items = appendRunTimelineText(items, "我再确认输入框。");
     items = upsertRunTimelineToolItem(items, {
       step: 2,
       action: "capture_screenshot",
@@ -24,16 +21,13 @@ describe("run timeline helpers", () => {
       logs: [],
     });
 
-    expect(items.map((item) => item.kind)).toEqual(["text", "tool", "text", "tool"]);
-    expect(items[0]).toMatchObject({ kind: "text", text: "我先看页面。" });
-    expect(items[1]).toMatchObject({ kind: "tool", step: 1, action: "search_elements" });
-    expect(items[2]).toMatchObject({ kind: "text", text: "我再确认输入框。" });
-    expect(items[3]).toMatchObject({ kind: "tool", step: 2, action: "capture_screenshot" });
+    expect(items.map((item) => item.kind)).toEqual(["tool", "tool"]);
+    expect(items[0]).toMatchObject({ kind: "tool", step: 1, action: "search_elements" });
+    expect(items[1]).toMatchObject({ kind: "tool", step: 2, action: "capture_screenshot" });
   });
 
   it("updates an existing tool step in place instead of appending duplicates", () => {
-    let items = appendRunTimelineText([], "我先看页面。");
-    items = upsertRunTimelineToolItem(items, {
+    let items = upsertRunTimelineToolItem([], {
       step: 1,
       action: "search_elements",
       detail: "参数：query=input",
@@ -48,8 +42,8 @@ describe("run timeline helpers", () => {
       logs: ["找到 3 个结果"],
     });
 
-    expect(items.map((item) => item.kind)).toEqual(["text", "tool"]);
-    expect(items[1]).toMatchObject({
+    expect(items.map((item) => item.kind)).toEqual(["tool"]);
+    expect(items[0]).toMatchObject({
       kind: "tool",
       step: 1,
       status: "done",

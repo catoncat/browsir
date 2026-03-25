@@ -1,7 +1,6 @@
 import { ref, computed, type Ref, type ComputedRef } from "vue";
 import type { DisplayMessage, RunViewPhase } from "../types";
 import {
-  appendRunTimelineText,
   cloneRunTimelineItems,
   type RunTimelineItem,
   upsertRunTimelineToolItem,
@@ -73,19 +72,6 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
     llmStreamingActive.value = false;
   }
 
-  /** 将当前流式文本冻结到独立列表，然后完全重置流式状态。 */
-  function freezeAndResetStreaming(explicitText?: string) {
-    flushLlmStreamingDeltaBuffer();
-    commitPendingLlmStreamingText();
-    const text = String(explicitText || "").trim() || llmStreamingText.value.trim();
-    liveRunTimelineItems.value = appendRunTimelineText(
-      liveRunTimelineItems.value,
-      text,
-    );
-    resetLlmStreamingState();
-  }
-
-  /** 清除冻结文本（仅在 loop 终态/重启时调用）。 */
   function clearFrozenPreToolText() {
     liveRunTimelineItems.value = [];
   }
@@ -198,7 +184,7 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
     }
 
     if (type === "hosted_chat.tool_call_detected") {
-      freezeAndResetStreaming(String(payload.assistantText || ""));
+      resetLlmStreamingState();
       return {
         handled: true,
         runPhase: "llm",
@@ -210,11 +196,7 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
     if (type === "hosted_chat.turn_resolved") {
       const finishReason = String(payload.finishReason || "").trim();
       if (finishReason === "tool_calls") {
-        const resolvedText =
-          typeof payload.assistantText === "string"
-            ? payload.assistantText
-            : String((payload.result as Record<string, unknown> | undefined)?.assistantText || "");
-        freezeAndResetStreaming(resolvedText);
+        resetLlmStreamingState();
         return {
           handled: true,
           runPhase: "llm",
@@ -278,7 +260,7 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
       const responseSource = String(payload.source || "").trim();
       const isHostedTransport = responseSource === "hosted_chat_transport";
       if (Number.isFinite(toolCalls) && toolCalls > 0) {
-        freezeAndResetStreaming();
+        resetLlmStreamingState();
         return {
           handled: true,
           runPhase: "llm",
@@ -324,7 +306,6 @@ export function useLlmStreaming(deps: LlmStreamingDeps) {
     flushLlmStreamingDeltaBuffer,
     appendLlmStreamingDelta,
     commitPendingLlmStreamingText,
-    freezeAndResetStreaming,
     clearFrozenPreToolText,
     clearLiveRunTimeline,
     getLiveRunTimelineItems,

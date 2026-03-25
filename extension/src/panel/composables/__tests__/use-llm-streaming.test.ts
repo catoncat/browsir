@@ -33,7 +33,7 @@ function createHarness() {
 }
 
 describe("useLlmStreaming", () => {
-  it("moves existing hosted text into frozen state when tool_call_detected arrives", () => {
+  it("resets streaming state when tool_call_detected arrives (text persisted via content blocks)", () => {
     const harness = createHarness();
     harness.applyStreamEvent("hosted_chat.debug", {}, "session-1");
     harness.applyStreamEvent(
@@ -49,36 +49,14 @@ describe("useLlmStreaming", () => {
     );
 
     expect(result.handled).toBe(true);
-    expect(harness.liveRunTimelineItems.value).toHaveLength(1);
-    expect(harness.liveRunTimelineItems.value[0]).toMatchObject({
-      kind: "text",
-      text: "我先去找输入框。",
-    });
-    expect(harness.shouldShowFrozenPreToolText.value).toBe(true);
+    // No frozen text in timeline — text is persisted to session via content blocks
+    expect(harness.liveRunTimelineItems.value).toHaveLength(0);
     expect(harness.llmStreamingText.value).toBe("");
     expect(harness.llmStreamingActive.value).toBe(false);
     expect(harness.shouldShowStreamingDraft.value).toBe(false);
   });
 
-  it("prefers assistantText from tool_call_detected payload when live buffer is empty", () => {
-    const harness = createHarness();
-    harness.applyStreamEvent("hosted_chat.debug", {}, "session-1");
-
-    const result = harness.applyStreamEvent(
-      "hosted_chat.tool_call_detected",
-      { assistantText: "我先去找输入框。" },
-      "session-1",
-    );
-
-    expect(result.handled).toBe(true);
-    expect(harness.liveRunTimelineItems.value[0]).toMatchObject({
-      kind: "text",
-      text: "我先去找输入框。",
-    });
-    expect(harness.shouldShowFrozenPreToolText.value).toBe(true);
-  });
-
-  it("moves existing hosted text into frozen state when turn_resolved ends in tool_calls", () => {
+  it("resets streaming state when turn_resolved ends in tool_calls", () => {
     const harness = createHarness();
     harness.applyStreamEvent("hosted_chat.debug", {}, "session-1");
     harness.applyStreamEvent(
@@ -94,35 +72,13 @@ describe("useLlmStreaming", () => {
     );
 
     expect(result.handled).toBe(true);
-    expect(harness.liveRunTimelineItems.value[0]).toMatchObject({
-      kind: "text",
-      text: "我先滚动页面再继续。",
-    });
-    expect(harness.shouldShowFrozenPreToolText.value).toBe(true);
+    expect(harness.liveRunTimelineItems.value).toHaveLength(0);
     expect(harness.llmStreamingText.value).toBe("");
     expect(harness.llmStreamingActive.value).toBe(false);
     expect(harness.shouldShowStreamingDraft.value).toBe(false);
   });
 
-  it("can freeze from turn_resolved payload when assistantText is present there", () => {
-    const harness = createHarness();
-    harness.applyStreamEvent("hosted_chat.debug", {}, "session-1");
-
-    const result = harness.applyStreamEvent(
-      "hosted_chat.turn_resolved",
-      { finishReason: "tool_calls", assistantText: "我先滚动页面再继续。" },
-      "session-1",
-    );
-
-    expect(result.handled).toBe(true);
-    expect(harness.liveRunTimelineItems.value[0]).toMatchObject({
-      kind: "text",
-      text: "我先滚动页面再继续。",
-    });
-    expect(harness.shouldShowFrozenPreToolText.value).toBe(true);
-  });
-
-  it("moves standard llm text into frozen state when parsed response contains tool calls", () => {
+  it("resets streaming state when parsed response contains tool calls", () => {
     const harness = createHarness();
     harness.applyStreamEvent("llm.stream.start", {}, "session-1");
     harness.applyStreamEvent(
@@ -138,108 +94,40 @@ describe("useLlmStreaming", () => {
     );
 
     expect(result.handled).toBe(true);
-    expect(harness.liveRunTimelineItems.value[0]).toMatchObject({
-      kind: "text",
-      text: "我先读取页面结构。",
-    });
-    expect(harness.shouldShowFrozenPreToolText.value).toBe(true);
+    expect(harness.liveRunTimelineItems.value).toHaveLength(0);
     expect(harness.llmStreamingText.value).toBe("");
     expect(harness.llmStreamingActive.value).toBe(false);
     expect(harness.shouldShowStreamingDraft.value).toBe(false);
   });
 
-  it("keeps frozen text when a new llm stream starts later in the same run", () => {
+  it("tool step tracking still works via liveRunTimelineItems", () => {
     const harness = createHarness();
-    harness.applyStreamEvent("hosted_chat.debug", {}, "session-1");
-    harness.applyStreamEvent(
-      "hosted_chat.stream_text_delta",
-      { text: "我先定位输入框。" },
-      "session-1",
-    );
-    harness.applyStreamEvent(
-      "hosted_chat.tool_call_detected",
-      {},
-      "session-1",
-    );
-
-    harness.applyStreamEvent("llm.stream.start", {}, "session-1");
-    harness.applyStreamEvent(
-      "llm.stream.delta",
-      { text: "我继续分析工具结果。" },
-      "session-1",
-    );
-
-    expect(harness.liveRunTimelineItems.value[0]).toMatchObject({
-      kind: "text",
-      text: "我先定位输入框。",
+    harness.upsertLiveRunTimelineToolStep({
+      step: 1,
+      action: "search_elements",
+      detail: "参数：query=input",
+      status: "running",
+      logs: [],
     });
-    expect(harness.shouldShowFrozenPreToolText.value).toBe(true);
-    expect(harness.llmStreamingText.value).toBe("");
-    expect(harness.llmStreamingActive.value).toBe(true);
-  });
-
-  it("accumulates multiple frozen pre-tool texts in order", () => {
-    const harness = createHarness();
-
-    harness.applyStreamEvent("hosted_chat.debug", {}, "session-1");
-    harness.applyStreamEvent(
-      "hosted_chat.tool_call_detected",
-      { assistantText: "我先找电影列表。" },
-      "session-1",
-    );
-    harness.applyStreamEvent("llm.stream.start", {}, "session-1");
-    harness.applyStreamEvent(
-      "hosted_chat.tool_call_detected",
-      { assistantText: "我再打开详情页确认一下。" },
-      "session-1",
-    );
-
-    expect(
-      harness.liveRunTimelineItems.value.map((item) =>
-        item.kind === "text" ? item.text : item.id,
-      ),
-    ).toEqual([
-      "我先找电影列表。",
-      "我再打开详情页确认一下。",
-    ]);
-    expect(harness.shouldShowFrozenPreToolText.value).toBe(true);
-  });
-
-  it("deduplicates repeated freeze attempts for the same text", () => {
-    const harness = createHarness();
-    harness.applyStreamEvent("hosted_chat.debug", {}, "session-1");
-
-    harness.applyStreamEvent(
-      "hosted_chat.tool_call_detected",
-      { assistantText: "我先去找输入框。" },
-      "session-1",
-    );
-    harness.applyStreamEvent(
-      "hosted_chat.turn_resolved",
-      { finishReason: "tool_calls", assistantText: "我先去找输入框。" },
-      "session-1",
-    );
 
     expect(harness.liveRunTimelineItems.value).toHaveLength(1);
     expect(harness.liveRunTimelineItems.value[0]).toMatchObject({
-      kind: "text",
-      text: "我先去找输入框。",
+      kind: "tool",
+      step: 1,
+      action: "search_elements",
     });
+    expect(harness.shouldShowFrozenPreToolText.value).toBe(true);
   });
 
-  it("clears frozen text only when explicitly requested", () => {
+  it("clears live timeline items when clearFrozenPreToolText is called", () => {
     const harness = createHarness();
-    harness.applyStreamEvent("hosted_chat.debug", {}, "session-1");
-    harness.applyStreamEvent(
-      "hosted_chat.stream_text_delta",
-      { text: "我先查一下页面结构。" },
-      "session-1",
-    );
-    harness.applyStreamEvent(
-      "hosted_chat.tool_call_detected",
-      {},
-      "session-1",
-    );
+    harness.upsertLiveRunTimelineToolStep({
+      step: 1,
+      action: "click",
+      detail: "目标：发送按钮",
+      status: "done",
+      logs: [],
+    });
 
     harness.clearFrozenPreToolText();
 

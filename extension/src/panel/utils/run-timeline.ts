@@ -4,13 +4,6 @@ import {
 } from "../composables/tool-run-stream-derive";
 import type { ToolPendingStepState } from "./tool-formatters";
 
-export interface RunTimelineTextItem {
-  kind: "text";
-  id: string;
-  text: string;
-  createdAt: number;
-}
-
 export interface RunTimelineToolItem {
   kind: "tool";
   id: string;
@@ -24,24 +17,10 @@ export interface RunTimelineToolItem {
   createdAt: number;
 }
 
-export type RunTimelineItem = RunTimelineTextItem | RunTimelineToolItem;
+export type RunTimelineItem = RunTimelineToolItem;
 
 function nowMs(): number {
   return Date.now();
-}
-
-export function createRunTimelineTextItem(
-  text: string,
-  createdAt = nowMs(),
-): RunTimelineTextItem | null {
-  const normalized = String(text || "").trim();
-  if (!normalized) return null;
-  return {
-    kind: "text",
-    id: `text-${createdAt}-${normalized.slice(0, 24)}`,
-    text: normalized,
-    createdAt,
-  };
 }
 
 export function createRunTimelineToolItem(
@@ -63,21 +42,6 @@ export function createRunTimelineToolItem(
   };
 }
 
-export function appendRunTimelineText(
-  items: RunTimelineItem[],
-  text: string,
-): RunTimelineItem[] {
-  const nextItem = createRunTimelineTextItem(text);
-  if (!nextItem) return [...items];
-  const current = [...items];
-  const last = current[current.length - 1];
-  if (last?.kind === "text" && last.text === nextItem.text) {
-    return current;
-  }
-  current.push(nextItem);
-  return current;
-}
-
 export function upsertRunTimelineToolItem(
   items: RunTimelineItem[],
   step: ToolPendingStepState,
@@ -90,7 +54,7 @@ export function upsertRunTimelineToolItem(
     const existing = current[existingIndex];
     const nextItem = createRunTimelineToolItem(
       step,
-      existing.kind === "tool" ? existing.createdAt : undefined,
+      existing.createdAt,
     );
     current[existingIndex] = nextItem;
     return current;
@@ -103,8 +67,6 @@ export function cloneRunTimelineItems(
   items: RunTimelineItem[],
 ): RunTimelineItem[] {
   return (Array.isArray(items) ? items : []).map((item) =>
-    item.kind === "text"
-      ? { ...item }
-      : { ...item, logs: Array.isArray(item.logs) ? [...item.logs] : [] },
+    ({ ...item, logs: Array.isArray(item.logs) ? [...item.logs] : [] }),
   );
 }

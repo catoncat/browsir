@@ -793,25 +793,11 @@ onClickOutside(executionTimelinePopupRef, () => {
           </div>
 
           <div class="max-h-72 space-y-2 overflow-y-auto px-2 pb-2 custom-scrollbar" role="list">
-            <template
+            <div
               v-for="item in props.executionTimelineItems"
               :key="`execution-${item.id}`"
+              class="rounded-lg border border-ui-border/60 bg-ui-surface/45 px-3 py-2"
             >
-              <div
-                v-if="item.kind === 'text'"
-                class="rounded-lg border border-ui-border/60 bg-ui-surface/55 px-3 py-2"
-              >
-                <div class="prose max-w-none text-[13px] text-ui-text leading-relaxed">
-                  <ThemeProvider :theme="incremarkTheme">
-                    <IncremarkContent :content="item.text" :is-finished="true" :components="incremarkComponents" />
-                  </ThemeProvider>
-                </div>
-              </div>
-
-              <div
-                v-else
-                class="rounded-lg border border-ui-border/60 bg-ui-surface/45 px-3 py-2"
-              >
                 <div class="flex items-start gap-2">
                   <div class="mt-0.5 h-5 w-5 shrink-0 rounded-md bg-ui-bg/85 text-ui-text-muted flex items-center justify-center">
                     <Loader2
@@ -850,8 +836,7 @@ onClickOutside(executionTimelinePopupRef, () => {
                   </div>
                 </div>
               </div>
-            </template>
-          </div>
+            </div>
         </div>
       </div>
     </div>

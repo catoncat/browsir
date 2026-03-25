@@ -279,9 +279,7 @@ const {
   upsertLiveRunTimelineToolStep: (step) => upsertLiveRunTimelineToolStep(step),
   captureCompletedRunArtifacts: (items) => {
     completedRunTimelineItems.value = items.map((item) =>
-      item.kind === "text"
-        ? { ...item }
-        : { ...item, logs: Array.isArray(item.logs) ? [...item.logs] : [] },
+      ({ ...item, logs: Array.isArray(item.logs) ? [...item.logs] : [] }),
     );
   },
   clearCompletedRunArtifacts,
@@ -328,9 +326,7 @@ const shouldShowCompletedRunTimeline = computed(() =>
 
 const liveRunTimelineStructureTokens = computed(() =>
   liveRunTimelineItems.value.map((item) =>
-    item.kind === "text"
-      ? `text:${item.id}:${item.text}`
-      : `tool:${item.id}:${item.step}:${item.status}`,
+    `tool:${item.id}:${item.step}:${item.status}`,
   ),
 );
 
@@ -868,13 +864,7 @@ defineExpose({ handleCreateSession, sessionListRenderState });
             v-for="item in liveRunTimelineItems"
             :key="`live-${String(activeSessionId || '__global__')}-${activeRunToken}-${item.id}`"
           >
-            <StreamingDraftContainer
-              v-if="item.kind === 'text'"
-              :content="item.text"
-              :active="false"
-            />
             <ChatMessage
-              v-else
               role="tool_pending"
               content=""
               :entry-id="`live-tool-${item.id}`"
