@@ -18,7 +18,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://cursor.com/help*"
+        "https://cursor.com/help*",
+        "https://cursor.com/*/help*"
       ],
       "js": [
         "assets/cursor-help-page-hook.js"
@@ -28,7 +29,8 @@
     },
     {
       "matches": [
-        "https://cursor.com/help*"
+        "https://cursor.com/help*",
+        "https://cursor.com/*/help*"
       ],
       "js": [
         "assets/cursor-help-content.js"

@@ -1739,6 +1739,96 @@ describe("web-chat-executor.browser", () => {
     });
   });
 
+  it("drops orphaned slots that still point at an old pool window", async () => {
+    buildChromeMock();
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    const windowsRemove = chrome.windows.remove as unknown as ReturnType<typeof vi.fn>;
+    const tabsRemove = chrome.tabs.remove as unknown as ReturnType<typeof vi.fn>;
+
+    await ensureCursorHelpPoolReady(3);
+
+    const currentStored = await chrome.storage.local.get(CURSOR_HELP_POOL_STORAGE_KEY);
+    const currentState = currentStored[CURSOR_HELP_POOL_STORAGE_KEY] as Record<string, unknown>;
+    const managedWindowId = Number(currentState.windowId || 0);
+    expect(managedWindowId).toBeGreaterThan(0);
+
+    const orphanWindow = await chrome.windows.create({
+      url: "https://cursor.com/help",
+      focused: false,
+      type: "popup",
+    });
+    const orphanWindowId = Number(orphanWindow?.id || 0);
+    expect(orphanWindowId).toBeGreaterThan(0);
+
+    const orphanPrimary = Array.isArray(orphanWindow?.tabs)
+      ? orphanWindow.tabs?.[0]
+      : null;
+    const orphanAux1 = await chrome.tabs.create({
+      windowId: orphanWindowId,
+      url: "https://cursor.com/help",
+      active: false,
+    });
+    const orphanAux2 = await chrome.tabs.create({
+      windowId: orphanWindowId,
+      url: "https://cursor.com/help",
+      active: false,
+    });
+
+    await chrome.storage.local.set({
+      [CURSOR_HELP_POOL_STORAGE_KEY]: {
+        version: 1,
+        windowId: managedWindowId,
+        windowMode: "pool-window",
+        updatedAt: 1,
+        slots: [
+          {
+            slotId: "slot-orphan-primary",
+            tabId: Number(orphanPrimary?.id || 0),
+            windowId: orphanWindowId,
+            lanePreference: "primary",
+            status: "idle",
+            lastKnownUrl: "https://cursor.com/help",
+            lastReadyAt: 1,
+            lastUsedAt: 1,
+          },
+          {
+            slotId: "slot-orphan-aux-1",
+            tabId: Number(orphanAux1?.id || 0),
+            windowId: orphanWindowId,
+            lanePreference: "auxiliary",
+            status: "idle",
+            lastKnownUrl: "https://cursor.com/help",
+            lastReadyAt: 1,
+            lastUsedAt: 1,
+          },
+          {
+            slotId: "slot-orphan-aux-2",
+            tabId: Number(orphanAux2?.id || 0),
+            windowId: orphanWindowId,
+            lanePreference: "auxiliary",
+            status: "idle",
+            lastKnownUrl: "https://cursor.com/help",
+            lastReadyAt: 1,
+            lastUsedAt: 1,
+          },
+        ],
+      },
+    });
+
+    await ensureCursorHelpPoolReady(3);
+
+    const repaired = await chrome.storage.local.get(CURSOR_HELP_POOL_STORAGE_KEY);
+    const repairedState = repaired[CURSOR_HELP_POOL_STORAGE_KEY] as Record<string, unknown>;
+    const repairedSlots = (repairedState.slots as Array<Record<string, unknown>>) || [];
+
+    expect(Number(repairedState.windowId || 0)).toBe(managedWindowId);
+    expect(repairedSlots).toHaveLength(3);
+    expect(repairedSlots.every((slot) => Number(slot.windowId || 0) === managedWindowId)).toBe(true);
+    expect(repairedSlots.every((slot) => Number(slot.tabId || 0) > 0)).toBe(true);
+    expect(windowsRemove).not.toHaveBeenCalledWith(orphanWindowId);
+    expect(tabsRemove).not.toHaveBeenCalledWith(Number(orphanPrimary?.id || 0));
+  });
+
   it("drops the stale slot binding after startup timeout before any request_started event", async () => {
     const realSetTimeout = globalThis.setTimeout;
     try {
@@ -1958,16 +2048,15 @@ describe("web-chat-executor.browser", () => {
     buildChromeMock();
     (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
-    await ensureCursorHelpPoolReady(2);
+    await ensureCursorHelpPoolReady(1);
 
     const stored = await chrome.storage.local.get(CURSOR_HELP_POOL_STORAGE_KEY);
     const state = stored[CURSOR_HELP_POOL_STORAGE_KEY] as Record<string, unknown>;
     const slots = (state.slots as Array<Record<string, unknown>>).slice();
 
-    // Both slots idle for a long time
+    // The only slot stays idle for a long time, but MIN=1 so it should survive.
     const longAgo = Date.now() - 200_000;
     slots[0] = { ...slots[0], status: "idle", lastUsedAt: longAgo, lastReadyAt: longAgo, lastHealthReason: "ready" };
-    slots[1] = { ...slots[1], status: "idle", lastUsedAt: longAgo, lastReadyAt: longAgo, lastHealthReason: "ready" };
 
     await chrome.storage.local.set({
       [CURSOR_HELP_POOL_STORAGE_KEY]: { ...state, slots },
@@ -1978,7 +2067,7 @@ describe("web-chat-executor.browser", () => {
     const afterStored = await chrome.storage.local.get(CURSOR_HELP_POOL_STORAGE_KEY);
     const afterState = afterStored[CURSOR_HELP_POOL_STORAGE_KEY] as Record<string, unknown>;
     const afterSlots = afterState.slots as Array<Record<string, unknown>>;
-    expect(afterSlots.length).toBe(2);
+    expect(afterSlots.length).toBe(1);
   });
 
   it("heartbeat respects shrink cooldown — does not shrink twice within cooldown window", async () => {
@@ -2147,6 +2236,20 @@ describe("web-chat-executor.browser", () => {
     expect(catalog.selectedModel).toBe("Sonnet 4.6");
     expect(catalog.availableModels).toEqual(CURSOR_HELP_AVAILABLE_MODELS);
     expect(catalog.statusMessage).toBe("");
+  });
+
+  it("boots only one managed slot by default", async () => {
+    buildChromeMock();
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    const windowsCreate = chrome.windows.create as unknown as ReturnType<typeof vi.fn>;
+    const tabsCreate = chrome.tabs.create as unknown as ReturnType<typeof vi.fn>;
+
+    const debugState = await ensureCursorHelpPoolReady();
+
+    expect(windowsCreate).toHaveBeenCalledTimes(1);
+    expect(tabsCreate).toHaveBeenCalledTimes(0);
+    expect(Number(debugState.summary.slotCount || 0)).toBe(1);
   });
 
   it("probeCursorHelpModelCatalog forceRefresh rebuilds a missing pool window", async () => {

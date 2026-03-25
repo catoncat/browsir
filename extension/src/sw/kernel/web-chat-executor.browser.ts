@@ -417,6 +417,33 @@ async function tryAutoShrinkPool(
   return true;
 }
 
+async function cleanupOrphanedManagedSlots(
+  windowId: number,
+  slots: CursorHelpSlotRecord[],
+): Promise<CursorHelpSlotRecord[]> {
+  if (!Number.isInteger(windowId) || windowId <= 0) return slots;
+  const keep: CursorHelpSlotRecord[] = [];
+  const orphaned: CursorHelpSlotRecord[] = [];
+  for (const slot of slots) {
+    if (
+      Number.isInteger(slot.windowId) &&
+      Number(slot.windowId) > 0 &&
+      Number(slot.windowId) !== windowId
+    ) {
+      orphaned.push(slot);
+      continue;
+    }
+    keep.push(slot);
+  }
+  if (orphaned.length <= 0) return slots;
+  for (const slot of orphaned) {
+    closeActiveRequestForSlot(slot.slotId, "Cursor Help 孤儿槽位已回收");
+    clearSlotPreferences(slot.slotId);
+  }
+
+  return keep;
+}
+
 let reconcilePoolMutex: Promise<CursorHelpPoolState> | null = null;
 
 async function reconcileCursorHelpPoolState(
@@ -512,6 +539,10 @@ async function reconcileCursorHelpPoolStateUnsafe(
 
   if (!windowId) {
     return await createCursorHelpPoolWindow(desiredSlotCount);
+  }
+
+  if (current.windowMode === "pool-window") {
+    slots = await cleanupOrphanedManagedSlots(windowId, slots);
   }
 
   while (slots.length < desiredSlotCount) {

@@ -55,6 +55,14 @@ const WORKER_SAFE_PRELOAD_HELPER_SOURCE = [
 
 function emitManifest() {
   const manifestPath = fileURLToPath(new URL("./manifest.json", import.meta.url));
+  const manifestJson = JSON.parse(readFileSync(manifestPath, "utf-8")) as {
+    content_scripts?: Array<{ js?: string[] }>;
+  };
+  const contentScriptFiles = new Set(
+    (manifestJson.content_scripts || [])
+      .flatMap((entry) => entry.js || [])
+      .filter((value): value is string => typeof value === "string" && value.length > 0),
+  );
   let rootDir = "";
   let outDir = "dist";
   const SERVICE_WORKER_FILE = "service-worker.js";
@@ -81,6 +89,15 @@ function emitManifest() {
         if (!/\/?preload-helper(?:-[^/]+)?\.js$/i.test(fileName)) continue;
         if (output.type !== "chunk") continue;
         output.code = WORKER_SAFE_PRELOAD_HELPER_SOURCE;
+      }
+
+      // Content scripts from the same extension share one isolated world per frame.
+      // Wrap each manifest-declared content script in its own IIFE so minified
+      // top-level names from different entries cannot collide at runtime.
+      for (const [fileName, output] of Object.entries(bundle)) {
+        if (!contentScriptFiles.has(fileName)) continue;
+        if (output.type !== "chunk") continue;
+        output.code = `(function () {\n${output.code}\n})();\n`;
       }
 
       // Service Worker 运行时禁止 dynamic import()，而 lifo 的命令注册默认使用

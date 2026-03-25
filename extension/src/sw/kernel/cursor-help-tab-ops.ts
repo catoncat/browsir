@@ -2,6 +2,10 @@ import type { CursorHelpInspectResult } from "./cursor-help-health";
 import type { CursorHelpSlotRecord } from "./cursor-help-pool-policy";
 
 export const CURSOR_HELP_URL = "https://cursor.com/help";
+export const CURSOR_HELP_URL_PATTERNS = [
+  "https://cursor.com/help*",
+  "https://cursor.com/*/help*",
+] as const;
 const CONTENT_SCRIPT_FILE = "assets/cursor-help-content.js";
 const PAGE_HOOK_SCRIPT_FILE = "assets/cursor-help-page-hook.js";
 const CURSOR_HELP_SESSION_SLOT_STORAGE_KEY = "cursor_help_web.session_slots";
@@ -13,7 +17,19 @@ const PERMANENT_TAB_MESSAGE_ERRORS = [
 ];
 
 export function isCursorHelpUrl(raw: unknown): boolean {
-  return String(raw || "").startsWith(CURSOR_HELP_URL);
+  const text = String(raw || "").trim();
+  if (!text) return false;
+  try {
+    const url = new URL(text);
+    if (url.hostname !== "cursor.com") return false;
+    const normalizedPath = url.pathname.replace(/\/+$/, "") || "/";
+    return (
+      normalizedPath === "/help" ||
+      /^\/[A-Za-z0-9_-]+\/help$/.test(normalizedPath)
+    );
+  } catch {
+    return false;
+  }
 }
 
 export async function sendTabMessageWithRetry(tabId: number, message: Record<string, unknown>, retries = 12): Promise<unknown> {
@@ -94,7 +110,7 @@ export async function waitForCursorHelpTabReady(tabId: number, timeoutMs = 20_00
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
-    if (tab?.id && tab.status === "complete" && String(tab.url || "").startsWith(CURSOR_HELP_URL)) {
+    if (tab?.id && tab.status === "complete" && isCursorHelpUrl(tab.url)) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 250));

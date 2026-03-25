@@ -8,19 +8,18 @@ import { canCursorHelpSlotBootExecute } from "./cursor-help-health";
 import { saveCursorHelpPoolState } from "./cursor-help-pool-state";
 import {
   CURSOR_HELP_URL,
+  CURSOR_HELP_URL_PATTERNS,
   markCursorHelpTabStable,
   waitForCursorHelpTabReady,
   waitForCursorHelpInspectReady,
   clearLegacySessionSlots,
   minimizeCursorHelpWindow,
 } from "./cursor-help-tab-ops";
-
-const CURSOR_TAB_PATTERNS = ["https://cursor.com/help*"] as const;
 const CURSOR_HELP_CONTAINER_WIDTH = 1280;
 const CURSOR_HELP_CONTAINER_HEIGHT = 900;
 
-export const DEFAULT_CURSOR_HELP_POOL_SLOT_COUNT = 3;
-export const MIN_CURSOR_HELP_POOL_SLOT_COUNT = 2;
+export const DEFAULT_CURSOR_HELP_POOL_SLOT_COUNT = 1;
+export const MIN_CURSOR_HELP_POOL_SLOT_COUNT = 1;
 export const MAX_CURSOR_HELP_POOL_SLOT_COUNT = 6;
 
 function nowMs(): number {
@@ -70,7 +69,7 @@ export async function tryAdoptExistingCursorHelpSlots(
 ): Promise<CursorHelpPoolState | null> {
   const desiredSlotCount = normalizePoolSlotCount(slotCount);
   const existingTabs = await chrome.tabs
-    .query({ url: [...CURSOR_TAB_PATTERNS] })
+    .query({ url: [...CURSOR_HELP_URL_PATTERNS] })
     .catch(() => [] as chrome.tabs.Tab[]);
   const adoptedSlots: CursorHelpSlotRecord[] = [];
 
@@ -232,7 +231,7 @@ export async function collectCursorHelpTabDecisionTrace(
   }>;
 }> {
   const liveTabs = await chrome.tabs
-    .query({ url: [...CURSOR_TAB_PATTERNS] })
+    .query({ url: [...CURSOR_HELP_URL_PATTERNS] })
     .catch(() => [] as chrome.tabs.Tab[]);
   const managedTabIds = new Set(
     state.slots
