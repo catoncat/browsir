@@ -7,6 +7,7 @@ import {
   createProjectionOutcome,
   createWechatReplyProjection,
 } from "./channel-projection";
+import { normalizeHostedAssistantIdentity } from "../../shared/cursor-help-web-shared";
 import type { ChannelTurnRecord } from "./channel-types";
 import type { ChannelOutboxRecord } from "./channel-types";
 import type { WechatReplySendInput, WechatReplySendResult } from "./host-protocol";
@@ -49,7 +50,18 @@ async function readLatestAssistantTextFromStepStream(
     const payload = toRecord(item.payload);
     const result = toRecord(payload.result);
     const text = String(result.assistantText || "").trim();
-    if (text) return text;
+    if (text) {
+      const entries = await orchestrator.sessions.getEntries(sessionId);
+      const latestUserText = Array.from(entries)
+        .reverse()
+        .find(
+          (entry) =>
+            entry.type === "message" &&
+            entry.role === "user" &&
+            String(entry.text || "").trim(),
+        )?.text;
+      return normalizeHostedAssistantIdentity(latestUserText, text).trim();
+    }
   }
   return "";
 }

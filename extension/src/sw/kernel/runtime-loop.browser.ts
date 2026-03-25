@@ -40,6 +40,10 @@ import {
   type PromptContextRefInput,
 } from "../../shared/context-ref";
 import {
+  extractLastUserMessage,
+  normalizeHostedAssistantIdentity,
+} from "../../shared/cursor-help-web-shared";
+import {
   frameMatchesVirtualCapability,
   invokeVirtualFrame,
   isVirtualUri,
@@ -2309,7 +2313,14 @@ export function createRuntimeLoopController(
           throw error;
         }
 
-        const assistantText = parseLlmContent(message).trim();
+        const rawAssistantText = parseLlmContent(message).trim();
+        const assistantText =
+          resolveRouteRuntimeKind(activeRoute) === "hosted_chat"
+            ? normalizeHostedAssistantIdentity(
+                extractLastUserMessage(requestMessages),
+                rawAssistantText,
+              ).trim()
+            : rawAssistantText;
         const toolCalls = normalizeToolCalls(message.tool_calls);
         orchestrator.events.emit("llm.response.parsed", sessionId, {
           step: llmStep,

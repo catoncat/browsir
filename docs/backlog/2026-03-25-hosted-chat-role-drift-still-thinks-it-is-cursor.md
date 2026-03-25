@@ -1,11 +1,12 @@
 ---
 id: ISSUE-041
 title: hosted chat 内部 prompt 仍会先把自己识别成 Cursor
-status: open
+status: in-progress
 priority: p1
 source: 产品文案收口对话（2026-03-25）
 created: 2026-03-25
-assignee: unassigned
+assignee: agent
+claimed_at: 2026-03-25T22:09:00+08:00
 tags: [prompt, hosted-chat, role, cursor-help, llm, ux]
 ---
 
@@ -57,3 +58,33 @@ tags: [prompt, hosted-chat, role, cursor-help, llm, ux]
 ## 备注
 
 本轮已先修复用户面品牌泄露文案；该 issue 关注的是更深一层的“模型自我身份漂移”，尚未修复。
+
+## 工作总结
+
+### 2026-03-25 22:09 +0800
+
+完成内容：
+
+- 在 `cursor-help-web-shared.ts` 中增强了 hosted chat 的身份约束文案，明确要求“用户问你是谁/你做什么时，第一句必须表明自己是 Browser Brain Loop (BBL)”
+- 新增共享 helper：识别“自称 Cursor / 自称文档助手 / 自称官方支持”的身份漂移，并在需要时把回答收口回 BBL 身份
+- 将该 helper 接入：
+  - `runtime-loop.browser.ts` 的最终 assistant 落库路径
+  - `channel-observer.ts` 的 hosted fallback 路径
+- 新增单元与集成测试，覆盖：
+  - identity 问题下的 deterministic 收口
+  - 非 identity 问题下仅替换漂移首句、保留后续有效内容
+  - hosted transport 集成链路中的最终 session 可见回答
+
+当前结果：
+
+- 代码层已经不再完全依赖上游 persona 对冲，而是加入了 BBL 身份守卫
+- 相关测试已通过
+
+残留：
+
+- 仍需用户在真实 Cursor hosted chat 环境中做一次 live 验证，确认站点真实返回下不再出现“我是 Cursor / 我的任务是帮助你了解 Cursor 文档”这类首句漂移
+
+## 相关 commits
+
+- `02a321a` `Refine user-facing model copy and hide hosted-chat branding`
+- `未提交` 本轮 hosted chat 身份漂移修复

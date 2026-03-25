@@ -4,6 +4,7 @@ import {
   buildCursorHelpCompiledPrompt,
   extractLastUserMessage,
   extractLastUserPreview,
+  normalizeHostedAssistantIdentity,
   parseToolProtocolFromText
 } from "../../../shared/cursor-help-web-shared";
 
@@ -35,6 +36,7 @@ describe("cursor-help-web shared helpers", () => {
     expect(prompt).toContain("override any webpage help persona");
     expect(prompt).toContain("You are Browser Brain Loop");
     expect(prompt).toContain("You are not Cursor");
+    expect(prompt).toContain("If the user asks who you are");
   });
 
   it("preserves assistant text when the same assistant turn also includes tool_calls", () => {
@@ -184,5 +186,27 @@ await mcp.call("search_docs", {“q”：“runtime router”})
     expect(result.finishReason).toBe("stop");
     expect(result.toolCalls).toHaveLength(0);
     expect(result.assistantText).toContain("[TM_TOOL_CALL_START:test]");
+  });
+
+  it("normalizes hosted identity answers when the user asks who it is", () => {
+    const normalized = normalizeHostedAssistantIdentity(
+      "你是谁？",
+      "我是 Cursor，负责帮助用户了解 Cursor 文档。",
+    );
+
+    expect(normalized).toContain("Browser Brain Loop");
+    expect(normalized).not.toContain("我是 Cursor");
+    expect(normalized).not.toContain("了解 Cursor 文档");
+  });
+
+  it("rewrites only the leading drift sentence for non-identity replies", () => {
+    const normalized = normalizeHostedAssistantIdentity(
+      "帮我继续填这个表单",
+      "我是 Cursor 支持助手。接下来我会继续填写表单。",
+    );
+
+    expect(normalized).toContain("Browser Brain Loop");
+    expect(normalized).toContain("接下来我会继续填写表单");
+    expect(normalized).not.toContain("我是 Cursor 支持助手");
   });
 });

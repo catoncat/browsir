@@ -5012,6 +5012,109 @@ describe("runtime-router.browser", () => {
     expect(parsedPayload.hasText).toBe(true);
   });
 
+  it("hosted chat 身份回答应收敛为 BBL 而不是网页原生 persona", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+    orchestrator.registerLlmProvider(
+      {
+        id: "cursor_help_web",
+        resolveRequestUrl() {
+          return "browser-brain-loop://hosted-chat/identity";
+        },
+        async send() {
+          return new Response(
+            [
+              serializeHostedChatTransportEvent({
+                type: "hosted_chat.debug",
+                requestId: "hosted-identity-1",
+                stage: "request_started",
+                detail: "started",
+              }),
+              serializeHostedChatTransportEvent({
+                type: "hosted_chat.turn_resolved",
+                requestId: "hosted-identity-1",
+                result: {
+                  assistantText: "我是 Cursor，负责帮助用户了解 Cursor 文档。",
+                  toolCalls: [],
+                  finishReason: "stop",
+                  meta: {},
+                },
+              }),
+            ].join(""),
+            {
+              status: 200,
+              headers: {
+                "content-type":
+                  "application/x-browser-brain-loop-hosted-chat+jsonl",
+              },
+            },
+          );
+        },
+      },
+      { replace: true },
+    );
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmDefaultProfile: "cursor-help",
+        llmProfiles: [
+          {
+            id: "cursor-help",
+            provider: "cursor_help_web",
+            llmApiBase: "",
+            llmApiKey: "",
+            llmModel: "auto",
+            role: "worker",
+            llmTimeoutMs: 120000,
+            llmRetryMaxAttempts: 0,
+            llmMaxRetryDelayMs: 0,
+            providerOptions: {
+              targetSite: "cursor_help",
+            },
+          },
+        ],
+      },
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "你是谁？",
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    await waitForLoopDone(sessionId);
+    const conversation = await invokeRuntime({
+      type: "brain.session.view",
+      sessionId,
+    });
+    expect(conversation.ok).toBe(true);
+    const messages = Array.isArray(
+      (
+        (conversation.data as Record<string, unknown>)
+          ?.conversationView as Record<string, unknown>
+      )?.messages,
+    )
+      ? ((
+          (conversation.data as Record<string, unknown>)
+            .conversationView as Record<string, unknown>
+        ).messages as unknown[] as Array<Record<string, unknown>>)
+      : [];
+    const assistantText = messages
+      .filter((item) => String(item.role || "") === "assistant")
+      .map((item) => String(item.content || ""))
+      .join("\n");
+
+    expect(assistantText).toContain("Browser Brain Loop");
+    expect(assistantText).not.toContain("我是 Cursor");
+    expect(assistantText).not.toContain("了解 Cursor 文档");
+  });
+
   it("缺少 LLM 配置时应以 failed_execute 结束而非 done", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
