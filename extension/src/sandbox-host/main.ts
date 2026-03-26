@@ -144,7 +144,7 @@ async function handleWechatHostCommand(
         data = wechatService.getState();
         break;
       case "login.start":
-        data = wechatService.startLogin();
+        data = await wechatService.startLogin();
         break;
       case "logout":
         data = wechatService.logout();

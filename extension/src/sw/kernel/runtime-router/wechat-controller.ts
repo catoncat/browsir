@@ -79,7 +79,12 @@ async function upsertBinding(
     channelKind,
     remoteConversationId,
   );
-  if (existing) return existing;
+  if (existing) {
+    const existingSession = await orchestrator.sessions.getMeta(existing.sessionId);
+    if (existingSession) {
+      return existing;
+    }
+  }
 
   const created = await orchestrator.createSession({
     metadata: {

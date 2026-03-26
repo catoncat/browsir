@@ -6,6 +6,7 @@ import { registerRuntimeRouter } from "../runtime-router";
 import { HOST_PROTOCOL_VERSION } from "../host-protocol";
 import { clearIdbStores } from "../idb-storage";
 import { handleBrainChannelWechat } from "../runtime-router/wechat-controller";
+import { removeSessionMeta } from "../session-store.browser";
 
 type RuntimeListener = (
   message: unknown,
@@ -250,6 +251,63 @@ describe("wechat-controller.browser", () => {
       role: "user",
       text: "queued follow up",
     });
+  });
+
+  it("recreates the binding when the stored session no longer exists", async () => {
+    const orchestrator = new BrainOrchestrator();
+    const firstRuntimeLoop = {
+      startFromPrompt: vi.fn(async (input: { sessionId: string; prompt: string }) => {
+        await orchestrator.appendUserMessage(input.sessionId, input.prompt);
+        return {
+          sessionId: input.sessionId,
+          runtime: orchestrator.getRunState(input.sessionId),
+        };
+      }),
+    } as any;
+
+    const first = await handleBrainChannelWechat(orchestrator, firstRuntimeLoop, {
+      type: "brain.channel.wechat.inbound",
+      remoteConversationId: "conv-stale",
+      remoteUserId: "user-stale",
+      remoteMessageId: "msg-stale-1",
+      text: "hello stale",
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) {
+      throw new Error(first.error);
+    }
+    const firstSessionId = String((first.data as Record<string, unknown>).sessionId || "");
+    expect(firstSessionId).toBeTruthy();
+
+    await removeSessionMeta(firstSessionId);
+
+    const secondRuntimeLoop = {
+      startFromPrompt: vi.fn(async (input: { sessionId: string; prompt: string }) => {
+        await orchestrator.appendUserMessage(input.sessionId, input.prompt);
+        return {
+          sessionId: input.sessionId,
+          runtime: orchestrator.getRunState(input.sessionId),
+        };
+      }),
+    } as any;
+
+    const second = await handleBrainChannelWechat(orchestrator, secondRuntimeLoop, {
+      type: "brain.channel.wechat.inbound",
+      remoteConversationId: "conv-stale",
+      remoteUserId: "user-stale",
+      remoteMessageId: "msg-stale-2",
+      text: "hello recreated",
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) {
+      throw new Error(second.error);
+    }
+    const secondSessionId = String((second.data as Record<string, unknown>).sessionId || "");
+    expect(secondSessionId).toBeTruthy();
+    expect(secondSessionId).not.toBe(firstSessionId);
+
+    const binding = await orchestrator.channels.store.getBinding("wechat", "conv-stale");
+    expect(binding?.sessionId).toBe(secondSessionId);
   });
 
   it("returns duplicate for the same remote message id", async () => {

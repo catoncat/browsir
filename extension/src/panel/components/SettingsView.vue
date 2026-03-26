@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { storeToRefs } from "pinia";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import QRCode from "qrcode";
+import { WECHAT_HOST_STATE_EVENT_TYPE } from "../../sw/kernel/host-protocol";
 import { useConfigStore } from "../stores/config-store";
 import { useWechatStore } from "../stores/wechat-store";
 import { ShieldCheck, Cpu, Loader2, ArrowLeft, Eye, EyeOff } from "lucide-vue-next";
@@ -10,7 +11,11 @@ const emit = defineEmits(["close"]);
 const store = useConfigStore();
 const { config, savingConfig, error } = storeToRefs(store);
 const wechatStore = useWechatStore();
-const { state: wechatState, loading: wechatLoading, error: wechatError } =
+const {
+  state: wechatState,
+  loading: wechatLoading,
+  userView: wechatUserView,
+} =
   storeToRefs(wechatStore);
 
 const dialogRef = ref<HTMLElement | null>(null);
@@ -29,35 +34,14 @@ const wechatQrDataUrl = ref("");
 const wechatQrRenderError = ref("");
 const wechatLogin = computed(() => wechatState.value.login);
 
-const wechatPrimaryActionLabel = computed(() => {
-  if (!wechatState.value.enabled) return "启用微信通道";
-  if (wechatState.value.login.status === "pending") return "刷新二维码";
-  if (wechatState.value.login.status === "logged_in") return "重新登录";
-  if (wechatState.value.login.status === "error") return "重新登录";
-  return "开始登录";
-});
-
-const wechatSecondaryActionLabel = computed(() => {
-  if (!wechatState.value.enabled) return "";
-  if (wechatState.value.login.status === "logged_in") return "退出登录";
-  return "停用通道";
-});
-
 async function handleWechatPrimaryAction() {
-  if (!wechatState.value.enabled) {
-    await wechatStore.enable();
-    return;
-  }
-  await wechatStore.startLogin();
+  if (wechatUserView.value.primaryActionDisabled) return;
+  await wechatStore.connect();
 }
 
 async function handleWechatSecondaryAction() {
-  if (!wechatState.value.enabled) return;
-  if (wechatState.value.login.status === "logged_in") {
-    await wechatStore.logout();
-    return;
-  }
-  await wechatStore.disable();
+  if (!wechatUserView.value.showSecondaryAction) return;
+  await wechatStore.disconnect();
 }
 
 async function handleSave() {
@@ -69,9 +53,24 @@ async function handleSave() {
   }
 }
 
+const onWechatRuntimeState = (message: unknown) => {
+  const row =
+    message && typeof message === "object"
+      ? (message as Record<string, unknown>)
+      : null;
+  if (!row || row.type !== WECHAT_HOST_STATE_EVENT_TYPE) return false;
+  wechatStore.applyHostState(row.payload);
+  return false;
+};
+
 onMounted(() => {
   dialogRef.value?.focus();
+  globalThis.chrome?.runtime?.onMessage?.addListener(onWechatRuntimeState);
   void wechatStore.refresh();
+});
+
+onUnmounted(() => {
+  globalThis.chrome?.runtime?.onMessage?.removeListener(onWechatRuntimeState);
 });
 
 watch(
@@ -227,48 +226,35 @@ watch(
             <div class="space-y-0.5 min-w-0">
               <p class="text-[13px] font-semibold text-ui-text">通道状态</p>
               <p class="text-[11px] text-ui-text-muted truncate">
-                {{
-                  !wechatState.enabled
-                    ? '已停用'
-                    : wechatLogin.status === 'pending'
-                      ? '正在等待微信登录完成'
-                      : wechatLogin.status === 'logged_in'
-                        ? '已登录'
-                        : wechatLogin.status === 'error'
-                          ? '登录异常'
-                          : '未登录'
-                }}
+                {{ wechatUserView.detail }}
               </p>
             </div>
             <span
               class="inline-flex shrink-0 items-center rounded-full px-2 py-1 text-[10px] font-semibold"
               :class="
-                !wechatState.enabled
-                  ? 'bg-ui-bg text-ui-text-muted'
-                  : wechatLogin.status === 'logged_in'
+                wechatUserView.status === 'connected'
                   ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
-                  : wechatLogin.status === 'pending'
+                  : wechatUserView.status === 'connecting_qr'
                     ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
-                    : wechatLogin.status === 'error'
+                    : wechatUserView.status === 'error'
                       ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300'
                       : 'bg-ui-bg text-ui-text-muted'
               "
             >
-              {{ wechatState.enabled ? wechatLogin.status : 'disabled' }}
+              {{ wechatUserView.badge }}
             </span>
           </div>
-          <p class="text-[10px] text-ui-text-muted/70">
-            当前 host epoch：{{ wechatState.hostEpoch || '未初始化' }}
+          <p class="text-[13px] font-semibold text-ui-text">
+            {{ wechatUserView.headline }}
           </p>
-          <p v-if="wechatError" class="text-[10px] text-rose-500">{{ wechatError }}</p>
           <p
-            v-else-if="wechatLogin.lastError"
+            v-if="wechatUserView.errorMessage"
             class="text-[10px] text-rose-500"
           >
-            {{ wechatLogin.lastError }}
+            {{ wechatUserView.errorMessage }}
           </p>
           <div
-            v-if="wechatLogin.status === 'pending' && wechatLogin.qrImageUrl"
+            v-if="wechatUserView.showQrCard && wechatLogin.qrImageUrl"
             class="flex flex-col items-center gap-2 rounded-sm border border-ui-border bg-ui-bg/60 px-3 py-3"
           >
             <img
@@ -284,7 +270,7 @@ watch(
               正在生成二维码…
             </div>
             <p class="text-[10px] text-ui-text-muted/70">
-              使用微信扫码完成登录
+              {{ wechatUserView.qrHint }}
             </p>
             <p
               v-if="wechatQrRenderError"
@@ -300,19 +286,19 @@ watch(
             <button
               type="button"
               class="rounded-sm bg-ui-text px-3 py-2 text-[12px] font-semibold text-ui-bg transition-opacity hover:opacity-90 disabled:opacity-50"
-              :disabled="wechatLoading"
+              :disabled="wechatLoading || wechatUserView.primaryActionDisabled"
               @click="handleWechatPrimaryAction"
             >
-              {{ wechatLoading ? '处理中...' : wechatPrimaryActionLabel }}
+              {{ wechatLoading ? '处理中...' : wechatUserView.primaryActionLabel }}
             </button>
             <button
-              v-if="wechatSecondaryActionLabel"
+              v-if="wechatUserView.showSecondaryAction"
               type="button"
               class="rounded-sm border border-ui-border bg-ui-bg px-3 py-2 text-[12px] font-semibold text-ui-text transition-colors hover:bg-ui-surface disabled:opacity-50"
               :disabled="wechatLoading"
               @click="handleWechatSecondaryAction"
             >
-              {{ wechatSecondaryActionLabel }}
+              {{ wechatUserView.secondaryActionLabel }}
             </button>
           </div>
         </div>

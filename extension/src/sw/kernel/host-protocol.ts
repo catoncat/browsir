@@ -1,4 +1,5 @@
 export const HOST_PROTOCOL_VERSION = "bbl.host.v1";
+export const WECHAT_HOST_STATE_EVENT_TYPE = "brain.channel.wechat.host_state";
 
 export type HostServiceId = "wechat";
 

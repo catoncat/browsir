@@ -1,5 +1,6 @@
 import {
   HOST_PROTOCOL_VERSION,
+  WECHAT_HOST_STATE_EVENT_TYPE,
   type WechatReplySendInput,
   type WechatReplySendResult,
   type WechatHostStateSnapshot,
@@ -103,6 +104,88 @@ function clearContextTokens(): void {
   localStorage.removeItem(WECHAT_CONTEXT_TOKENS_KEY);
 }
 
+function isAbortLikeError(error: unknown): boolean {
+  if (!error) return false;
+  const row = error as { name?: string; message?: string };
+  const name = String(row.name || "").trim();
+  const message = String(row.message || "").trim().toLowerCase();
+  return (
+    name === "AbortError" ||
+    message.includes("signal is aborted") ||
+    message.includes("aborted")
+  );
+}
+
+function isTimeoutLikeError(error: unknown): boolean {
+  if (!error) return false;
+  const row = error as { name?: string; message?: string };
+  const name = String(row.name || "").trim().toLowerCase();
+  const message = String(row.message || "").trim().toLowerCase();
+  return (
+    name === "timeouterror" ||
+    message.includes("signal timed out") ||
+    message.includes("timed out")
+  );
+}
+
+function collectBotIds(credentials: WechatCredentials): Set<string> {
+  return new Set(
+    [credentials.accountId, credentials.userId]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean),
+  );
+}
+
+function resolvePeerUserIdForContext(
+  credentials: WechatCredentials,
+  message: WechatMessage,
+): string | null {
+  const botIds = collectBotIds(credentials);
+  const fromUserId = String(message.from_user_id || "").trim();
+  const toUserId = String(message.to_user_id || "").trim();
+  const accountId = String(credentials.accountId || "").trim();
+  const actorUserId = String(credentials.userId || "").trim();
+
+  if (toUserId && accountId && toUserId === accountId) {
+    return fromUserId || null;
+  }
+  if (
+    toUserId &&
+    actorUserId &&
+    toUserId === actorUserId &&
+    fromUserId &&
+    !botIds.has(fromUserId)
+  ) {
+    return fromUserId;
+  }
+  if (fromUserId && botIds.has(fromUserId) && toUserId && !botIds.has(toUserId)) {
+    return toUserId;
+  }
+  if (fromUserId && !botIds.has(fromUserId)) return fromUserId;
+  if (toUserId && !botIds.has(toUserId)) return toUserId;
+  return null;
+}
+
+function isInboundMessage(
+  credentials: WechatCredentials,
+  message: WechatMessage,
+): boolean {
+  const botIds = collectBotIds(credentials);
+  const fromUserId = String(message.from_user_id || "").trim();
+  const toUserId = String(message.to_user_id || "").trim();
+  const accountId = String(credentials.accountId || "").trim();
+  const actorUserId = String(credentials.userId || "").trim();
+
+  if (!fromUserId || !toUserId) return false;
+  if (accountId && toUserId === accountId) {
+    return fromUserId !== accountId;
+  }
+  if (actorUserId && toUserId === actorUserId) {
+    return !botIds.has(fromUserId);
+  }
+  return false;
+}
+
 function readState(): WechatHostStateSnapshot {
   try {
     const raw = localStorage.getItem(WECHAT_STATE_KEY);
@@ -175,6 +258,12 @@ function readState(): WechatHostStateSnapshot {
 
 function writeState(state: WechatHostStateSnapshot): WechatHostStateSnapshot {
   localStorage.setItem(WECHAT_STATE_KEY, JSON.stringify(state));
+  queueMicrotask(() => {
+    void globalThis.chrome?.runtime?.sendMessage?.({
+      type: WECHAT_HOST_STATE_EVENT_TYPE,
+      payload: state,
+    })?.catch(() => {});
+  });
   return state;
 }
 
@@ -205,19 +294,41 @@ export class WechatHostService {
   private updatePollTimer: ReturnType<typeof setTimeout> | null = null;
   private updatePollController: AbortController | null = null;
 
+  constructor() {
+    this.resumePersistedBackgroundWork();
+  }
+
+  private resumePersistedBackgroundWork(): void {
+    const state = readState();
+    if (state.login.status === "pending" && state.login.qrCode) {
+      this.scheduleLoginPoll(state.login.qrCode);
+      return;
+    }
+    if (
+      state.enabled &&
+      state.login.status === "logged_in" &&
+      readCredentials()
+    ) {
+      this.scheduleUpdatePoll(0);
+    }
+  }
+
   private clearLoginPoll(): void {
     if (!this.loginPollTimer) return;
     clearTimeout(this.loginPollTimer);
     this.loginPollTimer = null;
   }
 
-  private clearUpdatePoll(): void {
+  private clearUpdatePoll(options: { abortInFlight?: boolean } = {}): void {
+    const abortInFlight = options.abortInFlight !== false;
     if (this.updatePollTimer) {
       clearTimeout(this.updatePollTimer);
       this.updatePollTimer = null;
     }
-    this.updatePollController?.abort();
-    this.updatePollController = null;
+    if (abortInFlight) {
+      this.updatePollController?.abort();
+      this.updatePollController = null;
+    }
   }
 
   private scheduleLoginPoll(qrCode: string): void {
@@ -228,23 +339,50 @@ export class WechatHostService {
   }
 
   private scheduleUpdatePoll(delayMs = 0): void {
-    this.clearUpdatePoll();
+    this.clearUpdatePoll({ abortInFlight: false });
+    if (this.updatePollController) return;
     this.updatePollTimer = setTimeout(() => {
       void this.pollUpdates();
     }, delayMs);
   }
 
-  private rememberContext(message: WechatMessage): void {
-    const userId =
-      message.message_type === 1 ? message.from_user_id : message.to_user_id;
+  private rememberContext(
+    credentials: WechatCredentials,
+    message: WechatMessage,
+  ): void {
+    const userId = resolvePeerUserIdForContext(credentials, message);
     if (!userId || !message.context_token) return;
     const tokens = readContextTokens();
     tokens[userId] = message.context_token;
     writeContextTokens(tokens);
   }
 
-  private toInboundMessage(message: WechatMessage): Record<string, unknown> | null {
-    if (message.message_type !== 1) return null;
+  private toInboundMessage(
+    credentials: WechatCredentials,
+    message: WechatMessage,
+  ): Record<string, unknown> | null {
+    if (message.message_type !== 1) {
+      console.debug("[wechat] toInbound: skip non-text message", message.message_type);
+      return null;
+    }
+    const remoteUserId = resolvePeerUserIdForContext(credentials, message);
+    const botIds = collectBotIds(credentials);
+    if (!remoteUserId) {
+      console.warn("[wechat] toInbound: no remoteUserId resolved", {
+        from: message.from_user_id,
+        to: message.to_user_id,
+        botIds: [...botIds],
+      });
+      return null;
+    }
+    if (!isInboundMessage(credentials, message)) {
+      console.warn("[wechat] toInbound: message not inbound, skip", {
+        from_user_id: message.from_user_id,
+        to_user_id: message.to_user_id,
+        botIds: [...botIds],
+      });
+      return null;
+    }
     const text = message.item_list
       ?.filter((item) => Number(item.type) === 1)
       .map((item) => String(item.text_item?.text || "").trim())
@@ -254,8 +392,8 @@ export class WechatHostService {
     if (!text) return null;
     return {
       type: "brain.channel.wechat.inbound",
-      remoteConversationId: message.from_user_id,
-      remoteUserId: message.from_user_id,
+      remoteConversationId: remoteUserId,
+      remoteUserId,
       remoteMessageId: String(message.message_id || "").trim(),
       text,
       contextToken: message.context_token,
@@ -264,12 +402,28 @@ export class WechatHostService {
   }
 
   private async deliverInboundBatch(
+    credentials: WechatCredentials,
     updates: WechatGetUpdatesResponse,
   ): Promise<void> {
     for (const message of updates.msgs || []) {
-      this.rememberContext(message);
-      const inbound = this.toInboundMessage(message);
-      if (!inbound) continue;
+      this.rememberContext(credentials, message);
+      const inbound = this.toInboundMessage(credentials, message);
+      if (!inbound) {
+        console.warn("[wechat] inbound dropped", {
+          messageId: message.message_id,
+          messageType: message.message_type,
+          fromUserId: message.from_user_id,
+          toUserId: message.to_user_id,
+          botUserIds: [...collectBotIds(credentials)],
+          hasText: Boolean(
+            message.item_list
+              ?.filter((item) => Number(item.type) === 1)
+              .some((item) => String(item.text_item?.text || "").trim()),
+          ),
+          resolvePeerResult: resolvePeerUserIdForContext(credentials, message),
+        });
+        continue;
+      }
       const response = (await chrome.runtime.sendMessage(inbound)) as
         | { ok?: boolean; data?: Record<string, unknown>; error?: string }
         | undefined;
@@ -288,9 +442,15 @@ export class WechatHostService {
 
   private async pollUpdates(): Promise<void> {
     const credentials = readCredentials();
-    if (!credentials) return;
+    if (!credentials) {
+      console.warn("[wechat] pollUpdates: no credentials, skip");
+      return;
+    }
     const current = readState();
-    if (current.login.status !== "logged_in") return;
+    if (current.login.status !== "logged_in") {
+      console.warn("[wechat] pollUpdates: not logged_in, skip", current.login.status);
+      return;
+    }
 
     try {
       this.updatePollController = new AbortController();
@@ -301,10 +461,22 @@ export class WechatHostService {
         this.updatePollController.signal,
       );
       this.updatePollController = null;
-      await this.deliverInboundBatch(updates);
+      await this.deliverInboundBatch(credentials, updates);
       this.scheduleUpdatePoll(0);
     } catch (error) {
       this.updatePollController = null;
+      if (isAbortLikeError(error)) {
+        if (readState().enabled && readCredentials()) {
+          this.scheduleUpdatePoll(0);
+        }
+        return;
+      }
+      if (isTimeoutLikeError(error)) {
+        if (readState().enabled && readCredentials()) {
+          this.scheduleUpdatePoll(0);
+        }
+        return;
+      }
       const err = error as { code?: number; message?: string };
       if (typeof err?.code === "number" && err.code === -14) {
         this.logout();
@@ -403,7 +575,15 @@ export class WechatHostService {
   }
 
   getState(): WechatHostStateSnapshot {
-    return readState();
+    const state = readState();
+    if (state.login.status === "pending" && state.login.qrCode) {
+      this.scheduleLoginPoll(state.login.qrCode);
+      return state;
+    }
+    if (state.enabled && state.login.status === "logged_in" && readCredentials()) {
+      this.scheduleUpdatePoll(0);
+    }
+    return state;
   }
 
   enable(): WechatHostStateSnapshot {
