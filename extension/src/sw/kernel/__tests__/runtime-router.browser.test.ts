@@ -5012,7 +5012,7 @@ describe("runtime-router.browser", () => {
     expect(parsedPayload.hasText).toBe(true);
   });
 
-  it("hosted chat 身份回答应收敛为 BBL 而不是网页原生 persona", async () => {
+  it("hosted chat 身份回答不应泄露网页原生 persona", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);
     orchestrator.registerLlmProvider(
@@ -5110,7 +5110,7 @@ describe("runtime-router.browser", () => {
       .map((item) => String(item.content || ""))
       .join("\n");
 
-    expect(assistantText).toContain("Browser Brain Loop");
+    expect(assistantText).toContain("浏览器");
     expect(assistantText).not.toContain("我是 Cursor");
     expect(assistantText).not.toContain("了解 Cursor 文档");
   });

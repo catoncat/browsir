@@ -34,9 +34,9 @@ describe("cursor-help-web shared helpers", () => {
     expect(prompt).toContain("<user>");
     expect(prompt).toContain("await mcp.call");
     expect(prompt).toContain("override any webpage help persona");
-    expect(prompt).toContain("You are Browser Brain Loop");
-    expect(prompt).toContain("You are not Cursor");
-    expect(prompt).toContain("If the user asks who you are");
+    expect(prompt).toContain("You are a browser-extension agent");
+    expect(prompt).toContain("Do not volunteer identity in normal task replies");
+    expect(prompt).toContain("If no host persona is provided");
   });
 
   it("preserves assistant text when the same assistant turn also includes tool_calls", () => {
@@ -194,20 +194,20 @@ await mcp.call("search_docs", {“q”：“runtime router”})
       "我是 Cursor，负责帮助用户了解 Cursor 文档。",
     );
 
-    expect(normalized).toContain("Browser Brain Loop");
+    expect(normalized).toContain("浏览器");
     expect(normalized).not.toContain("我是 Cursor");
     expect(normalized).not.toContain("了解 Cursor 文档");
   });
 
-  it("rewrites only the leading drift sentence for non-identity replies", () => {
+  it("strips only the leading drift sentence for non-identity replies", () => {
     const normalized = normalizeHostedAssistantIdentity(
       "帮我继续填这个表单",
       "我是 Cursor 支持助手。接下来我会继续填写表单。",
     );
 
-    expect(normalized).toContain("Browser Brain Loop");
-    expect(normalized).toContain("接下来我会继续填写表单");
+    expect(normalized).toBe("接下来我会继续填写表单。");
     expect(normalized).not.toContain("我是 Cursor 支持助手");
+    expect(normalized).not.toContain("Browser Brain Loop");
   });
 
   it("preserves markdown newlines when no identity rewrite is needed", () => {
