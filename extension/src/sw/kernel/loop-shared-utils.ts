@@ -708,6 +708,7 @@ export function extractLlmConfig(raw: JsonRecord): BridgeConfig {
       "browser-first",
     ),
     compaction: normalizeCompactionSettings(raw.compaction),
+    llmProviderCatalog: raw.llmProviderCatalog,
     llmDefaultProfile: String(raw.llmDefaultProfile || "default"),
     llmAuxProfile: String(raw.llmAuxProfile || ""),
     llmFallbackProfile: String(raw.llmFallbackProfile || ""),
