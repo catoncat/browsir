@@ -33,37 +33,101 @@ async function readLatestAssistantText(
   return { text: "" };
 }
 
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function readLatestAssistantTextFromStepStream(
   orchestrator: BrainOrchestrator,
   sessionId: string,
   notBeforeIso: string,
 ): Promise<string> {
+  try {
+    await orchestrator.flushSessionTraceWrites(sessionId);
+  } catch (error) {
+    console.warn("[channel-observer] flushSessionTraceWrites failed", error);
+  }
   const threshold = Date.parse(notBeforeIso);
   const stream = await orchestrator.getStepStream(sessionId);
   for (let i = stream.length - 1; i >= 0; i -= 1) {
     const item = stream[i];
-    if (String(item.type || "") !== "hosted_chat.turn_resolved") continue;
     const ts = Date.parse(String(item.timestamp || ""));
     if (Number.isFinite(threshold) && Number.isFinite(ts) && ts < threshold) {
       continue;
     }
+    const itemType = String(item.type || "").trim();
     const payload = toRecord(item.payload);
-    const result = toRecord(payload.result);
-    const text = String(result.assistantText || "").trim();
-    if (text) {
-      const entries = await orchestrator.sessions.getEntries(sessionId);
-      const latestUserText = Array.from(entries)
-        .reverse()
-        .find(
-          (entry) =>
-            entry.type === "message" &&
-            entry.role === "user" &&
-            String(entry.text || "").trim(),
-        )?.text;
-      return normalizeHostedAssistantIdentity(latestUserText, text).trim();
+
+    if (itemType === "hosted_chat.turn_resolved") {
+      const result = toRecord(payload.result);
+      const text = String(result.assistantText || "").trim();
+      if (text) {
+        const entries = await orchestrator.sessions.getEntries(sessionId);
+        const latestUserText = Array.from(entries)
+          .reverse()
+          .find(
+            (entry) =>
+              entry.type === "message" &&
+              entry.role === "user" &&
+              String(entry.text || "").trim(),
+          )?.text;
+        return normalizeHostedAssistantIdentity(latestUserText, text).trim();
+      }
+      continue;
+    }
+
+    if (itemType === "step_finished") {
+      const ok = payload.ok === true;
+      const mode = String(payload.mode || "").trim();
+      const preview = String(payload.preview || "").trim();
+      if (ok && mode === "llm" && preview) {
+        return preview;
+      }
     }
   }
   return "";
+}
+
+async function resolveFreshAssistantResult(
+  orchestrator: BrainOrchestrator,
+  turn: ChannelTurnRecord,
+): Promise<{ assistantEntryId?: string; text: string }> {
+  const maxAttempts = 5;
+  const waitPerAttemptMs = 40;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const latestAssistant = await readLatestAssistantText(
+      orchestrator,
+      turn.sessionId,
+    );
+    const hasFreshAssistantEntry =
+      !!latestAssistant.entryId &&
+      latestAssistant.entryId !== turn.assistantBaselineEntryId;
+    if (hasFreshAssistantEntry) {
+      return {
+        assistantEntryId: latestAssistant.entryId,
+        text: latestAssistant.text,
+      };
+    }
+
+    const fallbackAssistantText = await readLatestAssistantTextFromStepStream(
+      orchestrator,
+      turn.sessionId,
+      turn.createdAt,
+    );
+    if (fallbackAssistantText) {
+      return {
+        assistantEntryId: latestAssistant.entryId,
+        text: fallbackAssistantText,
+      };
+    }
+
+    if (attempt < maxAttempts - 1) {
+      await waitMs(waitPerAttemptMs);
+    }
+  }
+
+  return { text: "" };
 }
 
 async function findRunningTurn(
@@ -127,32 +191,13 @@ export function attachChannelObserver(orchestrator: BrainOrchestrator): void {
 
       const payload = toRecord(event.payload);
       const status = String(payload.status || "done").trim().toLowerCase();
-      const latestAssistant = await readLatestAssistantText(
+      const freshAssistant = await resolveFreshAssistantResult(
         orchestrator,
-        event.sessionId,
+        turn,
       );
-      const fallbackAssistantText =
-        latestAssistant.entryId &&
-        latestAssistant.entryId !== turn.assistantBaselineEntryId
-          ? ""
-          : await readLatestAssistantTextFromStepStream(
-              orchestrator,
-              event.sessionId,
-              turn.createdAt,
-            );
-      const hasFreshAssistant =
-        (!!latestAssistant.entryId &&
-          latestAssistant.entryId !== turn.assistantBaselineEntryId) ||
-        !!fallbackAssistantText;
-      const resolvedAssistantText =
-        !!latestAssistant.entryId &&
-        latestAssistant.entryId !== turn.assistantBaselineEntryId
-          ? latestAssistant.text
-          : fallbackAssistantText;
-      const projectionKind =
-        status === "done" && hasFreshAssistant
-          ? "final_text"
-          : "safe_failure";
+      const hasFreshAssistant = !!freshAssistant.text;
+      const resolvedAssistantText = freshAssistant.text;
+      const projectionKind = hasFreshAssistant ? "final_text" : "safe_failure";
       const visibleText =
         projectionKind === "final_text"
           ? resolvedAssistantText
@@ -160,7 +205,7 @@ export function attachChannelObserver(orchestrator: BrainOrchestrator): void {
       const projection = createProjectionOutcome({
         channelTurnId: turn.channelTurnId,
         sessionId: turn.sessionId,
-        assistantEntryId: hasFreshAssistant ? latestAssistant.entryId : undefined,
+        assistantEntryId: hasFreshAssistant ? freshAssistant.assistantEntryId : undefined,
         projectionKind,
         visibleText,
       });
@@ -173,10 +218,10 @@ export function attachChannelObserver(orchestrator: BrainOrchestrator): void {
 
       await orchestrator.channels.store.putOutbox(outbox);
       await orchestrator.channels.store.putTurn({
-        ...turn,
-          lifecycleStatus: status === "done" ? "projected" : "closed",
+          ...turn,
+          lifecycleStatus: projectionKind === "final_text" ? "projected" : "closed",
           deliveryStatus: "queued",
-          assistantEntryId: hasFreshAssistant ? latestAssistant.entryId : undefined,
+          assistantEntryId: hasFreshAssistant ? freshAssistant.assistantEntryId : undefined,
           deliveryId: outbox.deliveryId,
           updatedAt: new Date().toISOString(),
         });
@@ -186,10 +231,10 @@ export function attachChannelObserver(orchestrator: BrainOrchestrator): void {
         sessionId: turn.sessionId,
         type: "channel.turn.projected",
         createdAt: new Date().toISOString(),
-        payload: {
-          projectionKind,
-          deliveryId: outbox.deliveryId,
-          assistantEntryId: hasFreshAssistant ? latestAssistant.entryId : undefined,
+          payload: {
+            projectionKind,
+            deliveryId: outbox.deliveryId,
+          assistantEntryId: hasFreshAssistant ? freshAssistant.assistantEntryId : undefined,
           terminalStatus: status,
         },
       });
@@ -218,7 +263,7 @@ export function attachChannelObserver(orchestrator: BrainOrchestrator): void {
           ...turn,
           lifecycleStatus: "delivered",
           deliveryStatus: "delivered",
-          assistantEntryId: hasFreshAssistant ? latestAssistant.entryId : undefined,
+          assistantEntryId: hasFreshAssistant ? freshAssistant.assistantEntryId : undefined,
           deliveryId: outbox.deliveryId,
           updatedAt: sendResult.sentAt,
         });
@@ -245,7 +290,7 @@ export function attachChannelObserver(orchestrator: BrainOrchestrator): void {
           ...turn,
           lifecycleStatus: "sending",
           deliveryStatus: "uncertain",
-          assistantEntryId: hasFreshAssistant ? latestAssistant.entryId : undefined,
+          assistantEntryId: hasFreshAssistant ? freshAssistant.assistantEntryId : undefined,
           deliveryId: outbox.deliveryId,
           updatedAt: uncertainAt,
         });

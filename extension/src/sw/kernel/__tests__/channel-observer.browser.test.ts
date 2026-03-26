@@ -135,7 +135,7 @@ describe("channel-observer", () => {
     expect(outbox[0]?.deliveryStatus).toBe("delivered");
   });
 
-  it("falls back to hosted_chat.turn_resolved assistantText when a fresh assistant entry is not yet persisted", async () => {
+  it("flushes pending trace writes before falling back to hosted_chat.turn_resolved assistantText", async () => {
     const orchestrator = new BrainOrchestrator();
     attachChannelObserver(orchestrator);
     const created = await orchestrator.createSession({
@@ -173,7 +173,6 @@ describe("channel-observer", () => {
         finishReason: "stop",
       },
     });
-    await orchestrator.flushSessionTraceWrites(sessionId);
     orchestrator.events.emit("loop_done", sessionId, {
       status: "done",
       llmSteps: 1,
@@ -189,6 +188,154 @@ describe("channel-observer", () => {
 
     expect(outbox).toHaveLength(1);
     expect(outbox[0]?.projection.visibleText).toBe("fresh stream answer");
+    expect(outbox[0]?.projection.projectionKind).toBe("final_text");
+  });
+
+  it("delivers fresh assistant text even when loop_done status is not done", async () => {
+    const orchestrator = new BrainOrchestrator();
+    attachChannelObserver(orchestrator);
+    const created = await orchestrator.createSession({
+      metadata: {
+        sourceLabel: "wechat",
+        channel: {
+          kind: "wechat",
+          remoteConversationId: "conv-1",
+          remoteUserId: "user-1",
+        },
+      },
+    });
+
+    const sessionId = created.sessionId;
+    const store = new ChannelStore();
+    await store.acceptInbound({
+      binding: createBinding(sessionId),
+      turn: createRunningTurn(sessionId),
+      initialEvent: null,
+    });
+    await orchestrator.sessions.appendMessage({
+      sessionId,
+      role: "assistant",
+      text: "虽然终态失败，但这条答复是新的",
+    });
+
+    orchestrator.events.emit("loop_done", sessionId, {
+      status: "failed_execute",
+      llmSteps: 1,
+      toolSteps: 0,
+    });
+
+    const deadline = Date.now() + 1000;
+    let outbox = await store.listOutboxByTurn("turn-1");
+    while (Date.now() < deadline && outbox[0]?.deliveryStatus !== "delivered") {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      outbox = await store.listOutboxByTurn("turn-1");
+    }
+
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]?.projection.visibleText).toBe("虽然终态失败，但这条答复是新的");
+    expect(outbox[0]?.projection.projectionKind).toBe("final_text");
+  });
+
+  it("waits briefly for a late assistant entry before falling back to safe_failure", async () => {
+    const orchestrator = new BrainOrchestrator();
+    attachChannelObserver(orchestrator);
+    const created = await orchestrator.createSession({
+      metadata: {
+        sourceLabel: "wechat",
+        channel: {
+          kind: "wechat",
+          remoteConversationId: "conv-1",
+          remoteUserId: "user-1",
+        },
+      },
+    });
+
+    const sessionId = created.sessionId;
+    const store = new ChannelStore();
+    await store.acceptInbound({
+      binding: createBinding(sessionId),
+      turn: createRunningTurn(sessionId),
+      initialEvent: null,
+    });
+
+    orchestrator.events.emit("loop_done", sessionId, {
+      status: "done",
+      llmSteps: 1,
+      toolSteps: 0,
+    });
+
+    setTimeout(() => {
+      void orchestrator.sessions.appendMessage({
+        sessionId,
+        role: "assistant",
+        text: "late final answer",
+      });
+    }, 30);
+
+    const deadline = Date.now() + 1000;
+    let outbox = await store.listOutboxByTurn("turn-1");
+    while (Date.now() < deadline && outbox[0]?.deliveryStatus !== "delivered") {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      outbox = await store.listOutboxByTurn("turn-1");
+    }
+
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]?.projection.visibleText).toBe("late final answer");
+    expect(outbox[0]?.projection.projectionKind).toBe("final_text");
+  });
+
+  it("uses llm step_finished preview as a fallback reply source", async () => {
+    const orchestrator = new BrainOrchestrator();
+    attachChannelObserver(orchestrator);
+    const created = await orchestrator.createSession({
+      metadata: {
+        sourceLabel: "wechat",
+        channel: {
+          kind: "wechat",
+          remoteConversationId: "conv-1",
+          remoteUserId: "user-1",
+        },
+      },
+    });
+
+    const sessionId = created.sessionId;
+    const store = new ChannelStore();
+    await orchestrator.sessions.appendMessage({
+      sessionId,
+      role: "assistant",
+      text: "old answer",
+    });
+    const baselineEntry = (await orchestrator.sessions.getEntries(sessionId)).at(-1);
+    await store.acceptInbound({
+      binding: createBinding(sessionId),
+      turn: {
+        ...createRunningTurn(sessionId),
+        assistantBaselineEntryId: String(baselineEntry?.id || ""),
+      },
+      initialEvent: null,
+    });
+
+    orchestrator.events.emit("step_finished", sessionId, {
+      step: 1,
+      ok: true,
+      mode: "llm",
+      preview: "preview final answer",
+    });
+    orchestrator.events.emit("loop_done", sessionId, {
+      status: "done",
+      llmSteps: 1,
+      toolSteps: 0,
+    });
+
+    const deadline = Date.now() + 1000;
+    let outbox = await store.listOutboxByTurn("turn-1");
+    while (Date.now() < deadline && outbox[0]?.deliveryStatus !== "delivered") {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      outbox = await store.listOutboxByTurn("turn-1");
+    }
+
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]?.projection.visibleText).toBe("preview final answer");
     expect(outbox[0]?.projection.projectionKind).toBe("final_text");
   });
 });
