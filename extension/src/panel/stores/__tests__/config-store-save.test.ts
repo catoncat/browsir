@@ -152,4 +152,63 @@ describe("config-store saveConfig", () => {
       }),
     });
   });
+
+  it("persists llm provider catalog for runtime adapter sync", async () => {
+    const store = useConfigStore();
+    store.config = normalizePanelConfig({
+      llmProviders: [
+        {
+          id: "rs",
+          name: "rs",
+          type: "model_llm",
+          apiConfig: {
+            apiBase: "https://ai.chen.rs/v1",
+            apiKey: "sk-demo",
+            supportedModels: ["gpt-5-codex"],
+            supportsModelDiscovery: true,
+          },
+          builtin: false,
+        },
+      ],
+      llmProfiles: [
+        {
+          id: "route-primary",
+          providerId: "rs",
+          modelId: "gpt-5-codex",
+          timeoutMs: 120000,
+          retryMaxAttempts: 2,
+          maxRetryDelayMs: 60000,
+          builtin: false,
+        },
+      ],
+      llmDefaultProfile: "route-primary",
+    });
+
+    sendMessageMock.mockImplementation(async (type: string) => {
+      if (type === "brain.mcp.sync-config") return {};
+      if (type === "brain.debug.config") return {};
+      return {};
+    });
+
+    await store.saveConfig();
+
+    expect(sendMessageMock).toHaveBeenCalledWith("config.save", {
+      payload: expect.objectContaining({
+        llmProviderCatalog: expect.arrayContaining([
+          expect.objectContaining({
+            id: "rs",
+            type: "model_llm",
+          }),
+        ]),
+        llmProfiles: expect.arrayContaining([
+          expect.objectContaining({
+            id: "route-primary",
+            provider: "rs",
+            llmApiBase: "https://ai.chen.rs/v1",
+            llmModel: "gpt-5-codex",
+          }),
+        ]),
+      }),
+    });
+  });
 });
