@@ -112,6 +112,7 @@ acceptance_ref: docs/<某设计文档>.md
 - `ISSUE-032` ChatView 拆分复查修复（done）
 - `ISSUE-033` LLM 模块提取残留清理（done）
 - `ISSUE-034` Sandbox 路径遍历防御 + CDP 安全加固（done）
+- `ISSUE-042` 自定义 OpenAI-compatible provider 已保存但运行时未注册（done）
 
 ## 推荐领取顺序
 
