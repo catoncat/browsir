@@ -29,6 +29,7 @@ export interface BridgeConfig {
   mcpRefs?: McpRefConfig;
   browserRuntimeStrategy: BrowserRuntimeStrategy;
   compaction: CompactionSettings;
+  llmProviderCatalog?: unknown;
   llmDefaultProfile?: string;
   llmAuxProfile?: string;
   llmFallbackProfile?: string;
@@ -138,6 +139,31 @@ function normalizeStoredLlmProfiles(raw: unknown): unknown {
       },
     });
   }
+  return normalized;
+}
+
+function normalizeStoredLlmProviderCatalog(raw: unknown): unknown {
+  const source = Array.isArray(raw) ? raw : [];
+  const normalized: JsonRecord[] = [];
+  const seen = new Set<string>();
+
+  for (const item of source) {
+    const row = asRecord(item);
+    const id = String(row.id || "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+
+    const type =
+      row.type === "model_llm" || row.type === "hosted_chat"
+        ? row.type
+        : undefined;
+    normalized.push({
+      id,
+      ...(type ? { type } : {}),
+      ...(row.builtin === true ? { builtin: true } : {}),
+    });
+  }
+
   return normalized;
 }
 
@@ -361,6 +387,7 @@ export function createBridgeClient(): BridgeClient {
       "mcpRefs",
       "browserRuntimeStrategy",
       "compaction",
+      "llmProviderCatalog",
       "llmDefaultProfile",
       "llmAuxProfile",
       "llmFallbackProfile",
@@ -391,6 +418,9 @@ export function createBridgeClient(): BridgeClient {
         DEFAULT_BROWSER_RUNTIME_STRATEGY,
       ),
       compaction: normalizeCompactionSettings(data.compaction),
+      llmProviderCatalog: normalizeStoredLlmProviderCatalog(
+        data.llmProviderCatalog,
+      ),
       llmDefaultProfile,
       llmAuxProfile: normalizeOptionalProfileId(
         data.llmAuxProfile,
@@ -444,6 +474,11 @@ export function createBridgeClient(): BridgeClient {
   async function saveBridgeConfig(payload: unknown): Promise<BridgeConfig> {
     const source = asRecord(payload);
     const current = await getBridgeConfig();
+    const llmProviderCatalog = normalizeStoredLlmProviderCatalog(
+      source.llmProviderCatalog !== undefined
+        ? source.llmProviderCatalog
+        : current.llmProviderCatalog,
+    );
     const llmProfiles = normalizeStoredLlmProfiles(
       source.llmProfiles !== undefined
         ? source.llmProfiles
@@ -477,6 +512,7 @@ export function createBridgeClient(): BridgeClient {
         source.compaction ?? current.compaction,
         current.compaction,
       ),
+      llmProviderCatalog,
       llmDefaultProfile,
       llmAuxProfile: normalizeOptionalProfileId(
         source.llmAuxProfile !== undefined

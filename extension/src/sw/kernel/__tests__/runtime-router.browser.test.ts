@@ -5282,6 +5282,92 @@ describe("runtime-router.browser", () => {
     expect(String(payload.model || "")).toBe("gpt-worker-basic");
   });
 
+  it("自定义 provider catalog 应映射到 openai-compatible adapter", async () => {
+    const orchestrator = new BrainOrchestrator();
+    registerRuntimeRouter(orchestrator);
+
+    const capturedBodies: Array<Record<string, unknown>> = [];
+    const capturedUrls: string[] = [];
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input, init) => {
+        capturedUrls.push(String(input || ""));
+        const body = (JSON.parse(String(init?.body || "{}")) || {}) as Record<
+          string,
+          unknown
+        >;
+        capturedBodies.push(body);
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: "custom-provider-ok",
+                },
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        );
+      });
+
+    const saved = await invokeRuntime({
+      type: "config.save",
+      payload: {
+        llmProviderCatalog: [
+          {
+            id: "rs",
+            type: "model_llm",
+          },
+        ],
+        llmProfiles: [
+          {
+            id: "worker.basic",
+            provider: "rs",
+            llmApiBase: "https://ai.chen.rs/v1",
+            llmApiKey: "sk-demo",
+            llmModel: "gpt-5-codex",
+            role: "worker",
+          },
+        ],
+        llmDefaultProfile: "worker.basic",
+      },
+    });
+    expect(saved.ok).toBe(true);
+
+    const started = await invokeRuntime({
+      type: "brain.run.start",
+      prompt: "测试自定义 provider adapter 同步",
+    });
+    expect(started.ok).toBe(true);
+    const sessionId = String(
+      ((started.data as Record<string, unknown>) || {}).sessionId || "",
+    );
+    expect(sessionId).not.toBe("");
+
+    const stream = await waitForLoopDone(sessionId);
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(capturedUrls).toContain("https://ai.chen.rs/v1/chat/completions");
+    const runRequest = capturedBodies.find(
+      (body) => Array.isArray(body.tools) && body.stream === true,
+    );
+    expect(runRequest).toBeDefined();
+    expect(String(runRequest?.model || "")).toBe("gpt-5-codex");
+    const selected = stream.find(
+      (item) => String(item.type || "") === "llm.route.selected",
+    ) as Record<string, unknown> | undefined;
+    const payload = (selected?.payload || {}) as Record<string, unknown>;
+    expect(String(payload.profile || "")).toBe("worker.basic");
+    expect(String(payload.provider || "")).toBe("rs");
+    expect(String(payload.model || "")).toBe("gpt-5-codex");
+    expect(orchestrator.getLlmProvider("rs")?.id).toBe("rs");
+  });
+
   it("profile 指向未注册 provider 时应 llm.route.blocked 并 failed_execute", async () => {
     const orchestrator = new BrainOrchestrator();
     registerRuntimeRouter(orchestrator);

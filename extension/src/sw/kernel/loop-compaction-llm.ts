@@ -8,6 +8,7 @@ import {
   isRetryableLlmStatus,
   resolveAuxiliaryLlmRoute,
 } from "./loop-llm-route";
+import { syncCatalogModelLlmProviders } from "./llm-provider-catalog";
 import {
   parseLlmMessageFromBody,
   readHostedChatTurnFromTransportStream,
@@ -56,6 +57,7 @@ export async function requestCompactionSummaryFromLlm(
 ): Promise<string> {
   const cfgRaw = await callInfra(input.infra, { type: "config.get" });
   const config = extractLlmConfig(cfgRaw);
+  syncCatalogModelLlmProviders(input.providerRegistry, config);
   const resolvedRoute = resolveAuxiliaryLlmRoute(config);
   if (!resolvedRoute.ok) {
     throw new Error(resolvedRoute.message);

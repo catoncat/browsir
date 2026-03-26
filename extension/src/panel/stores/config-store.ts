@@ -80,6 +80,7 @@ export interface PanelConfig {
   mcpRefs: McpRefConfig;
   browserRuntimeStrategy: BrowserRuntimeStrategy;
   compaction: CompactionSettings;
+  llmProviderCatalog?: PanelLlmProvider[];
   llmDefaultProfile: string;
   llmAuxProfile: string;
   llmFallbackProfile: string;
@@ -1050,6 +1051,7 @@ export function convertToLegacyBridgeConfig(
     mcpRefs: normalizeMcpRefConfig(newConfig.mcpRefs),
     browserRuntimeStrategy: newConfig.browserRuntimeStrategy,
     compaction: newConfig.compaction,
+    llmProviderCatalog: newConfig.llmProviders,
     llmDefaultProfile: newConfig.llmDefaultProfile,
     llmAuxProfile: newConfig.llmAuxProfile,
     llmFallbackProfile: newConfig.llmFallbackProfile,

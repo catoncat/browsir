@@ -14,6 +14,7 @@ import { decideProfileEscalation } from "./llm-profile-policy";
 import { type LlmResolvedRoute } from "./llm-provider";
 import { requestCompactionSummaryFromLlm } from "./loop-compaction-llm";
 import { requestLlmWithRetry } from "./loop-llm-request";
+import { syncCatalogModelLlmProviders } from "./llm-provider-catalog";
 import { resolveLlmRoute } from "./llm-profile-resolver";
 import { writeSessionMeta } from "./session-store.browser";
 import {
@@ -1913,6 +1914,7 @@ export function createRuntimeLoopController(
 
     const cfgRaw = await callInfra(infra, { type: "config.get" });
     const config = extractLlmConfig(cfgRaw);
+    syncCatalogModelLlmProviders(llmProviders, config);
     orchestrator.updateCompactionSettings(config.compaction);
     const maxLoopSteps = normalizeIntInRange(config.maxSteps, 100, 1, 500);
     const sessionMeta = await orchestrator.sessions.getMeta(sessionId);
