@@ -13,10 +13,10 @@ function asRecord(value: unknown): JsonRecord {
 
 export function syncCatalogModelLlmProviders(
   providerRegistry: LlmProviderRegistry,
-  config: { llmProviderCatalog?: unknown },
+  config: { llmProviders?: unknown },
 ): string[] {
-  const rawCatalog = Array.isArray(config.llmProviderCatalog)
-    ? config.llmProviderCatalog
+  const rawCatalog = Array.isArray(config.llmProviders)
+    ? config.llmProviders
     : [];
   const synced: string[] = [];
 

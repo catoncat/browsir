@@ -14,6 +14,8 @@ import {
   type BashExecOutcome,
 } from "./loop-shared-types";
 import type { JsonRecord } from "./types";
+import { normalizePanelConfig } from "../../shared/panel-config";
+import { providerUsesOpenAiCompatibleToolSchema } from "../../shared/llm-provider-config";
 
 // ── JSON helpers ────────────────────────────────────────────────────
 
@@ -145,10 +147,7 @@ function buildTopLevelSchemaConstraintHint(
   parameters: unknown,
   providerId: string,
 ): string {
-  const provider = String(providerId || "")
-    .trim()
-    .toLowerCase();
-  if (provider !== "openai_compatible") return "";
+  if (!providerUsesOpenAiCompatibleToolSchema(providerId)) return "";
   const schema = toRecord(parameters);
   const fragments: string[] = [];
   const topLevelRequired = normalizeSchemaRequiredList(schema.required);
@@ -188,10 +187,7 @@ function sanitizeTopLevelToolSchemaForProvider(
   providerId: string,
 ): JsonRecord {
   const schema = toRecord(parameters);
-  const provider = String(providerId || "")
-    .trim()
-    .toLowerCase();
-  if (provider !== "openai_compatible") {
+  if (!providerUsesOpenAiCompatibleToolSchema(providerId)) {
     return {
       ...schema,
     };
@@ -682,10 +678,6 @@ export async function callInfra(
 
 // ── LLM config extraction ───────────────────────────────────────────
 
-import {
-  normalizeBrowserRuntimeStrategy,
-} from "./browser-runtime-strategy";
-import { normalizeCompactionSettings } from "../../shared/compaction";
 import type { BridgeConfig } from "./runtime-infra.browser";
 import {
   DEFAULT_BASH_TIMEOUT_MS,
@@ -700,20 +692,19 @@ import {
 } from "./loop-shared-types";
 
 export function extractLlmConfig(raw: JsonRecord): BridgeConfig {
-  return {
+  return normalizePanelConfig({
     bridgeUrl: String(raw.bridgeUrl || ""),
     bridgeToken: String(raw.bridgeToken || ""),
-    browserRuntimeStrategy: normalizeBrowserRuntimeStrategy(
-      raw.browserRuntimeStrategy,
-      "browser-first",
-    ),
-    compaction: normalizeCompactionSettings(raw.compaction),
-    llmProviderCatalog: raw.llmProviderCatalog,
-    llmDefaultProfile: String(raw.llmDefaultProfile || "default"),
-    llmAuxProfile: String(raw.llmAuxProfile || ""),
-    llmFallbackProfile: String(raw.llmFallbackProfile || ""),
+    llmProviders: raw.llmProviders,
     llmProfiles: raw.llmProfiles,
     llmSystemPromptCustom: String(raw.llmSystemPromptCustom || ""),
+    mcpServers: raw.mcpServers,
+    mcpRefs: raw.mcpRefs,
+    browserRuntimeStrategy: raw.browserRuntimeStrategy,
+    compaction: raw.compaction,
+    llmDefaultProfile: String(raw.llmDefaultProfile || "cursor_help_web"),
+    llmAuxProfile: String(raw.llmAuxProfile || ""),
+    llmFallbackProfile: String(raw.llmFallbackProfile || ""),
     maxSteps: normalizeIntInRange(raw.maxSteps, 100, 1, 500),
     autoTitleInterval: normalizeIntInRange(raw.autoTitleInterval, 10, 0, 100),
     bridgeInvokeTimeoutMs: normalizeIntInRange(
@@ -742,7 +733,7 @@ export function extractLlmConfig(raw: JsonRecord): BridgeConfig {
     ),
     devAutoReload: raw.devAutoReload === true,
     devReloadIntervalMs: Number(raw.devReloadIntervalMs || 1500),
-  };
+  });
 }
 
 // ── Misc ────────────────────────────────────────────────────────────

@@ -12,7 +12,24 @@ function baseConfig(): BridgeConfig {
     browserRuntimeStrategy: "host-first",
     compaction: DEFAULT_COMPACTION_SETTINGS,
     llmDefaultProfile: "cursor-help",
+    llmAuxProfile: "",
+    llmFallbackProfile: "",
+    llmProviders: [
+      {
+        id: "cursor_help_web",
+        name: "内置模型",
+        type: "hosted_chat",
+        options: {
+          targetTabId: 88,
+          targetSite: "cursor_help",
+        },
+        builtin: true,
+      },
+    ],
     llmProfiles: [],
+    mcpServers: [],
+    mcpRefs: {},
+    llmSystemPromptCustom: "",
     maxSteps: 10,
     autoTitleInterval: 10,
     bridgeInvokeTimeoutMs: 120000,
@@ -30,18 +47,12 @@ describe("llm-profile-resolver cursor_help_web", () => {
     config.llmProfiles = [
       {
         id: "cursor-help",
-        provider: "cursor_help_web",
-        llmApiBase: "",
-        llmApiKey: "",
-        llmModel: "auto",
-        providerOptions: {
-          targetTabId: 88,
-          targetSite: "cursor_help"
-        },
-        role: "worker",
-        llmTimeoutMs: 120000,
-        llmRetryMaxAttempts: 2,
-        llmMaxRetryDelayMs: 60000
+        providerId: "cursor_help_web",
+        modelId: "auto",
+        timeoutMs: 120000,
+        retryMaxAttempts: 2,
+        maxRetryDelayMs: 60000,
+        builtin: false,
       }
     ];
 

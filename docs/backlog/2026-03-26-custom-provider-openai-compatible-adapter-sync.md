@@ -64,3 +64,24 @@ tags: [llm, provider, runtime, config]
 ## 相关 commits（补充）
 
 - 未提交
+
+## 工作总结（再次补充）
+
+### 2026-03-27 00:13 +08:00
+
+- 继续排查自定义 provider `rs` 在 `tool_call` 场景下的 `LLM HTTP 400`
+- 现场错误：
+  - `Invalid schema for function 'click': schema must have type 'object' and not have 'oneOf'/'anyOf'/'allOf'/'enum'/'not' at the top level.`
+- 根因补充：
+  - `31d996e` 已引入 tool schema sanitize，但当时仅对 `provider === openai_compatible` 生效
+  - 后续自定义 provider 独立 id 落地后，`rs` 虽然底层仍走 OpenAI-compatible transport，但不再命中这个旧条件
+  - 结果是 `click` 等工具的顶层 `anyOf` 没被抹平，OpenAI 兼容端返回 400
+- 已修复：
+  - 将 tool schema sanitize / constraint hint 的适用条件从“provider id 恰好等于 `openai_compatible`”改为“所有 `model_llm` 路径”
+  - 给 `runtime-router` 的自定义 provider 测试补充断言，确认 `click.parameters` 顶层不再含 `anyOf/oneOf/allOf/enum/not`
+- 已验证：
+  - `cd extension && bun run test src/sw/kernel/__tests__/runtime-router.browser.test.ts`
+
+## 相关 commits（再次补充）
+
+- 未提交

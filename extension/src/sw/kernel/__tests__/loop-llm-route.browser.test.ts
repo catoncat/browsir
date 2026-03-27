@@ -33,24 +33,45 @@ function baseConfig(): TestBridgeConfig {
     llmMaxRetryDelayMs: 60000,
     devAutoReload: false,
     devReloadIntervalMs: 1500,
-    llmProfiles: [
+    llmProviders: [
       {
-        id: "cursor-help",
-        provider: "cursor_help_web",
-        llmApiBase: "",
-        llmApiKey: "",
-        llmModel: "auto",
-        providerOptions: {
+        id: "cursor_help_web",
+        name: "内置模型",
+        type: "hosted_chat",
+        options: {
           targetTabId: 88,
           targetSite: "cursor_help",
         },
+        builtin: true,
+      },
+      {
+        id: "openai_compatible",
+        name: "通用 API",
+        type: "model_llm",
+        apiConfig: {
+          apiBase: "https://example.ai/v1",
+          apiKey: "k-pro",
+          supportedModels: ["gpt-pro"],
+        },
+        builtin: true,
+      },
+    ],
+    llmProfiles: [
+      {
+        id: "cursor-help",
+        providerId: "cursor_help_web",
+        modelId: "auto",
+        timeoutMs: 120000,
+        retryMaxAttempts: 2,
+        maxRetryDelayMs: 60000,
       },
       {
         id: "worker.pro",
-        provider: "openai_compatible",
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "k-pro",
-        llmModel: "gpt-pro",
+        providerId: "openai_compatible",
+        modelId: "gpt-pro",
+        timeoutMs: 120000,
+        retryMaxAttempts: 2,
+        maxRetryDelayMs: 60000,
       },
     ],
   };
@@ -84,10 +105,11 @@ describe("loop-llm-route auxiliary route", () => {
     config.llmProfiles = [
       {
         id: "cursor-help",
-        provider: "cursor_help_web",
-        llmApiBase: "",
-        llmApiKey: "",
-        llmModel: "auto",
+        providerId: "cursor_help_web",
+        modelId: "auto",
+        timeoutMs: 120000,
+        retryMaxAttempts: 2,
+        maxRetryDelayMs: 60000,
       },
     ];
     const resolved = resolveAuxiliaryNonHostedLlmRoute(

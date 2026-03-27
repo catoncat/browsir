@@ -12,7 +12,7 @@ type JsonRecord = Record<string, unknown>;
 
 interface LlmProfileDef {
   id: string;
-  provider: string;
+  providerId: string;
   llmBase: string;
   llmKey: string;
   llmModel: string;
@@ -76,33 +76,56 @@ function toIntInRange(
   return floored;
 }
 
+function collectProviderMap(config: BridgeConfig): Map<string, JsonRecord> {
+  const map = new Map<string, JsonRecord>();
+  const rawProviders = Array.isArray(config.llmProviders) ? config.llmProviders : [];
+  for (const item of rawProviders) {
+    const row = asRecord(item);
+    const id = String(row.id || "").trim();
+    if (!id) continue;
+    map.set(id, row);
+  }
+  return map;
+}
+
 function normalizeProfileDef(
   raw: JsonRecord,
+  providerMap: Map<string, JsonRecord>,
   fallbackId: string,
   fallbackConfig: BridgeConfig,
 ): LlmProfileDef | null {
   const id = normalizeProfileId(raw.id || fallbackId);
-  const provider =
-    String(raw.provider || DEFAULT_LLM_PROVIDER_ID).trim() ||
+  const providerId =
+    String(raw.providerId || DEFAULT_LLM_PROVIDER_ID).trim() ||
     DEFAULT_LLM_PROVIDER_ID;
-  const llmBase = String(raw.llmApiBase || "").trim();
-  const llmKey = String(raw.llmApiKey || "").trim();
-  const llmModel =
-    String(raw.llmModel || "gpt-5.3-codex").trim() || "gpt-5.3-codex";
+  const provider = providerMap.get(providerId) || {};
+  const runtimeKind =
+    String(provider.type || "").trim() === "hosted_chat" ||
+    String(provider.type || "").trim() === "model_llm"
+      ? String(provider.type || "").trim()
+      : getProviderRuntimeKind(providerId);
+  const apiConfig = asRecord(provider.apiConfig);
+  const llmBase = String(apiConfig.apiBase || "").trim();
+  const llmKey = String(apiConfig.apiKey || "").trim();
+  const llmModel = String(
+    raw.modelId ||
+      apiConfig.defaultModel ||
+      (runtimeKind === "hosted_chat" ? "auto" : "gpt-5.3-codex"),
+  ).trim() || (runtimeKind === "hosted_chat" ? "auto" : "gpt-5.3-codex");
   const llmTimeoutMs = toIntInRange(
-    raw.llmTimeoutMs,
+    raw.timeoutMs,
     fallbackConfig.llmTimeoutMs,
     1_000,
     300_000,
   );
   const llmRetryMaxAttempts = toIntInRange(
-    raw.llmRetryMaxAttempts,
+    raw.retryMaxAttempts,
     fallbackConfig.llmRetryMaxAttempts,
     0,
     6,
   );
   const llmMaxRetryDelayMs = toIntInRange(
-    raw.llmMaxRetryDelayMs,
+    raw.maxRetryDelayMs,
     fallbackConfig.llmMaxRetryDelayMs,
     0,
     300_000,
@@ -110,11 +133,11 @@ function normalizeProfileDef(
   if (!id) return null;
   return {
     id,
-    provider,
+    providerId,
     llmBase,
     llmKey,
     llmModel,
-    providerOptions: asRecord(raw.providerOptions),
+    providerOptions: asRecord(provider.options),
     llmTimeoutMs,
     llmRetryMaxAttempts,
     llmMaxRetryDelayMs,
@@ -123,15 +146,14 @@ function normalizeProfileDef(
 
 function collectProfiles(config: BridgeConfig): Map<string, LlmProfileDef> {
   const map = new Map<string, LlmProfileDef>();
-
-  const rawProfiles = (config as BridgeConfig & { llmProfiles?: unknown })
-    .llmProfiles;
+  const providerMap = collectProviderMap(config);
+  const rawProfiles = config.llmProfiles;
   if (!Array.isArray(rawProfiles)) return map;
 
   for (const item of rawProfiles) {
     const row = asRecord(item);
     const fallbackId = normalizeProfileId(row.id);
-    const normalized = normalizeProfileDef(row, fallbackId, config);
+    const normalized = normalizeProfileDef(row, providerMap, fallbackId, config);
     if (!normalized) continue;
     map.set(normalized.id, normalized);
   }
@@ -144,10 +166,7 @@ function resolveOrderedProfiles(
   selectedProfile: string,
   profiles: Map<string, LlmProfileDef>,
 ): string[] {
-  const fallbackProfile = normalizeOptionalProfileId(
-    (config as BridgeConfig & { llmFallbackProfile?: unknown })
-      .llmFallbackProfile,
-  );
+  const fallbackProfile = normalizeOptionalProfileId(config.llmFallbackProfile);
   if (
     !fallbackProfile ||
     fallbackProfile === selectedProfile ||
@@ -168,10 +187,7 @@ function resolveEscalationPolicy(
   if (explicit === "disabled" || explicit === "upgrade_only") {
     return explicit;
   }
-  const fallbackProfile = normalizeOptionalProfileId(
-    (config as BridgeConfig & { llmFallbackProfile?: unknown })
-      .llmFallbackProfile,
-  );
+  const fallbackProfile = normalizeOptionalProfileId(config.llmFallbackProfile);
   return fallbackProfile ? "upgrade_only" : "disabled";
 }
 
@@ -183,10 +199,7 @@ export function resolveLlmRoute(
 
   const profile =
     normalizeProfileId(
-      input.profile ||
-        (config as BridgeConfig & { llmDefaultProfile?: unknown })
-          .llmDefaultProfile ||
-        DEFAULT_LLM_PROFILE_ID,
+      input.profile || config.llmDefaultProfile || DEFAULT_LLM_PROFILE_ID,
     ) || DEFAULT_LLM_PROFILE_ID;
   const preferredRoleRaw = String(input.role || "").trim();
   const escalationPolicy = resolveEscalationPolicy(
@@ -210,7 +223,7 @@ export function resolveLlmRoute(
     };
   }
   const role = normalizeRole(preferredRoleRaw);
-  const runtimeKind = getProviderRuntimeKind(selected.provider);
+  const runtimeKind = getProviderRuntimeKind(selected.providerId);
 
   if (
     runtimeKind === "model_llm" &&
@@ -230,7 +243,7 @@ export function resolveLlmRoute(
     ok: true,
     route: {
       profile: selected.id,
-      provider: selected.provider || DEFAULT_LLM_PROVIDER_ID,
+      provider: selected.providerId || DEFAULT_LLM_PROVIDER_ID,
       runtimeKind,
       llmBase: selected.llmBase,
       llmKey: selected.llmKey,

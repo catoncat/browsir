@@ -5319,20 +5319,30 @@ describe("runtime-router.browser", () => {
     const saved = await invokeRuntime({
       type: "config.save",
       payload: {
-        llmProviderCatalog: [
+        llmProviders: [
           {
             id: "rs",
+            name: "rs",
             type: "model_llm",
+            apiConfig: {
+              apiBase: "https://ai.chen.rs/v1",
+              apiKey: "sk-demo",
+              defaultModel: "gpt-5-codex",
+              supportedModels: ["gpt-5-codex"],
+              supportsModelDiscovery: true,
+            },
+            builtin: false,
           },
         ],
         llmProfiles: [
           {
             id: "worker.basic",
-            provider: "rs",
-            llmApiBase: "https://ai.chen.rs/v1",
-            llmApiKey: "sk-demo",
-            llmModel: "gpt-5-codex",
-            role: "worker",
+            providerId: "rs",
+            modelId: "gpt-5-codex",
+            timeoutMs: 120000,
+            retryMaxAttempts: 2,
+            maxRetryDelayMs: 60000,
+            builtin: false,
           },
         ],
         llmDefaultProfile: "worker.basic",
@@ -5358,6 +5368,16 @@ describe("runtime-router.browser", () => {
     );
     expect(runRequest).toBeDefined();
     expect(String(runRequest?.model || "")).toBe("gpt-5-codex");
+    const clickTool = (Array.isArray(runRequest?.tools) ? runRequest.tools : []).find(
+      (tool) => String(asRecord(asRecord(tool).function).name || "") === "click",
+    );
+    const clickParameters = asRecord(asRecord(clickTool).function).parameters;
+    expect(String(asRecord(clickParameters).type || "")).toBe("object");
+    expect("anyOf" in asRecord(clickParameters)).toBe(false);
+    expect("oneOf" in asRecord(clickParameters)).toBe(false);
+    expect("allOf" in asRecord(clickParameters)).toBe(false);
+    expect("enum" in asRecord(clickParameters)).toBe(false);
+    expect("not" in asRecord(clickParameters)).toBe(false);
     const selected = stream.find(
       (item) => String(item.type || "") === "llm.route.selected",
     ) as Record<string, unknown> | undefined;

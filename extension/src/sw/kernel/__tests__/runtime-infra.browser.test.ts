@@ -76,14 +76,28 @@ function buildWorkerLlmConfig(options?: {
   const id = String(options?.id || "default");
   return {
     llmDefaultProfile: id,
+    llmProviders: [
+      {
+        id: "openai_compatible",
+        name: "通用 API",
+        type: "model_llm",
+        apiConfig: {
+          apiBase: "https://example.com/v1",
+          apiKey: options?.apiKey ?? "k1",
+          supportedModels: [options?.model || "gpt-test"],
+        },
+        builtin: true,
+      },
+    ],
     llmProfiles: [
       {
         id,
-        provider: "openai_compatible",
-        llmApiBase: "https://example.com/v1",
-        llmApiKey: options?.apiKey ?? "k1",
-        llmModel: options?.model || "gpt-test",
-        role: "worker",
+        providerId: "openai_compatible",
+        modelId: options?.model || "gpt-test",
+        timeoutMs: 120000,
+        retryMaxAttempts: 2,
+        maxRetryDelayMs: 60000,
+        builtin: false,
       },
     ],
   };
@@ -270,7 +284,7 @@ describe("runtime infra handler", () => {
     const profiles = Array.isArray(updated.llmProfiles)
       ? (updated.llmProfiles as Array<Record<string, unknown>>)
       : [];
-    expect(String((profiles[0] || {}).llmModel || "")).toBe("gpt-test");
+    expect(String((profiles[0] || {}).modelId || "")).toBe("gpt-test");
     expect(updated.llmSystemPromptCustom).toBe(
       "Always provide concise evidence.",
     );
@@ -315,28 +329,37 @@ describe("runtime infra handler", () => {
 
     expect(String(data.llmDefaultProfile || "")).toBe("cursor_help_web");
     expect(builtin).toBeTruthy();
-    expect(String(builtin?.provider || "")).toBe("cursor_help_web");
-    expect(String(builtin?.llmModel || "")).toBe("auto");
+    expect(String(builtin?.providerId || "")).toBe("cursor_help_web");
+    expect(String(builtin?.modelId || "")).toBe("auto");
   });
 
-  it("clears cursor_help_web base/key fields during config.save", async () => {
+  it("stores cursor_help_web as hosted_chat provider/profile pair", async () => {
     const infra = createRuntimeInfraHandler();
 
     const saved = await infra.handleMessage({
       type: "config.save",
       payload: {
         llmDefaultProfile: "cursor-help",
+        llmProviders: [
+          {
+            id: "cursor_help_web",
+            name: "内置模型",
+            type: "hosted_chat",
+            options: {
+              targetSite: "cursor_help",
+            },
+            builtin: true,
+          },
+        ],
         llmProfiles: [
           {
             id: "cursor-help",
-            provider: "cursor_help_web",
-            llmApiBase: "",
-            llmApiKey: "",
-            llmModel: "auto",
-            providerOptions: {
-              targetSite: "cursor_help",
-            },
-            role: "worker",
+            providerId: "cursor_help_web",
+            modelId: "auto",
+            timeoutMs: 120000,
+            retryMaxAttempts: 1,
+            maxRetryDelayMs: 60000,
+            builtin: false,
           },
         ],
       },
@@ -347,11 +370,15 @@ describe("runtime infra handler", () => {
     expect(after?.ok).toBe(true);
     if (!after || after.ok !== true) return;
     const data = (after.data ?? {}) as Record<string, unknown>;
+    const provider = Array.isArray(data.llmProviders)
+      ? (data.llmProviders[0] as Record<string, unknown>)
+      : {};
     const profile = Array.isArray(data.llmProfiles)
       ? (data.llmProfiles[0] as Record<string, unknown>)
       : {};
-    expect(String(profile.llmApiBase || "")).toBe("");
-    expect(String(profile.llmApiKey || "")).toBe("");
+    expect(String(provider.type || "")).toBe("hosted_chat");
+    expect(String(profile.providerId || "")).toBe("cursor_help_web");
+    expect(String(profile.modelId || "")).toBe("auto");
   });
 
   it("self-heals legacy default profile ids to a valid stored profile", async () => {
@@ -361,16 +388,22 @@ describe("runtime infra handler", () => {
       type: "config.save",
       payload: {
         llmDefaultProfile: "default",
+        llmProviders: [
+          {
+            id: "cursor_help_web",
+            name: "内置模型",
+            type: "hosted_chat",
+            builtin: true,
+          },
+        ],
         llmProfiles: [
           {
             id: "cursor_help_web",
-            provider: "cursor_help_web",
-            llmApiBase: "",
-            llmApiKey: "",
-            llmModel: "auto",
-            providerOptions: {
-              targetSite: "cursor_help",
-            },
+            providerId: "cursor_help_web",
+            modelId: "auto",
+            timeoutMs: 120000,
+            retryMaxAttempts: 1,
+            maxRetryDelayMs: 60000,
           },
         ],
       },

@@ -194,7 +194,7 @@ describe("config-store saveConfig", () => {
 
     expect(sendMessageMock).toHaveBeenCalledWith("config.save", {
       payload: expect.objectContaining({
-        llmProviderCatalog: expect.arrayContaining([
+        llmProviders: expect.arrayContaining([
           expect.objectContaining({
             id: "rs",
             type: "model_llm",
@@ -203,9 +203,8 @@ describe("config-store saveConfig", () => {
         llmProfiles: expect.arrayContaining([
           expect.objectContaining({
             id: "route-primary",
-            provider: "rs",
-            llmApiBase: "https://ai.chen.rs/v1",
-            llmModel: "gpt-5-codex",
+            providerId: "rs",
+            modelId: "gpt-5-codex",
           }),
         ]),
       }),

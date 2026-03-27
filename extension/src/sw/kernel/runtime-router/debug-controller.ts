@@ -300,6 +300,9 @@ export async function handleBrainDebug(
     const profiles = Array.isArray(cfg.llmProfiles)
       ? cfg.llmProfiles.map((item) => toRecord(item))
       : [];
+    const providers = Array.isArray(cfg.llmProviders)
+      ? cfg.llmProviders.map((item) => toRecord(item))
+      : [];
     const llmDefaultProfile = String(cfg.llmDefaultProfile || "default");
     const activeProfile =
       profiles.find(
@@ -307,14 +310,23 @@ export async function handleBrainDebug(
       ) ||
       profiles[0] ||
       ({} as Record<string, unknown>);
-    const activeProvider =
-      String(activeProfile.provider || "openai_compatible").trim() ||
+    const activeProviderId =
+      String(activeProfile.providerId || "openai_compatible").trim() ||
       "openai_compatible";
-    const activeModel = String(activeProfile.llmModel || "").trim();
+    const activeProvider =
+      providers.find(
+        (item) => String(item.id || "").trim() === activeProviderId,
+      ) || ({} as Record<string, unknown>);
+    const activeProviderType = String(activeProvider.type || "").trim();
+    const activeApiConfig = toRecord(activeProvider.apiConfig);
+    const activeModel = String(
+      activeProfile.modelId || activeApiConfig.defaultModel || "",
+    ).trim();
     const hasLlmApiKey =
-      activeProvider === "cursor_help_web"
+      activeProviderId === "cursor_help_web" ||
+      activeProviderType === "hosted_chat"
         ? true
-        : !!String(activeProfile.llmApiKey || "").trim();
+        : !!String(activeApiConfig.apiKey || "").trim();
     const systemPromptPreview = await runtimeLoop.getSystemPromptPreview();
     return ok({
       bridgeUrl: String(cfg.bridgeUrl || ""),
@@ -325,7 +337,7 @@ export async function handleBrainDebug(
       llmAuxProfile: String(cfg.llmAuxProfile || ""),
       llmFallbackProfile: String(cfg.llmFallbackProfile || ""),
       llmProfilesCount: profiles.length,
-      llmProvider: activeProvider,
+      llmProvider: activeProviderId,
       llmModel: activeModel,
       bridgeInvokeTimeoutMs: Number(cfg.bridgeInvokeTimeoutMs || 0),
       llmTimeoutMs: Number(cfg.llmTimeoutMs || 0),

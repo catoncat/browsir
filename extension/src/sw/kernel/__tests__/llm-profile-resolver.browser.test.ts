@@ -5,7 +5,7 @@ import { resolveLlmRoute } from "../llm-profile-resolver";
 import type { BridgeConfig } from "../runtime-infra.browser";
 import { DEFAULT_COMPACTION_SETTINGS } from "../../../shared/compaction";
 
-type TestBridgeConfig = BridgeConfig & {
+type TestBridgeConfig = Omit<BridgeConfig, "llmProfiles"> & {
   llmProfiles?: unknown;
 };
 
@@ -15,7 +15,21 @@ function baseConfig(): TestBridgeConfig {
     bridgeToken: "dev-token",
     browserRuntimeStrategy: "host-first",
     compaction: DEFAULT_COMPACTION_SETTINGS,
-    llmDefaultProfile: "default",
+    llmDefaultProfile: "cursor_help_web",
+    llmAuxProfile: "",
+    llmFallbackProfile: "",
+    llmProviders: [
+      {
+        id: "cursor_help_web",
+        name: "内置模型",
+        type: "hosted_chat",
+        builtin: true,
+      },
+    ],
+    llmProfiles: [],
+    mcpServers: [],
+    mcpRefs: {},
+    llmSystemPromptCustom: "",
     maxSteps: 100,
     autoTitleInterval: 10,
     bridgeInvokeTimeoutMs: 120_000,
@@ -30,22 +44,43 @@ function baseConfig(): TestBridgeConfig {
 describe("llm-profile-resolver.browser", () => {
   it("resolves explicit profile and fallback route", () => {
     const config = baseConfig();
+    config.llmProviders = [
+      {
+        id: "cursor_help_web",
+        name: "内置模型",
+        type: "hosted_chat",
+        builtin: true,
+      },
+      {
+        id: "openai_compatible",
+        name: "通用 API",
+        type: "model_llm",
+        apiConfig: {
+          apiBase: "https://example.ai/v1",
+          apiKey: "k1",
+          supportedModels: ["gpt-basic", "gpt-pro"],
+        },
+        builtin: true,
+      },
+    ];
     config.llmProfiles = [
       {
         id: "worker.basic",
-        provider: "openai_compatible",
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "k1",
-        llmModel: "gpt-basic",
-        role: "worker",
+        providerId: "openai_compatible",
+        modelId: "gpt-basic",
+        timeoutMs: 120000,
+        retryMaxAttempts: 2,
+        maxRetryDelayMs: 60000,
+        builtin: false,
       },
       {
         id: "worker.pro",
-        provider: "openai_compatible",
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "k2",
-        llmModel: "gpt-pro",
-        role: "worker",
+        providerId: "openai_compatible",
+        modelId: "gpt-pro",
+        timeoutMs: 120000,
+        retryMaxAttempts: 2,
+        maxRetryDelayMs: 60000,
+        builtin: false,
       },
     ];
     config.llmFallbackProfile = "worker.pro";
@@ -73,14 +108,27 @@ describe("llm-profile-resolver.browser", () => {
 
   it("returns missing_llm_config when selected profile misses base/key", () => {
     const config = baseConfig();
+    config.llmProviders = [
+      {
+        id: "openai_compatible",
+        name: "通用 API",
+        type: "model_llm",
+        apiConfig: {
+          apiBase: "",
+          apiKey: "",
+        },
+        builtin: true,
+      },
+    ];
     config.llmProfiles = [
       {
         id: "worker.basic",
-        provider: "openai_compatible",
-        llmApiBase: "",
-        llmApiKey: "",
-        llmModel: "gpt-basic",
-        role: "worker",
+        providerId: "openai_compatible",
+        modelId: "gpt-basic",
+        timeoutMs: 120000,
+        retryMaxAttempts: 2,
+        maxRetryDelayMs: 60000,
+        builtin: false,
       },
     ];
     const out = resolveLlmRoute({
@@ -98,21 +146,15 @@ describe("llm-profile-resolver.browser", () => {
     config.llmProfiles = {
       "reviewer.basic": {
         id: "reviewer.basic",
-        provider: "openai_compatible",
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "k-review",
-        llmModel: "gpt-review",
-        role: "reviewer",
+        providerId: "openai_compatible",
+        modelId: "gpt-review",
       },
       "reviewer.pro": {
         id: "reviewer.pro",
-        provider: "openai_compatible",
-        llmApiBase: "https://example.ai/v1",
-        llmApiKey: "k-review-pro",
-        llmModel: "gpt-review-pro",
-        role: "reviewer",
+        providerId: "openai_compatible",
+        modelId: "gpt-review-pro",
       },
-    };
+    } as unknown;
     config.llmFallbackProfile = "reviewer.pro";
 
     const out = resolveLlmRoute({
