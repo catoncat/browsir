@@ -1,5 +1,10 @@
 import { initSessionIndex, resetSessionStore } from "../storage-reset.browser";
 import type { BrainOrchestrator } from "../orchestrator.browser";
+import type { RuntimeInfraHandler } from "../runtime-infra.browser";
+import {
+  exportExtensionDataBackup,
+  importExtensionDataBackup,
+} from "./storage-backup";
 
 type RuntimeOk<T = unknown> = { ok: true; data: T };
 type RuntimeErr = { ok: false; error: string };
@@ -21,6 +26,7 @@ function toRecord(value: unknown): Record<string, unknown> {
 
 export async function handleStorage(
   orchestrator: BrainOrchestrator,
+  infra: RuntimeInfraHandler,
   message: unknown,
 ): Promise<RuntimeResult> {
   const payload = toRecord(message);
@@ -32,6 +38,21 @@ export async function handleStorage(
   }
   if (action === "brain.storage.init") {
     return ok(await initSessionIndex());
+  }
+  if (action === "brain.storage.backup.export") {
+    return ok(
+      await exportExtensionDataBackup(orchestrator, infra, payload.sessionId),
+    );
+  }
+  if (action === "brain.storage.backup.import") {
+    return ok(
+      await importExtensionDataBackup(
+        orchestrator,
+        infra,
+        payload.backup,
+        payload.sessionId,
+      ),
+    );
   }
   return fail(`unsupported storage action: ${action}`);
 }

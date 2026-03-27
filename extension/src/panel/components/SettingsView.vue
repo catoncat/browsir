@@ -3,13 +3,30 @@ import { storeToRefs } from "pinia";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import QRCode from "qrcode";
 import { WECHAT_HOST_STATE_EVENT_TYPE } from "../../sw/kernel/host-protocol";
+import type { ExtensionDataBackup } from "../../shared/data-backup";
 import { useConfigStore } from "../stores/config-store";
+import { useBackupStore } from "../stores/backup-store";
 import { useWechatStore } from "../stores/wechat-store";
-import { ShieldCheck, Cpu, Loader2, ArrowLeft, Eye, EyeOff } from "lucide-vue-next";
+import {
+  ShieldCheck,
+  Cpu,
+  Loader2,
+  ArrowLeft,
+  Eye,
+  EyeOff,
+  Download,
+  Upload,
+} from "lucide-vue-next";
 
 const emit = defineEmits(["close"]);
 const store = useConfigStore();
 const { config, savingConfig, error } = storeToRefs(store);
+const backupStore = useBackupStore();
+const {
+  exporting: exportingBackup,
+  importing: importingBackup,
+  error: backupError,
+} = storeToRefs(backupStore);
 const wechatStore = useWechatStore();
 const {
   state: wechatState,
@@ -19,6 +36,7 @@ const {
   storeToRefs(wechatStore);
 
 const dialogRef = ref<HTMLElement | null>(null);
+const backupFileInputRef = ref<HTMLInputElement | null>(null);
 const systemPromptCustomId = "settings-system-prompt-custom";
 const maxStepsId = "settings-max-steps";
 const autoTitleIntervalId = "settings-auto-title-interval";
@@ -30,6 +48,8 @@ const compactionKeepRecentId = "settings-compaction-keep-recent";
 const bridgeUrlId = "settings-bridge-url";
 const bridgeTokenId = "settings-bridge-token";
 const showBridgeToken = ref(false);
+const backupStatus = ref("");
+const backupLocalError = ref("");
 const wechatQrDataUrl = ref("");
 const wechatQrRenderError = ref("");
 const wechatLogin = computed(() => wechatState.value.login);
@@ -50,6 +70,74 @@ async function handleSave() {
     emit("close");
   } catch {
     // error message is stored in runtime store and rendered in footer.
+  }
+}
+
+function createBackupFileName(backup: ExtensionDataBackup): string {
+  const stamp = String(backup.exportedAt || "")
+    .replace(/[:.]/g, "-")
+    .replace("T", "_")
+    .replace("Z", "");
+  return `bbl-backup-${stamp || "export"}.json`;
+}
+
+function downloadBackup(backup: ExtensionDataBackup): void {
+  const blob = new Blob([JSON.stringify(backup, null, 2)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = createBackupFileName(backup);
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+async function handleExportBackup() {
+  backupStatus.value = "";
+  backupLocalError.value = "";
+  try {
+    const backup = await backupStore.exportBackup();
+    downloadBackup(backup);
+    backupStatus.value = `已导出 ${backup.payload.skills.length} 个自定义技能`;
+  } catch (error) {
+    backupLocalError.value =
+      error instanceof Error ? error.message : String(error);
+  }
+}
+
+function handleOpenImportPicker() {
+  if (importingBackup.value) return;
+  backupFileInputRef.value?.click();
+}
+
+async function handleImportBackup(event: Event) {
+  const target = event.target as HTMLInputElement | null;
+  const file = target?.files?.[0] || null;
+  if (!file) return;
+  backupStatus.value = "";
+  backupLocalError.value = "";
+  try {
+    const parsed = JSON.parse(await file.text()) as unknown;
+    const confirmed = globalThis.confirm(
+      "导入会覆盖当前模型配置、系统设置，并按备份替换现有自定义技能。是否继续？",
+    );
+    if (!confirmed) return;
+    const result = await backupStore.importBackup(parsed);
+    await store.loadConfig();
+    await store.refreshHealth().catch(() => {});
+    await store.loadBuiltinFreeCatalog().catch(() => {});
+    backupStatus.value =
+      result.removedSkillIds.length > 0
+        ? `导入完成，恢复 ${result.importedSkillIds.length} 个技能，替换 ${result.removedSkillIds.length} 个旧技能`
+        : `导入完成，恢复 ${result.importedSkillIds.length} 个技能`;
+  } catch (error) {
+    backupLocalError.value =
+      error instanceof Error ? error.message : String(error);
+  } finally {
+    if (target) {
+      target.value = "";
+    }
   }
 }
 
@@ -341,6 +429,58 @@ watch(
               </button>
             </div>
           </div>
+        </div>
+      </section>
+
+      <section class="space-y-4">
+        <div class="flex items-center gap-2 text-ui-text-muted opacity-60">
+          <ShieldCheck :size="14" />
+          <h3 class="text-[10px] font-bold uppercase tracking-[0.1em]">数据备份</h3>
+        </div>
+        <div class="space-y-3 rounded-sm border border-ui-border bg-ui-surface px-3 py-3">
+          <p class="text-[13px] font-semibold text-ui-text">导出或恢复当前扩展数据</p>
+          <p class="text-[11px] text-ui-text-muted">
+            备份会包含模型配置、系统设置、MCP 配置和自定义技能文件。文件内会包含 API Key、Bridge Token 等敏感信息。
+          </p>
+          <div class="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              class="rounded-sm bg-ui-text px-3 py-2 text-[12px] font-semibold text-ui-bg transition-opacity hover:opacity-90 disabled:opacity-50"
+              :disabled="exportingBackup || importingBackup"
+              @click="handleExportBackup"
+            >
+              <Loader2 v-if="exportingBackup" :size="14" class="mr-1 inline-block animate-spin" />
+              <Download v-else :size="14" class="mr-1 inline-block" aria-hidden="true" />
+              {{ exportingBackup ? '导出中...' : '导出备份' }}
+            </button>
+            <button
+              type="button"
+              class="rounded-sm border border-ui-border bg-ui-bg px-3 py-2 text-[12px] font-semibold text-ui-text transition-colors hover:bg-ui-surface disabled:opacity-50"
+              :disabled="importingBackup || exportingBackup"
+              @click="handleOpenImportPicker"
+            >
+              <Loader2 v-if="importingBackup" :size="14" class="mr-1 inline-block animate-spin" />
+              <Upload v-else :size="14" class="mr-1 inline-block" aria-hidden="true" />
+              {{ importingBackup ? '导入中...' : '导入备份' }}
+            </button>
+            <input
+              ref="backupFileInputRef"
+              type="file"
+              accept="application/json,.json"
+              class="hidden"
+              aria-label="选择备份文件"
+              @change="handleImportBackup"
+            />
+          </div>
+          <p v-if="backupStatus" class="text-[11px] text-emerald-600">
+            {{ backupStatus }}
+          </p>
+          <p v-if="backupError" class="text-[11px] text-rose-500">
+            {{ backupError }}
+          </p>
+          <p v-else-if="backupLocalError" class="text-[11px] text-rose-500">
+            {{ backupLocalError }}
+          </p>
         </div>
       </section>
     </div>

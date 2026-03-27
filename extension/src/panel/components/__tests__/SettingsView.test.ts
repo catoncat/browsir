@@ -6,6 +6,7 @@ import { createPinia, setActivePinia } from "pinia";
 
 import SettingsView from "../SettingsView.vue";
 import { normalizePanelConfig, useConfigStore } from "../../stores/config-store";
+import { useBackupStore } from "../../stores/backup-store";
 import { useWechatStore } from "../../stores/wechat-store";
 
 const mountedViews: Array<() => void> = [];
@@ -22,7 +23,28 @@ async function mountView() {
   configStore.config = normalizePanelConfig({});
   configStore.error = "";
   configStore.savingConfig = false;
+  configStore.loadConfig = vi.fn().mockResolvedValue(undefined);
+  configStore.refreshHealth = vi.fn().mockResolvedValue(undefined);
+  configStore.loadBuiltinFreeCatalog = vi.fn().mockResolvedValue(undefined);
   configStore.saveConfig = vi.fn().mockResolvedValue(undefined);
+
+  const backupStore = useBackupStore();
+  backupStore.exporting = false;
+  backupStore.importing = false;
+  backupStore.error = "";
+  backupStore.exportBackup = vi.fn().mockResolvedValue({
+    schemaVersion: "bbl.extension-data.v1",
+    exportedAt: "2026-03-27T00:00:00.000Z",
+    payload: {
+      config: normalizePanelConfig({}),
+      skills: [],
+    },
+  });
+  backupStore.importBackup = vi.fn().mockResolvedValue({
+    importedAt: "2026-03-27T00:00:00.000Z",
+    importedSkillIds: [],
+    removedSkillIds: [],
+  });
 
   const wechatStore = useWechatStore();
   wechatStore.state = {
@@ -59,7 +81,7 @@ async function mountView() {
   };
   mountedViews.push(unmount);
 
-  return { root, wechatStore, closeSpy, unmount };
+  return { root, wechatStore, backupStore, configStore, closeSpy, unmount };
 }
 
 afterEach(() => {
@@ -67,6 +89,7 @@ afterEach(() => {
     mountedViews.pop()?.();
   }
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("SettingsView", () => {
@@ -136,5 +159,64 @@ describe("SettingsView", () => {
     expect(view.root.textContent || "").toContain("读取状态...");
     expect(view.root.textContent || "").not.toContain("已停用");
     expect(view.root.textContent || "").not.toContain("连接微信");
+  });
+
+  it("exports backup from the settings page", async () => {
+    vi.stubGlobal("URL", {
+      createObjectURL: vi.fn(() => "blob:backup"),
+      revokeObjectURL: vi.fn(),
+    });
+    const clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => {});
+    const view = await mountView();
+
+    const exportButton = Array.from(view.root.querySelectorAll("button")).find(
+      (button) => (button.textContent || "").includes("导出备份"),
+    ) as HTMLButtonElement | undefined;
+    expect(exportButton).toBeDefined();
+    exportButton?.click();
+    await flushUi();
+
+    expect(view.backupStore.exportBackup).toHaveBeenCalledTimes(1);
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("imports backup and refreshes config state", async () => {
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const view = await mountView();
+
+    const input = view.root.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement | null;
+    expect(input).not.toBeNull();
+    if (!input) return;
+    const file = new File(
+      [
+        JSON.stringify({
+          schemaVersion: "bbl.extension-data.v1",
+          exportedAt: "2026-03-27T00:00:00.000Z",
+          payload: {
+            config: normalizePanelConfig({}),
+            skills: [],
+          },
+        }),
+      ],
+      "backup.json",
+      { type: "application/json" },
+    );
+    Object.defineProperty(input, "files", {
+      value: [file],
+      configurable: true,
+    });
+
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi();
+    await flushUi();
+
+    expect(view.backupStore.importBackup).toHaveBeenCalledTimes(1);
+    expect(view.configStore.loadConfig).toHaveBeenCalledTimes(1);
+    expect(view.configStore.refreshHealth).toHaveBeenCalledTimes(1);
+    expect(view.configStore.loadBuiltinFreeCatalog).toHaveBeenCalledTimes(1);
   });
 });

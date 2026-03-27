@@ -238,7 +238,9 @@ export function registerRuntimeRouter(orchestrator: BrainOrchestrator): void {
         }
 
         if (type.startsWith("brain.storage.")) {
-          return await applyAfter(await handleStorage(orchestrator, routeMessage));
+          return await applyAfter(
+            await handleStorage(orchestrator, infra, routeMessage),
+          );
         }
 
         if (type.startsWith("brain.channel.wechat.")) {
