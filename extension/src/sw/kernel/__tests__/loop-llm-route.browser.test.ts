@@ -12,7 +12,7 @@ import {
   resolveAuxiliaryNonHostedLlmRoute,
 } from "../loop-llm-route";
 
-type TestBridgeConfig = BridgeConfig & {
+type TestBridgeConfig = Omit<BridgeConfig, "llmProfiles"> & {
   llmProfiles?: unknown;
 };
 
@@ -33,6 +33,9 @@ function baseConfig(): TestBridgeConfig {
     llmMaxRetryDelayMs: 60000,
     devAutoReload: false,
     devReloadIntervalMs: 1500,
+    mcpServers: [],
+    mcpRefs: {},
+    llmSystemPromptCustom: "",
     llmProviders: [
       {
         id: "cursor_help_web",
@@ -64,6 +67,7 @@ function baseConfig(): TestBridgeConfig {
         timeoutMs: 120000,
         retryMaxAttempts: 2,
         maxRetryDelayMs: 60000,
+        builtin: false,
       },
       {
         id: "worker.pro",
@@ -72,6 +76,7 @@ function baseConfig(): TestBridgeConfig {
         timeoutMs: 120000,
         retryMaxAttempts: 2,
         maxRetryDelayMs: 60000,
+        builtin: false,
       },
     ],
   };
@@ -110,6 +115,7 @@ describe("loop-llm-route auxiliary route", () => {
         timeoutMs: 120000,
         retryMaxAttempts: 2,
         maxRetryDelayMs: 60000,
+        builtin: false,
       },
     ];
     const resolved = resolveAuxiliaryNonHostedLlmRoute(
