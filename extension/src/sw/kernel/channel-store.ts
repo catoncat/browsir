@@ -1,6 +1,7 @@
 import { getDB } from "./idb-storage";
 import type {
   ChannelBindingRecord,
+  ChannelDeliveryStatus,
   ChannelEventRecord,
   ChannelOutboxRecord,
   ChannelTurnRecord,
@@ -139,6 +140,17 @@ export class ChannelStore {
       .objectStore("channelOutbox")
       .index("by-turn");
     return (await index.getAll(channelTurnId)) as ChannelOutboxRecord[];
+  }
+
+  async listOutboxByDeliveryStatus(
+    deliveryStatus: ChannelDeliveryStatus,
+  ): Promise<ChannelOutboxRecord[]> {
+    const db = await getDB();
+    const index = db
+      .transaction("channelOutbox")
+      .objectStore("channelOutbox")
+      .index("by-delivery-status");
+    return (await index.getAll(deliveryStatus)) as ChannelOutboxRecord[];
   }
 
   async clearAll(): Promise<void> {

@@ -3,6 +3,7 @@ import type { BrainOrchestrator } from "../orchestrator.browser";
 import { nowIso, randomId } from "../types";
 import { sendHostCommand } from "../channel-broker";
 import type { WechatHostStateSnapshot } from "../host-protocol";
+import { recoverPendingChannelOutbox } from "../channel-observer";
 import type {
   ChannelBindingRecord,
   ChannelEventRecord,
@@ -238,6 +239,23 @@ export async function handleBrainChannelWechat(
           {},
         ),
       );
+    }
+
+    if (action === "brain.channel.wechat.resume") {
+      const state = await sendHostCommand<
+        { reason: string },
+        WechatHostStateSnapshot
+      >(
+        "wechat",
+        "resume",
+        {
+          reason: String(payload.reason || "manual"),
+        },
+      );
+      if (state.enabled && state.auth.status === "authenticated") {
+        await recoverPendingChannelOutbox(orchestrator);
+      }
+      return ok(state);
     }
 
     if (action === "brain.channel.wechat.logout") {

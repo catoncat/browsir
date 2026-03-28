@@ -4,12 +4,46 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, nextTick } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 
+import { HOST_PROTOCOL_VERSION } from "../../../sw/kernel/host-protocol";
 import SettingsView from "../SettingsView.vue";
 import { normalizePanelConfig, useConfigStore } from "../../stores/config-store";
 import { useBackupStore } from "../../stores/backup-store";
-import { useWechatStore } from "../../stores/wechat-store";
+import { useWechatStore, type WechatPanelState } from "../../stores/wechat-store";
 
 const mountedViews: Array<() => void> = [];
+
+function buildWechatState(
+  patch: {
+    hostEpoch?: string;
+    protocolVersion?: WechatPanelState["protocolVersion"];
+    enabled?: boolean;
+    auth?: Partial<WechatPanelState["auth"]>;
+    transport?: Partial<WechatPanelState["transport"]>;
+    resume?: Partial<WechatPanelState["resume"]>;
+  } = {},
+): WechatPanelState {
+  return {
+    hostEpoch: patch.hostEpoch ?? "epoch-1",
+    protocolVersion: patch.protocolVersion ?? HOST_PROTOCOL_VERSION,
+    enabled: patch.enabled ?? false,
+    auth: {
+      status: "logged_out",
+      updatedAt: "2026-03-22T00:00:00.000Z",
+      ...patch.auth,
+    } as WechatPanelState["auth"],
+    transport: {
+      status: "stopped",
+      updatedAt: "2026-03-22T00:00:00.000Z",
+      resumable: false,
+      consecutiveFailures: 0,
+      ...patch.transport,
+    } as WechatPanelState["transport"],
+    resume: {
+      resumable: false,
+      ...patch.resume,
+    } as WechatPanelState["resume"],
+  };
+}
 
 function flushUi(): Promise<void> {
   return Promise.resolve().then(() => nextTick());
@@ -47,15 +81,7 @@ async function mountView() {
   });
 
   const wechatStore = useWechatStore();
-  wechatStore.state = {
-    hostEpoch: "epoch-1",
-    protocolVersion: "bbl.host.v1",
-    enabled: false,
-    login: {
-      status: "logged_out",
-      updatedAt: "2026-03-22T00:00:00.000Z",
-    },
-  };
+  wechatStore.state = buildWechatState();
   wechatStore.loading = false;
   wechatStore.error = "";
   wechatStore.ready = true;
@@ -115,10 +141,23 @@ describe("SettingsView", () => {
     expect(view.wechatStore.connect).toHaveBeenCalledTimes(1);
   });
 
-  it("uses disconnect action as the only secondary button when enabled", async () => {
+  it("uses disconnect action as the only secondary button when healthy", async () => {
     const view = await mountView();
-    view.wechatStore.state.enabled = true;
-    view.wechatStore.state.login.status = "logged_in";
+    view.wechatStore.state = buildWechatState({
+      enabled: true,
+      auth: {
+        status: "authenticated",
+        accountId: "bot-1",
+        botUserId: "user-1",
+      },
+      transport: {
+        status: "healthy",
+        resumable: true,
+      },
+      resume: {
+        resumable: true,
+      },
+    });
     await flushUi();
 
     expect(view.root.textContent || "").toContain("断开微信");
@@ -137,15 +176,19 @@ describe("SettingsView", () => {
     expect(view.wechatStore.disconnect).toHaveBeenCalledTimes(1);
   });
 
-  it("shows reconnect copy for an error state without leaking host internals", async () => {
+  it("shows reconnect copy for a reauth-required state without leaking host internals", async () => {
     const view = await mountView();
-    view.wechatStore.state.enabled = true;
-    view.wechatStore.state.login.status = "error";
-    view.wechatStore.state.login.lastError = "二维码已过期";
+    view.wechatStore.state = buildWechatState({
+      enabled: true,
+      auth: {
+        status: "reauth_required",
+        lastError: "二维码已过期",
+      },
+    });
     await flushUi();
 
-    expect(view.root.textContent || "").toContain("微信连接异常");
-    expect(view.root.textContent || "").toContain("重新连接微信");
+    expect(view.root.textContent || "").toContain("微信需要重新登录");
+    expect(view.root.textContent || "").toContain("重新登录微信");
     expect(view.root.textContent || "").not.toContain("host epoch");
     expect(view.root.textContent || "").not.toContain("已停用");
   });

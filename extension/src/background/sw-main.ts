@@ -16,6 +16,8 @@ const DEV_RELOAD_IDLE_INTERVAL_MS = 1500;
 const DEV_RELOAD_MIN_INTERVAL_MS = 500;
 const DEV_RELOAD_MAX_INTERVAL_MS = 30_000;
 const DEV_RELOAD_STORAGE_VERSION_KEY = "devBridgeSeenVersion";
+const WECHAT_RESUME_ALARM_NAME = "bbl.wechat.resume";
+const WECHAT_RESUME_ALARM_PERIOD_MINUTES = 1;
 
 let devReloadTimer: ReturnType<typeof setTimeout> | null = null;
 let devReloadInFlight = false;
@@ -41,6 +43,34 @@ async function bootstrapSessionStore(): Promise<void> {
   if (syncResult && syncResult.ok !== true) {
     console.warn("[mcp] startup sync failed", syncResult.error);
   }
+}
+
+async function scheduleWechatResumeAlarm(): Promise<void> {
+  await chrome.alarms.create(WECHAT_RESUME_ALARM_NAME, {
+    periodInMinutes: WECHAT_RESUME_ALARM_PERIOD_MINUTES,
+  });
+}
+
+async function requestWechatResume(reason: string): Promise<void> {
+  const response = await chrome.runtime
+    .sendMessage({
+      type: "brain.channel.wechat.resume",
+      reason,
+    })
+    .catch((error) => {
+      console.warn("[wechat] resume failed", error);
+      return null;
+    });
+  if (response && response.ok !== true) {
+    console.warn("[wechat] resume rejected", response.error);
+  }
+}
+
+async function bootstrapWechatLifecycle(reason: string): Promise<void> {
+  await scheduleWechatResumeAlarm().catch((error) => {
+    console.warn("[wechat] alarm setup failed", error);
+  });
+  await requestWechatResume(reason);
 }
 
 function toIntInRange(raw: unknown, fallback: number, min: number, max: number): number {
@@ -177,10 +207,17 @@ orchestrator.events.subscribe((event) => {
 
 chrome.runtime.onInstalled.addListener(() => {
   void bootstrapSessionStore();
+  void bootstrapWechatLifecycle("install");
 });
 
 chrome.runtime.onStartup?.addListener(() => {
   void bootstrapSessionStore();
+  void bootstrapWechatLifecycle("startup");
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== WECHAT_RESUME_ALARM_NAME) return;
+  void requestWechatResume("alarm");
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -202,3 +239,4 @@ chrome.action.onClicked.addListener(async (tab) => {
 });
 
 startDevAutoReloadLoop();
+void bootstrapWechatLifecycle("service_worker");

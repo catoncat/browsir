@@ -34,9 +34,19 @@ describe("channel-broker", () => {
       data: {
         hostEpoch: "epoch-1",
         protocolVersion: HOST_PROTOCOL_VERSION,
-        login: {
+        enabled: false,
+        auth: {
           status: "logged_out",
           updatedAt: "2026-03-22T00:00:00.000Z",
+        },
+        transport: {
+          status: "stopped",
+          updatedAt: "2026-03-22T00:00:00.000Z",
+          resumable: false,
+          consecutiveFailures: 0,
+        },
+        resume: {
+          resumable: false,
         },
       },
     });
@@ -45,9 +55,19 @@ describe("channel-broker", () => {
     expect(state).toEqual({
       hostEpoch: "epoch-1",
       protocolVersion: HOST_PROTOCOL_VERSION,
-      login: {
+      enabled: false,
+      auth: {
         status: "logged_out",
         updatedAt: "2026-03-22T00:00:00.000Z",
+      },
+      transport: {
+        status: "stopped",
+        updatedAt: "2026-03-22T00:00:00.000Z",
+        resumable: false,
+        consecutiveFailures: 0,
+      },
+      resume: {
+        resumable: false,
       },
     });
     expect((globalThis as any).chrome.offscreen.createDocument).toHaveBeenCalled();

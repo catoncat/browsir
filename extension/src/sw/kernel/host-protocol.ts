@@ -36,14 +36,25 @@ export type HostResponseEnvelope<TData = unknown> =
   | HostSuccessEnvelope<TData>
   | HostErrorEnvelope;
 
-export type WechatLoginStatus = "logged_out" | "pending" | "logged_in" | "error";
+export type WechatAuthStatus =
+  | "logged_out"
+  | "pending_qr"
+  | "authenticated"
+  | "reauth_required";
+
+export type WechatTransportStatus =
+  | "stopped"
+  | "starting"
+  | "healthy"
+  | "backing_off"
+  | "degraded";
 
 export interface WechatHostStateSnapshot {
   hostEpoch: string;
   protocolVersion: typeof HOST_PROTOCOL_VERSION;
   enabled: boolean;
-  login: {
-    status: WechatLoginStatus;
+  auth: {
+    status: WechatAuthStatus;
     updatedAt: string;
     qrCode?: string;
     qrImageUrl?: string;
@@ -51,6 +62,20 @@ export interface WechatHostStateSnapshot {
     accountId?: string;
     botUserId?: string;
     lastError?: string;
+  };
+  transport: {
+    status: WechatTransportStatus;
+    updatedAt: string;
+    resumable: boolean;
+    consecutiveFailures: number;
+    nextRetryAt?: string;
+    lastSuccessAt?: string;
+    lastError?: string;
+  };
+  resume: {
+    resumable: boolean;
+    lastResumeAt?: string;
+    lastResumeReason?: string;
   };
 }
 

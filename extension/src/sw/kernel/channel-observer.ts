@@ -13,6 +13,7 @@ import type { WechatReplySendInput, WechatReplySendResult } from "./host-protoco
 
 const DELIVERY_MAX_ATTEMPTS = 3;
 const DELIVERY_RETRY_DELAYS_MS = [100, 300] as const;
+const RECOVERABLE_DELIVERY_STATUSES = ["queued", "sending", "uncertain"] as const;
 const sessionObserverQueues = new Map<string, Promise<void>>();
 
 function toRecord(value: unknown): Record<string, unknown> {
@@ -299,6 +300,39 @@ async function deliverWechatOutbox(
     });
     return;
   }
+}
+
+export async function recoverPendingChannelOutbox(
+  orchestrator: BrainOrchestrator,
+): Promise<void> {
+  const grouped = await Promise.all(
+    RECOVERABLE_DELIVERY_STATUSES.map((deliveryStatus) =>
+      orchestrator.channels.store.listOutboxByDeliveryStatus(deliveryStatus),
+    ),
+  );
+  const pendingOutbox = grouped
+    .flat()
+    .sort((a, b) =>
+      `${a.updatedAt}:${a.deliveryId}`.localeCompare(`${b.updatedAt}:${b.deliveryId}`),
+    );
+
+  await Promise.all(
+    pendingOutbox.map((outbox) =>
+      runSessionObserverTask(outbox.sessionId, async () => {
+        const turn = await orchestrator.channels.store.getTurn(
+          outbox.channelTurnId,
+        );
+        if (!turn) return;
+        if (
+          turn.deliveryStatus === "delivered" ||
+          turn.deliveryStatus === "dead_letter"
+        ) {
+          return;
+        }
+        await deliverWechatOutbox(orchestrator, turn, outbox);
+      }),
+    ),
+  );
 }
 
 export function attachChannelObserver(orchestrator: BrainOrchestrator): void {

@@ -141,19 +141,24 @@ async function handleWechatHostCommand(
     let data: unknown;
     switch (message.action) {
       case "get_state":
-        data = wechatService.getState();
+        data = await wechatService.getState();
+        break;
+      case "resume":
+        data = await wechatService.resume(
+          String((message.payload as Record<string, unknown>)?.reason || "manual"),
+        );
         break;
       case "login.start":
         data = await wechatService.startLogin();
         break;
       case "logout":
-        data = wechatService.logout();
+        data = await wechatService.logout();
         break;
       case "enable":
-        data = wechatService.enable();
+        data = await wechatService.enable();
         break;
       case "disable":
-        data = wechatService.disable();
+        data = await wechatService.disable();
         break;
       case "reply.text":
         data = await wechatService.sendReply(

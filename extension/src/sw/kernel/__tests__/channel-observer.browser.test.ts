@@ -1,8 +1,17 @@
 import "./test-setup";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { attachChannelObserver } from "../channel-observer";
+import {
+  attachChannelObserver,
+  recoverPendingChannelOutbox,
+} from "../channel-observer";
 import { ChannelStore } from "../channel-store";
+import {
+  createOutboxRecord,
+  createProjectionOutcome,
+  createWechatReplyProjection,
+  WECHAT_REPLY_PART_MAX_CHARS,
+} from "../channel-projection";
 import {
   __resetIdbStorageForTest,
   clearIdbStores,
@@ -16,7 +25,6 @@ import {
   type ChannelBindingRecord,
   type ChannelTurnRecord,
 } from "../channel-types";
-import { WECHAT_REPLY_PART_MAX_CHARS } from "../channel-projection";
 
 function createBinding(sessionId: string): ChannelBindingRecord {
   return {
@@ -144,7 +152,7 @@ describe("channel-observer", () => {
     expect(outbox[0]?.deliveryStatus).toBe("delivered");
   });
 
-  it("flushes pending trace writes before falling back to hosted_chat.turn_resolved assistantText", async () => {
+  it("falls back to safe_failure when no fresh assistant entry exists", async () => {
     const orchestrator = new BrainOrchestrator();
     attachChannelObserver(orchestrator);
     const created = await orchestrator.createSession({
@@ -175,13 +183,6 @@ describe("channel-observer", () => {
       initialEvent: null,
     });
 
-    orchestrator.events.emit("hosted_chat.turn_resolved", sessionId, {
-      result: {
-        assistantText: "fresh stream answer",
-        toolCalls: [],
-        finishReason: "stop",
-      },
-    });
     orchestrator.events.emit("loop_done", sessionId, {
       status: "done",
       llmSteps: 1,
@@ -196,8 +197,10 @@ describe("channel-observer", () => {
     }
 
     expect(outbox).toHaveLength(1);
-    expect(outbox[0]?.projection.visibleText).toBe("fresh stream answer");
-    expect(outbox[0]?.projection.projectionKind).toBe("final_text");
+    expect(outbox[0]?.projection.visibleText).toBe(
+      "本轮未生成新的可回复结果，请在插件中查看。",
+    );
+    expect(outbox[0]?.projection.projectionKind).toBe("safe_failure");
   });
 
   it("serializes repeated loop_done events so one turn is delivered once", async () => {
@@ -379,9 +382,39 @@ describe("channel-observer", () => {
     expect(outbox[0]?.projection.projectionKind).toBe("final_text");
   });
 
-  it("uses llm step_finished preview as a fallback reply source", async () => {
+  it("recovers queued deliveries on demand", async () => {
+    const sendMessageMock = vi.fn(
+      async (message: Record<string, unknown>) => {
+        if (message.type === "host.command" && message.service === "wechat") {
+          return {
+            type: "host.response",
+            protocolVersion: HOST_PROTOCOL_VERSION,
+            id: String(message.id || ""),
+            service: "wechat",
+            action: String(message.action || ""),
+            ok: true,
+            data: {
+              deliveryId: String(
+                (message.payload as Record<string, unknown>)?.deliveryId || "",
+              ),
+              sentAt: "2026-03-22T00:00:01.000Z",
+              deliveredPartCount: Array.isArray(
+                (message.payload as Record<string, unknown>)?.parts,
+              )
+                ? (
+                  (message.payload as Record<string, unknown>)?.parts as unknown[]
+                ).length
+                : 0,
+              complete: true,
+            },
+          };
+        }
+        return { ok: true };
+      },
+    );
+    (globalThis as any).chrome.runtime.sendMessage = sendMessageMock;
+
     const orchestrator = new BrainOrchestrator();
-    attachChannelObserver(orchestrator);
     const created = await orchestrator.createSession({
       metadata: {
         sourceLabel: "wechat",
@@ -395,43 +428,53 @@ describe("channel-observer", () => {
 
     const sessionId = created.sessionId;
     const store = new ChannelStore();
-    await orchestrator.sessions.appendMessage({
-      sessionId,
-      role: "assistant",
-      text: "old answer",
-    });
-    const baselineEntry = (await orchestrator.sessions.getEntries(sessionId)).at(-1);
     await store.acceptInbound({
       binding: createBinding(sessionId),
-      turn: {
-        ...createRunningTurn(sessionId),
-        assistantBaselineEntryId: String(baselineEntry?.id || ""),
-      },
+      turn: createRunningTurn(sessionId),
       initialEvent: null,
     });
+    const projectedTurn: ChannelTurnRecord = {
+      ...createRunningTurn(sessionId),
+      lifecycleStatus: "projected",
+      deliveryStatus: "queued",
+      assistantEntryId: "assistant-1",
+      deliveryId: "delivery-1",
+      updatedAt: "2026-03-22T00:00:00.500Z",
+    };
+    const projection = createProjectionOutcome({
+      channelTurnId: projectedTurn.channelTurnId,
+      sessionId,
+      assistantEntryId: "assistant-1",
+      projectionKind: "final_text",
+      visibleText: "resume delivery",
+    });
+    const replyProjection = createWechatReplyProjection(projection, {
+      deliveryId: "delivery-1",
+    });
+    const outbox = createOutboxRecord({
+      turn: projectedTurn,
+      outcome: projection,
+      replyProjection,
+    });
+    await store.putTurn(projectedTurn);
+    await store.putOutbox(outbox);
 
-    orchestrator.events.emit("step_finished", sessionId, {
-      step: 1,
-      ok: true,
-      mode: "llm",
-      preview: "preview final answer",
-    });
-    orchestrator.events.emit("loop_done", sessionId, {
-      status: "done",
-      llmSteps: 1,
-      toolSteps: 0,
-    });
+    await recoverPendingChannelOutbox(orchestrator);
 
     const deadline = Date.now() + 1000;
-    let outbox = await store.listOutboxByTurn("turn-1");
-    while (Date.now() < deadline && outbox[0]?.deliveryStatus !== "delivered") {
+    let recoveredTurn = await store.getTurn("turn-1");
+    while (Date.now() < deadline && recoveredTurn?.deliveryStatus !== "delivered") {
       await new Promise((resolve) => setTimeout(resolve, 10));
-      outbox = await store.listOutboxByTurn("turn-1");
+      recoveredTurn = await store.getTurn("turn-1");
     }
 
-    expect(outbox).toHaveLength(1);
-    expect(outbox[0]?.projection.visibleText).toBe("preview final answer");
-    expect(outbox[0]?.projection.projectionKind).toBe("final_text");
+    expect(recoveredTurn?.deliveryStatus).toBe("delivered");
+    expect(
+      sendMessageMock.mock.calls.filter(
+        ([message]) =>
+          (message as Record<string, unknown>)?.type === "host.command",
+      ),
+    ).toHaveLength(1);
   });
 
   it("retries only remaining reply parts with stable client ids after partial send", async () => {

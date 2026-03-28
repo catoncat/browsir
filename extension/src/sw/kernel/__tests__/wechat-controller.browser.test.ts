@@ -33,7 +33,7 @@ function resetRuntimeOnMessageMock(): void {
 
 function buildWechatResponse(
   action: string,
-  status: "logged_out" | "pending" | "logged_in" | "error",
+  status: "logged_out" | "pending_qr" | "authenticated" | "reauth_required",
 ) {
   return {
     type: "host.response",
@@ -45,9 +45,19 @@ function buildWechatResponse(
     data: {
       hostEpoch: "epoch-1",
       protocolVersion: HOST_PROTOCOL_VERSION,
-      login: {
+      enabled: action !== "logout",
+      auth: {
         status,
         updatedAt: "2026-03-22T00:00:00.000Z",
+      },
+      transport: {
+        status: status === "authenticated" ? "healthy" : "stopped",
+        updatedAt: "2026-03-22T00:00:00.000Z",
+        resumable: status === "authenticated" || status === "pending_qr",
+        consecutiveFailures: 0,
+      },
+      resume: {
+        resumable: status === "authenticated" || status === "pending_qr",
       },
     },
   };
@@ -88,7 +98,10 @@ describe("wechat-controller.browser", () => {
             return buildWechatResponse("get_state", "logged_out");
           }
           if (message.action === "login.start") {
-            return buildWechatResponse("login.start", "pending");
+            return buildWechatResponse("login.start", "pending_qr");
+          }
+          if (message.action === "resume") {
+            return buildWechatResponse("resume", "authenticated");
           }
           if (message.action === "logout") {
             return buildWechatResponse("logout", "logged_out");
@@ -106,28 +119,38 @@ describe("wechat-controller.browser", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect((result.data as Record<string, unknown>).login).toEqual({
+    expect((result.data as Record<string, unknown>).auth).toEqual({
       status: "logged_out",
       updatedAt: "2026-03-22T00:00:00.000Z",
     });
   });
 
-  it("routes brain.channel.wechat.login.start and logout through the host broker", async () => {
+  it("routes brain.channel.wechat.login.start, resume, and logout through the host broker", async () => {
     const login = await invokeRuntime({
       type: "brain.channel.wechat.login.start",
     });
     expect(login.ok).toBe(true);
     expect(
-      ((login.data as Record<string, unknown>).login as Record<string, unknown>)
+      ((login.data as Record<string, unknown>).auth as Record<string, unknown>)
         .status,
-    ).toBe("pending");
+    ).toBe("pending_qr");
+
+    const resume = await invokeRuntime({
+      type: "brain.channel.wechat.resume",
+      reason: "manual",
+    });
+    expect(resume.ok).toBe(true);
+    expect(
+      ((resume.data as Record<string, unknown>).auth as Record<string, unknown>)
+        .status,
+    ).toBe("authenticated");
 
     const logout = await invokeRuntime({
       type: "brain.channel.wechat.logout",
     });
     expect(logout.ok).toBe(true);
     expect(
-      ((logout.data as Record<string, unknown>).login as Record<string, unknown>)
+      ((logout.data as Record<string, unknown>).auth as Record<string, unknown>)
         .status,
     ).toBe("logged_out");
   });
@@ -246,11 +269,7 @@ describe("wechat-controller.browser", () => {
     expect(runtime.queue.followUp).toBe(1);
 
     const entries = await orchestrator.sessions.getEntries(created.sessionId);
-    expect(entries.at(-1)).toMatchObject({
-      type: "message",
-      role: "user",
-      text: "queued follow up",
-    });
+    expect(entries).toHaveLength(0);
   });
 
   it("recreates the binding when the stored session no longer exists", async () => {

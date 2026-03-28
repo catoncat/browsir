@@ -1,48 +1,119 @@
 import {
   HOST_PROTOCOL_VERSION,
   WECHAT_HOST_STATE_EVENT_TYPE,
+  type WechatAuthStatus,
+  type WechatHostStateSnapshot,
   type WechatReplySendInput,
   type WechatReplySendResult,
-  type WechatHostStateSnapshot,
+  type WechatTransportStatus,
 } from "../sw/kernel/host-protocol";
 import {
   DEFAULT_BASE_URL,
+  WechatApiError,
   fetchQrCode,
   getUpdates,
   pollQrStatus,
   sendTextMessage,
+  type WechatCredentials,
   type WechatGetUpdatesResponse,
   type WechatMessage,
-  type WechatCredentials,
 } from "./wechat-api";
 
+const WECHAT_RUNTIME_KEY = "bbl.wechat.runtime.v2";
 const WECHAT_STATE_KEY = "bbl.wechat.host.state.v1";
 const WECHAT_SEND_LOG_KEY = "bbl.wechat.host.send-log.v1";
 const WECHAT_CREDENTIALS_KEY = "bbl.wechat.host.credentials.v1";
 const WECHAT_CURSOR_KEY = "bbl.wechat.host.cursor.v1";
 const WECHAT_CONTEXT_TOKENS_KEY = "bbl.wechat.host.context-tokens.v1";
+const WECHAT_RUNTIME_VERSION = 2;
 const QR_POLL_INTERVAL_MS = 2_000;
 const CONTEXT_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const CONTEXT_TOKEN_MAX_ENTRIES = 200;
+const SEND_LOG_MAX_ENTRIES = 20;
+const UPDATE_BACKOFF_STEPS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
 
 interface ContextTokenEntry {
   token: string;
   updatedAt: string;
 }
 
+interface WechatSendLogEntry {
+  deliveryId: string;
+  channelTurnId: string;
+  sessionId: string;
+  parts: Array<{ kind: "text"; text: string; clientId?: string }>;
+  sentAt: string;
+}
+
+interface WechatRuntimeRecord {
+  version: number;
+  hostEpoch: string;
+  protocolVersion: typeof HOST_PROTOCOL_VERSION;
+  enabled: boolean;
+  auth: {
+    status: WechatAuthStatus;
+    updatedAt: string;
+    qrCode?: string;
+    qrImageUrl?: string;
+    baseUrl?: string;
+    accountId?: string;
+    botUserId?: string;
+    lastError?: string;
+  };
+  transport: {
+    status: WechatTransportStatus;
+    updatedAt: string;
+    resumable: boolean;
+    consecutiveFailures: number;
+    nextRetryAt?: string;
+    lastSuccessAt?: string;
+    lastError?: string;
+  };
+  resume: {
+    resumable: boolean;
+    lastResumeAt?: string;
+    lastResumeReason?: string;
+  };
+  credentials: WechatCredentials | null;
+  cursor: string;
+  contextTokens: Record<string, ContextTokenEntry>;
+  sendLog: WechatSendLogEntry[];
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
 
-function createInitialState(): WechatHostStateSnapshot {
+function toRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function createInitialRuntimeRecord(): WechatRuntimeRecord {
+  const at = nowIso();
   return {
+    version: WECHAT_RUNTIME_VERSION,
     hostEpoch: crypto.randomUUID(),
     protocolVersion: HOST_PROTOCOL_VERSION,
     enabled: false,
-    login: {
+    auth: {
       status: "logged_out",
-      updatedAt: nowIso(),
+      updatedAt: at,
     },
+    transport: {
+      status: "stopped",
+      updatedAt: at,
+      resumable: false,
+      consecutiveFailures: 0,
+    },
+    resume: {
+      resumable: false,
+    },
+    credentials: null,
+    cursor: "",
+    contextTokens: {},
+    sendLog: [],
   };
 }
 
@@ -57,35 +128,29 @@ function isWechatCredentials(value: unknown): value is WechatCredentials {
   );
 }
 
-function readCredentials(): WechatCredentials | null {
-  try {
-    const raw = localStorage.getItem(WECHAT_CREDENTIALS_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as unknown;
-    return isWechatCredentials(parsed) ? parsed : null;
-  } catch {
-    return null;
+function normalizeAuthStatus(value: unknown): WechatAuthStatus {
+  const status = String(value || "").trim();
+  if (
+    status === "pending_qr" ||
+    status === "authenticated" ||
+    status === "reauth_required"
+  ) {
+    return status;
   }
+  return "logged_out";
 }
 
-function writeCredentials(credentials: WechatCredentials): void {
-  localStorage.setItem(WECHAT_CREDENTIALS_KEY, JSON.stringify(credentials));
-}
-
-function clearCredentials(): void {
-  localStorage.removeItem(WECHAT_CREDENTIALS_KEY);
-}
-
-function readCursor(): string {
-  return String(localStorage.getItem(WECHAT_CURSOR_KEY) || "").trim();
-}
-
-function writeCursor(cursor: string): void {
-  localStorage.setItem(WECHAT_CURSOR_KEY, String(cursor || ""));
-}
-
-function clearCursor(): void {
-  localStorage.removeItem(WECHAT_CURSOR_KEY);
+function normalizeTransportStatus(value: unknown): WechatTransportStatus {
+  const status = String(value || "").trim();
+  if (
+    status === "starting" ||
+    status === "healthy" ||
+    status === "backing_off" ||
+    status === "degraded"
+  ) {
+    return status;
+  }
+  return "stopped";
 }
 
 function normalizeContextTokenEntry(value: unknown): ContextTokenEntry | null {
@@ -111,37 +176,310 @@ function pruneContextTokens(
         ([userId, value]) =>
           userId &&
           value &&
+          Number.isFinite(Date.parse(value.updatedAt)) &&
           now - Date.parse(value.updatedAt) <= CONTEXT_TOKEN_TTL_MS,
       )
       .sort(
-        (a, b) =>
-          Date.parse(b[1]!.updatedAt) - Date.parse(a[1]!.updatedAt),
+        (a, b) => Date.parse(b[1]!.updatedAt) - Date.parse(a[1]!.updatedAt),
       )
       .slice(0, CONTEXT_TOKEN_MAX_ENTRIES)
       .map(([userId, value]) => [userId, value!] as const),
   );
 }
 
-function readContextTokens(): Record<string, ContextTokenEntry> {
+function normalizeSendLog(value: unknown): WechatSendLogEntry[] {
+  const list = Array.isArray(value) ? value : [];
+  return list
+    .map((item) => {
+      const row = toRecord(item);
+      const deliveryId = String(row.deliveryId || "").trim();
+      const channelTurnId = String(row.channelTurnId || "").trim();
+      const sessionId = String(row.sessionId || "").trim();
+      const sentAt = String(row.sentAt || "").trim();
+      const parts = Array.isArray(row.parts)
+        ? row.parts
+          .map((part) => {
+            const partRow = toRecord(part);
+            const kind = String(partRow.kind || "").trim();
+            const text = String(partRow.text || "");
+            const clientId = String(partRow.clientId || "").trim();
+            if (kind !== "text" || !text) return null;
+            return clientId
+              ? { kind: "text" as const, text, clientId }
+              : { kind: "text" as const, text };
+          })
+          .filter(Boolean) as Array<{ kind: "text"; text: string; clientId?: string }>
+        : [];
+      if (!deliveryId || !channelTurnId || !sessionId || !sentAt) return null;
+      return { deliveryId, channelTurnId, sessionId, sentAt, parts };
+    })
+    .filter(Boolean)
+    .slice(-SEND_LOG_MAX_ENTRIES) as WechatSendLogEntry[];
+}
+
+function deriveResumable(runtime: WechatRuntimeRecord): boolean {
+  if (
+    runtime.auth.status === "pending_qr" &&
+    String(runtime.auth.qrCode || "").trim()
+  ) {
+    return true;
+  }
+  return (
+    runtime.auth.status === "authenticated" &&
+    runtime.credentials !== null
+  );
+}
+
+function normalizeRuntimeRecord(raw: unknown): WechatRuntimeRecord {
+  const initial = createInitialRuntimeRecord();
+  const row = toRecord(raw);
+  const authRow = toRecord(row.auth);
+  const transportRow = toRecord(row.transport);
+  const resumeRow = toRecord(row.resume);
+  const normalized: WechatRuntimeRecord = {
+    version: Number(row.version || WECHAT_RUNTIME_VERSION),
+    hostEpoch: String(row.hostEpoch || "").trim() || initial.hostEpoch,
+    protocolVersion: HOST_PROTOCOL_VERSION,
+    enabled: row.enabled === true,
+    auth: {
+      status: normalizeAuthStatus(authRow.status),
+      updatedAt: String(authRow.updatedAt || "").trim() || initial.auth.updatedAt,
+      ...(String(authRow.qrCode || "").trim()
+        ? { qrCode: String(authRow.qrCode || "").trim() }
+        : {}),
+      ...(String(authRow.qrImageUrl || "").trim()
+        ? { qrImageUrl: String(authRow.qrImageUrl || "").trim() }
+        : {}),
+      ...(String(authRow.baseUrl || "").trim()
+        ? { baseUrl: String(authRow.baseUrl || "").trim() }
+        : {}),
+      ...(String(authRow.accountId || "").trim()
+        ? { accountId: String(authRow.accountId || "").trim() }
+        : {}),
+      ...(String(authRow.botUserId || "").trim()
+        ? { botUserId: String(authRow.botUserId || "").trim() }
+        : {}),
+      ...(String(authRow.lastError || "").trim()
+        ? { lastError: String(authRow.lastError || "").trim() }
+        : {}),
+    },
+    transport: {
+      status: normalizeTransportStatus(transportRow.status),
+      updatedAt:
+        String(transportRow.updatedAt || "").trim() || initial.transport.updatedAt,
+      resumable: transportRow.resumable === true,
+      consecutiveFailures: Math.max(
+        0,
+        Number.isFinite(Number(transportRow.consecutiveFailures))
+          ? Math.trunc(Number(transportRow.consecutiveFailures))
+          : 0,
+      ),
+      ...(String(transportRow.nextRetryAt || "").trim()
+        ? { nextRetryAt: String(transportRow.nextRetryAt || "").trim() }
+        : {}),
+      ...(String(transportRow.lastSuccessAt || "").trim()
+        ? { lastSuccessAt: String(transportRow.lastSuccessAt || "").trim() }
+        : {}),
+      ...(String(transportRow.lastError || "").trim()
+        ? { lastError: String(transportRow.lastError || "").trim() }
+        : {}),
+    },
+    resume: {
+      resumable: resumeRow.resumable === true,
+      ...(String(resumeRow.lastResumeAt || "").trim()
+        ? { lastResumeAt: String(resumeRow.lastResumeAt || "").trim() }
+        : {}),
+      ...(String(resumeRow.lastResumeReason || "").trim()
+        ? { lastResumeReason: String(resumeRow.lastResumeReason || "").trim() }
+        : {}),
+    },
+    credentials: isWechatCredentials(row.credentials) ? row.credentials : null,
+    cursor: String(row.cursor || "").trim(),
+    contextTokens: pruneContextTokens(
+      toRecord(row.contextTokens) as Record<string, ContextTokenEntry>,
+    ),
+    sendLog: normalizeSendLog(row.sendLog),
+  };
+  normalized.transport.resumable = deriveResumable(normalized);
+  normalized.resume.resumable = normalized.transport.resumable;
+  if (normalized.auth.status === "authenticated" && !normalized.credentials) {
+    normalized.auth.status = "reauth_required";
+  }
+  if (!normalized.enabled) {
+    normalized.transport.status = "stopped";
+    delete normalized.transport.nextRetryAt;
+  }
+  return normalized;
+}
+
+function buildSnapshot(runtime: WechatRuntimeRecord): WechatHostStateSnapshot {
+  return {
+    hostEpoch: runtime.hostEpoch,
+    protocolVersion: HOST_PROTOCOL_VERSION,
+    enabled: runtime.enabled,
+    auth: { ...runtime.auth },
+    transport: { ...runtime.transport },
+    resume: { ...runtime.resume },
+  };
+}
+
+function readLegacyState(): {
+  hostEpoch: string;
+  enabled: boolean;
+  login: {
+    status: "logged_out" | "pending" | "logged_in" | "error";
+    updatedAt: string;
+    qrCode?: string;
+    qrImageUrl?: string;
+    baseUrl?: string;
+    accountId?: string;
+    botUserId?: string;
+    lastError?: string;
+  };
+} | null {
+  try {
+    const raw = localStorage.getItem(WECHAT_STATE_KEY);
+    if (!raw) return null;
+    const row = toRecord(JSON.parse(raw));
+    const loginRow = toRecord(row.login);
+    const status = String(loginRow.status || "").trim();
+    return {
+      hostEpoch: String(row.hostEpoch || "").trim() || crypto.randomUUID(),
+      enabled: row.enabled === true,
+      login: {
+        status:
+          status === "pending" ||
+          status === "logged_in" ||
+          status === "error"
+            ? status
+            : "logged_out",
+        updatedAt: String(loginRow.updatedAt || "").trim() || nowIso(),
+        ...(String(loginRow.qrCode || "").trim()
+          ? { qrCode: String(loginRow.qrCode || "").trim() }
+          : {}),
+        ...(String(loginRow.qrImageUrl || "").trim()
+          ? { qrImageUrl: String(loginRow.qrImageUrl || "").trim() }
+          : {}),
+        ...(String(loginRow.baseUrl || "").trim()
+          ? { baseUrl: String(loginRow.baseUrl || "").trim() }
+          : {}),
+        ...(String(loginRow.accountId || "").trim()
+          ? { accountId: String(loginRow.accountId || "").trim() }
+          : {}),
+        ...(String(loginRow.botUserId || "").trim()
+          ? { botUserId: String(loginRow.botUserId || "").trim() }
+          : {}),
+        ...(String(loginRow.lastError || "").trim()
+          ? { lastError: String(loginRow.lastError || "").trim() }
+          : {}),
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readLegacyCredentials(): WechatCredentials | null {
+  try {
+    const raw = localStorage.getItem(WECHAT_CREDENTIALS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    return isWechatCredentials(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function readLegacyCursor(): string {
+  return String(localStorage.getItem(WECHAT_CURSOR_KEY) || "").trim();
+}
+
+function readLegacyContextTokens(): Record<string, ContextTokenEntry> {
   try {
     const raw = localStorage.getItem(WECHAT_CONTEXT_TOKENS_KEY);
-    const parsed = raw ? JSON.parse(raw) : {};
-    if (!parsed || typeof parsed !== "object") return {};
-    return pruneContextTokens(parsed as Record<string, ContextTokenEntry>);
+    if (!raw) return {};
+    return pruneContextTokens(
+      toRecord(JSON.parse(raw)) as Record<string, ContextTokenEntry>,
+    );
   } catch {
     return {};
   }
 }
 
-function writeContextTokens(tokens: Record<string, ContextTokenEntry>): void {
-  localStorage.setItem(
-    WECHAT_CONTEXT_TOKENS_KEY,
-    JSON.stringify(pruneContextTokens(tokens)),
-  );
+function readLegacySendLog(): WechatSendLogEntry[] {
+  try {
+    const raw = localStorage.getItem(WECHAT_SEND_LOG_KEY);
+    if (!raw) return [];
+    return normalizeSendLog(JSON.parse(raw));
+  } catch {
+    return [];
+  }
 }
 
-function clearContextTokens(): void {
+function clearLegacyStorage(): void {
+  localStorage.removeItem(WECHAT_STATE_KEY);
+  localStorage.removeItem(WECHAT_SEND_LOG_KEY);
+  localStorage.removeItem(WECHAT_CREDENTIALS_KEY);
+  localStorage.removeItem(WECHAT_CURSOR_KEY);
   localStorage.removeItem(WECHAT_CONTEXT_TOKENS_KEY);
+}
+
+function migrateLegacyRuntime(): WechatRuntimeRecord | null {
+  const legacyState = readLegacyState();
+  const legacyCredentials = readLegacyCredentials();
+  const hasLegacy =
+    legacyState !== null ||
+    legacyCredentials !== null ||
+    !!readLegacyCursor() ||
+    Object.keys(readLegacyContextTokens()).length > 0 ||
+    readLegacySendLog().length > 0;
+  if (!hasLegacy) return null;
+
+  const runtime = createInitialRuntimeRecord();
+  runtime.enabled = legacyState?.enabled === true;
+  runtime.credentials = legacyCredentials;
+  runtime.cursor = readLegacyCursor();
+  runtime.contextTokens = readLegacyContextTokens();
+  runtime.sendLog = readLegacySendLog();
+
+  if (legacyState) {
+    runtime.auth.updatedAt = legacyState.login.updatedAt;
+    runtime.auth.baseUrl = legacyState.login.baseUrl;
+    runtime.auth.accountId = legacyState.login.accountId;
+    runtime.auth.botUserId = legacyState.login.botUserId;
+    runtime.auth.lastError = legacyState.login.lastError;
+    runtime.auth.qrCode = legacyState.login.qrCode;
+    runtime.auth.qrImageUrl = legacyState.login.qrImageUrl;
+    if (legacyState.login.status === "pending" && legacyState.login.qrCode) {
+      runtime.auth.status = "pending_qr";
+    } else if (legacyCredentials) {
+      runtime.auth.status = "authenticated";
+    } else if (legacyState.login.status === "error") {
+      runtime.auth.status = "reauth_required";
+    }
+  } else if (legacyCredentials) {
+    runtime.auth.status = "authenticated";
+    runtime.auth.baseUrl = legacyCredentials.baseUrl;
+    runtime.auth.accountId = legacyCredentials.accountId;
+    runtime.auth.botUserId = legacyCredentials.userId;
+  }
+
+  runtime.transport.status =
+    runtime.enabled && runtime.auth.status === "authenticated"
+      ? "degraded"
+      : "stopped";
+  runtime.transport.updatedAt = nowIso();
+  runtime.transport.resumable = deriveResumable(runtime);
+  runtime.resume.resumable = runtime.transport.resumable;
+  return runtime;
+}
+
+function getBackoffDelayMs(failureCount: number): number {
+  const index = Math.max(
+    0,
+    Math.min(failureCount - 1, UPDATE_BACKOFF_STEPS_MS.length - 1),
+  );
+  return UPDATE_BACKOFF_STEPS_MS[index] || UPDATE_BACKOFF_STEPS_MS[UPDATE_BACKOFF_STEPS_MS.length - 1];
 }
 
 function isAbortLikeError(error: unknown): boolean {
@@ -168,6 +506,14 @@ function isTimeoutLikeError(error: unknown): boolean {
     message.includes("signal timed out") ||
     message.includes("timed out")
   );
+}
+
+function isAuthFailure(error: unknown): boolean {
+  if (error instanceof WechatApiError) {
+    return error.code === -14 || error.status === 401;
+  }
+  const row = error as { code?: unknown; status?: unknown; message?: unknown };
+  return Number(row.code) === -14 || Number(row.status) === 401;
 }
 
 function collectBotIds(credentials: WechatCredentials): Set<string> {
@@ -228,138 +574,63 @@ function isInboundMessage(
   return false;
 }
 
-function readState(): WechatHostStateSnapshot {
-  try {
-    const raw = localStorage.getItem(WECHAT_STATE_KEY);
-    const credentials = readCredentials();
-    if (!raw) {
-      const initial = createInitialState();
-      if (!credentials) return initial;
-      return {
-        ...initial,
-        enabled: false,
-        login: {
-          status: "logged_in",
-          updatedAt: nowIso(),
-          baseUrl: credentials.baseUrl,
-          accountId: credentials.accountId,
-          botUserId: credentials.userId,
-        },
-      };
-    }
-    const parsed = JSON.parse(raw) as Partial<WechatHostStateSnapshot>;
-    return {
-      hostEpoch: String(parsed.hostEpoch || "").trim() || crypto.randomUUID(),
-      protocolVersion: HOST_PROTOCOL_VERSION,
-      enabled: parsed.enabled === true,
-      login: {
-        status:
-          parsed.login?.status === "pending" ||
-          parsed.login?.status === "logged_in" ||
-          parsed.login?.status === "error"
-            ? parsed.login.status
-            : "logged_out",
-        updatedAt:
-          typeof parsed.login?.updatedAt === "string"
-            ? parsed.login.updatedAt
-            : nowIso(),
-        ...(typeof parsed.login?.lastError === "string" &&
-        parsed.login.lastError.trim()
-          ? { lastError: parsed.login.lastError.trim() }
-          : {}),
-        ...(typeof parsed.login?.qrCode === "string" && parsed.login.qrCode.trim()
-          ? { qrCode: parsed.login.qrCode.trim() }
-          : {}),
-        ...(typeof parsed.login?.qrImageUrl === "string" &&
-        parsed.login.qrImageUrl.trim()
-          ? { qrImageUrl: parsed.login.qrImageUrl.trim() }
-          : {}),
-        ...(typeof parsed.login?.baseUrl === "string" && parsed.login.baseUrl.trim()
-          ? { baseUrl: parsed.login.baseUrl.trim() }
-          : credentials?.baseUrl
-            ? { baseUrl: credentials.baseUrl }
-            : {}),
-        ...(typeof parsed.login?.accountId === "string" &&
-        parsed.login.accountId.trim()
-          ? { accountId: parsed.login.accountId.trim() }
-          : credentials?.accountId
-            ? { accountId: credentials.accountId }
-            : {}),
-        ...(typeof parsed.login?.botUserId === "string" &&
-        parsed.login.botUserId.trim()
-          ? { botUserId: parsed.login.botUserId.trim() }
-          : credentials?.userId
-            ? { botUserId: credentials.userId }
-            : {}),
-      },
-    };
-  } catch {
-    return createInitialState();
-  }
-}
-
-function writeState(state: WechatHostStateSnapshot): WechatHostStateSnapshot {
-  localStorage.setItem(WECHAT_STATE_KEY, JSON.stringify(state));
-  queueMicrotask(() => {
-    void globalThis.chrome?.runtime?.sendMessage?.({
-      type: WECHAT_HOST_STATE_EVENT_TYPE,
-      payload: state,
-    })?.catch(() => {});
-  });
-  return state;
-}
-
-function updateState(
-  updater: (current: WechatHostStateSnapshot) => WechatHostStateSnapshot,
-): WechatHostStateSnapshot {
-  return writeState(updater(readState()));
-}
-
-function appendSendLog(payload: WechatReplySendInput, sentAt: string): void {
-  const raw = localStorage.getItem(WECHAT_SEND_LOG_KEY);
-  let list: unknown[] = [];
-  try {
-    const parsed = raw ? JSON.parse(raw) : [];
-    list = Array.isArray(parsed) ? parsed : [];
-  } catch {
-    list = [];
-  }
-  const next = [
-    ...list.slice(-19),
-    {
-      deliveryId: payload.deliveryId,
-      channelTurnId: payload.channelTurnId,
-      sessionId: payload.sessionId,
-      parts: payload.parts,
-      sentAt,
-    },
-  ];
-  localStorage.setItem(WECHAT_SEND_LOG_KEY, JSON.stringify(next));
-}
-
 export class WechatHostService {
   private loginPollTimer: ReturnType<typeof setTimeout> | null = null;
   private updatePollTimer: ReturnType<typeof setTimeout> | null = null;
   private updatePollController: AbortController | null = null;
   private updatePollDueAt: number | null = null;
+  private runtime: WechatRuntimeRecord = createInitialRuntimeRecord();
+  private readonly readyPromise: Promise<void>;
 
   constructor() {
-    this.resumePersistedBackgroundWork();
+    this.readyPromise = this.bootstrap();
   }
 
-  private resumePersistedBackgroundWork(): void {
-    const state = readState();
-    if (state.login.status === "pending" && state.login.qrCode) {
-      this.scheduleLoginPoll(state.login.qrCode);
-      return;
+  private async bootstrap(): Promise<void> {
+    const stored = await chrome.storage.local.get(WECHAT_RUNTIME_KEY);
+    const persisted = stored[WECHAT_RUNTIME_KEY];
+    const migrated = persisted ? null : migrateLegacyRuntime();
+    this.runtime = normalizeRuntimeRecord(persisted || migrated || createInitialRuntimeRecord());
+    this.runtime.hostEpoch = crypto.randomUUID();
+    this.runtime.protocolVersion = HOST_PROTOCOL_VERSION;
+    this.runtime.transport.resumable = deriveResumable(this.runtime);
+    this.runtime.resume.resumable = this.runtime.transport.resumable;
+    if (this.runtime.enabled && this.runtime.auth.status === "authenticated") {
+      this.runtime.transport.status = "degraded";
+      this.runtime.transport.updatedAt = nowIso();
     }
-    if (
-      state.enabled &&
-      state.login.status === "logged_in" &&
-      readCredentials()
-    ) {
-      this.scheduleUpdatePoll(0);
+    await this.persistRuntime({ emit: false });
+    if (migrated) {
+      clearLegacyStorage();
     }
+  }
+
+  private async ensureReady(): Promise<void> {
+    await this.readyPromise;
+  }
+
+  private emitHostState(): void {
+    const snapshot = buildSnapshot(this.runtime);
+    queueMicrotask(() => {
+      void globalThis.chrome?.runtime?.sendMessage?.({
+        type: WECHAT_HOST_STATE_EVENT_TYPE,
+        payload: snapshot,
+      })?.catch(() => {});
+    });
+  }
+
+  private async persistRuntime(
+    options: { emit?: boolean } = {},
+  ): Promise<WechatHostStateSnapshot> {
+    this.runtime.transport.resumable = deriveResumable(this.runtime);
+    this.runtime.resume.resumable = this.runtime.transport.resumable;
+    await chrome.storage.local.set({
+      [WECHAT_RUNTIME_KEY]: this.runtime,
+    });
+    if (options.emit !== false) {
+      this.emitHostState();
+    }
+    return buildSnapshot(this.runtime);
   }
 
   private clearLoginPoll(): void {
@@ -418,15 +689,25 @@ export class WechatHostService {
   private rememberContext(
     credentials: WechatCredentials,
     message: WechatMessage,
-  ): void {
+  ): boolean {
     const userId = resolvePeerUserIdForContext(credentials, message);
-    if (!userId || !message.context_token) return;
-    const tokens = readContextTokens();
-    tokens[userId] = {
+    if (!userId || !message.context_token) return false;
+    const current = this.runtime.contextTokens[userId];
+    const next: ContextTokenEntry = {
       token: message.context_token,
       updatedAt: nowIso(),
     };
-    writeContextTokens(tokens);
+    if (
+      current?.token === next.token &&
+      current?.updatedAt === next.updatedAt
+    ) {
+      return false;
+    }
+    this.runtime.contextTokens = pruneContextTokens({
+      ...this.runtime.contextTokens,
+      [userId]: next,
+    });
+    return true;
   }
 
   private toInboundMessage(
@@ -477,8 +758,9 @@ export class WechatHostService {
     credentials: WechatCredentials,
     updates: WechatGetUpdatesResponse,
   ): Promise<void> {
+    let changed = false;
     for (const message of updates.msgs || []) {
-      this.rememberContext(credentials, message);
+      changed = this.rememberContext(credentials, message) || changed;
       const inbound = this.toInboundMessage(credentials, message);
       if (!inbound) {
         console.warn("[wechat] inbound dropped", {
@@ -508,77 +790,170 @@ export class WechatHostService {
       }
     }
     if (updates.get_updates_buf) {
-      writeCursor(updates.get_updates_buf);
+      this.runtime.cursor = String(updates.get_updates_buf || "").trim();
+      changed = true;
+    }
+    if (changed) {
+      await this.persistRuntime({ emit: false });
+    }
+  }
+
+  private markTransportStopped(): void {
+    this.runtime.transport = {
+      ...this.runtime.transport,
+      status: "stopped",
+      updatedAt: nowIso(),
+      nextRetryAt: undefined,
+    };
+  }
+
+  private async markReauthRequired(message: string): Promise<void> {
+    this.clearUpdatePoll();
+    this.runtime.credentials = null;
+    this.runtime.cursor = "";
+    this.runtime.contextTokens = {};
+    this.runtime.auth = {
+      status: "reauth_required",
+      updatedAt: nowIso(),
+      baseUrl: this.runtime.auth.baseUrl,
+      accountId: this.runtime.auth.accountId,
+      botUserId: this.runtime.auth.botUserId,
+      lastError: message,
+    };
+    this.runtime.transport = {
+      ...this.runtime.transport,
+      status: "stopped",
+      updatedAt: nowIso(),
+      resumable: false,
+      nextRetryAt: undefined,
+      lastError: message,
+    };
+    await this.persistRuntime();
+  }
+
+  private async markTransportBackoff(error: unknown): Promise<void> {
+    const consecutiveFailures = this.runtime.transport.consecutiveFailures + 1;
+    const delayMs = getBackoffDelayMs(consecutiveFailures);
+    const nextRetryAt = new Date(Date.now() + delayMs).toISOString();
+    this.runtime.transport = {
+      ...this.runtime.transport,
+      status: "backing_off",
+      updatedAt: nowIso(),
+      resumable: true,
+      consecutiveFailures,
+      nextRetryAt,
+      lastError: error instanceof Error ? error.message : String(error),
+    };
+    await this.persistRuntime();
+    if (this.runtime.enabled && this.runtime.auth.status === "authenticated") {
+      this.scheduleUpdatePoll(delayMs);
     }
   }
 
   private async pollUpdates(): Promise<void> {
-    const credentials = readCredentials();
+    await this.ensureReady();
+    const credentials = this.runtime.credentials;
     if (!credentials) {
       console.warn("[wechat] pollUpdates: no credentials, skip");
+      this.markTransportStopped();
+      await this.persistRuntime();
       return;
     }
-    const current = readState();
-    if (current.login.status !== "logged_in") {
-      console.warn("[wechat] pollUpdates: not logged_in, skip", current.login.status);
+    if (!this.runtime.enabled || this.runtime.auth.status !== "authenticated") {
+      this.markTransportStopped();
+      await this.persistRuntime();
       return;
     }
 
     let nextPollDelayMs: number | null = null;
     const controller = new AbortController();
     this.updatePollController = controller;
+    this.runtime.transport = {
+      ...this.runtime.transport,
+      status: this.runtime.transport.status === "healthy" ? "healthy" : "starting",
+      updatedAt: nowIso(),
+      resumable: true,
+      nextRetryAt: undefined,
+    };
+    await this.persistRuntime();
+
     try {
       const updates = await getUpdates(
         credentials.baseUrl,
         credentials.token,
-        readCursor(),
+        this.runtime.cursor,
         controller.signal,
       );
       await this.deliverInboundBatch(credentials, updates);
+      const successAt = nowIso();
+      this.runtime.auth = {
+        ...this.runtime.auth,
+        status: "authenticated",
+        updatedAt: successAt,
+        baseUrl: credentials.baseUrl,
+        accountId: credentials.accountId,
+        botUserId: credentials.userId,
+        lastError: undefined,
+      };
+      this.runtime.transport = {
+        ...this.runtime.transport,
+        status: "healthy",
+        updatedAt: successAt,
+        resumable: true,
+        consecutiveFailures: 0,
+        nextRetryAt: undefined,
+        lastSuccessAt: successAt,
+        lastError: undefined,
+      };
+      await this.persistRuntime();
       nextPollDelayMs = 0;
     } catch (error) {
       if (isAbortLikeError(error)) {
-        nextPollDelayMs = 0;
-      } else if (isTimeoutLikeError(error)) {
-        nextPollDelayMs = 0;
-      } else {
-        const err = error as { code?: number; message?: string };
-        if (typeof err?.code === "number" && err.code === -14) {
-          this.logout();
-          updateState((state) => ({
-            ...state,
-            login: {
-              status: "logged_out",
-              updatedAt: nowIso(),
-              lastError: "微信会话已过期，请重新登录。",
-            },
-          }));
-          return;
-        }
-        updateState((state) => ({
-          ...state,
-          login: {
-            ...state.login,
-            status: "error",
+        if (this.runtime.enabled && this.runtime.auth.status === "authenticated") {
+          this.runtime.transport = {
+            ...this.runtime.transport,
+            status: "degraded",
             updatedAt: nowIso(),
-            lastError: error instanceof Error ? error.message : String(error),
-          },
-        }));
-        nextPollDelayMs = 2_000;
+            resumable: true,
+          };
+          await this.persistRuntime();
+          nextPollDelayMs = 0;
+        }
+      } else if (isTimeoutLikeError(error)) {
+        this.runtime.transport = {
+          ...this.runtime.transport,
+          status: "healthy",
+          updatedAt: nowIso(),
+          resumable: true,
+          nextRetryAt: undefined,
+        };
+        await this.persistRuntime();
+        nextPollDelayMs = 0;
+      } else if (isAuthFailure(error)) {
+        await this.markReauthRequired("微信会话已过期，请重新登录。");
+        return;
+      } else {
+        await this.markTransportBackoff(error);
+        return;
       }
     } finally {
       if (this.updatePollController === controller) {
         this.updatePollController = null;
       }
-      if (nextPollDelayMs !== null && readState().enabled && readCredentials()) {
+      if (
+        nextPollDelayMs !== null &&
+        this.runtime.enabled &&
+        this.runtime.auth.status === "authenticated" &&
+        this.runtime.credentials
+      ) {
         this.scheduleUpdatePoll(nextPollDelayMs);
       }
     }
   }
 
   private async pollLogin(qrCode: string): Promise<void> {
-    const current = readState();
-    const baseUrl = current.login.baseUrl || DEFAULT_BASE_URL;
+    await this.ensureReady();
+    const baseUrl = this.runtime.auth.baseUrl || DEFAULT_BASE_URL;
     try {
       const status = await pollQrStatus(baseUrl, qrCode);
       if (status.status === "confirmed") {
@@ -587,14 +962,20 @@ export class WechatHostService {
           !status.ilink_bot_id ||
           !status.ilink_user_id
         ) {
-          updateState((state) => ({
-            ...state,
-            login: {
-              status: "error",
-              updatedAt: nowIso(),
-              lastError: "二维码已确认，但未返回完整凭据",
-            },
-          }));
+          this.runtime.auth = {
+            status: "reauth_required",
+            updatedAt: nowIso(),
+            baseUrl,
+            lastError: "二维码已确认，但未返回完整凭据",
+          };
+          this.runtime.credentials = null;
+          this.runtime.transport = {
+            ...this.runtime.transport,
+            status: "stopped",
+            updatedAt: nowIso(),
+            resumable: false,
+          };
+          await this.persistRuntime();
           return;
         }
         const credentials: WechatCredentials = {
@@ -603,145 +984,210 @@ export class WechatHostService {
           accountId: status.ilink_bot_id,
           userId: status.ilink_user_id,
         };
-        writeCredentials(credentials);
-        updateState((state) => ({
-          ...state,
-          login: {
-            status: "logged_in",
-            updatedAt: nowIso(),
-            baseUrl: credentials.baseUrl,
-            accountId: credentials.accountId,
-            botUserId: credentials.userId,
-          },
-        }));
+        this.runtime.credentials = credentials;
+        this.runtime.auth = {
+          status: "authenticated",
+          updatedAt: nowIso(),
+          baseUrl: credentials.baseUrl,
+          accountId: credentials.accountId,
+          botUserId: credentials.userId,
+        };
+        this.runtime.transport = {
+          ...this.runtime.transport,
+          status: this.runtime.enabled ? "starting" : "stopped",
+          updatedAt: nowIso(),
+          resumable: true,
+          consecutiveFailures: 0,
+          nextRetryAt: undefined,
+          lastError: undefined,
+        };
         this.clearLoginPoll();
-        if (current.enabled) {
+        await this.persistRuntime();
+        if (this.runtime.enabled) {
           this.ensureUpdatePoll();
         }
         return;
       }
       if (status.status === "expired") {
-        updateState((state) => ({
-          ...state,
-          login: {
-            status: "logged_out",
-            updatedAt: nowIso(),
-            lastError: "二维码已过期，请重新开始登录。",
-          },
-        }));
         this.clearLoginPoll();
+        this.runtime.credentials = null;
+        this.runtime.cursor = "";
+        this.runtime.contextTokens = {};
+        this.runtime.auth = {
+          status: "logged_out",
+          updatedAt: nowIso(),
+          lastError: "二维码已过期，请重新开始登录。",
+        };
+        this.runtime.transport = {
+          ...this.runtime.transport,
+          status: "stopped",
+          updatedAt: nowIso(),
+          resumable: false,
+          nextRetryAt: undefined,
+        };
+        await this.persistRuntime();
         return;
       }
+      this.runtime.auth = {
+        ...this.runtime.auth,
+        status: "pending_qr",
+        updatedAt: nowIso(),
+        lastError: undefined,
+      };
+      await this.persistRuntime();
       this.scheduleLoginPoll(qrCode);
     } catch (error) {
-      updateState((state) => ({
-        ...state,
-        login: {
-          ...state.login,
-          status: "error",
-          updatedAt: nowIso(),
-          lastError: error instanceof Error ? error.message : String(error),
-        },
-      }));
-      this.clearLoginPoll();
+      this.runtime.auth = {
+        ...this.runtime.auth,
+        status: "pending_qr",
+        updatedAt: nowIso(),
+        lastError: error instanceof Error ? error.message : String(error),
+      };
+      await this.persistRuntime();
+      this.scheduleLoginPoll(qrCode);
     }
   }
 
-  getState(): WechatHostStateSnapshot {
-    const state = readState();
-    if (state.login.status === "pending" && state.login.qrCode) {
-      this.scheduleLoginPoll(state.login.qrCode);
-      return state;
+  async getState(): Promise<WechatHostStateSnapshot> {
+    await this.ensureReady();
+    return buildSnapshot(this.runtime);
+  }
+
+  async resume(reason = "manual"): Promise<WechatHostStateSnapshot> {
+    await this.ensureReady();
+    this.runtime.resume = {
+      resumable: deriveResumable(this.runtime),
+      lastResumeAt: nowIso(),
+      lastResumeReason: reason,
+    };
+    if (this.runtime.auth.status === "pending_qr" && this.runtime.auth.qrCode) {
+      this.scheduleLoginPoll(this.runtime.auth.qrCode);
+      return this.persistRuntime();
     }
-    if (state.enabled && state.login.status === "logged_in" && readCredentials()) {
+    if (!this.runtime.enabled) {
+      this.clearUpdatePoll();
+      this.markTransportStopped();
+      return this.persistRuntime();
+    }
+    if (this.runtime.auth.status === "authenticated" && this.runtime.credentials) {
+      this.runtime.transport = {
+        ...this.runtime.transport,
+        status: "starting",
+        updatedAt: nowIso(),
+        resumable: true,
+        nextRetryAt: undefined,
+      };
       this.ensureUpdatePoll();
+      return this.persistRuntime();
     }
-    return state;
+    this.markTransportStopped();
+    return this.persistRuntime();
   }
 
-  enable(): WechatHostStateSnapshot {
-    const current = readState();
-    const next = writeState({
-      ...current,
-      enabled: true,
-    });
-    if (next.login.status === "logged_in") {
-      this.ensureUpdatePoll();
+  async enable(): Promise<WechatHostStateSnapshot> {
+    await this.ensureReady();
+    this.runtime.enabled = true;
+    if (this.runtime.auth.status === "authenticated" && this.runtime.credentials) {
+      this.runtime.transport = {
+        ...this.runtime.transport,
+        status: "degraded",
+        updatedAt: nowIso(),
+        resumable: true,
+      };
     }
-    return next;
+    return this.persistRuntime();
   }
 
-  disable(): WechatHostStateSnapshot {
+  async disable(): Promise<WechatHostStateSnapshot> {
+    await this.ensureReady();
     this.clearUpdatePoll();
-    const current = readState();
-    return writeState({
-      ...current,
-      enabled: false,
-    });
+    this.runtime.enabled = false;
+    this.markTransportStopped();
+    return this.persistRuntime();
   }
 
   async startLogin(): Promise<WechatHostStateSnapshot> {
+    await this.ensureReady();
     this.clearLoginPoll();
     this.clearUpdatePoll();
-    clearCursor();
-    clearContextTokens();
-    clearCredentials();
-    const current = readState();
     const qr = await fetchQrCode(DEFAULT_BASE_URL);
-    const next = writeState({
-      ...current,
-      login: {
-        status: "pending",
-        updatedAt: nowIso(),
-        qrCode: qr.qrcode,
-        qrImageUrl: qr.qrcode_img_content,
-        baseUrl: DEFAULT_BASE_URL,
-      },
-    });
+    this.runtime.credentials = null;
+    this.runtime.cursor = "";
+    this.runtime.contextTokens = {};
+    this.runtime.auth = {
+      status: "pending_qr",
+      updatedAt: nowIso(),
+      qrCode: qr.qrcode,
+      qrImageUrl: qr.qrcode_img_content,
+      baseUrl: DEFAULT_BASE_URL,
+    };
+    this.runtime.transport = {
+      ...this.runtime.transport,
+      status: "stopped",
+      updatedAt: nowIso(),
+      resumable: true,
+      consecutiveFailures: 0,
+      nextRetryAt: undefined,
+      lastError: undefined,
+    };
     this.scheduleLoginPoll(qr.qrcode);
-    return next;
+    return this.persistRuntime();
   }
 
-  logout(): WechatHostStateSnapshot {
+  async logout(): Promise<WechatHostStateSnapshot> {
+    await this.ensureReady();
     this.clearLoginPoll();
     this.clearUpdatePoll();
-    clearCredentials();
-    clearCursor();
-    clearContextTokens();
-    const current = readState();
-    return writeState({
-      ...current,
-      login: {
-        status: "logged_out",
-        updatedAt: nowIso(),
-      },
-    });
+    this.runtime.enabled = false;
+    this.runtime.credentials = null;
+    this.runtime.cursor = "";
+    this.runtime.contextTokens = {};
+    this.runtime.auth = {
+      status: "logged_out",
+      updatedAt: nowIso(),
+    };
+    this.runtime.transport = {
+      ...this.runtime.transport,
+      status: "stopped",
+      updatedAt: nowIso(),
+      resumable: false,
+      consecutiveFailures: 0,
+      nextRetryAt: undefined,
+      lastError: undefined,
+    };
+    this.runtime.resume = {
+      resumable: false,
+      lastResumeAt: this.runtime.resume.lastResumeAt,
+      lastResumeReason: this.runtime.resume.lastResumeReason,
+    };
+    return this.persistRuntime();
   }
 
   async sendReply(input: WechatReplySendInput): Promise<WechatReplySendResult> {
-    const current = readState();
-    if (!current.enabled) {
+    await this.ensureReady();
+    if (!this.runtime.enabled) {
       throw new Error("WeChat 通道未启用，无法发送回复");
     }
-    const credentials = readCredentials();
-    if (!credentials) {
+    if (this.runtime.auth.status !== "authenticated" || !this.runtime.credentials) {
       throw new Error("WeChat 未登录，无法发送回复");
     }
-    const tokens = readContextTokens();
-    writeContextTokens(tokens);
-    const tokenEntry = tokens[input.userId];
+    this.runtime.contextTokens = pruneContextTokens(this.runtime.contextTokens);
+    await this.persistRuntime({ emit: false });
+
+    const tokenEntry = this.runtime.contextTokens[input.userId];
     const contextToken = String(tokenEntry?.token || "").trim();
     if (!contextToken) {
       throw new Error(`缺少用户 ${input.userId} 的 context_token，无法发送回复`);
     }
+
     let deliveredPartCount = 0;
     for (const part of input.parts) {
       if (part.kind !== "text") continue;
       try {
         await sendTextMessage({
-          baseUrl: credentials.baseUrl,
-          token: credentials.token,
-          fromUserId: credentials.userId,
+          baseUrl: this.runtime.credentials.baseUrl,
+          token: this.runtime.credentials.token,
+          fromUserId: this.runtime.credentials.userId,
           userId: input.userId,
           contextToken,
           text: part.text,
@@ -758,8 +1204,19 @@ export class WechatHostService {
         };
       }
     }
+
     const sentAt = nowIso();
-    appendSendLog(input, sentAt);
+    this.runtime.sendLog = [
+      ...this.runtime.sendLog.slice(-(SEND_LOG_MAX_ENTRIES - 1)),
+      {
+        deliveryId: input.deliveryId,
+        channelTurnId: input.channelTurnId,
+        sessionId: input.sessionId,
+        parts: input.parts,
+        sentAt,
+      },
+    ];
+    await this.persistRuntime({ emit: false });
     return {
       deliveryId: input.deliveryId,
       sentAt,

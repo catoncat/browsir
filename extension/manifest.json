@@ -5,6 +5,7 @@
   "description": "用自然语言操控网页的 AI 助手。填表、点击、提取数据、后台自动化——装上就能用，开源免费。",
   "permissions": [
     "debugger",
+    "alarms",
     "offscreen",
     "scripting",
     "tabs",

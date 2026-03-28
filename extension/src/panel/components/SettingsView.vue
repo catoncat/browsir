@@ -52,7 +52,7 @@ const backupStatus = ref("");
 const backupLocalError = ref("");
 const wechatQrDataUrl = ref("");
 const wechatQrRenderError = ref("");
-const wechatLogin = computed(() => wechatState.value.login);
+const wechatAuth = computed(() => wechatState.value.auth);
 
 async function handleWechatPrimaryAction() {
   if (wechatUserView.value.primaryActionDisabled) return;
@@ -162,7 +162,7 @@ onUnmounted(() => {
 });
 
 watch(
-  () => wechatState.value.login.qrImageUrl,
+  () => wechatState.value.auth.qrImageUrl,
   async (value) => {
     const payload = String(value || "").trim();
     wechatQrDataUrl.value = "";
@@ -322,6 +322,8 @@ watch(
               :class="
                 wechatUserView.status === 'connected'
                   ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                  : wechatUserView.status === 'reconnecting'
+                    ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300'
                   : wechatUserView.status === 'connecting_qr'
                     ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
                     : wechatUserView.status === 'error'
@@ -342,7 +344,7 @@ watch(
             {{ wechatUserView.errorMessage }}
           </p>
           <div
-            v-if="wechatUserView.showQrCard && wechatLogin.qrImageUrl"
+            v-if="wechatUserView.showQrCard && wechatAuth.qrImageUrl"
             class="flex flex-col items-center gap-2 rounded-sm border border-ui-border bg-ui-bg/60 px-3 py-3"
           >
             <img
@@ -367,7 +369,7 @@ watch(
               二维码生成失败：{{ wechatQrRenderError }}
             </p>
             <p class="max-w-[18rem] break-all text-[10px] text-ui-text-muted/60">
-              {{ wechatState.login.qrImageUrl }}
+              {{ wechatState.auth.qrImageUrl }}
             </p>
           </div>
           <div class="flex items-center gap-2">
