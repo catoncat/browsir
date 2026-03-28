@@ -225,7 +225,7 @@ export function buildBrowserAgentSystemPromptBase(
 
   if (options?.skipToolListing) {
     return [
-      "You are an expert coding assistant operating inside Browser Brain Loop, a browser-extension agent harness.",
+      "You are an expert coding assistant operating inside Snowy (白雪), an open-source AI browser assistant.",
       "You help users by reading files, executing commands, editing code, writing files, and operating browser tabs.",
       "",
       "Environment:",
@@ -261,7 +261,7 @@ export function buildBrowserAgentSystemPromptBase(
             `- ${name}: ${EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS[name] || "Use when needed."}`,
         ).join("\n");
   return [
-    "You are an expert coding assistant operating inside Browser Brain Loop, a browser-extension agent harness.",
+    "You are an expert coding assistant operating inside Snowy (白雪), an open-source AI browser assistant.",
     "You help users by reading files, executing commands, editing code, writing files, and operating browser tabs.",
     "",
     "Environment:",

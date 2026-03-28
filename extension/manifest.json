@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Browser Brain Loop",
+  "name": "白雪 Snowy - AI 浏览器助手",
   "version": "0.1.1",
-  "description": "Browser-side planner + loop engine + CDP gateway + local WS bridge.",
+  "description": "用自然语言操控网页的 AI 助手。填表、点击、提取数据、后台自动化——装上就能用，开源免费。",
   "permissions": [
     "debugger",
     "offscreen",
@@ -56,7 +56,7 @@
     "default_path": "sidepanel.html"
   },
   "action": {
-    "default_title": "Browser Brain Loop",
+    "default_title": "白雪 Snowy",
     "default_icon": {
       "16": "icon-16.png",
       "48": "icon-48.png",

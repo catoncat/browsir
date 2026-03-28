@@ -175,7 +175,7 @@ describe("cursor-help-protocol", () => {
       },
       {
         requestId: "req-2",
-        compiledPrompt: "You are Browser Brain Loop.",
+        compiledPrompt: "You are Snowy.",
         latestUserPrompt: "hello",
         requestedModel: "Sonnet 4.6"
       }
@@ -185,7 +185,7 @@ describe("cursor-help-protocol", () => {
     expect(messages).toHaveLength(2);
     expect(messages[0]?.role).toBe("system");
     expect(String(((messages[0]?.parts as Array<Record<string, unknown>>)?.[0]?.text || ""))).toContain(
-      "You are Browser Brain Loop."
+      "You are Snowy."
     );
     expect(String(((messages[0]?.parts as Array<Record<string, unknown>>)?.[0]?.text || ""))).not.toContain(
       "You are Cursor Help."

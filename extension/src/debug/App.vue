@@ -86,7 +86,7 @@ onUnmounted(() => {
 <template>
   <main class="debug-shell">
     <header class="debug-header">
-      <h1 class="debug-title">Browser Brain Debug Workspace</h1>
+      <h1 class="debug-title">白雪 Snowy — 调试面板</h1>
       <div class="actions">
         <button class="btn" :disabled="loading" @click="refreshAll">刷新</button>
         <button class="btn" :disabled="loading || !activeSessionId" @click="loadSelectedSession">拉取当前会话</button>

@@ -5855,7 +5855,7 @@ describe("runtime-router.browser", () => {
       .map((item) => String(item.content || ""))
       .join("\n");
     expect(systemText).toContain(
-      "You are an expert coding assistant operating inside Browser Brain Loop",
+      "You are an expert coding assistant operating inside Snowy",
     );
     expect(systemText).toContain("select_option_by_uid");
     expect(systemText).toContain("press_key");
@@ -5947,7 +5947,7 @@ describe("runtime-router.browser", () => {
       "Always report changed file paths in the final response.",
     );
     expect(systemText).not.toContain(
-      "You are an expert coding assistant operating inside Browser Brain Loop",
+      "You are an expert coding assistant operating inside Snowy",
     );
   });
 
@@ -6032,7 +6032,7 @@ describe("runtime-router.browser", () => {
     expect(systemText).toContain("[ref:ctx_");
     expect(systemText).toContain('path="/mem/skills/system-prompt/README.md"');
     expect(systemText).not.toContain(
-      "You are an expert coding assistant operating inside Browser Brain Loop",
+      "You are an expert coding assistant operating inside Snowy",
     );
   });
 

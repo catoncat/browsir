@@ -847,7 +847,7 @@ defineExpose({ handleCreateSession, sessionListRenderState });
             <div class="w-10 h-10 bg-ui-accent/5 rounded-xl flex items-center justify-center border border-ui-accent/10">
               <Activity :size="20" class="text-ui-accent" />
             </div>
-            <h2 class="text-xl font-black uppercase tracking-tight text-ui-text">Agent Terminal</h2>
+            <h2 class="text-xl font-black uppercase tracking-tight text-ui-text">白雪</h2>
           </div>
           <p class="text-ui-text-muted text-[15px] leading-relaxed max-w-xs font-bold">
             就绪。发送消息让 Agent 帮你完成浏览器任务。

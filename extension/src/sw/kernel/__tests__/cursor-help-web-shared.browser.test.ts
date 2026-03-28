@@ -207,7 +207,7 @@ await mcp.call("search_docs", {“q”：“runtime router”})
 
     expect(normalized).toBe("接下来我会继续填写表单。");
     expect(normalized).not.toContain("我是 Cursor 支持助手");
-    expect(normalized).not.toContain("Browser Brain Loop");
+    expect(normalized).not.toContain("Snowy");
   });
 
   it("preserves markdown newlines when no identity rewrite is needed", () => {
