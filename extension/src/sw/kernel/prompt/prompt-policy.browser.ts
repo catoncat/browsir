@@ -355,7 +355,7 @@ const EXTENSION_AGENT_PROMPT_TOOL_DESCRIPTIONS: Record<string, string> = {
   browser_edit_file:
     "Patch browser sandbox files with exact replacements.",
   browser_bash:
-    "Execute shell commands in browser sandbox runtime. Sandboxed Linux-like shell with 60+ commands (ls, grep, sed, awk, sort, find, tree, diff, tar, base64, bc). Supports pipes, redirects, variables, globs. No real network access, no host filesystem — use host_bash for system-level operations.",
+    "Execute shell commands in browser sandbox runtime. Sandboxed Linux-like shell with 60+ commands (ls, grep, sed, awk, sort, find, tree, diff, tar, base64, bc). Supports pipes, redirects, variables, globs. No Python runtime and no generic heredoc (<<EOF); use node -e for JS and host_bash for python/pip/system work. No real network access, no host filesystem — use host_bash for system-level operations.",
   host_read_file: "Read file contents from host filesystem.",
   host_write_file: "Create or overwrite files on host filesystem.",
   host_edit_file:

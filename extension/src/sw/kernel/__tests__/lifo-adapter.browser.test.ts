@@ -634,4 +634,59 @@ describe("lifo-adapter.browser", () => {
     expect(Number(out.exitCode ?? 1)).toBe(0);
     expect(String(out.stdout || "").trim()).toBe("{\"ok\":true}");
   });
+
+  it("normalizes node heredoc execution to node -e", async () => {
+    const sessionId = "sess-node-heredoc";
+    const out = await invokeLifoFrame({
+      sessionId,
+      tool: "bash",
+      args: {
+        cmdId: "bash.exec",
+        args: [
+          "node - <<'JS'\nconsole.log(JSON.stringify({ ok: 21 * 2 === 42 }))\nJS"
+        ],
+        runtime: "sandbox"
+      }
+    });
+
+    expect(Number(out.exitCode ?? 1)).toBe(0);
+    expect(String(out.stdout || "").trim()).toBe("{\"ok\":true}");
+  });
+
+  it("reports python heredoc as missing runtime instead of shell parse noise", async () => {
+    const sessionId = "sess-python-heredoc";
+    const out = await invokeLifoFrame({
+      sessionId,
+      tool: "bash",
+      args: {
+        cmdId: "bash.exec",
+        args: [
+          "python - <<'PY'\nprint(42)\nPY"
+        ],
+        runtime: "sandbox"
+      }
+    });
+
+    expect(Number(out.exitCode ?? 0)).toBe(127);
+    expect(String(out.stderr || "")).toContain("python: command not found");
+    expect(String(out.stderr || "")).not.toContain("Expected Word");
+  });
+
+  it("rewrites simple sed line ranges to head/tail-compatible commands", async () => {
+    const sessionId = "sess-sed-range";
+    const out = await invokeLifoFrame({
+      sessionId,
+      tool: "bash",
+      args: {
+        cmdId: "bash.exec",
+        args: [
+          "printf 'a\\nb\\nc\\nd\\n' | sed -n '2,3p'"
+        ],
+        runtime: "sandbox"
+      }
+    });
+
+    expect(Number(out.exitCode ?? 1)).toBe(0);
+    expect(String(out.stdout || "")).toBe("b\nc\n");
+  });
 });

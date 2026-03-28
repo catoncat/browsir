@@ -193,6 +193,105 @@ function clipTelemetryText(input: unknown, max = 180): string {
   return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
+function shellSingleQuote(text: string): string {
+  return `'${String(text || "").replace(/'/g, `'\\''`)}'`;
+}
+
+function createSyntheticBashResult(
+  stderr: string,
+  exitCode: number,
+): SandboxBashResult {
+  return {
+    ok: exitCode === 0,
+    stdout: "",
+    stderr,
+    exitCode,
+    vfsDiff: [],
+  };
+}
+
+function parseSimpleHeredocCommand(command: string): {
+  runtime: string;
+  prefixArgs: string;
+  body: string;
+} | null {
+  const lines = command.split("\n");
+  if (lines.length < 3) return null;
+  const header = String(lines[0] || "");
+  const match =
+    /^(?<runtime>[A-Za-z0-9._+-]+)(?<prefixArgs>(?:\s+(?:--?[^\s]+|[^\s]+))*)\s+-\s*<<-?\s*(?<tag>(?:'[^']+'|"[^"]+"|[A-Za-z_][A-Za-z0-9_]*))\s*$/.exec(
+      header,
+    );
+  if (!match?.groups) return null;
+  const tag = String(match.groups.tag || "").replace(/^['"]|['"]$/g, "");
+  const closingTag = String(lines[lines.length - 1] || "").trim();
+  if (!tag || tag !== closingTag) return null;
+  return {
+    runtime: match.groups.runtime || "",
+    prefixArgs: match.groups.prefixArgs || "",
+    body: lines.slice(1, -1).join("\n"),
+  };
+}
+
+function rewriteSimpleSedPrintRanges(command: string): string {
+  return command.replace(
+    /\bsed\s+-n\s+(['"]?)\s*(\d+)\s*,\s*(\d+)p\s*\1/g,
+    (segment, _quote, startRaw, endRaw) => {
+      const start = Number(startRaw);
+      const end = Number(endRaw);
+      if (!Number.isInteger(start) || !Number.isInteger(end)) return segment;
+      if (start < 1 || end < start) return segment;
+      if (start === 1) return `head -n ${end}`;
+      return `head -n ${end} | tail -n ${end - start + 1}`;
+    },
+  );
+}
+
+function normalizeSandboxCommandCompatibility(command: string): {
+  command: string;
+  syntheticResult?: SandboxBashResult;
+} {
+  const heredoc = parseSimpleHeredocCommand(command);
+  if (heredoc) {
+    const runtime = heredoc.runtime.toLowerCase();
+    if (runtime === "node" || runtime === "nodejs") {
+      if (heredoc.prefixArgs.trim().length > 0) {
+        return {
+          command,
+          syntheticResult: createSyntheticBashResult(
+            "browser sandbox node heredoc does not support extra node flags; use node -e directly\n",
+            2,
+          ),
+        };
+      }
+      return {
+        command: `${heredoc.runtime} -e ${shellSingleQuote(
+          heredoc.body,
+        )}`,
+      };
+    }
+    if (runtime === "python" || runtime === "python3") {
+      return {
+        command,
+        syntheticResult: createSyntheticBashResult(
+          `${heredoc.runtime}: command not found\n`,
+          127,
+        ),
+      };
+    }
+    return {
+      command,
+      syntheticResult: createSyntheticBashResult(
+        "browser sandbox shell does not support heredoc (<<)\n",
+        2,
+      ),
+    };
+  }
+  return {
+    command: rewriteSimpleSedPrintRanges(command),
+  };
+}
+
 function createEmptyTelemetrySummary(): SandboxTelemetrySummary {
   return {
     flushCount: 0,
@@ -831,7 +930,11 @@ async function bashFrame(args: JsonRecord, sessionId: string): Promise<JsonRecor
 
     const argv = Array.isArray(args.args) ? args.args.map((item) => String(item)) : [];
     const rawCommand = String(argv[0] || "").trim();
-    const command = rewriteCommandVirtualUris(rawCommand, sessionId);
+    const rewrittenCommand = rewriteCommandVirtualUris(rawCommand, sessionId);
+    const normalizedCommand = normalizeSandboxCommandCompatibility(
+      rewrittenCommand,
+    );
+    const command = normalizedCommand.command;
     const hasExplicitCwd =
       args.cwd != null && String(args.cwd || "").trim() !== "";
     const cwdResolved = hasExplicitCwd
@@ -848,7 +951,10 @@ async function bashFrame(args: JsonRecord, sessionId: string): Promise<JsonRecor
 
     const cwd = cwdResolved?.unixPath ?? sandbox.cwd;
     let result: SandboxBashResult;
-    if (_testBashExecutor) {
+    const executedCommand = normalizedCommand.syntheticResult == null;
+    if (normalizedCommand.syntheticResult) {
+      result = normalizedCommand.syntheticResult;
+    } else if (_testBashExecutor) {
       result = await _testBashExecutor(sandbox, command, cwdResolved?.unixPath, timeoutMs);
     } else if (!commandRequiresEval(command)) {
       // SW 直执行：命令不需要 eval，直接在 SW 侧 LIFO 实例执行，
@@ -890,8 +996,10 @@ async function bashFrame(args: JsonRecord, sessionId: string): Promise<JsonRecor
     const exitCode = result.exitCode;
     const timeoutHit = result.stderr.includes("timed out");
     recordCommandFinished(sessionId, rawCommand, durationMs, exitCode, timeoutHit);
-    sandboxManager.markDirty(sessionId);
-    await checkpointSessionSandbox(sessionId, "bash", { force: true });
+    if (executedCommand) {
+      sandboxManager.markDirty(sessionId);
+      await checkpointSessionSandbox(sessionId, "bash", { force: true });
+    }
 
     const stdout = result.stdout;
     const stderr = result.stderr;

@@ -88,6 +88,7 @@ const FILE_TOOL_CONTRACTS: ToolContract[] = [
       "The working directory defaults to the session root; use relative paths or mem:// URIs. " +
       "Provides a full Linux-like shell with 60+ commands (ls, cat, grep, sed, awk, sort, head, tail, wc, find, tree, curl, wget, diff, tar, gzip, base64, bc, date, env, whoami, etc.). " +
       "Supports pipes, redirects, variables, glob expansion, and control flow (if/for/while/case). " +
+      "No Python runtime. Generic heredoc (<<EOF) is unsupported; use node -e for JavaScript and host_bash for python/pip/system tools. " +
       "Use curl/wget for HTTP requests (via browser fetch, subject to CORS). " +
       "Use node -e 'code' to run JavaScript (routed to eval sandbox). " +
       "Prefer this over host_bash when working with mem:// files or when host bridge is unavailable.",
