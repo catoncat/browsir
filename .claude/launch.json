@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "brain:dev (bridge + extension watcher)",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["tools/brain-dev.sh"],
+      "port": 8787
+    },
+    {
+      "name": "bridge",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["run", "start"],
+      "port": 8787
+    },
+    {
+      "name": "extension:watch",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["tools/brain-ext-watch.ts"],
+      "port": 0
+    }
+  ]
+}
