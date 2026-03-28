@@ -10,6 +10,52 @@ import type { ToolDefinition } from "../orchestrator.browser";
 type JsonRecord = Record<string, unknown>;
 
 const MAX_PROMPT_SKILL_ITEMS = 64;
+const MAX_PROMPT_SKILL_DESCRIPTION_CHARS = 160;
+const MAX_PROMPT_AVAILABLE_SKILLS_CHARS = 6000;
+const PROMPT_SKILL_DESCRIPTION_MIN_CHARS = 24;
+const PROMPT_SKILL_OVERFLOW_FOOTER_RESERVE_CHARS = 96;
+const PROMPT_SKILL_QUERY_TERM_LIMIT = 24;
+const PROMPT_SKILL_QUERY_TERM_MIN_CHARS = 2;
+const PROMPT_SKILL_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "as",
+  "at",
+  "by",
+  "for",
+  "from",
+  "help",
+  "how",
+  "i",
+  "in",
+  "into",
+  "me",
+  "my",
+  "of",
+  "on",
+  "or",
+  "please",
+  "skill",
+  "skills",
+  "the",
+  "to",
+  "use",
+  "with",
+  "一个",
+  "一些",
+  "使用",
+  "技能",
+  "帮我",
+  "查看",
+  "继续",
+  "以及",
+  "还有",
+  "需要",
+  "相关",
+  "这个",
+  "那个",
+]);
 
 export interface PromptPolicyFilesystemInspect {
   stat(params: {
@@ -45,6 +91,10 @@ function buildSharedTabsContextMessage(sharedTabs: unknown): string {
   ].join("\n");
 }
 
+function normalizePromptText(input: unknown): string {
+  return String(input || "").replace(/\s+/g, " ").trim();
+}
+
 function escapeXmlAttributeForPrompt(input: unknown): string {
   return String(input || "")
     .replace(/&/g, "&amp;")
@@ -53,33 +103,198 @@ function escapeXmlAttributeForPrompt(input: unknown): string {
     .replace(/>/g, "&gt;");
 }
 
-export function buildAvailableSkillsSystemMessage(skills: SkillMetadata[]): string {
+function clipPromptText(input: unknown, maxChars: number): string {
+  const text = normalizePromptText(input);
+  if (!text) return "";
+  if (!Number.isFinite(maxChars) || maxChars <= 0) return "";
+  if (text.length <= maxChars) return text;
+  if (maxChars <= 3) return ".".repeat(maxChars);
+  return `${text.slice(0, maxChars - 3).trimEnd()}...`;
+}
+
+function clipPromptSkillDescription(
+  input: unknown,
+  maxChars = MAX_PROMPT_SKILL_DESCRIPTION_CHARS,
+): string {
+  return clipPromptText(input, maxChars);
+}
+
+function extractPromptQueryTerms(input: unknown): string[] {
+  const text = normalizePromptText(input).toLowerCase();
+  if (!text) return [];
+  const matches = text.match(/[\p{L}\p{N}_-]+/gu) || [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of matches) {
+    const term = raw.trim();
+    if (!term) continue;
+    const isAsciiLike = /^[a-z0-9_-]+$/i.test(term);
+    if (isAsciiLike && term.length < PROMPT_SKILL_QUERY_TERM_MIN_CHARS) continue;
+    if (PROMPT_SKILL_STOP_WORDS.has(term)) continue;
+    if (seen.has(term)) continue;
+    seen.add(term);
+    out.push(term);
+    if (out.length >= PROMPT_SKILL_QUERY_TERM_LIMIT) break;
+  }
+  return out;
+}
+
+function scoreSkillForPrompt(
+  skill: SkillMetadata,
+  queryText: string,
+  queryTerms: string[],
+): number {
+  const id = normalizePromptText(skill.id).toLowerCase();
+  const name = normalizePromptText(skill.name).toLowerCase();
+  const description = normalizePromptText(skill.description).toLowerCase();
+  const location = normalizePromptText(skill.location).toLowerCase();
+  const source = normalizePromptText(skill.source).toLowerCase();
+  const searchCorpus = [id, name, description, location, source]
+    .filter(Boolean)
+    .join("\n");
+
+  let score = 0;
+  if (queryText) {
+    if (id && queryText.includes(id)) score += 800;
+    if (name && queryText.includes(name)) score += 900;
+  }
+
+  for (const term of queryTerms) {
+    if (!term) continue;
+    if (name.includes(term)) {
+      score += 120;
+      continue;
+    }
+    if (id.includes(term)) {
+      score += 90;
+      continue;
+    }
+    if (description.includes(term)) {
+      score += 40;
+      continue;
+    }
+    if (
+      location.includes(term) ||
+      source.includes(term) ||
+      searchCorpus.includes(term)
+    ) {
+      score += 12;
+    }
+  }
+
+  if (skill.source === "builtin") score += 8;
+  if (skill.source === "project") score += 4;
+  if (description) score += Math.max(0, 12 - Math.floor(description.length / 80));
+  return score;
+}
+
+function rankSkillsForPrompt(
+  skills: SkillMetadata[],
+  queryText: string,
+): SkillMetadata[] {
+  const normalizedQueryText = normalizePromptText(queryText).toLowerCase();
+  const queryTerms = extractPromptQueryTerms(normalizedQueryText);
+  return [...skills].sort((a, b) => {
+    const scoreDiff =
+      scoreSkillForPrompt(b, normalizedQueryText, queryTerms) -
+      scoreSkillForPrompt(a, normalizedQueryText, queryTerms);
+    if (scoreDiff !== 0) return scoreDiff;
+    const updatedAtDiff = String(b.updatedAt || "").localeCompare(
+      String(a.updatedAt || ""),
+    );
+    if (updatedAtDiff !== 0) return updatedAtDiff;
+    const byName = String(a.name || "").localeCompare(String(b.name || ""));
+    if (byName !== 0) return byName;
+    return String(a.id || "").localeCompare(String(b.id || ""));
+  });
+}
+
+function buildPromptSkillLine(
+  skill: SkillMetadata,
+  descriptionChars: number,
+): string {
+  const attrs = [
+    `id="${escapeXmlAttributeForPrompt(skill.id)}"`,
+    `name="${escapeXmlAttributeForPrompt(skill.name)}"`,
+  ];
+  const description = clipPromptSkillDescription(
+    skill.description,
+    descriptionChars,
+  );
+  if (description) {
+    attrs.push(`desc="${escapeXmlAttributeForPrompt(description)}"`);
+  }
+  if (skill.location) {
+    attrs.push(`loc="${escapeXmlAttributeForPrompt(skill.location)}"`);
+  }
+  if (skill.source && skill.source !== "project") {
+    attrs.push(`src="${escapeXmlAttributeForPrompt(skill.source)}"`);
+  }
+  return `  <skill ${attrs.join(" ")} />`;
+}
+
+export function buildAvailableSkillsSystemMessage(
+  skills: SkillMetadata[],
+  options?: { queryText?: string },
+): string {
   const visible = (Array.isArray(skills) ? skills : []).filter(
     (item) => item && item.enabled && item.disableModelInvocation !== true,
   );
   if (!visible.length) return "";
 
-  const sorted = [...visible].sort((a, b) => {
-    const byName = String(a.name || "").localeCompare(String(b.name || ""));
-    if (byName !== 0) return byName;
-    return String(a.id || "").localeCompare(String(b.id || ""));
-  });
-  const limited = sorted.slice(0, MAX_PROMPT_SKILL_ITEMS);
-  const lines = limited.map((skill) => {
-    return `  <skill name="${escapeXmlAttributeForPrompt(skill.name)}" description="${escapeXmlAttributeForPrompt(
-      skill.description,
-    )}" location="${escapeXmlAttributeForPrompt(skill.location)}" source="${escapeXmlAttributeForPrompt(skill.source)}" />`;
-  });
-  if (sorted.length > limited.length) {
-    lines.push(
-      `  <!-- truncated ${sorted.length - limited.length} more skills -->`,
+  const ranked = rankSkillsForPrompt(visible, String(options?.queryText || ""));
+  const candidates = ranked.slice(0, MAX_PROMPT_SKILL_ITEMS);
+  const lines: string[] = [];
+  let usedChars = 0;
+
+  for (let i = 0; i < candidates.length; i += 1) {
+    const remainingCandidates = candidates.length - i;
+    const remainingBudget = MAX_PROMPT_AVAILABLE_SKILLS_CHARS - usedChars;
+    if (remainingBudget <= 0) break;
+    const reserveForFooter =
+      i < candidates.length - 1
+        ? PROMPT_SKILL_OVERFLOW_FOOTER_RESERVE_CHARS
+        : 0;
+    const lineBudget = remainingBudget - reserveForFooter;
+    if (lineBudget <= 0) break;
+
+    const dynamicDescriptionBudget = Math.max(
+      PROMPT_SKILL_DESCRIPTION_MIN_CHARS,
+      Math.min(
+        MAX_PROMPT_SKILL_DESCRIPTION_CHARS,
+        Math.floor(lineBudget / Math.max(1, remainingCandidates)) - 72,
+      ),
     );
+
+    let line = buildPromptSkillLine(candidates[i], dynamicDescriptionBudget);
+    if (line.length > lineBudget) {
+      const overflow = line.length - lineBudget;
+      const reducedDescriptionBudget = Math.max(
+        0,
+        dynamicDescriptionBudget - overflow - 8,
+      );
+      line = buildPromptSkillLine(candidates[i], reducedDescriptionBudget);
+    }
+    if (line.length > lineBudget) {
+      if (lines.length > 0) break;
+      line = buildPromptSkillLine(candidates[i], 0);
+      if (line.length > lineBudget) break;
+    }
+
+    lines.push(line);
+    usedChars += line.length + 1;
+  }
+
+  const omittedCount = ranked.length - lines.length;
+  if (omittedCount > 0) {
+    lines.push(`  <!-- truncated ${omittedCount} more skills -->`);
   }
 
   return [
     "Available skills are instruction resources (not executable sandboxes).",
     "When a skill is relevant, use browser_read_file (mem://) or host_read_file (host path) to load SKILL.md.",
-    "<available_skills>",
+    'Prompt schema: <available_skills schema="compact-v1"> with attrs id/name/desc/loc/src; src defaults to project when omitted.',
+    '<available_skills schema="compact-v1">',
     ...lines,
     "</available_skills>",
   ].join("\n");
