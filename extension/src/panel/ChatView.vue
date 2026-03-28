@@ -48,6 +48,12 @@ const emit = defineEmits<{
   (e: "create-session"): void;
 }>();
 
+const emptySuggestions = [
+  { label: "帮我总结这个页面", text: "帮我总结这个页面" },
+  { label: "查看所有标签页", text: "查看所有标签页" },
+  { label: "帮我截图", text: "帮我截个图" },
+];
+
 const store = useRuntimeStore();
 const chatStore = useChatStore();
 const cfgStore = useConfigStore();
@@ -844,14 +850,23 @@ defineExpose({ handleCreateSession, sessionListRenderState });
 
         <div v-else class="flex flex-col items-start py-8 animate-in fade-in duration-500">
           <div class="flex items-center gap-3 mb-4">
-            <div class="w-10 h-10 bg-ui-accent/5 rounded-xl flex items-center justify-center border border-ui-accent/10">
-              <Activity :size="20" class="text-ui-accent" />
-            </div>
-            <h2 class="text-xl font-black uppercase tracking-tight text-ui-text">白雪</h2>
+            <img src="/icon-48.png" alt="白雪" class="w-10 h-10 rounded-xl" aria-hidden="true" />
+            <h2 class="text-xl font-black tracking-tight text-ui-text">白雪</h2>
           </div>
-          <p class="text-ui-text-muted text-[15px] leading-relaxed max-w-xs font-bold">
-            就绪。发送消息让 Agent 帮你完成浏览器任务。
+          <p class="text-ui-text-muted text-[15px] leading-relaxed max-w-xs">
+            我是白雪，你的浏览器 AI 助手。告诉我你想做什么。
           </p>
+          <div class="flex flex-wrap gap-2 mt-4">
+            <button
+              v-for="suggestion in emptySuggestions"
+              :key="suggestion.text"
+              class="px-3 py-1.5 text-sm rounded-lg border border-ui-border hover:bg-ui-bg-hover text-ui-text-muted hover:text-ui-text transition-colors cursor-pointer"
+              :disabled="loading || creatingSession"
+              @click="handleSend({ text: suggestion.text, tabIds: [], skillIds: [] })"
+            >
+              {{ suggestion.label }}
+            </button>
+          </div>
         </div>
       </div>
     </div>

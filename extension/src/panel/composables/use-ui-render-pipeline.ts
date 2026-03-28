@@ -67,7 +67,7 @@ export function useUiRenderPipeline(deps: UiRenderPipelineDeps) {
     state: { steer: 0, followUp: 0, total: 0 },
   });
   const chatInputRenderState = ref<{ placeholder: string }>({
-    placeholder: "/技能 @标签",
+    placeholder: "告诉白雪你想做什么…",
   });
 
   let panelNoticeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -360,7 +360,7 @@ export function useUiRenderPipeline(deps: UiRenderPipelineDeps) {
     return {
       sessionId: String(deps.activeSessionId.value || "").trim() || undefined,
       text: String(deps.prompt.value || ""),
-      placeholder: String(chatInputRenderState.value.placeholder || "").trim() || "/技能 @标签",
+      placeholder: String(chatInputRenderState.value.placeholder || "").trim() || "告诉白雪你想做什么…",
       disabled: Boolean(deps.loading.value || deps.creatingSession.value || deps.isStopping.value),
       isRunning: deps.isRunActive.value,
       isCompacting: deps.isCompacting.value,
@@ -373,7 +373,7 @@ export function useUiRenderPipeline(deps: UiRenderPipelineDeps) {
     fallback: UiChatInputRenderPayload
   ): { placeholder: string } {
     const row = toRecord(input);
-    const placeholder = String((row.placeholder ?? fallback.placeholder) || "").trim() || "/技能 @标签";
+    const placeholder = String((row.placeholder ?? fallback.placeholder) || "").trim() || "告诉白雪你想做什么…";
     return { placeholder };
   }
 
