@@ -310,9 +310,6 @@ export async function handleBrainChannelWechat(
 
           const currentRuntime = orchestrator.getRunState(binding.sessionId);
           if (currentRuntime.running) {
-            await orchestrator.appendUserMessage(binding.sessionId, text, {
-              metadata: buildChannelMetadata(binding, turn.channelTurnId),
-            });
             const queuedRuntime = orchestrator.enqueueQueuedPrompt(
               binding.sessionId,
               "followUp",
