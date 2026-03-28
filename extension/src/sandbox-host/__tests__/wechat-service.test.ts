@@ -21,6 +21,17 @@ class LocalStorageMock {
   }
 }
 
+function readStoredContextTokens(): Record<string, string> {
+  const raw = localStorage.getItem("bbl.wechat.host.context-tokens.v1") || "{}";
+  const parsed = JSON.parse(raw) as Record<string, string | { token?: string }>;
+  return Object.fromEntries(
+    Object.entries(parsed).map(([userId, value]) => [
+      userId,
+      typeof value === "string" ? value : String(value?.token || ""),
+    ]),
+  );
+}
+
 describe("wechat-service", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -185,6 +196,8 @@ describe("wechat-service", () => {
     });
 
     expect(result.deliveryId).toBe("delivery-1");
+    expect(result.deliveredPartCount).toBe(1);
+    expect(result.complete).toBe(true);
     const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0] || [];
     expect(String(url || "")).toContain("/ilink/bot/sendmessage");
     const body = JSON.parse(String((init as RequestInit)?.body || "{}")) as {
@@ -193,6 +206,61 @@ describe("wechat-service", () => {
     expect(body.msg?.context_token).toBe("ctx-1");
     expect(body.msg?.to_user_id).toBe("user-1");
     expect(body.msg?.item_list?.[0]?.text_item?.text).toBe("hello");
+  });
+
+  it("sendReply reports partial progress without regenerating client ids", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ret: 0 }), { status: 200 }))
+      .mockRejectedValueOnce(new Error("temporary timeout"));
+    localStorage.setItem(
+      "bbl.wechat.host.credentials.v1",
+      JSON.stringify({
+        token: "token-1",
+        baseUrl: "https://ilinkai.weixin.qq.com",
+        accountId: "bot-1",
+        userId: "bot-user",
+      }),
+    );
+    localStorage.setItem(
+      "bbl.wechat.host.state.v1",
+      JSON.stringify({
+        hostEpoch: "epoch-1",
+        protocolVersion: "bbl.host.v1",
+        enabled: true,
+        login: {
+          status: "logged_in",
+          updatedAt: "2026-03-22T00:00:00.000Z",
+          baseUrl: "https://ilinkai.weixin.qq.com",
+          accountId: "bot-1",
+          botUserId: "bot-user",
+        },
+      }),
+    );
+    localStorage.setItem(
+      "bbl.wechat.host.context-tokens.v1",
+      JSON.stringify({
+        "user-1": { token: "ctx-1", updatedAt: "2026-03-22T00:00:00.000Z" },
+      }),
+    );
+
+    const service = new WechatHostService();
+    const result = await service.sendReply({
+      deliveryId: "delivery-1",
+      channelTurnId: "turn-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      parts: [
+        { kind: "text", text: "part-1", clientId: "part-client-1" },
+        { kind: "text", text: "part-2", clientId: "part-client-2" },
+      ],
+    });
+
+    expect(result.deliveredPartCount).toBe(1);
+    expect(result.complete).toBe(false);
+    const secondCallBody = JSON.parse(
+      String((vi.mocked(globalThis.fetch).mock.calls[1]?.[1] as RequestInit)?.body || "{}"),
+    ) as { msg?: { client_id?: string } };
+    expect(secondCallBody.msg?.client_id).toBe("part-client-2");
   });
 
   it("confirmed login can poll updates, cache context token, and use it for reply", async () => {
@@ -259,9 +327,7 @@ describe("wechat-service", () => {
     await service.startLogin();
     await vi.advanceTimersByTimeAsync(2_000);
     for (let i = 0; i < 20; i += 1) {
-      const cached = JSON.parse(
-        localStorage.getItem("bbl.wechat.host.context-tokens.v1") || "{}",
-      ) as Record<string, string>;
+      const cached = readStoredContextTokens();
       if (cached["user-2"] === "ctx-2") break;
       await vi.advanceTimersByTimeAsync(10);
     }
@@ -355,15 +421,11 @@ describe("wechat-service", () => {
     const deadline = Date.now() + 1000;
     while (Date.now() < deadline) {
       await vi.advanceTimersByTimeAsync(20);
-      const cached = JSON.parse(
-        localStorage.getItem("bbl.wechat.host.context-tokens.v1") || "{}",
-      ) as Record<string, string>;
+      const cached = readStoredContextTokens();
       if (cached["user-4"] === "ctx-4") break;
     }
 
-    const cached = JSON.parse(
-      localStorage.getItem("bbl.wechat.host.context-tokens.v1") || "{}",
-    ) as Record<string, string>;
+    const cached = readStoredContextTokens();
     expect(cached["user-4"]).toBe("ctx-4");
     expect(cached["bot-user"]).toBeUndefined();
     expect(sendMessageMock).not.toHaveBeenCalledWith(
@@ -438,9 +500,7 @@ describe("wechat-service", () => {
     const deadline = Date.now() + 1000;
     while (Date.now() < deadline) {
       await vi.advanceTimersByTimeAsync(20);
-      const cached = JSON.parse(
-        localStorage.getItem("bbl.wechat.host.context-tokens.v1") || "{}",
-      ) as Record<string, string>;
+      const cached = readStoredContextTokens();
       if (cached["user-8"] === "ctx-8") break;
     }
 
@@ -452,9 +512,7 @@ describe("wechat-service", () => {
         text: "hello account bot",
       }),
     );
-    const cached = JSON.parse(
-      localStorage.getItem("bbl.wechat.host.context-tokens.v1") || "{}",
-    ) as Record<string, string>;
+    const cached = readStoredContextTokens();
     expect(cached["user-8"]).toBe("ctx-8");
   });
 
@@ -523,9 +581,7 @@ describe("wechat-service", () => {
     const deadline = Date.now() + 1000;
     while (Date.now() < deadline) {
       await vi.advanceTimersByTimeAsync(20);
-      const cached = JSON.parse(
-        localStorage.getItem("bbl.wechat.host.context-tokens.v1") || "{}",
-      ) as Record<string, string>;
+      const cached = readStoredContextTokens();
       if (cached["wechat-user"] === "ctx-9") break;
     }
 
@@ -537,9 +593,7 @@ describe("wechat-service", () => {
         text: "hello real packet",
       }),
     );
-    const cached = JSON.parse(
-      localStorage.getItem("bbl.wechat.host.context-tokens.v1") || "{}",
-    ) as Record<string, string>;
+    const cached = readStoredContextTokens();
     expect(cached["wechat-user"]).toBe("ctx-9");
   });
 
@@ -622,6 +676,220 @@ describe("wechat-service", () => {
     expect(state.login.lastError).toBeUndefined();
   });
 
+  it("does not force an immediate retry when getState is polled after a poll error", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new Error("bridge exploded"))
+      .mockImplementationOnce(() => new Promise(() => {}));
+
+    localStorage.setItem(
+      "bbl.wechat.host.credentials.v1",
+      JSON.stringify({
+        token: "token-1",
+        baseUrl: "https://ilinkai.weixin.qq.com",
+        accountId: "bot-1",
+        userId: "bot-user",
+      }),
+    );
+    localStorage.setItem(
+      "bbl.wechat.host.state.v1",
+      JSON.stringify({
+        hostEpoch: "epoch-1",
+        protocolVersion: "bbl.host.v1",
+        enabled: true,
+        login: {
+          status: "logged_in",
+          updatedAt: "2026-03-22T00:00:00.000Z",
+          baseUrl: "https://ilinkai.weixin.qq.com",
+          accountId: "bot-1",
+          botUserId: "bot-user",
+        },
+      }),
+    );
+
+    const service = new WechatHostService();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(1);
+
+    service.getState();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(1);
+    expect(service.getState().login.status).toBe("error");
+  });
+
+  it("does not start a second update poll while inbound delivery is still running", async () => {
+    let resolveInbound!: (value: { ok: true; data: { status: "accepted" } }) => void;
+    const inboundDeferred = new Promise<{ ok: true; data: { status: "accepted" } }>((resolve) => {
+      resolveInbound = resolve;
+    });
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            ret: 0,
+            msgs: [
+              {
+                message_id: 10,
+                from_user_id: "user-10",
+                to_user_id: "bot-user",
+                client_id: "client-10",
+                create_time_ms: Date.parse("2026-03-22T00:00:10.000Z"),
+                message_type: 1,
+                message_state: 2,
+                context_token: "ctx-10",
+                item_list: [{ type: 1, text_item: { text: "hello overlap" } }],
+              },
+            ],
+            get_updates_buf: "cursor-10",
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockImplementationOnce(() => new Promise(() => {}));
+
+    (globalThis as any).chrome.runtime.sendMessage = vi.fn(async (message: Record<string, unknown>) => {
+      if (message.type === "brain.channel.wechat.inbound") {
+        return inboundDeferred;
+      }
+      return { ok: true };
+    });
+
+    localStorage.setItem(
+      "bbl.wechat.host.credentials.v1",
+      JSON.stringify({
+        token: "token-1",
+        baseUrl: "https://ilinkai.weixin.qq.com",
+        accountId: "bot-1",
+        userId: "bot-user",
+      }),
+    );
+    localStorage.setItem(
+      "bbl.wechat.host.state.v1",
+      JSON.stringify({
+        hostEpoch: "epoch-1",
+        protocolVersion: "bbl.host.v1",
+        enabled: true,
+        login: {
+          status: "logged_in",
+          updatedAt: "2026-03-22T00:00:00.000Z",
+          baseUrl: "https://ilinkai.weixin.qq.com",
+          accountId: "bot-1",
+          botUserId: "bot-user",
+        },
+      }),
+    );
+
+    const service = new WechatHostService();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(1);
+
+    service.getState();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(1);
+
+    resolveInbound({ ok: true, data: { status: "accepted" } });
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats unrelated 'Transaction aborted' errors as real poll failures", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(
+      new Error("Transaction aborted by storage engine"),
+    );
+
+    localStorage.setItem(
+      "bbl.wechat.host.credentials.v1",
+      JSON.stringify({
+        token: "token-1",
+        baseUrl: "https://ilinkai.weixin.qq.com",
+        accountId: "bot-1",
+        userId: "bot-user",
+      }),
+    );
+    localStorage.setItem(
+      "bbl.wechat.host.state.v1",
+      JSON.stringify({
+        hostEpoch: "epoch-1",
+        protocolVersion: "bbl.host.v1",
+        enabled: true,
+        login: {
+          status: "logged_in",
+          updatedAt: "2026-03-22T00:00:00.000Z",
+          baseUrl: "https://ilinkai.weixin.qq.com",
+          accountId: "bot-1",
+          botUserId: "bot-user",
+        },
+      }),
+    );
+
+    const service = new WechatHostService();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(service.getState().login.status).toBe("error");
+    expect(service.getState().login.lastError).toContain("Transaction aborted");
+  });
+
+  it("prunes oversized context token ledgers on send", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ ret: 0 }), { status: 200 }),
+    );
+    localStorage.setItem(
+      "bbl.wechat.host.credentials.v1",
+      JSON.stringify({
+        token: "token-1",
+        baseUrl: "https://ilinkai.weixin.qq.com",
+        accountId: "bot-1",
+        userId: "bot-user",
+      }),
+    );
+    localStorage.setItem(
+      "bbl.wechat.host.state.v1",
+      JSON.stringify({
+        hostEpoch: "epoch-1",
+        protocolVersion: "bbl.host.v1",
+        enabled: true,
+        login: {
+          status: "logged_in",
+          updatedAt: "2026-03-22T00:00:00.000Z",
+          baseUrl: "https://ilinkai.weixin.qq.com",
+          accountId: "bot-1",
+          botUserId: "bot-user",
+        },
+      }),
+    );
+    localStorage.setItem(
+      "bbl.wechat.host.context-tokens.v1",
+      JSON.stringify(
+        Object.fromEntries(
+          Array.from({ length: 205 }, (_, index) => [
+            `user-${index}`,
+            {
+              token: `ctx-${index}`,
+              updatedAt: `2026-03-22T00:00:${String(index % 60).padStart(2, "0")}.000Z`,
+            },
+          ]),
+        ),
+      ),
+    );
+
+    const service = new WechatHostService();
+    await service.sendReply({
+      deliveryId: "delivery-prune",
+      channelTurnId: "turn-prune",
+      sessionId: "session-prune",
+      userId: "user-204",
+      parts: [{ kind: "text", text: "hello" }],
+    });
+
+    const stored = JSON.parse(
+      localStorage.getItem("bbl.wechat.host.context-tokens.v1") || "{}",
+    ) as Record<string, unknown>;
+    expect(Object.keys(stored)).toHaveLength(200);
+    expect(readStoredContextTokens()["user-204"]).toBe("ctx-204");
+  });
+
   it("resumes update polling after host service is reconstructed while still logged in", async () => {
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(
@@ -689,9 +957,7 @@ describe("wechat-service", () => {
     const deadline = Date.now() + 1000;
     while (Date.now() < deadline) {
       await vi.advanceTimersByTimeAsync(20);
-      const cached = JSON.parse(
-        localStorage.getItem("bbl.wechat.host.context-tokens.v1") || "{}",
-      ) as Record<string, string>;
+      const cached = readStoredContextTokens();
       if (cached["user-3"] === "ctx-3") break;
     }
 
@@ -702,9 +968,7 @@ describe("wechat-service", () => {
         text: "wake up",
       }),
     );
-    const cached = JSON.parse(
-      localStorage.getItem("bbl.wechat.host.context-tokens.v1") || "{}",
-    ) as Record<string, string>;
+    const cached = readStoredContextTokens();
     expect(cached["user-3"]).toBe("ctx-3");
   });
 });

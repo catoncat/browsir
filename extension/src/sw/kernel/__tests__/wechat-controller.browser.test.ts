@@ -344,4 +344,45 @@ describe("wechat-controller.browser", () => {
     }
     expect((second.data as Record<string, unknown>).status).toBe("duplicate");
   });
+
+  it("refreshes binding remoteUserId when the same conversation maps to a new sender", async () => {
+    const orchestrator = new BrainOrchestrator();
+    const runtimeLoop = {
+      startFromPrompt: vi.fn(async (input: { sessionId: string; prompt: string }) => {
+        await orchestrator.appendUserMessage(input.sessionId, input.prompt);
+        return {
+          sessionId: input.sessionId,
+          runtime: orchestrator.getRunState(input.sessionId),
+        };
+      }),
+    } as any;
+
+    const first = await handleBrainChannelWechat(orchestrator, runtimeLoop, {
+      type: "brain.channel.wechat.inbound",
+      remoteConversationId: "conv-group",
+      remoteUserId: "user-a",
+      remoteMessageId: "msg-a",
+      text: "hello from a",
+    });
+    expect(first.ok).toBe(true);
+
+    const second = await handleBrainChannelWechat(orchestrator, runtimeLoop, {
+      type: "brain.channel.wechat.inbound",
+      remoteConversationId: "conv-group",
+      remoteUserId: "user-b",
+      remoteMessageId: "msg-b",
+      text: "hello from b",
+    });
+    expect(second.ok).toBe(true);
+
+    const binding = await orchestrator.channels.store.getBinding("wechat", "conv-group");
+    expect(binding?.remoteUserId).toBe("user-b");
+    const secondData = second.ok ? (second.data as Record<string, unknown>) : {};
+    const sessionId = String(secondData.sessionId || "");
+    const meta = await orchestrator.sessions.getMeta(sessionId);
+    expect(
+      ((meta?.header.metadata as Record<string, unknown>)?.channel as Record<string, unknown>)
+        ?.remoteUserId,
+    ).toBe("user-b");
+  });
 });

@@ -1,6 +1,6 @@
 import "./test-setup";
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { attachChannelObserver } from "../channel-observer";
 import { ChannelStore } from "../channel-store";
 import {
@@ -16,6 +16,7 @@ import {
   type ChannelBindingRecord,
   type ChannelTurnRecord,
 } from "../channel-types";
+import { WECHAT_REPLY_PART_MAX_CHARS } from "../channel-projection";
 
 function createBinding(sessionId: string): ChannelBindingRecord {
   return {
@@ -77,6 +78,14 @@ beforeEach(async () => {
             (message.payload as Record<string, unknown>)?.deliveryId || "",
           ),
           sentAt: "2026-03-22T00:00:01.000Z",
+          deliveredPartCount: Array.isArray(
+            (message.payload as Record<string, unknown>)?.parts,
+          )
+            ? (
+              (message.payload as Record<string, unknown>)?.parts as unknown[]
+            ).length
+            : 0,
+          complete: true,
         },
       };
     }
@@ -189,6 +198,92 @@ describe("channel-observer", () => {
     expect(outbox).toHaveLength(1);
     expect(outbox[0]?.projection.visibleText).toBe("fresh stream answer");
     expect(outbox[0]?.projection.projectionKind).toBe("final_text");
+  });
+
+  it("serializes repeated loop_done events so one turn is delivered once", async () => {
+    const sendMessageMock = vi.fn(
+      async (message: Record<string, unknown>) => {
+        if (message.type === "host.command" && message.service === "wechat") {
+          return {
+            type: "host.response",
+            protocolVersion: HOST_PROTOCOL_VERSION,
+            id: String(message.id || ""),
+            service: "wechat",
+            action: String(message.action || ""),
+            ok: true,
+            data: {
+              deliveryId: String(
+                (message.payload as Record<string, unknown>)?.deliveryId || "",
+              ),
+              sentAt: "2026-03-22T00:00:01.000Z",
+              deliveredPartCount: Array.isArray(
+                (message.payload as Record<string, unknown>)?.parts,
+              )
+                ? (
+                  (message.payload as Record<string, unknown>)?.parts as unknown[]
+                ).length
+                : 0,
+              complete: true,
+            },
+          };
+        }
+        return { ok: true };
+      },
+    );
+    (globalThis as any).chrome.runtime.sendMessage = sendMessageMock;
+
+    const orchestrator = new BrainOrchestrator();
+    attachChannelObserver(orchestrator);
+    const created = await orchestrator.createSession({
+      metadata: {
+        sourceLabel: "wechat",
+        channel: {
+          kind: "wechat",
+          remoteConversationId: "conv-1",
+          remoteUserId: "user-1",
+        },
+      },
+    });
+
+    const sessionId = created.sessionId;
+    const store = new ChannelStore();
+    await store.acceptInbound({
+      binding: createBinding(sessionId),
+      turn: createRunningTurn(sessionId),
+      initialEvent: null,
+    });
+    await orchestrator.sessions.appendMessage({
+      sessionId,
+      role: "assistant",
+      text: "deliver once",
+    });
+
+    orchestrator.events.emit("loop_done", sessionId, {
+      status: "done",
+      llmSteps: 1,
+      toolSteps: 0,
+    });
+    orchestrator.events.emit("loop_done", sessionId, {
+      status: "done",
+      llmSteps: 1,
+      toolSteps: 0,
+    });
+
+    const deadline = Date.now() + 1000;
+    let turn = await store.getTurn("turn-1");
+    while (Date.now() < deadline && turn?.deliveryStatus !== "delivered") {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      turn = await store.getTurn("turn-1");
+    }
+
+    expect(turn?.deliveryStatus).toBe("delivered");
+    expect(
+      sendMessageMock.mock.calls.filter(
+        ([message]) =>
+          (message as Record<string, unknown>)?.type === "host.command",
+      ),
+    ).toHaveLength(1);
+    expect(await store.listOutboxByTurn("turn-1")).toHaveLength(1);
   });
 
   it("delivers fresh assistant text even when loop_done status is not done", async () => {
@@ -337,5 +432,173 @@ describe("channel-observer", () => {
     expect(outbox).toHaveLength(1);
     expect(outbox[0]?.projection.visibleText).toBe("preview final answer");
     expect(outbox[0]?.projection.projectionKind).toBe("final_text");
+  });
+
+  it("retries only remaining reply parts with stable client ids after partial send", async () => {
+    const hostCalls: Array<Array<Record<string, unknown>>> = [];
+    let secondPartClientId = "";
+    (globalThis as any).chrome.runtime.sendMessage = vi.fn(
+      async (message: Record<string, unknown>) => {
+        if (message.type === "host.command" && message.service === "wechat") {
+          const parts = (
+            (message.payload as Record<string, unknown>)?.parts || []
+          ) as Array<Record<string, unknown>>;
+          hostCalls.push(parts);
+          if (hostCalls.length === 1) {
+            secondPartClientId = String(parts[1]?.clientId || "");
+            return {
+              type: "host.response",
+              protocolVersion: HOST_PROTOCOL_VERSION,
+              id: String(message.id || ""),
+              service: "wechat",
+              action: String(message.action || ""),
+              ok: true,
+              data: {
+                deliveryId: String(
+                  (message.payload as Record<string, unknown>)?.deliveryId || "",
+                ),
+                sentAt: "2026-03-22T00:00:01.000Z",
+                deliveredPartCount: 1,
+                complete: false,
+                lastError: "temporary timeout",
+              },
+            };
+          }
+          return {
+            type: "host.response",
+            protocolVersion: HOST_PROTOCOL_VERSION,
+            id: String(message.id || ""),
+            service: "wechat",
+            action: String(message.action || ""),
+            ok: true,
+            data: {
+              deliveryId: String(
+                (message.payload as Record<string, unknown>)?.deliveryId || "",
+              ),
+              sentAt: "2026-03-22T00:00:02.000Z",
+              deliveredPartCount: parts.length,
+              complete: true,
+            },
+          };
+        }
+        return { ok: true };
+      },
+    );
+
+    const orchestrator = new BrainOrchestrator();
+    attachChannelObserver(orchestrator);
+    const created = await orchestrator.createSession({
+      metadata: {
+        sourceLabel: "wechat",
+        channel: {
+          kind: "wechat",
+          remoteConversationId: "conv-1",
+          remoteUserId: "user-1",
+        },
+      },
+    });
+
+    const sessionId = created.sessionId;
+    const store = new ChannelStore();
+    await store.acceptInbound({
+      binding: createBinding(sessionId),
+      turn: createRunningTurn(sessionId),
+      initialEvent: null,
+    });
+    await orchestrator.sessions.appendMessage({
+      sessionId,
+      role: "assistant",
+      text: "x".repeat(WECHAT_REPLY_PART_MAX_CHARS + 25),
+    });
+
+    orchestrator.events.emit("loop_done", sessionId, {
+      status: "done",
+      llmSteps: 1,
+      toolSteps: 0,
+    });
+
+    const deadline = Date.now() + 1500;
+    let turn = await store.getTurn("turn-1");
+    while (Date.now() < deadline && turn?.deliveryStatus !== "delivered") {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      turn = await store.getTurn("turn-1");
+    }
+
+    expect(turn?.deliveryStatus).toBe("delivered");
+    expect(hostCalls).toHaveLength(2);
+    expect(hostCalls[0]).toHaveLength(2);
+    expect(hostCalls[1]).toHaveLength(1);
+    expect(String(hostCalls[1]?.[0]?.clientId || "")).toBe(secondPartClientId);
+  });
+
+  it("marks delivery dead_letter after exhausting retry budget", async () => {
+    (globalThis as any).chrome.runtime.sendMessage = vi.fn(
+      async (message: Record<string, unknown>) => {
+        if (message.type === "host.command" && message.service === "wechat") {
+          return {
+            type: "host.response",
+            protocolVersion: HOST_PROTOCOL_VERSION,
+            id: String(message.id || ""),
+            service: "wechat",
+            action: String(message.action || ""),
+            ok: true,
+            data: {
+              deliveryId: String(
+                (message.payload as Record<string, unknown>)?.deliveryId || "",
+              ),
+              sentAt: "2026-03-22T00:00:01.000Z",
+              deliveredPartCount: 0,
+              complete: false,
+              lastError: "temporary timeout",
+            },
+          };
+        }
+        return { ok: true };
+      },
+    );
+
+    const orchestrator = new BrainOrchestrator();
+    attachChannelObserver(orchestrator);
+    const created = await orchestrator.createSession({
+      metadata: {
+        sourceLabel: "wechat",
+        channel: {
+          kind: "wechat",
+          remoteConversationId: "conv-1",
+          remoteUserId: "user-1",
+        },
+      },
+    });
+
+    const sessionId = created.sessionId;
+    const store = new ChannelStore();
+    await store.acceptInbound({
+      binding: createBinding(sessionId),
+      turn: createRunningTurn(sessionId),
+      initialEvent: null,
+    });
+    await orchestrator.sessions.appendMessage({
+      sessionId,
+      role: "assistant",
+      text: "fail me",
+    });
+
+    orchestrator.events.emit("loop_done", sessionId, {
+      status: "done",
+      llmSteps: 1,
+      toolSteps: 0,
+    });
+
+    const deadline = Date.now() + 1500;
+    let turn = await store.getTurn("turn-1");
+    while (Date.now() < deadline && turn?.deliveryStatus !== "dead_letter") {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      turn = await store.getTurn("turn-1");
+    }
+
+    expect(turn?.deliveryStatus).toBe("dead_letter");
+    const outbox = await store.listOutboxByTurn("turn-1");
+    expect(outbox[0]?.deliveryStatus).toBe("dead_letter");
+    expect(outbox[0]?.attemptCount).toBe(3);
   });
 });

@@ -199,6 +199,7 @@ export async function sendTextMessage(input: {
   userId: string;
   contextToken: string;
   text: string;
+  clientId?: string;
 }): Promise<Record<string, unknown>> {
   return apiPost<Record<string, unknown>>(
     input.baseUrl,
@@ -207,7 +208,7 @@ export async function sendTextMessage(input: {
       msg: {
         from_user_id: input.fromUserId,
         to_user_id: input.userId,
-        client_id: crypto.randomUUID(),
+        client_id: String(input.clientId || "").trim() || crypto.randomUUID(),
         message_type: 2,
         message_state: 2,
         context_token: input.contextToken,

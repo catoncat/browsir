@@ -106,7 +106,7 @@ export interface ChannelProjectionOutcome {
 export interface ChannelReplyProjection {
   channelTurnId: string;
   deliveryId: string;
-  parts: Array<{ kind: "text"; text: string }>;
+  parts: Array<{ kind: "text"; text: string; clientId?: string }>;
 }
 
 export interface ChannelOutboxRecord {
@@ -117,6 +117,7 @@ export interface ChannelOutboxRecord {
   projectionKind: ChannelProjectionKind;
   deliveryStatus: ChannelDeliveryStatus;
   attemptCount: number;
+  deliveredPartCount?: number;
   projection: ChannelProjectionOutcome;
   replyProjection: ChannelReplyProjection;
   lastError?: string;

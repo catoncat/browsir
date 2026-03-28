@@ -59,10 +59,13 @@ export interface WechatReplySendInput {
   channelTurnId: string;
   sessionId: string;
   userId: string;
-  parts: Array<{ kind: "text"; text: string }>;
+  parts: Array<{ kind: "text"; text: string; clientId?: string }>;
 }
 
 export interface WechatReplySendResult {
   deliveryId: string;
   sentAt: string;
+  deliveredPartCount: number;
+  complete: boolean;
+  lastError?: string;
 }

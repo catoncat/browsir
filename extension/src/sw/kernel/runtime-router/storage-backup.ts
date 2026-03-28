@@ -30,6 +30,20 @@ function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" ? (value as JsonRecord) : {};
 }
 
+function isMissingVirtualPathError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /ENOENT|no such file or directory/i.test(String(error.message || ""));
+}
+
+function isMissingSkillPackageError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = String(error.message || "");
+  return (
+    message.startsWith("skill package 不存在:") ||
+    /virtual file not found/i.test(message)
+  );
+}
+
 function normalizeSessionId(raw: unknown): string {
   return String(raw || "").trim() || DEFAULT_BACKUP_SESSION_ID;
 }
@@ -326,6 +340,9 @@ async function collectSkillPackageFiles(
 async function exportCustomSkillPackages(
   orchestrator: BrainOrchestrator,
   sessionId: string,
+  options: {
+    skipMissingPackages?: boolean;
+  } = {},
 ): Promise<ExtensionDataBackupSkillPackage[]> {
   const skills = (await orchestrator.listSkills()).filter(
     (item) => String(item.source || "").trim() !== "builtin",
@@ -333,23 +350,50 @@ async function exportCustomSkillPackages(
   const packages: ExtensionDataBackupSkillPackage[] = [];
   for (const skill of skills) {
     const packageRoot = deriveSkillCleanupPath(skill.location);
-    packages.push({
-      skill: {
-        id: skill.id,
-        name: skill.name,
-        description: skill.description,
-        location: skill.location,
-        source: skill.source,
-        enabled: skill.enabled,
-        disableModelInvocation: skill.disableModelInvocation,
-        createdAt: skill.createdAt,
-        updatedAt: skill.updatedAt,
-      },
-      packageRoot,
-      files: await collectSkillPackageFiles(packageRoot, sessionId),
-    });
+    try {
+      packages.push({
+        skill: {
+          id: skill.id,
+          name: skill.name,
+          description: skill.description,
+          location: skill.location,
+          source: skill.source,
+          enabled: skill.enabled,
+          disableModelInvocation: skill.disableModelInvocation,
+          createdAt: skill.createdAt,
+          updatedAt: skill.updatedAt,
+        },
+        packageRoot,
+        files: await collectSkillPackageFiles(packageRoot, sessionId),
+      });
+    } catch (error) {
+      if (!options.skipMissingPackages || !isMissingSkillPackageError(error)) {
+        throw error;
+      }
+    }
   }
   return packages.sort((a, b) => a.skill.id.localeCompare(b.skill.id));
+}
+
+async function captureRollbackBackup(
+  orchestrator: BrainOrchestrator,
+  infra: RuntimeInfraHandler,
+  sessionId: string,
+): Promise<ExtensionDataBackup> {
+  const cfgResult = await infra.handleMessage({ type: "config.get" });
+  if (!cfgResult || !cfgResult.ok) {
+    throw new Error(cfgResult?.error || "config.get failed");
+  }
+  return {
+    schemaVersion: EXTENSION_DATA_BACKUP_SCHEMA_VERSION,
+    exportedAt: new Date().toISOString(),
+    payload: {
+      config: normalizePanelConfig(toRecord(cfgResult.data)),
+      skills: await exportCustomSkillPackages(orchestrator, sessionId, {
+        skipMissingPackages: true,
+      }),
+    },
+  };
 }
 
 async function removeCustomSkill(
@@ -377,11 +421,11 @@ async function restoreSkillPackage(
   const oldCleanupPath = existingById
     ? deriveSkillCleanupPath(existingById.location)
     : "";
-  const existingStat = await statVirtualPath(packageRoot, sessionId);
   const backupPath = createVirtualStagingPath(pathDirName(packageRoot), "skill_backup");
 
   let stagingRoot = "";
   let stagingMoveTarget = "";
+  let backedUpExistingPackage = false;
   try {
     if (rootIsFile) {
       if (pkg.files.length !== 1 || pkg.files[0]?.path !== targetBaseName) {
@@ -406,8 +450,15 @@ async function restoreSkillPackage(
       }
     }
 
-    if (existingStat.exists) {
-      await moveVirtualPath(packageRoot, backupPath, sessionId);
+    if ((await statVirtualPath(packageRoot, sessionId)).exists) {
+      try {
+        await moveVirtualPath(packageRoot, backupPath, sessionId);
+        backedUpExistingPackage = true;
+      } catch (error) {
+        if (!isMissingVirtualPathError(error)) {
+          throw error;
+        }
+      }
     }
     await moveVirtualPath(stagingMoveTarget, packageRoot, sessionId);
     await orchestrator.installSkill(
@@ -438,7 +489,7 @@ async function restoreSkillPackage(
       );
     }
     await removeVirtualPathRecursively(packageRoot, sessionId).catch(() => undefined);
-    if (existingStat.exists) {
+    if (backedUpExistingPackage) {
       await moveVirtualPath(backupPath, packageRoot, sessionId).catch(
         () => undefined,
       );
@@ -524,7 +575,7 @@ export async function importExtensionDataBackup(
 }> {
   const sessionId = normalizeSessionId(rawSessionId);
   const backup = normalizeBackupPayload(rawBackup);
-  const previous = await exportExtensionDataBackup(orchestrator, infra, sessionId);
+  const previous = await captureRollbackBackup(orchestrator, infra, sessionId);
   try {
     const result = await applyBackupPayload(
       orchestrator,

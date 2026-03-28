@@ -55,6 +55,7 @@ export function createWechatReplyProjection(
   const parts = splitText(outcome.visibleText, maxChars).map((text) => ({
     kind: "text" as const,
     text,
+    clientId: randomId("delivery_part"),
   }));
 
   return {
@@ -78,6 +79,7 @@ export function createOutboxRecord(input: {
     projectionKind: input.outcome.projectionKind,
     deliveryStatus: "queued",
     attemptCount: 0,
+    deliveredPartCount: 0,
     projection: input.outcome,
     replyProjection: input.replyProjection,
     createdAt: at,

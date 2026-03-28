@@ -17,6 +17,7 @@ import {
 type RuntimeOk<T = unknown> = { ok: true; data: T };
 type RuntimeErr = { ok: false; error: string };
 type RuntimeResult<T = unknown> = RuntimeOk<T> | RuntimeErr;
+const inboundConversationQueues = new Map<string, Promise<void>>();
 
 function ok<T>(data: T): RuntimeOk<T> {
   return { ok: true, data };
@@ -30,6 +31,28 @@ function toRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object"
     ? (value as Record<string, unknown>)
     : {};
+}
+
+async function runInboundConversationTask<T>(
+  conversationKey: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const previous = inboundConversationQueues.get(conversationKey) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.catch(() => {}).then(() => gate);
+  inboundConversationQueues.set(conversationKey, tail);
+  await previous.catch(() => {});
+  try {
+    return await task();
+  } finally {
+    release();
+    if (inboundConversationQueues.get(conversationKey) === tail) {
+      inboundConversationQueues.delete(conversationKey);
+    }
+  }
 }
 
 function readRequiredText(payload: Record<string, unknown>, key: string): string {
@@ -82,7 +105,14 @@ async function upsertBinding(
   if (existing) {
     const existingSession = await orchestrator.sessions.getMeta(existing.sessionId);
     if (existingSession) {
-      return existing;
+      if (existing.remoteUserId === remoteUserId) {
+        return existing;
+      }
+      return {
+        ...existing,
+        remoteUserId,
+        updatedAt: nowIso(),
+      };
     }
   }
 
@@ -112,6 +142,27 @@ async function upsertBinding(
     createdAt: nowIso(),
     updatedAt: nowIso(),
   };
+}
+
+async function syncChannelSessionMeta(
+  orchestrator: BrainOrchestrator,
+  binding: ChannelBindingRecord,
+): Promise<void> {
+  await orchestrator.sessions.updateMeta(binding.sessionId, (meta) => ({
+    ...meta,
+    header: {
+      ...meta.header,
+      metadata: {
+        ...(meta.header.metadata || {}),
+        channel: {
+          kind: binding.channelKind,
+          remoteConversationId: binding.remoteConversationId,
+          remoteUserId: binding.remoteUserId,
+        },
+        sourceLabel: binding.sourceLabel,
+      },
+    },
+  }));
 }
 
 function createTurn(
@@ -220,126 +271,114 @@ export async function handleBrainChannelWechat(
     }
 
     if (action === "brain.channel.wechat.inbound") {
-      const remoteConversationId = readRequiredText(
-        payload,
-        "remoteConversationId",
-      );
-      const remoteMessageId = readRequiredText(payload, "remoteMessageId");
-      const text = readRequiredText(payload, "text");
+      const remoteConversationId = readRequiredText(payload, "remoteConversationId");
+      return await runInboundConversationTask(
+        buildChannelConversationKey("wechat", remoteConversationId),
+        async () => {
+          const remoteMessageId = readRequiredText(payload, "remoteMessageId");
+          const text = readRequiredText(payload, "text");
 
-      const duplicate = await orchestrator.channels.store.getTurnByRemoteMessage(
-        "wechat",
-        remoteConversationId,
-        remoteMessageId,
-      );
-      if (duplicate) {
-        return ok({
-          status: "duplicate",
-          channelTurnId: duplicate.channelTurnId,
-          sessionId: duplicate.sessionId,
-        });
-      }
+          const duplicate = await orchestrator.channels.store.getTurnByRemoteMessage(
+            "wechat",
+            remoteConversationId,
+            remoteMessageId,
+          );
+          if (duplicate) {
+            return ok({
+              status: "duplicate",
+              channelTurnId: duplicate.channelTurnId,
+              sessionId: duplicate.sessionId,
+            });
+          }
 
-      const binding = await upsertBinding(orchestrator, payload);
-      const turn = createTurn(binding, payload);
-      const assistantBaselineEntryId = await readLatestAssistantEntryId(
-        orchestrator,
-        binding.sessionId,
-      );
-      const acceptedTurn: ChannelTurnRecord = {
-        ...turn,
-        assistantBaselineEntryId,
-      };
-      await orchestrator.channels.store.acceptInbound({
-        binding,
-        turn: acceptedTurn,
-        initialEvent: createAcceptedEvent(acceptedTurn),
-      });
+          const binding = await upsertBinding(orchestrator, payload);
+          const turn = createTurn(binding, payload);
+          const assistantBaselineEntryId = await readLatestAssistantEntryId(
+            orchestrator,
+            binding.sessionId,
+          );
+          const acceptedTurn: ChannelTurnRecord = {
+            ...turn,
+            assistantBaselineEntryId,
+          };
+          await orchestrator.channels.store.acceptInbound({
+            binding,
+            turn: acceptedTurn,
+            initialEvent: createAcceptedEvent(acceptedTurn),
+          });
+          await syncChannelSessionMeta(orchestrator, binding);
 
-      const currentRuntime = orchestrator.getRunState(binding.sessionId);
-      if (currentRuntime.running) {
-        await orchestrator.appendUserMessage(binding.sessionId, text, {
-          metadata: buildChannelMetadata(binding, turn.channelTurnId),
-        });
-        const queuedRuntime = orchestrator.enqueueQueuedPrompt(
-          binding.sessionId,
-          "followUp",
-          text,
-        );
-        const queuedPrompt = [...queuedRuntime.queue.items]
-          .filter((item) => item.behavior === "followUp")
-          .at(-1);
-        await orchestrator.channels.store.putTurn({
-          ...acceptedTurn,
-          queuedMode: "followUp",
-          lifecycleStatus: "queued",
-          dispatchStatus: "queued",
-          queuedPromptId: String(queuedPrompt?.id || "").trim() || undefined,
-          updatedAt: nowIso(),
-        });
-        await orchestrator.channels.store.appendEvent({
-          eventId: randomId("channel_event"),
-          channelTurnId: turn.channelTurnId,
-          sessionId: turn.sessionId,
-          type: "channel.turn.follow_up_queued",
-          createdAt: nowIso(),
-          payload: {
-            queuedPromptId: String(queuedPrompt?.id || "").trim() || undefined,
-            queueTotal: queuedRuntime.queue.total,
-          },
-        });
-        return ok({
-          status: "accepted",
-          sessionId: binding.sessionId,
-          channelTurnId: turn.channelTurnId,
-          queuedMode: "followUp",
-        });
-      }
+          const currentRuntime = orchestrator.getRunState(binding.sessionId);
+          if (currentRuntime.running) {
+            await orchestrator.appendUserMessage(binding.sessionId, text, {
+              metadata: buildChannelMetadata(binding, turn.channelTurnId),
+            });
+            const queuedRuntime = orchestrator.enqueueQueuedPrompt(
+              binding.sessionId,
+              "followUp",
+              text,
+            );
+            const queuedPrompt = [...queuedRuntime.queue.items]
+              .filter((item) => item.behavior === "followUp")
+              .at(-1);
+            await orchestrator.channels.store.putTurn({
+              ...acceptedTurn,
+              queuedMode: "followUp",
+              lifecycleStatus: "queued",
+              dispatchStatus: "queued",
+              queuedPromptId: String(queuedPrompt?.id || "").trim() || undefined,
+              updatedAt: nowIso(),
+            });
+            await orchestrator.channels.store.appendEvent({
+              eventId: randomId("channel_event"),
+              channelTurnId: turn.channelTurnId,
+              sessionId: turn.sessionId,
+              type: "channel.turn.follow_up_queued",
+              createdAt: nowIso(),
+              payload: {
+                queuedPromptId: String(queuedPrompt?.id || "").trim() || undefined,
+                queueTotal: queuedRuntime.queue.total,
+              },
+            });
+            return ok({
+              status: "accepted",
+              sessionId: binding.sessionId,
+              channelTurnId: turn.channelTurnId,
+              queuedMode: "followUp",
+            });
+          }
 
-      const runtime = await runtimeLoop.startFromPrompt({
-        sessionId: binding.sessionId,
-        prompt: text,
-        autoRun: true,
-      });
-      await orchestrator.channels.store.putTurn({
-        ...acceptedTurn,
-        lifecycleStatus: "running",
-        dispatchStatus: "queued",
-        runAttemptCount: 1,
-        updatedAt: nowIso(),
-      });
-      await orchestrator.channels.store.appendEvent({
-        eventId: randomId("channel_event"),
-        channelTurnId: turn.channelTurnId,
-        sessionId: turn.sessionId,
-        type: "channel.turn.dispatched",
-        createdAt: nowIso(),
-        payload: {
-          queuedMode: "start",
-          running: runtime.runtime.running,
-        },
-      });
-      await orchestrator.sessions.updateMeta(binding.sessionId, (meta) => ({
-        ...meta,
-        header: {
-          ...meta.header,
-          metadata: {
-            ...(meta.header.metadata || {}),
-            channel: {
-              kind: binding.channelKind,
-              remoteConversationId: binding.remoteConversationId,
-              remoteUserId: binding.remoteUserId,
+          const runtime = await runtimeLoop.startFromPrompt({
+            sessionId: binding.sessionId,
+            prompt: text,
+            autoRun: true,
+          });
+          await orchestrator.channels.store.putTurn({
+            ...acceptedTurn,
+            lifecycleStatus: "running",
+            dispatchStatus: "queued",
+            runAttemptCount: 1,
+            updatedAt: nowIso(),
+          });
+          await orchestrator.channels.store.appendEvent({
+            eventId: randomId("channel_event"),
+            channelTurnId: turn.channelTurnId,
+            sessionId: turn.sessionId,
+            type: "channel.turn.dispatched",
+            createdAt: nowIso(),
+            payload: {
+              queuedMode: "start",
+              running: runtime.runtime.running,
             },
-            sourceLabel: binding.sourceLabel,
-          },
+          });
+          return ok({
+            status: "accepted",
+            sessionId: binding.sessionId,
+            channelTurnId: acceptedTurn.channelTurnId,
+            queuedMode: "start",
+          });
         },
-      }));
-      return ok({
-        status: "accepted",
-          sessionId: binding.sessionId,
-          channelTurnId: acceptedTurn.channelTurnId,
-          queuedMode: "start",
-        });
+      );
     }
   } catch (error) {
     return fail(error instanceof Error ? error.message : String(error));

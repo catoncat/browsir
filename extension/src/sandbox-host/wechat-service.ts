@@ -22,6 +22,13 @@ const WECHAT_CREDENTIALS_KEY = "bbl.wechat.host.credentials.v1";
 const WECHAT_CURSOR_KEY = "bbl.wechat.host.cursor.v1";
 const WECHAT_CONTEXT_TOKENS_KEY = "bbl.wechat.host.context-tokens.v1";
 const QR_POLL_INTERVAL_MS = 2_000;
+const CONTEXT_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const CONTEXT_TOKEN_MAX_ENTRIES = 200;
+
+interface ContextTokenEntry {
+  token: string;
+  updatedAt: string;
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -81,23 +88,56 @@ function clearCursor(): void {
   localStorage.removeItem(WECHAT_CURSOR_KEY);
 }
 
-function readContextTokens(): Record<string, string> {
+function normalizeContextTokenEntry(value: unknown): ContextTokenEntry | null {
+  if (typeof value === "string") {
+    const token = value.trim();
+    return token ? { token, updatedAt: nowIso() } : null;
+  }
+  if (!value || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  const token = String(row.token || "").trim();
+  const updatedAt = String(row.updatedAt || "").trim() || nowIso();
+  return token ? { token, updatedAt } : null;
+}
+
+function pruneContextTokens(
+  tokens: Record<string, ContextTokenEntry>,
+): Record<string, ContextTokenEntry> {
+  const now = Date.now();
+  return Object.fromEntries(
+    Object.entries(tokens)
+      .map(([userId, value]) => [String(userId), normalizeContextTokenEntry(value)] as const)
+      .filter(
+        ([userId, value]) =>
+          userId &&
+          value &&
+          now - Date.parse(value.updatedAt) <= CONTEXT_TOKEN_TTL_MS,
+      )
+      .sort(
+        (a, b) =>
+          Date.parse(b[1]!.updatedAt) - Date.parse(a[1]!.updatedAt),
+      )
+      .slice(0, CONTEXT_TOKEN_MAX_ENTRIES)
+      .map(([userId, value]) => [userId, value!] as const),
+  );
+}
+
+function readContextTokens(): Record<string, ContextTokenEntry> {
   try {
     const raw = localStorage.getItem(WECHAT_CONTEXT_TOKENS_KEY);
     const parsed = raw ? JSON.parse(raw) : {};
     if (!parsed || typeof parsed !== "object") return {};
-    return Object.fromEntries(
-      Object.entries(parsed as Record<string, unknown>)
-        .map(([key, value]) => [String(key), String(value || "").trim()])
-        .filter(([key, value]) => key && value),
-    );
+    return pruneContextTokens(parsed as Record<string, ContextTokenEntry>);
   } catch {
     return {};
   }
 }
 
-function writeContextTokens(tokens: Record<string, string>): void {
-  localStorage.setItem(WECHAT_CONTEXT_TOKENS_KEY, JSON.stringify(tokens));
+function writeContextTokens(tokens: Record<string, ContextTokenEntry>): void {
+  localStorage.setItem(
+    WECHAT_CONTEXT_TOKENS_KEY,
+    JSON.stringify(pruneContextTokens(tokens)),
+  );
 }
 
 function clearContextTokens(): void {
@@ -111,8 +151,10 @@ function isAbortLikeError(error: unknown): boolean {
   const message = String(row.message || "").trim().toLowerCase();
   return (
     name === "AbortError" ||
+    message === "the operation was aborted." ||
+    message === "the operation was aborted" ||
     message.includes("signal is aborted") ||
-    message.includes("aborted")
+    message.includes("aborterror")
   );
 }
 
@@ -267,6 +309,12 @@ function writeState(state: WechatHostStateSnapshot): WechatHostStateSnapshot {
   return state;
 }
 
+function updateState(
+  updater: (current: WechatHostStateSnapshot) => WechatHostStateSnapshot,
+): WechatHostStateSnapshot {
+  return writeState(updater(readState()));
+}
+
 function appendSendLog(payload: WechatReplySendInput, sentAt: string): void {
   const raw = localStorage.getItem(WECHAT_SEND_LOG_KEY);
   let list: unknown[] = [];
@@ -293,6 +341,7 @@ export class WechatHostService {
   private loginPollTimer: ReturnType<typeof setTimeout> | null = null;
   private updatePollTimer: ReturnType<typeof setTimeout> | null = null;
   private updatePollController: AbortController | null = null;
+  private updatePollDueAt: number | null = null;
 
   constructor() {
     this.resumePersistedBackgroundWork();
@@ -325,6 +374,7 @@ export class WechatHostService {
       clearTimeout(this.updatePollTimer);
       this.updatePollTimer = null;
     }
+    this.updatePollDueAt = null;
     if (abortInFlight) {
       this.updatePollController?.abort();
       this.updatePollController = null;
@@ -339,11 +389,30 @@ export class WechatHostService {
   }
 
   private scheduleUpdatePoll(delayMs = 0): void {
-    this.clearUpdatePoll({ abortInFlight: false });
     if (this.updatePollController) return;
+    const safeDelayMs = Math.max(0, Math.floor(delayMs));
+    const dueAt = Date.now() + safeDelayMs;
+    if (
+      this.updatePollTimer &&
+      this.updatePollDueAt !== null &&
+      this.updatePollDueAt <= dueAt
+    ) {
+      return;
+    }
+    if (this.updatePollTimer) {
+      clearTimeout(this.updatePollTimer);
+    }
+    this.updatePollDueAt = dueAt;
     this.updatePollTimer = setTimeout(() => {
+      this.updatePollTimer = null;
+      this.updatePollDueAt = null;
       void this.pollUpdates();
-    }, delayMs);
+    }, Math.max(0, dueAt - Date.now()));
+  }
+
+  private ensureUpdatePoll(): void {
+    if (this.updatePollTimer || this.updatePollController) return;
+    this.scheduleUpdatePoll(0);
   }
 
   private rememberContext(
@@ -353,7 +422,10 @@ export class WechatHostService {
     const userId = resolvePeerUserIdForContext(credentials, message);
     if (!userId || !message.context_token) return;
     const tokens = readContextTokens();
-    tokens[userId] = message.context_token;
+    tokens[userId] = {
+      token: message.context_token,
+      updatedAt: nowIso(),
+    };
     writeContextTokens(tokens);
   }
 
@@ -452,54 +524,55 @@ export class WechatHostService {
       return;
     }
 
+    let nextPollDelayMs: number | null = null;
+    const controller = new AbortController();
+    this.updatePollController = controller;
     try {
-      this.updatePollController = new AbortController();
       const updates = await getUpdates(
         credentials.baseUrl,
         credentials.token,
         readCursor(),
-        this.updatePollController.signal,
+        controller.signal,
       );
-      this.updatePollController = null;
       await this.deliverInboundBatch(credentials, updates);
-      this.scheduleUpdatePoll(0);
+      nextPollDelayMs = 0;
     } catch (error) {
-      this.updatePollController = null;
       if (isAbortLikeError(error)) {
-        if (readState().enabled && readCredentials()) {
-          this.scheduleUpdatePoll(0);
+        nextPollDelayMs = 0;
+      } else if (isTimeoutLikeError(error)) {
+        nextPollDelayMs = 0;
+      } else {
+        const err = error as { code?: number; message?: string };
+        if (typeof err?.code === "number" && err.code === -14) {
+          this.logout();
+          updateState((state) => ({
+            ...state,
+            login: {
+              status: "logged_out",
+              updatedAt: nowIso(),
+              lastError: "微信会话已过期，请重新登录。",
+            },
+          }));
+          return;
         }
-        return;
-      }
-      if (isTimeoutLikeError(error)) {
-        if (readState().enabled && readCredentials()) {
-          this.scheduleUpdatePoll(0);
-        }
-        return;
-      }
-      const err = error as { code?: number; message?: string };
-      if (typeof err?.code === "number" && err.code === -14) {
-        this.logout();
-        writeState({
-          ...readState(),
+        updateState((state) => ({
+          ...state,
           login: {
-            status: "logged_out",
+            ...state.login,
+            status: "error",
             updatedAt: nowIso(),
-            lastError: "微信会话已过期，请重新登录。",
+            lastError: error instanceof Error ? error.message : String(error),
           },
-        });
-        return;
+        }));
+        nextPollDelayMs = 2_000;
       }
-      writeState({
-        ...current,
-        login: {
-          ...current.login,
-          status: "error",
-          updatedAt: nowIso(),
-          lastError: error instanceof Error ? error.message : String(error),
-        },
-      });
-      this.scheduleUpdatePoll(2_000);
+    } finally {
+      if (this.updatePollController === controller) {
+        this.updatePollController = null;
+      }
+      if (nextPollDelayMs !== null && readState().enabled && readCredentials()) {
+        this.scheduleUpdatePoll(nextPollDelayMs);
+      }
     }
   }
 
@@ -514,14 +587,14 @@ export class WechatHostService {
           !status.ilink_bot_id ||
           !status.ilink_user_id
         ) {
-          writeState({
-            ...current,
+          updateState((state) => ({
+            ...state,
             login: {
               status: "error",
               updatedAt: nowIso(),
               lastError: "二维码已确认，但未返回完整凭据",
             },
-          });
+          }));
           return;
         }
         const credentials: WechatCredentials = {
@@ -531,8 +604,8 @@ export class WechatHostService {
           userId: status.ilink_user_id,
         };
         writeCredentials(credentials);
-        writeState({
-          ...current,
+        updateState((state) => ({
+          ...state,
           login: {
             status: "logged_in",
             updatedAt: nowIso(),
@@ -540,36 +613,36 @@ export class WechatHostService {
             accountId: credentials.accountId,
             botUserId: credentials.userId,
           },
-        });
+        }));
         this.clearLoginPoll();
         if (current.enabled) {
-          this.scheduleUpdatePoll(0);
+          this.ensureUpdatePoll();
         }
         return;
       }
       if (status.status === "expired") {
-        writeState({
-          ...current,
+        updateState((state) => ({
+          ...state,
           login: {
             status: "logged_out",
             updatedAt: nowIso(),
             lastError: "二维码已过期，请重新开始登录。",
           },
-        });
+        }));
         this.clearLoginPoll();
         return;
       }
       this.scheduleLoginPoll(qrCode);
     } catch (error) {
-      writeState({
-        ...current,
+      updateState((state) => ({
+        ...state,
         login: {
-          ...current.login,
+          ...state.login,
           status: "error",
           updatedAt: nowIso(),
           lastError: error instanceof Error ? error.message : String(error),
         },
-      });
+      }));
       this.clearLoginPoll();
     }
   }
@@ -581,7 +654,7 @@ export class WechatHostService {
       return state;
     }
     if (state.enabled && state.login.status === "logged_in" && readCredentials()) {
-      this.scheduleUpdatePoll(0);
+      this.ensureUpdatePoll();
     }
     return state;
   }
@@ -593,7 +666,7 @@ export class WechatHostService {
       enabled: true,
     });
     if (next.login.status === "logged_in") {
-      this.scheduleUpdatePoll(0);
+      this.ensureUpdatePoll();
     }
     return next;
   }
@@ -646,7 +719,6 @@ export class WechatHostService {
   }
 
   async sendReply(input: WechatReplySendInput): Promise<WechatReplySendResult> {
-    const sentAt = nowIso();
     const current = readState();
     if (!current.enabled) {
       throw new Error("WeChat 通道未启用，无法发送回复");
@@ -656,25 +728,43 @@ export class WechatHostService {
       throw new Error("WeChat 未登录，无法发送回复");
     }
     const tokens = readContextTokens();
-    const contextToken = tokens[input.userId];
+    writeContextTokens(tokens);
+    const tokenEntry = tokens[input.userId];
+    const contextToken = String(tokenEntry?.token || "").trim();
     if (!contextToken) {
       throw new Error(`缺少用户 ${input.userId} 的 context_token，无法发送回复`);
     }
+    let deliveredPartCount = 0;
     for (const part of input.parts) {
       if (part.kind !== "text") continue;
-      await sendTextMessage({
-        baseUrl: credentials.baseUrl,
-        token: credentials.token,
-        fromUserId: credentials.userId,
-        userId: input.userId,
-        contextToken,
-        text: part.text,
-      });
+      try {
+        await sendTextMessage({
+          baseUrl: credentials.baseUrl,
+          token: credentials.token,
+          fromUserId: credentials.userId,
+          userId: input.userId,
+          contextToken,
+          text: part.text,
+          clientId: part.clientId,
+        });
+        deliveredPartCount += 1;
+      } catch (error) {
+        return {
+          deliveryId: input.deliveryId,
+          sentAt: nowIso(),
+          deliveredPartCount,
+          complete: false,
+          lastError: error instanceof Error ? error.message : String(error),
+        };
+      }
     }
+    const sentAt = nowIso();
     appendSendLog(input, sentAt);
     return {
       deliveryId: input.deliveryId,
       sentAt,
+      deliveredPartCount,
+      complete: true,
     };
   }
 }

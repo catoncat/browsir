@@ -10,6 +10,7 @@
  */
 
 import { Sandbox } from "@lifo-sh/core";
+import { collectSandboxFiles, computeVfsDiff } from "./vfs-sync";
 
 // --- Types ---
 
@@ -94,56 +95,6 @@ async function writeFilesToSandbox(
   }
 }
 
-async function collectFiles(
-  sb: Awaited<ReturnType<typeof Sandbox.create>>,
-  dir: string
-): Promise<Map<string, string>> {
-  const result = new Map<string, string>();
-  // Skip LIFO special mounts
-  if (dir === "/proc" || dir === "/dev") return result;
-  try {
-    const entries = await sb.fs.readdir(dir);
-    for (const entry of entries) {
-      const fullPath = dir === "/" ? `/${entry}` : `${dir}/${entry}`;
-      try {
-        const stat = await sb.fs.stat(fullPath);
-        if (stat.type === "directory") {
-          const sub = await collectFiles(sb, fullPath);
-          for (const [k, v] of sub) result.set(k, v);
-        } else {
-          const content = String(await sb.fs.readFile(fullPath));
-          result.set(fullPath, content);
-        }
-      } catch {
-        // skip unreadable entries
-      }
-    }
-  } catch {
-    // dir doesn't exist or isn't readable
-  }
-  return result;
-}
-
-function computeVfsDiff(
-  before: Map<string, string>,
-  after: Map<string, string>
-): BashResult["vfsDiff"] {
-  const diff: BashResult["vfsDiff"] = [];
-  for (const [path, content] of after) {
-    if (!before.has(path)) {
-      diff.push({ op: "add", path, content });
-    } else if (before.get(path) !== content) {
-      diff.push({ op: "modify", path, content });
-    }
-  }
-  for (const path of before.keys()) {
-    if (!after.has(path)) {
-      diff.push({ op: "delete", path });
-    }
-  }
-  return diff;
-}
-
 // --- Bash execution ---
 
 async function handleBash(req: BashRequest): Promise<BashResult> {
@@ -153,7 +104,7 @@ async function handleBash(req: BashRequest): Promise<BashResult> {
   await writeFilesToSandbox(sb, req.files);
 
   // Snapshot VFS before execution
-  const before = await collectFiles(sb, "/");
+  const before = await collectSandboxFiles(sb.fs, "/");
 
   // Set cwd
   if (req.cwd) {
@@ -185,7 +136,7 @@ async function handleBash(req: BashRequest): Promise<BashResult> {
   }
 
   // Snapshot VFS after execution and compute diff
-  const after = await collectFiles(sb, "/");
+  const after = await collectSandboxFiles(sb.fs, "/");
   const vfsDiff = computeVfsDiff(before, after);
 
   // Update hash cache to reflect post-execution VFS state

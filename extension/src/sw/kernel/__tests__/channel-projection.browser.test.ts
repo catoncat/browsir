@@ -69,7 +69,9 @@ describe("channel-projection", () => {
     expect(reply.deliveryId).toBe("delivery-1");
     expect(reply.parts).toHaveLength(2);
     expect(reply.parts[0].text).toHaveLength(WECHAT_REPLY_PART_MAX_CHARS);
+    expect(reply.parts[0].clientId).toBeTruthy();
     expect(reply.parts[1].text).toHaveLength(25);
+    expect(reply.parts[1].clientId).toBeTruthy();
   });
 
   it("creates queued outbox records from a turn and projection", () => {
@@ -92,6 +94,7 @@ describe("channel-projection", () => {
 
     expect(record.deliveryId).toBe("delivery-1");
     expect(record.deliveryStatus).toBe("queued");
+    expect(record.deliveredPartCount).toBe(0);
     expect(record.projection.visibleText).toBe("error happened");
     expect(record.replyProjection.parts[0].text).toBe("error happened");
   });
