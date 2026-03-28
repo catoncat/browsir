@@ -7,7 +7,6 @@ import {
   createProjectionOutcome,
   createWechatReplyProjection,
 } from "./channel-projection";
-import { normalizeHostedAssistantIdentity } from "../../shared/cursor-help-web-shared";
 import type { ChannelTurnRecord } from "./channel-types";
 import type { ChannelOutboxRecord } from "./channel-types";
 import type { WechatReplySendInput, WechatReplySendResult } from "./host-protocol";
@@ -77,62 +76,6 @@ function waitMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function readLatestAssistantTextFromStepStream(
-  orchestrator: BrainOrchestrator,
-  sessionId: string,
-  notBeforeIso: string,
-): Promise<string> {
-  try {
-    await orchestrator.flushSessionTraceWrites(sessionId);
-  } catch (error) {
-    console.warn("[channel-observer] flushSessionTraceWrites failed", error);
-  }
-  const threshold = Date.parse(notBeforeIso);
-  const stream = await orchestrator.getStepStream(sessionId);
-  for (let i = stream.length - 1; i >= 0; i -= 1) {
-    const item = stream[i];
-    const ts = Date.parse(String(item.timestamp || ""));
-    if (Number.isFinite(threshold) && (!Number.isFinite(ts) || ts < threshold)) {
-      continue;
-    }
-    const itemType = String(item.type || "").trim();
-    const payload = toRecord(item.payload);
-
-    if (itemType === "hosted_chat.turn_resolved") {
-      const result = toRecord(payload.result);
-      const text = String(result.assistantText || "").trim();
-      if (text) {
-        const entries = await orchestrator.sessions.getEntries(sessionId);
-        const latestUserEntry = Array.from(entries)
-          .reverse()
-          .find(
-            (entry) =>
-              entry.type === "message" &&
-              entry.role === "user" &&
-              "text" in entry &&
-              String(entry.text || "").trim(),
-          );
-        const latestUserText =
-          latestUserEntry && "text" in latestUserEntry
-            ? latestUserEntry.text
-            : "";
-        return normalizeHostedAssistantIdentity(latestUserText, text).trim();
-      }
-      continue;
-    }
-
-    if (itemType === "step_finished") {
-      const ok = payload.ok === true;
-      const mode = String(payload.mode || "").trim();
-      const preview = String(payload.preview || "").trim();
-      if (ok && mode === "llm" && preview) {
-        return preview;
-      }
-    }
-  }
-  return "";
-}
-
 async function resolveFreshAssistantResult(
   orchestrator: BrainOrchestrator,
   turn: ChannelTurnRecord,
@@ -152,18 +95,6 @@ async function resolveFreshAssistantResult(
       return {
         assistantEntryId: latestAssistant.entryId,
         text: latestAssistant.text,
-      };
-    }
-
-    const fallbackAssistantText = await readLatestAssistantTextFromStepStream(
-      orchestrator,
-      turn.sessionId,
-      turn.createdAt,
-    );
-    if (fallbackAssistantText) {
-      return {
-        assistantEntryId: undefined,
-        text: fallbackAssistantText,
       };
     }
 
