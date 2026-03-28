@@ -690,9 +690,9 @@ export async function compact(
 
   let summary = "";
   if (preparation.isSplitTurn && preparation.turnPrefixMessages.length > 0) {
-    const [historyResult, turnPrefixResult] = await Promise.all([
+    const historyResult =
       preparation.messagesToSummarize.length > 0
-        ? generateSummary({
+        ? await generateSummary({
             mode: "history",
             promptText: buildSummaryPrompt({
               messages: preparation.messagesToSummarize,
@@ -701,13 +701,12 @@ export async function compact(
             }),
             maxTokens: Math.floor(0.8 * reserveTokens)
           })
-        : Promise.resolve("No prior history."),
-      generateSummary({
-        mode: "turn_prefix",
-        promptText: buildTurnPrefixPrompt(preparation.turnPrefixMessages),
-        maxTokens: Math.floor(0.5 * reserveTokens)
-      })
-    ]);
+        : "No prior history.";
+    const turnPrefixResult = await generateSummary({
+      mode: "turn_prefix",
+      promptText: buildTurnPrefixPrompt(preparation.turnPrefixMessages),
+      maxTokens: Math.floor(0.5 * reserveTokens)
+    });
     summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
   } else {
     summary = await generateSummary({

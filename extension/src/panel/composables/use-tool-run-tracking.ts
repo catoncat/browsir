@@ -351,7 +351,7 @@ export function useToolRunTracking(deps: ToolRunTrackingDeps) {
         if (runPhase.value === "idle") {
           runPhase.value = "llm";
         }
-        setLlmRunHint("整理上下文", "正在压缩历史上下文");
+        setLlmRunHint("压缩上下文", "正在压缩上下文");
         return;
       }
       if (runPhase.value === "idle") {
@@ -450,7 +450,7 @@ export function useToolRunTracking(deps: ToolRunTrackingDeps) {
       if (runPhase.value === "idle") {
         runPhase.value = "llm";
       }
-      setLlmRunHint("整理上下文", "正在压缩历史上下文");
+      setLlmRunHint("压缩上下文", "正在压缩上下文");
       return;
     }
     if (type === "auto_compaction_end") {

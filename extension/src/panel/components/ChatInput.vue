@@ -925,7 +925,7 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
           aria-live="polite"
         >
           <Loader2 :size="11" class="animate-spin" aria-hidden="true" />
-          <span>正在整理上下文，消息会排队</span>
+          <span>正在压缩上下文</span>
         </div>
         <textarea
           ref="textarea"

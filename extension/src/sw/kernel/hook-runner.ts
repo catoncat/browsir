@@ -39,32 +39,13 @@ export class HookRunner<TMap extends { [K in keyof TMap]: HookPayload }> {
   private readonly handlers = new Map<keyof TMap & string, HookRegistration<TMap[keyof TMap & string]>[]>();
   private sequence = 0;
 
-  on<K extends keyof TMap & string>(
+  private offWhere<K extends keyof TMap & string>(
     hook: K,
-    handler: HookHandler<TMap[K]>,
-    options: HookHandlerOptions = {}
-  ): () => void {
-    const registrations = (this.handlers.get(hook) as HookRegistration<TMap[K]>[] | undefined) ?? [];
-    const id = options.id?.trim() || `${hook}#${this.sequence + 1}`;
-    const registration: HookRegistration<TMap[K]> = {
-      id,
-      priority: options.priority ?? 0,
-      seq: this.sequence++,
-      handler
-    };
-    registrations.push(registration);
-    registrations.sort((a, b) => {
-      if (a.priority !== b.priority) return b.priority - a.priority;
-      return a.seq - b.seq;
-    });
-    this.handlers.set(hook, registrations as HookRegistration<TMap[keyof TMap & string]>[]);
-    return () => this.off(hook, id);
-  }
-
-  off<K extends keyof TMap & string>(hook: K, hookId: string): boolean {
-    const registrations = this.handlers.get(hook);
+    predicate: (item: HookRegistration<TMap[K]>) => boolean,
+  ): boolean {
+    const registrations = this.handlers.get(hook) as HookRegistration<TMap[K]>[] | undefined;
     if (!registrations || registrations.length === 0) return false;
-    const next = registrations.filter((item) => item.id !== hookId);
+    const next = registrations.filter((item) => !predicate(item));
     if (next.length === registrations.length) return false;
     if (next.length === 0) {
       this.handlers.delete(hook);
@@ -72,6 +53,37 @@ export class HookRunner<TMap extends { [K in keyof TMap]: HookPayload }> {
       this.handlers.set(hook, next as HookRegistration<TMap[keyof TMap & string]>[]);
     }
     return true;
+  }
+
+  on<K extends keyof TMap & string>(
+    hook: K,
+    handler: HookHandler<TMap[K]>,
+    options: HookHandlerOptions = {}
+  ): () => void {
+    const registrations = (this.handlers.get(hook) as HookRegistration<TMap[K]>[] | undefined) ?? [];
+    const id = options.id?.trim() || `${hook}#${this.sequence + 1}`;
+    const existingIndex = registrations.findIndex((item) => item.id === id);
+    const registration: HookRegistration<TMap[K]> = {
+      id,
+      priority: options.priority ?? 0,
+      seq: this.sequence++,
+      handler
+    };
+    if (existingIndex >= 0) {
+      registrations.splice(existingIndex, 1, registration);
+    } else {
+      registrations.push(registration);
+    }
+    registrations.sort((a, b) => {
+      if (a.priority !== b.priority) return b.priority - a.priority;
+      return a.seq - b.seq;
+    });
+    this.handlers.set(hook, registrations as HookRegistration<TMap[keyof TMap & string]>[]);
+    return () => this.offWhere(hook, (item) => item.id === id && item.seq === registration.seq);
+  }
+
+  off<K extends keyof TMap & string>(hook: K, hookId: string): boolean {
+    return this.offWhere(hook, (item) => item.id === hookId);
   }
 
   async run<K extends keyof TMap & string>(hook: K, initialValue: TMap[K]): Promise<HookRunResult<TMap[K]>> {

@@ -130,6 +130,34 @@ describe("compaction.browser", () => {
     expect(draft.tokensAfter).toBeGreaterThan(0);
   });
 
+  it("split-turn 摘要请求必须串行，避免同 session compaction lane 并发", async () => {
+    const entries = [
+      compactionEntry("c1", "old-summary", "u1", null),
+      message("u1", "user", "first", null),
+      message("a1", "assistant", "answer1", "u1"),
+      message("u2", "user", "second", "a1"),
+      message("a2", "assistant", "answer2", "u2")
+    ];
+    const preparation = prepareCompaction({
+      reason: "threshold",
+      entries,
+      keepRecentTokens: 1,
+      splitTurn: true
+    });
+    let inflight = 0;
+    let maxInflight = 0;
+
+    await compact(preparation, async (input) => {
+      inflight += 1;
+      maxInflight = Math.max(maxInflight, inflight);
+      await Promise.resolve();
+      inflight -= 1;
+      return input.mode === "turn_prefix" ? "turn-prefix-summary" : "history-summary";
+    });
+
+    expect(maxInflight).toBe(1);
+  });
+
   it("compact 会从 host_/browser_ 文件工具结果提取 read/modified 文件清单", async () => {
     const entries: SessionEntry[] = [
       message("u1", "user", "先读再改", null),

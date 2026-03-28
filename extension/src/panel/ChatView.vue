@@ -843,7 +843,7 @@ defineExpose({ handleCreateSession, sessionListRenderState });
             v-if="shouldShowStreamingDraft"
             :content="llmStreamingText"
             :active="llmStreamingActive"
-            :waiting-label="isCompacting ? '正在整理上下文' : (activeRunHint?.label || '等待模型响应')"
+            :waiting-label="isCompacting ? '正在压缩上下文' : (activeRunHint?.label || '等待模型响应')"
           />
 
         </div>
