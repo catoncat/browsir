@@ -57,6 +57,7 @@ import {
   buildLlmMessagesFromContext,
   buildTaskProgressSystemMessage,
 } from "./prompt/prompt-policy.browser";
+import { clipText } from "./loop-shared-utils";
 import { createSystemPromptResolver } from "./prompt/prompt-resolver.browser";
 import {
   nowIso,
@@ -97,6 +98,8 @@ import {
   shouldAcquireLease,
 } from "./loop-browser-proof";
 import { browserMcpClientRegistry } from "./browser-mcp-client-registry";
+const MAX_PROMPT_SKILL_RESOURCES_CHARS = 4000;
+
 import {
   buildFocusEscalationToolCall,
   parseToolCallArgs,
@@ -1833,12 +1836,22 @@ export function createRuntimeLoopController(
       materialized: materializedRefs,
     });
     if (!contextPrefix) return "";
-    return [
-      "<skill_resources>",
-      "以下是该 skill package 内可按需读取的本地 references 索引；仅在需要时再调用 read_skill_reference 读取具体文件。",
+    const clippedContextPrefix = clipText(
       contextPrefix,
+      MAX_PROMPT_SKILL_RESOURCES_CHARS,
+    );
+    const truncated = clippedContextPrefix !== contextPrefix;
+    return [
+      '<skill_resources schema="compact-v1">',
+      "以下是该 skill package 内可按需读取的本地 references 索引；仅在需要时再调用 read_skill_reference 读取具体文件。",
+      truncated
+        ? `<!-- clipped skill_resources index to ${MAX_PROMPT_SKILL_RESOURCES_CHARS} chars -->`
+        : "",
+      clippedContextPrefix,
       "</skill_resources>",
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
   });
 
   // Tool dispatch functions extracted to loop-tool-dispatch.ts
@@ -2077,7 +2090,15 @@ export function createRuntimeLoopController(
       let availableSkillsPrompt = "";
       try {
         const skills = await orchestrator.listSkills();
-        availableSkillsPrompt = buildAvailableSkillsSystemMessage(skills);
+        const latestUserPrompt = [...context.messages]
+          .reverse()
+          .find((item) => String(item.role || "") === "user");
+        const skillQueryText = String(
+          latestUserPrompt?.llmContent || latestUserPrompt?.content || "",
+        );
+        availableSkillsPrompt = buildAvailableSkillsSystemMessage(skills, {
+          queryText: skillQueryText,
+        });
       } catch {
         availableSkillsPrompt = "";
       }
