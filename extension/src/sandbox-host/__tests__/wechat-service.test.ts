@@ -292,8 +292,9 @@ describe("wechat-service", () => {
     await vi.advanceTimersByTimeAsync(0);
     await waitFor(async () =>
       runtimeSendMessage.mock.calls.some(
-        ([message]) =>
-          (message as Record<string, unknown>)?.type === "brain.channel.wechat.inbound",
+        (call) =>
+          ((call as unknown[])[0] as Record<string, unknown> | undefined)?.type ===
+          "brain.channel.wechat.inbound",
       ),
     );
 
