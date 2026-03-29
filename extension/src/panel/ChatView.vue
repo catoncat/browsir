@@ -48,10 +48,39 @@ const emit = defineEmits<{
   (e: "create-session"): void;
 }>();
 
-const emptySuggestions = [
-  { label: "帮我总结这个页面", text: "帮我总结这个页面" },
-  { label: "查看所有标签页", text: "查看所有标签页" },
-  { label: "帮我截图", text: "帮我截个图" },
+const suggestionCategories = [
+  {
+    icon: "🌐",
+    title: "网页操作",
+    items: [
+      { label: "帮我填这个表", text: "帮我填这个表" },
+      { label: "点击页面上的登录按钮", text: "点击页面上的登录按钮" },
+    ],
+  },
+  {
+    icon: "📋",
+    title: "信息提取",
+    items: [
+      { label: "总结这个页面", text: "帮我总结这个页面的要点" },
+      { label: "提取表格数据", text: "提取这个页面的表格数据" },
+    ],
+  },
+  {
+    icon: "🔍",
+    title: "标签页管理",
+    items: [
+      { label: "查看所有标签页", text: "查看所有打开的标签页" },
+      { label: "关掉重复标签页", text: "帮我关掉所有重复的标签页" },
+    ],
+  },
+  {
+    icon: "✨",
+    title: "更多玩法",
+    items: [
+      { label: "@ 引用标签页", text: "", hint: "输入 @ 可以引用标签页内容" },
+      { label: "/ 使用技能", text: "", hint: "输入 / 可以搜索和使用技能" },
+    ],
+  },
 ];
 
 const store = useRuntimeStore();
@@ -82,7 +111,7 @@ const showMoreMenu = ref(false);
 const showToolHistory = ref(true);
 const creatingSession = ref(false);
 const moreMenuRef = ref(null);
-const exportMenuRef = ref(null);
+
 const automationMode = ref<"focus" | "background">("focus");
 
 // Load initial mode and subscribe to changes
@@ -488,7 +517,7 @@ const {
   showActionNoticeWithPlugins,
   setErrorMessage,
 });
-onClickOutside(exportMenuRef, () => showExportMenu.value = false);
+
 const {
   handleCreateSession,
   handleJumpToForkSourceSession,
@@ -655,19 +684,6 @@ defineExpose({ handleCreateSession, sessionListRenderState });
 
       <div class="flex items-center gap-0.5 shrink-0" role="toolbar" aria-label="会话操作">
         <button
-          class="p-2 rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-          :class="isBackgroundMode
-            ? 'bg-amber-500/15 text-amber-600 hover:bg-amber-500/25'
-            : 'text-ui-text hover:bg-ui-surface'"
-          :title="isBackgroundMode ? '当前：后台模式（不抢焦点）' : '当前：前台模式（标准 CDP）'"
-          :aria-label="isBackgroundMode ? '切换到前台模式' : '切换到后台模式'"
-          :aria-pressed="isBackgroundMode"
-          @click="toggleAutomationMode"
-        >
-          <MonitorOff v-if="isBackgroundMode" :size="18" aria-hidden="true" />
-          <Monitor v-else :size="18" aria-hidden="true" />
-        </button>
-        <button
           class="p-2 hover:bg-ui-surface rounded-full text-ui-text transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
           title="新建对话"
           aria-label="开始新对话"
@@ -685,34 +701,14 @@ defineExpose({ handleCreateSession, sessionListRenderState });
           <History :size="18" aria-hidden="true" />
         </button>
 
-        <!-- Export Menu -->
-        <div class="relative" ref="exportMenuRef">
-          <button
-            class="p-2 hover:bg-ui-surface rounded-full text-ui-text transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
-            title="导出对话"
-            :aria-label="showExportMenu ? '关闭导出菜单' : '打开导出菜单'"
-            aria-haspopup="menu"
-            :aria-expanded="showExportMenu"
-            @click="showExportMenu = !showExportMenu"
-          >
-            <FileText :size="18" aria-hidden="true" />
-          </button>
-          <div 
-            v-if="showExportMenu" 
-            class="absolute right-0 mt-1 w-44 bg-ui-bg border border-ui-border rounded-lg shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-100"
-            role="menu"
-          >
-            <button role="menuitem" @click="handleCopyMarkdown" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none">
-              <Copy :size="14" aria-hidden="true" /> 复制 Markdown
-            </button>
-            <button role="menuitem" @click="handleExport('download')" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left border-t border-ui-border/30 focus:bg-ui-surface outline-none">
-              <Download :size="14" aria-hidden="true" /> 下载 MD 文件
-            </button>
-            <button role="menuitem" @click="handleExport('open')" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none">
-              <ExternalLink :size="14" aria-hidden="true" /> 在标签页打开
-            </button>
-          </div>
-        </div>
+        <button
+          class="p-2 hover:bg-ui-surface rounded-full text-ui-text transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-accent"
+          title="设置"
+          aria-label="打开系统设置"
+          @click="emit('update:active-view', 'settings')"
+        >
+          <Settings :size="18" aria-hidden="true" />
+        </button>
 
         <!-- More Menu -->
         <div class="relative" ref="moreMenuRef">
@@ -726,19 +722,39 @@ defineExpose({ handleCreateSession, sessionListRenderState });
           >
             <MoreVertical :size="18" aria-hidden="true" />
           </button>
-          <div 
-            v-if="showMoreMenu" 
-            class="absolute right-0 mt-1 w-40 bg-ui-bg border border-ui-border rounded-lg shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-100"
+          <div
+            v-if="showMoreMenu"
+            class="absolute right-0 mt-1 w-44 bg-ui-bg border border-ui-border rounded-lg shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-100"
             role="menu"
           >
-            <button role="menuitem" @click="handleCopyDebugLink(); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none">
-              <ExternalLink :size="14" aria-hidden="true" /> 复制调试链接
+            <!-- Export sub-items -->
+            <button role="menuitem" @click="handleCopyMarkdown(); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none">
+              <Copy :size="14" aria-hidden="true" /> 复制 Markdown
+            </button>
+            <button role="menuitem" @click="handleExport('download'); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left border-t border-ui-border/30 focus:bg-ui-surface outline-none">
+              <Download :size="14" aria-hidden="true" /> 下载 MD 文件
+            </button>
+            <button role="menuitem" @click="handleExport('open'); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left border-t border-ui-border/30 focus:bg-ui-surface outline-none">
+              <ExternalLink :size="14" aria-hidden="true" /> 在标签页打开
+            </button>
+            <!-- Mode toggle -->
+            <button
+              role="menuitem"
+              class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left border-t border-ui-border/30 focus:bg-ui-surface outline-none"
+              @click="toggleAutomationMode(); showMoreMenu = false"
+            >
+              <MonitorOff v-if="isBackgroundMode" :size="14" aria-hidden="true" />
+              <Monitor v-else :size="14" aria-hidden="true" />
+              {{ isBackgroundMode ? '切换到前台模式' : '切换到后台模式' }}
             </button>
             <button role="menuitem" @click="handleRefreshSession(activeSessionId); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
               <RefreshCcw :size="14" aria-hidden="true" /> 重新生成标题
             </button>
             <button role="menuitem" @click="showToolHistory = !showToolHistory; showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
               <Activity :size="14" aria-hidden="true" /> {{ toolHistoryToggleLabel }}
+            </button>
+            <button role="menuitem" @click="handleCopyDebugLink(); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
+              <ExternalLink :size="14" aria-hidden="true" /> 复制调试链接
             </button>
             <button role="menuitem" @click="emit('update:active-view', 'skills'); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
               <Wrench :size="14" aria-hidden="true" /> Skills 管理
@@ -751,9 +767,6 @@ defineExpose({ handleCreateSession, sessionListRenderState });
             </button>
             <button role="menuitem" @click="emit('update:active-view', 'provider-settings'); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
               <Cpu :size="14" aria-hidden="true" /> 模型路由
-            </button>
-            <button role="menuitem" @click="emit('update:active-view', 'settings'); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
-              <Settings :size="14" aria-hidden="true" /> 系统设置
             </button>
             <button role="menuitem" @click="emit('update:active-view', 'debug'); showMoreMenu = false" class="w-full flex items-center gap-2 px-3 py-2 text-[13px] hover:bg-ui-surface text-left focus:bg-ui-surface outline-none border-t border-ui-border/30">
               <Bug :size="14" aria-hidden="true" /> 调试面板
@@ -848,24 +861,36 @@ defineExpose({ handleCreateSession, sessionListRenderState });
 
         </div>
 
-        <div v-else class="flex flex-col items-start py-8 animate-in fade-in duration-500">
-          <div class="flex items-center gap-3 mb-4">
-            <img src="/icon-48.png" alt="白雪" class="w-10 h-10 rounded-xl" aria-hidden="true" />
-            <h2 class="text-xl font-black tracking-tight text-ui-text">白雪</h2>
+        <div v-else class="flex flex-col items-start py-6 animate-in fade-in duration-500 w-full">
+          <div class="flex items-center gap-3 mb-2">
+            <img src="/icon-48.png" alt="白雪" class="w-9 h-9 rounded-xl" aria-hidden="true" />
+            <h2 class="text-lg font-black tracking-tight text-ui-text">白雪</h2>
           </div>
-          <p class="text-ui-text-muted text-[15px] leading-relaxed max-w-xs">
-            我是白雪，你的浏览器 AI 助手。告诉我你想做什么。
-          </p>
-          <div class="flex flex-wrap gap-2 mt-4">
-            <button
-              v-for="suggestion in emptySuggestions"
-              :key="suggestion.text"
-              class="px-3 py-1.5 text-sm rounded-lg border border-ui-border hover:bg-ui-bg-hover text-ui-text-muted hover:text-ui-text transition-colors cursor-pointer"
-              :disabled="loading || creatingSession"
-              @click="handleSend({ text: suggestion.text, tabIds: [], skillIds: [] })"
+          <p class="text-ui-text-muted text-[13px] mb-4">试试这些：</p>
+          <div class="grid grid-cols-2 gap-2 w-full">
+            <div
+              v-for="category in suggestionCategories"
+              :key="category.title"
+              class="rounded-xl border border-ui-border/60 bg-ui-surface/30 p-3 space-y-1.5"
             >
-              {{ suggestion.label }}
-            </button>
+              <div class="flex items-center gap-1.5 text-[12px] font-semibold text-ui-text">
+                <span aria-hidden="true">{{ category.icon }}</span>
+                {{ category.title }}
+              </div>
+              <div class="space-y-1">
+                <button
+                  v-for="item in category.items"
+                  :key="item.label"
+                  class="w-full text-left px-2 py-1 text-[12px] rounded-md text-ui-text-muted transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent"
+                  :class="item.text ? 'hover:bg-ui-bg-hover hover:text-ui-text cursor-pointer' : 'opacity-70 cursor-default'"
+                  :disabled="loading || creatingSession || !item.text"
+                  :title="(item as any).hint || ''"
+                  @click="item.text && handleSend({ text: item.text, tabIds: [], skillIds: [] })"
+                >
+                  {{ item.label }}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -890,13 +915,18 @@ defineExpose({ handleCreateSession, sessionListRenderState });
 
     <div
       v-if="showBridgeOfflineDot"
-      class="absolute bottom-3 right-3 z-20"
+      class="absolute bottom-2 left-3 right-3 z-20"
       role="status"
       aria-live="polite"
-      aria-label="Bridge 未连接"
-      title="Bridge 未连接"
     >
-      <span class="inline-flex h-2.5 w-2.5 rounded-full bg-rose-500 shadow-[0_0_10px_rgba(244,63,94,0.45)]" aria-hidden="true"></span>
+      <div class="flex items-center gap-2 rounded-lg border border-rose-200/60 bg-rose-50/90 px-3 py-1.5 text-[11px] text-rose-700 shadow-sm">
+        <span class="inline-flex h-2 w-2 shrink-0 rounded-full bg-rose-500" aria-hidden="true"></span>
+        <span class="flex-1">本地文件和终端功能暂不可用</span>
+        <button
+          class="shrink-0 font-medium text-rose-600 hover:text-rose-800 underline underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-rose-500 rounded-sm"
+          @click="emit('update:active-view', 'settings')"
+        >连接 →</button>
+      </div>
     </div>
 
     </div>

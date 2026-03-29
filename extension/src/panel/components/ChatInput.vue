@@ -83,6 +83,17 @@ const skillCacheUpdatedAt = ref(0);
 
 const SKILL_CACHE_TTL_MS = 8000;
 
+// Feature discovery hint
+const HINT_STORAGE_KEY = "snowy_input_hint_dismissed";
+const inputHintDismissed = ref(
+  typeof localStorage !== "undefined" && localStorage.getItem(HINT_STORAGE_KEY) === "1",
+);
+const showInputHint = computed(() => !inputHintDismissed.value && !props.isRunning);
+function dismissInputHint() {
+  inputHintDismissed.value = true;
+  try { localStorage.setItem(HINT_STORAGE_KEY, "1"); } catch { /* noop */ }
+}
+
 onClickOutside(mentionContainer, () => {
   showMentionList.value = false;
 });
@@ -939,7 +950,7 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
 
         <div class="flex items-center justify-between px-3 pb-3">
           <div class="flex items-center gap-1">
-            <button 
+            <button
               class="p-2 text-ui-text-muted hover:text-ui-text hover:bg-black/5 rounded-lg transition-all active:scale-95 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ui-accent"
               aria-label="添加附件或引用标签页"
               aria-haspopup="listbox"
@@ -950,16 +961,18 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
             </button>
           </div>
 
-          <div class="flex items-center gap-2">
-              <button
+          <div class="composer-actions-cluster">
+            <button
               v-if="isRunning"
+              type="button"
               class="composer-action-btn composer-stop-btn focus-visible:outline-none"
               aria-label="停止生成"
               @click="$emit('stop')"
             >
-              <Square :size="14" fill="currentColor" aria-hidden="true" />
+              <Square :size="13" fill="currentColor" aria-hidden="true" />
             </button>
             <button
+              type="button"
               class="composer-action-btn composer-send-btn focus-visible:outline-none"
               :class="canSubmit ? 'composer-send-btn-ready' : 'composer-send-btn-disabled'"
               :disabled="!canSubmit"
@@ -967,12 +980,27 @@ function handleSubmit(mode: "normal" | "steer" | "followUp") {
               :title="isStartingRun ? '正在启动响应' : (isRunning ? '追加发送（默认 steer，Alt+Enter 为 followUp）' : '发送消息')"
               @click="handleSubmit('normal')"
             >
-              <Loader2 v-if="isStartingRun" :size="18" class="animate-spin" aria-hidden="true" />
-              <Send v-else :size="18" aria-hidden="true" />
+              <Loader2 v-if="isStartingRun" :size="17" class="animate-spin" aria-hidden="true" />
+              <Send v-else :size="17" aria-hidden="true" />
             </button>
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- Feature discovery hint -->
+    <div
+      v-if="showInputHint"
+      class="flex items-center justify-between px-4 pt-0 pb-1 text-[10px] text-ui-text-muted/50 select-none"
+    >
+      <span>💡 输入 <kbd class="font-mono font-semibold">@</kbd> 引用标签页 · 输入 <kbd class="font-mono font-semibold">/</kbd> 使用技能 · <kbd class="font-mono">Shift+Enter</kbd> 换行</span>
+      <button
+        class="ml-2 p-0.5 rounded hover:text-ui-text-muted transition-colors focus-visible:outline-none"
+        aria-label="关闭提示"
+        @click="dismissInputHint"
+      >
+        <X :size="10" aria-hidden="true" />
+      </button>
     </div>
   </div>
 </template>
@@ -999,16 +1027,18 @@ textarea::-webkit-scrollbar {
   transition: color 0.18s ease;
 }
 .composer-action-btn {
-  width: 2.5rem;
-  height: 2.5rem;
+  width: 2.65rem;
+  height: 2.65rem;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: 999px;
-  border: 1px solid color-mix(in oklab, var(--border) 86%, transparent);
-  background: color-mix(in oklab, var(--surface) 92%, var(--bg) 8%);
-  color: color-mix(in oklab, var(--text-muted) 82%, transparent);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.62), 0 1px 2px rgba(15, 23, 42, 0.08);
+  border: 1px solid color-mix(in oklab, var(--border) 84%, transparent);
+  background: color-mix(in oklab, var(--surface) 88%, var(--bg) 12%);
+  color: color-mix(in oklab, var(--text-muted) 80%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 2px 6px rgba(15, 23, 42, 0.12);
   transition: transform 0.14s ease, background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, color 0.18s ease;
 }
 .composer-action-btn:active {
@@ -1019,27 +1049,48 @@ textarea::-webkit-scrollbar {
     inset 0 1px 0 rgba(255, 255, 255, 0.68),
     0 0 0 2px color-mix(in oklab, var(--accent) 28%, transparent);
 }
+.composer-actions-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.3rem;
+  border-radius: 999px;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in oklab, var(--surface) 84%, var(--bg) 16%) 0%,
+      color-mix(in oklab, var(--bg) 72%, var(--surface) 28%) 100%
+    );
+  border: 1px solid color-mix(in oklab, var(--border) 74%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 10px 24px rgba(15, 23, 42, 0.12);
+}
 .composer-send-btn {
   color: #fff;
 }
 .composer-send-btn-ready {
   background: linear-gradient(
     180deg,
-    color-mix(in oklab, var(--accent) 90%, #fff 10%) 0%,
-    color-mix(in oklab, var(--accent) 100%, #0f172a 0%) 100%
+    color-mix(in oklab, var(--accent) 82%, #ffffff 18%) 0%,
+    color-mix(in oklab, var(--accent) 96%, #0f172a 4%) 100%
   );
-  border-color: color-mix(in oklab, var(--accent) 72%, #0f172a 28%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 4px 12px color-mix(in oklab, var(--accent) 32%, transparent);
+  border-color: color-mix(in oklab, var(--accent) 68%, #0f172a 32%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 8px 18px color-mix(in oklab, var(--accent) 24%, transparent);
 }
 .composer-send-btn-ready:hover {
   transform: translateY(-1px);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24), 0 6px 14px color-mix(in oklab, var(--accent) 38%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.26),
+    0 10px 20px color-mix(in oklab, var(--accent) 28%, transparent);
 }
 .composer-send-btn-disabled {
-  background: color-mix(in oklab, var(--surface) 95%, var(--bg) 5%);
+  background: color-mix(in oklab, var(--surface) 90%, var(--bg) 10%);
   color: color-mix(in oklab, var(--text-muted) 68%, transparent);
   border-color: color-mix(in oklab, var(--border) 90%, transparent);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.58);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
 }
 .composer-send-btn:disabled {
   cursor: not-allowed;
@@ -1049,14 +1100,23 @@ textarea::-webkit-scrollbar {
   transform: none;
 }
 .composer-stop-btn {
-  color: #fff;
-  background: color-mix(in oklab, var(--text) 86%, var(--surface) 14%);
-  border-color: color-mix(in oklab, var(--text) 55%, var(--border) 45%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 3px 10px rgba(15, 23, 42, 0.18);
+  color: color-mix(in oklab, #f8fafc 92%, var(--text-muted) 8%);
+  background:
+    radial-gradient(circle at 30% 28%, rgba(255, 255, 255, 0.14), transparent 48%),
+    color-mix(in oklab, var(--bg) 58%, var(--surface) 42%);
+  border-color: color-mix(in oklab, #fb7185 24%, var(--border) 76%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 6px 14px rgba(15, 23, 42, 0.16);
 }
 .composer-stop-btn:hover {
   transform: translateY(-1px);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 4px 12px rgba(15, 23, 42, 0.24);
+  background:
+    radial-gradient(circle at 30% 28%, rgba(255, 255, 255, 0.18), transparent 48%),
+    color-mix(in oklab, var(--bg) 52%, var(--surface) 48%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 8px 16px rgba(15, 23, 42, 0.18);
 }
 .shortcut-kbd {
   display: inline-flex;
