@@ -70,6 +70,32 @@ export function useUiRenderPipeline(deps: UiRenderPipelineDeps) {
     placeholder: "告诉白雪你想做什么…",
   });
 
+  // Rotating placeholder for empty state
+  const rotatingPlaceholders = [
+    "帮我总结当前页面…",
+    "提取这个页面的表格数据…",
+    "@标签页 发送页面内容给白雪…",
+    "帮我填这个表单…",
+    "告诉白雪你想做什么…",
+  ];
+  let placeholderRotationIndex = 0;
+  let placeholderRotationTimer: ReturnType<typeof setInterval> | null = null;
+
+  function startPlaceholderRotation(isEmptyChat: () => boolean) {
+    if (placeholderRotationTimer) return;
+    placeholderRotationTimer = setInterval(() => {
+      if (!isEmptyChat()) return;
+      placeholderRotationIndex = (placeholderRotationIndex + 1) % rotatingPlaceholders.length;
+      chatInputRenderState.value = { placeholder: rotatingPlaceholders[placeholderRotationIndex] };
+    }, 4000);
+  }
+
+  function stopPlaceholderRotation() {
+    if (!placeholderRotationTimer) return;
+    clearInterval(placeholderRotationTimer);
+    placeholderRotationTimer = null;
+  }
+
   let panelNoticeTimer: ReturnType<typeof setTimeout> | null = null;
   let stableMessagesBuildToken = 0;
   const reportedPanelUiPluginFailures = new Set<string>();
@@ -592,8 +618,12 @@ export function useUiRenderPipeline(deps: UiRenderPipelineDeps) {
   function cleanup() {
     stableMessagesBuildToken += 1;
     clearPanelNoticeTimer();
+    stopPlaceholderRotation();
     void panelUiRuntime.dispose();
   }
+
+  // Start placeholder rotation for empty chat
+  startPlaceholderRotation(() => deps.baseConversationMessages.value.length === 0);
 
   return {
     panelUiRuntime,
