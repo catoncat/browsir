@@ -57,7 +57,6 @@ import {
   buildLlmMessagesFromContext,
   buildTaskProgressSystemMessage,
 } from "./prompt/prompt-policy.browser";
-import { clipText } from "./loop-shared-utils";
 import { createSystemPromptResolver } from "./prompt/prompt-resolver.browser";
 import {
   nowIso,
